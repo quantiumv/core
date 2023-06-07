@@ -2,7 +2,7 @@
 RISCV SoC Collab work.
 
 
-# General SoC Architecture IDEA
+# General SoC Architecture idea
                     +-------+
                     |  CPI  |
             +-------+-------+
