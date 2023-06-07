@@ -19,7 +19,7 @@ RISCV SoC Collab work.
                 ||                     ||                     ||
                 \/                     \/                     \/
             +---------+            +---------+            +---------+
-            |  Cache  |            |  Device |            |  Cache  |
+            |  Cache  |            |  Device |            |  Device |
             +---------+            +---------+            +---------+
                 /\
                 ||
