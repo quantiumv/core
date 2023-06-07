@@ -1,6 +1,6 @@
 # QuantiumV
 RISCV SoC Collab work.
-
+https://discord.gg/fT3Faa5Q
 
 # General SoC Architecture idea
                     +-------+
