@@ -166,7 +166,7 @@ endinterface //WB4
 ```
 
 # Coding Style
-All extra components that are not part of the main SoC should have their own directory under src/
+All extra components that are not part of the main SoC should have their own directory under src/.
 Core components should be a file per module.
 
 # Tools and Software
