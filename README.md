@@ -63,6 +63,18 @@ wire [31:0] rs2;
  - [ ] I Cache
  - [ ] WB4 to AXI Bridge
  - [ ] AXI to WB4 Bridge
+ - [ ] ALU
+ - [ ] Register File
+ - [ ] Fetch Stage
+ - [ ] Decode Stage
+ - [ ] Execute Stage
+ - [ ] Memory Stage
+ - [ ] Write Back Stage
+ - [ ] Forwading Unit
+ - [ ] Hazard detection
+ - [ ] Pipeline Stall
+ - [ ] Branch Prediction
+ - [ ] D-I Cache Coherence
 
 # Wishbone 4 interface
 
