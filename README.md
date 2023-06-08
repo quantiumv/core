@@ -2,6 +2,7 @@
 RISCV SoC Collab work.
 
 # General SoC Architecture idea
+```sv
                     +-------+
                     |  CPI  |
             +-------+-------+
@@ -34,6 +35,7 @@ RISCV SoC Collab work.
             |   RAM   |
             +---------+
             
+```
 
 # CPI - CoProcessor Interface
 Basic idea of the coprocessor interface. This can later of extended.
@@ -76,6 +78,54 @@ wire [31:0] rs2;
  - [ ] Branch Prediction
  - [ ] D-I Cache Coherence
 
+# First Stage Pipeline
+
+No Unaligned memory access. CPU throws an unalinged memory access exemption.
+
+```sv
+   ++============================================================
+   || ++============================================++     +----+
+   || ||                           +-+   +------+   ||     |    |
+   || ||                           |4|==>| A    |   ||     |    |
+   || ||                           +-+   | +    |===++     |    |
+   || ||                           ++===>| B    |          |    |
+   || ||                           ||    +------+          |    |
+   || ||                           ||                      |    |
+   || ||    +------+    +------+   ||    +-----------+     | IF |
+   || ++===>| 0    |    |      |   ||    |           |     |    |
+   ||       | MUX  |===>|  PC  |===++===>|  I Cache  |====>|    |
+   ++======>| 1    |    |      |  ADDR   |           |     |    |
+            +------+    +------+         +-----------+     |    |
+                                         |  AXI/Wb4  |     |    |
+                                         +-----------+     |    |
+                                               /\          |    |
+                                               || I BUS    |    |
+                                               \/          +----+
+```
+
+Unaligned memory access control logic on the instruction cache. 
+Pipeline stall while cache logic fetches data blocks and aligns them.
+
+```sv
+   ++============================================================
+   || ++============================================++     +----+
+   || ||                           +-+   +------+   ||     |    |
+   || ||                           |4|==>| A    |   ||     |    |
+   || ||                           +-+   | +    |===++     |    |
+   || ||                           ++===>| B    |          |    |
+   || ||                           ||    +------+          |    |
+   || ||                           ||                      |    |
+   || ||    +------+    +------+   ||    +---+-------+     | IF |
+   || ++===>| 0    |    |      |   ||    | U |       |     |    |
+   ||       | MUX  |===>|  PC  |===++===>| A |I Cache|====>|    |
+   ++======>| 1    |    |      |  ADDR   | L |       |     |    |
+            +------+    +------+         +---+-------+     |    |
+                                         |  AXI/Wb4  |     |    |
+                                         +-----------+     |    |
+                                               /\          |    |
+                                               || I BUS    |    |
+                                               \/          +----+
+```                                             
 # Wishbone 4 interface
 
 ```sv
