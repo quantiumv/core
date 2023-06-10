@@ -2,4 +2,4 @@ module fetch_stage();
 
 
 
-emdmodule
+endmodule
