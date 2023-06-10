@@ -130,6 +130,15 @@ Pipeline stall while cache logic fetches data blocks and aligns them.
 ```                                             
 # Wishbone 4 interface
 
+Use Advanced synchronous termination or simple synchrnous termination for the ACK signal. 
+It's not a requirement but it will lower the routing delay allowing for higher clock speeds.
+
+For more information look at the following:
+Wishbone B4 Chapter 4. WISHBONE Registered Feedback Bus Cycles
+    4.1 Introduction, Synchronous vs. Asynchronous cycle termination
+    llustration 4-2: WISHBONE Classic synchronous cycle terminated burst
+    Illustration 4-3: Advanced synchronous terminated burst
+
 ```sv
 interface WB4(input clk, input rst);
     logic ACK;
