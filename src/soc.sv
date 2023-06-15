@@ -68,4 +68,40 @@ initial begin
 end
 `endif
 
+
+
+wb_test_master wb_test_master_0
+(
+    .clk(clk_gen),
+    .rst(rst_gen),
+    //Master Wishbone interface
+    .ACK(ACK),
+    .ERR(ERR),
+    .RTY(RTY),
+    .STB(STB),
+    .CYC(CYC),
+    .ADR(ADR),
+    .DAT_I(DAT_I),
+    .DAT_O(DAT_O),
+    .CTI_O(CTI_O),
+    .WE(WE)
+);
+
+ram ram_0
+(
+    .clk(clk_gen),
+    .ACK(ACK),
+    .ERR(ERR),
+    .RTY(RTY),
+    .STB(STB),
+    .CYC(CYC),
+    .ADR(ADR),
+    .DAT_I(DAT_I),
+    .DAT_O(DAT_O),
+    .CTI_O(CTI_O),
+    .WE(WE)
+);
+
+
+
 endmodule
