@@ -1,94 +1,109 @@
-module wb_test_master
-(
-    input logic clk,
-    input logic rst,
-    //Master Wishbone interface
-    input  logic ACK,
-    input  logic ERR,
-    input  logic RTY,
-    output logic STB,
-    output logic CYC,
-    output logic [31:0] ADR,
-    input  logic [31:0] DAT_I,
-    output logic [31:0] DAT_O,
-    output logic [2:0]  CTI_O,
-    output logic WE
-);
+`timescale 1ns / 1ps
+//////////////////////////////////////////////////////////////////////////////////
+// Company: 
+// Engineer: 
+// 
+// Create Date: 06/14/2023 09:34:13 PM
+// Design Name: 
+// Module Name: wb_test_master
+// Project Name: 
+// Target Devices: 
+// Tool Versions: 
+// Description: 
+// 
+// Dependencies: 
+// 
+// Revision:
+// Revision 0.01 - File Created
+// Additional Comments:
+// 
+//////////////////////////////////////////////////////////////////////////////////
+`default_nettype none
 
-typedef enum logic [1:0] { IDDLE, WEITE, READ } state_t;
-state_t state = IDDLE;
+module wb_test_master #(
+    parameter WB_ADDR_WIDTH = 32,
+    parameter WB_DATA_WIDTH = 32
+    )(
+    // Wishbone B4
+    input wire WB_CLK_I,
+    input wire WB_RST_I,
+    output reg [WB_ADDR_WIDTH-1:0] WB_ADR_O,
+    output reg [WB_DATA_WIDTH-1:0] WB_DAT_O,
+    input wire [WB_DATA_WIDTH-1:0] WB_DAT_I,
+    output reg WB_WE_O,
+    output reg WB_STB_O,
+    input wire WB_ACK_I,
+    output reg WB_CYC_O,
+    input wire WB_ERR_I,
+    input wire WB_RTY_I,
+    output reg [2:0] WB_CTI_O,
+    input wire WB_STALL_I
+    );
 
-initial begin
-    ADR <= 0;
-end
+    // Cycle type encodings
+    localparam CLASSIC = 3'b000;
+    localparam CONST = 3'b001;
+    localparam INCR = 3'b010;
+    localparam EOB = 3'b111;
 
-always@(posedge clk)
-begin
-    case (state)
-        IDDLE:
-        begin
-            STB <= 1'b0;
-            CYC <= 1'b0;
-            CTI_O <= 3'b0; //Classic cycle
-            ADR <= ADR; 
-            state <= WEITE;
-            WE <= 1'b0;
+    typedef enum reg [1:0] {HOLD, IDLE, WRITE, READ} state_t;
+    state_t wb_state = HOLD;
+
+    reg [WB_ADDR_WIDTH-1:0] addr_counter = {WB_ADDR_WIDTH{1'b0}};
+
+    always_ff @(posedge WB_CLK_I or posedge WB_RST_I) begin
+        if (WB_RST_I) begin
+            addr_counter <= {WB_ADDR_WIDTH{1'b0}};
+            wb_state <= IDLE;
         end
-        WEITE:
-        begin            
-            CTI_O <= 3'b0; //Classic cycle
-            ADR <= ADR; //Write 0 because address is latched in this example
-            if(ACK)
-            begin
-                state <= READ;
-                STB <= 1'b0;
-                CYC <= 1'b0;
-                WE <= 1'b0; //Setup WE for READ cycle. It's just nicer to look at         
-            end
-            else
-            begin
-                STB <= 1'b1;
-                CYC <= 1'b1;
-                WE <= 1'b1; //Write Signal        
-            end
-        end
-        READ:
-        begin
-            CTI_O <= 3'b0; //Classic cycle
-            if(ACK)
-            begin
-                ADR <= ADR + 32'b1; //Before going to IDDLE increment address 
-                state <= IDDLE;
-                STB <= 1'b0;
-                CYC <= 1'b0;
-                if(DAT_I == ADR)
-                begin
-                    $display("Successful READ/WEITE");
+        else begin
+            case (wb_state)
+                IDLE : begin
+                    WB_ADR_O <= addr_counter;
+                    WB_DAT_O <= addr_counter;
+                    WB_STB_O <= 1'b1;
+                    WB_CYC_O <= 1'b1;
+                    if (addr_counter == 5) WB_CTI_O <= CONST;
+                    else if (addr_counter == 7) WB_CTI_O <= INCR;
+                    else if (addr_counter == 9) WB_CTI_O <= EOB;
+                    else WB_CTI_O <= CLASSIC;
+                    WB_WE_O <= 1'b1;
+                    wb_state <= WRITE;
                 end
-                else
-                begin
-                    $display("Fail READ/WEITE");
+                WRITE : begin
+                    if (WB_ACK_I) begin
+                        WB_STB_O <= 1'b0;
+                        WB_CYC_O <= 1'b0;
+                        WB_WE_O <= 1'b0;
+                        wb_state <= READ;
+                    end
+                    else begin
+                        WB_STB_O <= 1'b1;
+                        WB_CYC_O <= 1'b1;
+                        WB_WE_O <= 1'b1;
+                    end
                 end
-            end
-            else
-            begin
-                STB <= 1'b1;
-                CYC <= 1'b1;
-                WE <= 1'b0; //WE 0 is a read        
-            end
+                READ : begin
+                    if (WB_ACK_I) begin
+                        WB_STB_O <= 1'b0;
+                        WB_CYC_O <= 1'b0;
+                        WB_WE_O <= 1'b0;
+                        if (WB_DAT_I == addr_counter) $display("Result correct.");
+                        else begin
+                            $display("Result incorrect.");
+                            //$finish;
+                        end
+                        addr_counter <= addr_counter + 1;
+                        wb_state <= IDLE;
+                    end
+                    else begin
+                        WB_STB_O <= 1'b1;
+                        WB_CYC_O <= 1'b1;
+                        WB_WE_O <= 1'b0;
+                    end
+                end
+            endcase
         end
-        default:
-        begin
-            STB <= 1'b0;
-            CYC <= 1'b0;
-            WE <= 1'b0; //WE 0 is a read
-            CTI_O <= 3'b0;        
-            state <= IDDLE;
-        end 
-    endcase
-end
-
-assign DAT_O = ADR;
-
-
+    end
 endmodule
+`default_nettype wire
