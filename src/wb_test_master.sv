@@ -18,6 +18,10 @@ module wb_test_master
 typedef enum logic [1:0] { IDDLE, WEITE, READ } state_t;
 state_t state = IDDLE;
 
+initial begin
+    ADR <= 0;
+end
+
 always@(posedge clk)
 begin
     case (state)
@@ -26,7 +30,7 @@ begin
             STB <= 1'b0;
             CYC <= 1'b0;
             CTI_O <= 3'b0; //Classic cycle
-            ADR <= 32'b0; //Write 0 because address is latched in this example
+            ADR <= ADR; 
             state <= WEITE;
             WE <= 1'b0;
         end
@@ -39,6 +43,7 @@ begin
                 state <= READ;
                 STB <= 1'b0;
                 CYC <= 1'b0;
+                WE <= 1'b0; //Setup WE for READ cycle. It's just nicer to look at         
             end
             else
             begin
