@@ -46,12 +46,12 @@ module wb_test_master #(
     localparam INCR = 3'b010;
     localparam EOB = 3'b111;
 
-    typedef enum reg [1:0] {HOLD, IDLE, WRITE, READ} state_t;
+    typedef enum reg [2:0] {HOLD, IDLE, WRITE, READ, WRITE_BURST, READ_BURST} state_t;
     state_t wb_state = HOLD;
 
     reg [WB_ADDR_WIDTH-1:0] addr_counter = {WB_ADDR_WIDTH{1'b0}};
 
-    always_ff @(posedge WB_CLK_I or posedge WB_RST_I) begin
+    always@(posedge WB_CLK_I or posedge WB_RST_I) begin
         if (WB_RST_I) begin
             addr_counter <= {WB_ADDR_WIDTH{1'b0}};
             wb_state <= IDLE;
