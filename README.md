@@ -67,8 +67,8 @@ wire [31:0] rs2;
  - [ ] I Cache
  - [ ] WB4 to AXI Bridge
  - [ ] AXI to WB4 Bridge
- - [ ] ALU
- - [ ] Register File
+ - [x] ALU
+ - [x] Register File
  - [ ] Fetch Stage
  - [ ] Decode Stage
  - [ ] Execute Stage
