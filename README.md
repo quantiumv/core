@@ -185,6 +185,3 @@ These are some open source alternatives to Quartus and Vivado.
 iverilog
 iverilator
 gtkwave
-
-# Resources
-https://cdn.opencores.org/downloads/wbspec_b4.pdf
