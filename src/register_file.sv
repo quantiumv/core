@@ -90,16 +90,15 @@ module register_file #(
 
 
 	/* Write. */
-	always @(posedge i_clk) begin
+	always @(posedge i_clk) begin: write
 		if (i_load_pc)
 			program_counter <= i_load_pc_data;
 
 		/* Don't write at r0. Decrement select to offset for r0. */
 		if (i_load_gpr && i_load_gpr_sel)
 			gp_registers[i_load_gpr_sel - 1] <= i_load_gpr_data;
-	end
-endmodule
-
+	end: write
+endmodule: register_file
 
 /* ------------------------------------------------------------------------- */
 

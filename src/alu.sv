@@ -28,7 +28,7 @@ module alu (
 
 	output logic	[(`WORD_SIZE - 1):0]	o_result
 );
-	always_comb begin
+	always_comb begin: alu_ops
 		case (i_operation)
 
 		/* Arithmetic operations */
@@ -52,8 +52,8 @@ module alu (
 		default: o_result = 0;
 
 		endcase
-	end
-endmodule
+	end: alu_ops
+endmodule: alu
 
 
 /* ------------------------------------------------------------------------- */

@@ -52,7 +52,7 @@ module sram #(
 	/* num_words memory locations, each WORD_SIZE bits wide. */
 	reg [(`WORD_SIZE - 1):0]	memory [0:(num_words - 1)];
 
-	always @(posedge i_clk) begin
+	always @(posedge i_clk) begin: rw
 		if (i_write_enable)
 			memory[i_addr_write] <= i_data_to_write;
 
@@ -61,8 +61,8 @@ module sram #(
 
 		if (i_read_enable_B)
 			o_data_read_B <= memory[i_addr_read_B];
-	end
-endmodule
+	end: rw
+endmodule: sram
 
 
 /* ------------------------------------------------------------------------- */
