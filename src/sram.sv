@@ -3,11 +3,7 @@
 /* ------------------------------------------------------------------------- */
 
 
-`define WORD_SIZE		32
-`define L2_WORD_SIZE		5
-
-`define DEFAULT_NUM_WORDS	4096	/* 16 kB memory. */
-`define L2_DEFAULT_NUM_WORDS	12
+`include "defaults/defaults.sv"
 
 
 /* ------------------------------------------------------------------------- */
@@ -17,8 +13,8 @@
  * Module: Internal SRAM
  *
  * Parameters:
- *	num_words: Number of words in the memory.
- *	l2_num_words: log2(num_words).
+ *	num_words: Number of words in the memory (default = 4096).
+ *	l2_num_words: log2(num_words) = address width (default = 12).
  *
  * Input ports:
  *	i_clk: Clock signal (positive edge is used for trigger).
@@ -35,8 +31,8 @@
  *	o_data_read_B: Data read from location / address #2.
  */
 module sram #(
-	parameter num_words = `DEFAULT_NUM_WORDS,
-	parameter l2_num_words = `L2_DEFAULT_NUM_WORDS
+	parameter num_words = 4096,	/* 16 kB default. */
+	parameter l2_num_words = 12
 ) (
 	input logic				i_clk,
 

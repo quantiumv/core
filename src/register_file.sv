@@ -3,8 +3,7 @@
 /* ------------------------------------------------------------------------- */
 
 
-`define REG_SIZE	32	/* Will make REG_SIZExREG_SIZE file. */
-`define L2_REG_SIZE	5	/* log2(REG_SIZE). */
+`include "defaults/defaults.sv"
 
 
 /* ------------------------------------------------------------------------- */
@@ -13,7 +12,12 @@
 /*
  * Module: Register file
  *
+ * Parameters:
+ *	- num_regs: Number of GPRs in the file (default = REG_FILE_SIZE).
+ *	- l2_num_regs: log2(num_regs) (default = L2_REG_FILE_SIZE).
+ *
  * Features:
+ *	- Size = num_regs x WORD_SIZE
  *	- Dual port reads and single port write.
  *	- Program counter read and write.
  *	- Dedicated link register (r1) and stack pointer (r2) outputs.
@@ -35,34 +39,37 @@
  *	o_link_register: Data read from the conventional link register (r1).
  *	o_stack_pointer: Data read from the conventional stack pointer (r2).
  */
-module register_file(
+module register_file #(
+	parameter num_regs = `REG_FILE_SIZE,
+	parameter l2_num_regs = `L2_REG_FILE_SIZE
+) (
 	input logic				i_clk,
 
-	input logic	[(`L2_REG_SIZE - 1):0]	i_read_gpr_A_sel,
-	output logic	[(`REG_SIZE - 1):0]	o_read_gpr_A_data,
+	input logic	[(l2_num_regs - 1):0]	i_read_gpr_A_sel,
+	output logic	[(`WORD_SIZE - 1):0]	o_read_gpr_A_data,
 
-	input logic	[(`L2_REG_SIZE - 1):0]	i_read_gpr_B_sel,
-	output logic	[(`REG_SIZE - 1):0]	o_read_gpr_B_data,
+	input logic	[(l2_num_regs - 1):0]	i_read_gpr_B_sel,
+	output logic	[(`WORD_SIZE - 1):0]	o_read_gpr_B_data,
 
 	input logic				i_load_gpr,
-	input logic	[(`L2_REG_SIZE - 1):0]	i_load_gpr_sel,
-	input logic	[(`REG_SIZE - 1):0]	i_load_gpr_data,
+	input logic	[(l2_num_regs - 1):0]	i_load_gpr_sel,
+	input logic	[(`WORD_SIZE - 1):0]	i_load_gpr_data,
 
 	input logic				i_load_pc,
-	input logic	[(`REG_SIZE - 1):0]	i_load_pc_data,
-	output logic	[(`REG_SIZE - 1):0]	o_program_counter,
+	input logic	[(`WORD_SIZE - 1):0]	i_load_pc_data,
+	output logic	[(`WORD_SIZE - 1):0]	o_program_counter,
 
-	output logic	[(`REG_SIZE - 1):0]	o_link_register,
-	output logic	[(`REG_SIZE - 1):0]	o_stack_pointer
+	output logic	[(`WORD_SIZE - 1):0]	o_link_register,
+	output logic	[(`WORD_SIZE - 1):0]	o_stack_pointer
 );
 	/*
-	 * REG_SIZE general purpose registers, each REG_SIZE bit wide.
+	 * num_regs general purpose registers, each WORD_SIZE bit wide.
 	 *
 	 * r0 is to be hardwired to 0 (ref. page 13 of RISC-V spec).
 	 * Thus, just make one register less. (for eg. [0:30] and not [0:31]).
-	 * Thus, subtract 2 from REG_SIZE in the initialisation.
+	 * Thus, subtract 2 from num_regs in the initialisation.
 	 */
-	reg [(`REG_SIZE - 1):0]		gp_registers [0:(`REG_SIZE - 2)];
+	reg [(`WORD_SIZE - 1):0]	gp_registers [0:(num_regs - 2)];
 
 
 	/* r1 is link register, r2 is stack pointer (ref. page 14). */
@@ -71,7 +78,7 @@ module register_file(
 
 
 	/* Program counter is an additional register (ref. page 13, 14). */
-	reg [(`REG_SIZE - 1):0] program_counter;
+	reg [(`WORD_SIZE - 1):0] program_counter;
 	assign o_program_counter = program_counter;
 
 
