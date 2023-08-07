@@ -35,7 +35,7 @@ module fetch_stage
     output logic [2:0]  CTI_O,
     output logic WE,
     //Stage Outputs
-    output logic [31:0] INS //Instruction Data 
+    output logic [31:0] INS //Instruction Data
 );
 
 
