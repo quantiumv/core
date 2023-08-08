@@ -60,12 +60,6 @@
 `define INSTR_MASK_BGEU	`BRANCH_INSTRS_MASK
 
 
-/* Don't expose temporary macros used for readability / generation outside. */
-
-`undef BRANCH_INSTR_CREATE
-`undef BRANCH_INSTRS_MASK
-
-
 /* ------------------------------------------------------------------------- */
 
 
@@ -91,12 +85,6 @@
 `define INSTR_MASK_LHU	`LOAD_INSTRS_MASK
 
 
-/* Don't expose temporary macros used for readability / generation outside. */
-
-`undef LOAD_INSTR_CREATE
-`undef LOAD_INSTRS_MASK
-
-
 /* ------------------------------------------------------------------------- */
 
 
@@ -114,12 +102,6 @@
 
 `define INSTR_SW	`STORE_INSTR_CREATE(3'b010)
 `define INSTR_MASK_SW	`STORE_INSTRS_MASK
-
-
-/* Don't expose temporary macros used for readability / generation outside. */
-
-`undef STORE_INSTR_CREATE
-`undef STORE_INSTRS_MASK
 
 
 /* ------------------------------------------------------------------------- */
@@ -168,14 +150,6 @@
 `define INSTR_MASK_SRAI	`IMM_SHIFT_INSTRS_MASK
 
 
-/* Don't expose temporary macros used for readability / generation outside. */
-
-`undef IMM_AL_INSTR_CREATE
-`undef IMM_AL_INSTRS_MASK
-`undef IMM_SHIFT_INSTR_CREATE
-`undef IMM_SHIFT_INSTRS_MASK
-
-
 /* ------------------------------------------------------------------------- */
 
 
@@ -217,12 +191,6 @@
 `define INSTR_MASK_AND	`ALU_INSTRS_MASK
 
 
-/* Don't expose temporary macros used for readability / generation outside. */
-
-`undef ALU_INSTR_CREATE
-`undef ALU_INSTRS_MASK
-
-
 /* ------------------------------------------------------------------------- */
 
 
@@ -244,12 +212,6 @@
 
 `define INSTR_EBREAK		`ENV_INSTR_CREATE(1'b1)
 `define INSTR_MASK_EBREAK	`ENV_INSTRS_MASK
-
-
-/* Don't expose temporary macros used for readability / generation outside. */
-
-`undef ENV_INSTR_CREATE
-`undef ENV_INSTRS_MASK
 
 
 /* ------------------------------------------------------------------------- */
