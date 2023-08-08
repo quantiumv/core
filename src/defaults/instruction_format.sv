@@ -114,21 +114,21 @@
  * Equivalent to having (imm_20_bits << 1). So we have imm[20:1].
  */
 
-`define B_IMM_SIZE	20
+`define J_IMM_SIZE	20
 
 /* Bit 20. */
-`define B_IMM_MSB		31
+`define J_IMM_MSB		31
 
 /* imm[19:12]. */
-`define B_IMM_LOW_BITS_MSB	19
-`define B_IMM_LOW_BITS_LSB	12
+`define J_IMM_LOW_BITS_MSB	19
+`define J_IMM_LOW_BITS_LSB	12
 
 /* Bit 11. */
-`define B_IMM_MID_BIT		20
+`define J_IMM_MID_BIT		20
 
 /* imm[10:1]. */
-`define B_IMM_MID_BITS_MSB	30
-`define B_IMM_MID_BITS_LSB	21
+`define J_IMM_MID_BITS_MSB	30
+`define J_IMM_MID_BITS_LSB	21
 
 
 /* ------------------------------------------------------------------------- */
