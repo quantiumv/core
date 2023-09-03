@@ -39,6 +39,7 @@ module alu (
 		`OR:	o_result = i_operand_A | i_operand_B;
 		`AND:	o_result = i_operand_A & i_operand_B;
 		`XOR:	o_result = i_operand_A ^ i_operand_B;
+		`NOT:	o_result = ~i_operand_A;	/* Unary */
 
 		/* Comparison operations */
 		`SLTU:	o_result = i_operand_A < i_operand_B;

@@ -6,7 +6,13 @@
 /* ------------------------------------------------------------------------- */
 
 
-`define ALU_OPSIZE 4		/* Since we have 9 ops, we need 4 bits. */
+`define ALU_OPSIZE 4		/* Since we have 10 ops, we need 4 bits. */
+
+
+/* ------------------------------------------------------------------------- */
+
+
+/* Standard ISA instructions. */
 
 `define ADD	4'b0000		/* Word addition, overflow ignored */
 `define SUB	4'b0001		/* Word subtraction, overflow ignored */
@@ -24,3 +30,14 @@
 
 
 /* ------------------------------------------------------------------------- */
+
+
+/* Custom instructions. */
+
+`define NOT	4'b1010		/* Bitwise NOT / inversion */
+
+
+/* ------------------------------------------------------------------------- */
+
+
+/* End of file. */
