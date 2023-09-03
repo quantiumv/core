@@ -10,7 +10,7 @@
 /* ------------------------------------------------------------------------- */
 
 
-/* Common. */
+/* Common (including R (register) type). */
 
 `define INSTR_SIZE		32
 `define L2_INSTR_SIZE		5
@@ -43,7 +43,7 @@
 /* ------------------------------------------------------------------------- */
 
 
-/* For I type. */
+/* For I (immediate) type. */
 
 `define I_IMM_SIZE	12
 `define I_IMM_MSB	31
@@ -53,7 +53,7 @@
 /* ------------------------------------------------------------------------- */
 
 
-/* For S type. */
+/* For S (store) type. */
 
 `define S_IMM_SIZE	12
 
@@ -68,14 +68,14 @@
 
 
 /*
- * For B type (Similar to S type).
+ * For B (branch) type (Similar to S type).
  *
  * Immediate value encodes branch offsets in multiples of 2.
  * Thus, imm[12:1] is stored as for multiples of 2, last bit is always 0, so
  * there is no point in storing it.
  */
 
-`define B_IMM_SIZE	12
+`define B_IMM_SIZE	13
 
 `define B_IMM_SIGN_BIT	31	/* Bit 12. */
 `define B_IMM_HIGH_BIT	7	/* Bit 11. */
@@ -93,7 +93,7 @@
 
 
 /*
- * For U type.
+ * For U (upper immediate) type.
  *
  * The instruction contains bits 31 to 12 (= upper 20 bits) of a 32 bit
  * immediate value. Remaining 12 lower bits are typically zeroed out.
@@ -109,26 +109,27 @@
 
 
 /*
- * For J type (Similar to U type).
+ * For J (jump) type (Similar to U type).
  *
- * Equivalent to having (imm_20_bits << 1). So we have imm[20:1].
+ * Equivalent to having (imm_20_bits << 1). So we have imm[20:1] (as there is
+ * no need to store last bit which will always be 0).
  */
 
-`define J_IMM_SIZE	20
+`define J_IMM_SIZE	21
 
 /* Bit 20. */
 `define J_IMM_MSB		31
 
 /* imm[19:12]. */
-`define J_IMM_LOW_BITS_MSB	19
-`define J_IMM_LOW_BITS_LSB	12
+`define J_IMM_MID_BITS_MSB	19
+`define J_IMM_MID_BITS_LSB	12
 
 /* Bit 11. */
-`define J_IMM_MID_BIT		20
+`define J_IMM_POST_MID_BIT	20
 
 /* imm[10:1]. */
-`define J_IMM_MID_BITS_MSB	30
-`define J_IMM_MID_BITS_LSB	21
+`define J_IMM_LOW_BITS_MSB	30
+`define J_IMM_LOW_BITS_LSB	21
 
 
 /* ------------------------------------------------------------------------- */
