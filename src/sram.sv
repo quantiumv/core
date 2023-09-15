@@ -26,7 +26,7 @@
  *	i_addr_write: Address to write at.
  *	i_data_to_write: Data to write at the specified location.
  *
- * Output port:
+ * Output ports:
  *	o_data_read_A: Data read from location / address #1.
  *	o_data_read_B: Data read from location / address #2.
  */
