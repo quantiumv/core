@@ -36,8 +36,8 @@
  *	o_read_gpr_A_data: Data read from the selected register #1.
  *	o_read_gpr_B_data: Data read from the selected register #2.
  *	o_program_counter: Data read from the program counter.
- *	o_link_register: Data read from the conventional link register (r1).
- *	o_stack_pointer: Data read from the conventional stack pointer (r2).
+ *	o_return_address: Data read from the conventional ra register (r1).
+ *	o_stack_pointer: Data read from the conventional sp register (r2).
  */
 module register_file #(
 	parameter num_regs = `REG_FILE_SIZE,
@@ -59,44 +59,47 @@ module register_file #(
 	input logic	[(`WORD_SIZE - 1):0]	i_load_pc_data,
 	output logic	[(`WORD_SIZE - 1):0]	o_program_counter,
 
-	output logic	[(`WORD_SIZE - 1):0]	o_link_register,
+	output logic	[(`WORD_SIZE - 1):0]	o_return_address,
 	output logic	[(`WORD_SIZE - 1):0]	o_stack_pointer
 );
+	/* num_regs general purpose registers, each WORD_SIZE bit wide. */
+	logic [(`WORD_SIZE - 1):0]	gp_registers [0:(num_regs - 1)];
+
+
 	/*
-	 * num_regs general purpose registers, each WORD_SIZE bit wide.
-	 *
-	 * r0 is to be hardwired to 0 (ref. page 13 of RISC-V spec).
-	 * Thus, just make one register less. (for eg. [0:30] and not [0:31]).
-	 * Thus, subtract 2 from num_regs in the initialisation.
+	 * r1 stores the return address (i.e., it is the link register), and
+	 * r2 stores the stack pointer, conventionally.
+	 * Refer page 14 of RISC-V spec.
 	 */
-	reg [(`WORD_SIZE - 1):0]	gp_registers [0:(num_regs - 2)];
-
-
-	/* r1 is link register, r2 is stack pointer (ref. page 14). */
-	assign o_link_register = gp_registers[0];
-	assign o_stack_pointer = gp_registers[1];
+	assign o_return_address = gp_registers[1];
+	assign o_stack_pointer = gp_registers[2];
 
 
 	/* Program counter is an additional register (ref. page 13, 14). */
-	reg [(`WORD_SIZE - 1):0] program_counter;
+	logic [(`WORD_SIZE - 1):0] program_counter;
 	assign o_program_counter = program_counter;
 
 
 	/* Read at both ports (NB: r0 is hardwired to 0). */
-	assign o_read_gpr_A_data = i_read_gpr_A_sel ?
-				gp_registers[i_read_gpr_A_sel - 1] : 'b0;
-	assign o_read_gpr_B_data = i_read_gpr_B_sel ?
-				gp_registers[i_read_gpr_B_sel - 1] : 'b0;
+	assign o_read_gpr_A_data = gp_registers[i_read_gpr_A_sel];
+	assign o_read_gpr_B_data = gp_registers[i_read_gpr_B_sel];
 
 
 	/* Write. */
 	always @(posedge i_clk) begin: write
+		/* r0 is to be hardwired to 0 (ref. page 13). */
+		gp_registers[0] <= 0;
+
+		/*
+		 * Load GPR.
+		 * NB: We don't write at r0. Thus, select must be non-zero.
+		 */
+		if (i_load_gpr && i_load_gpr_sel)
+			gp_registers[i_load_gpr_sel] <= i_load_gpr_data;
+
+		/* Load program counter. */
 		if (i_load_pc)
 			program_counter <= i_load_pc_data;
-
-		/* Don't write at r0. Decrement select to offset for r0. */
-		if (i_load_gpr && i_load_gpr_sel)
-			gp_registers[i_load_gpr_sel - 1] <= i_load_gpr_data;
 	end: write
 endmodule: register_file
 
