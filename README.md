@@ -83,7 +83,7 @@ wire [31:0] rs2;
 - [x] ALU
 - [x] Register File
 - [ ] Fetch Stage
-- [ ] Decode Stage
+- [x] Decode Stage
 - [ ] Execute Stage
 - [ ] Memory Stage
 - [ ] Write Back Stage
