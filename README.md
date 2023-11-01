@@ -196,14 +196,6 @@ interface WB4(input clk, input rst);
 endinterface //WB4
 ```
 
-# Project hierarchy
-
-- resources: This folder is for housing resources, like spec PDFs.
-
-- src: The main HDL source code in SystemVerilog.
-        - src/\*.sv: Core component/module that are part of the main SoC (only one per file).
-        - All extra components that are not part of the main SoC should have their own directory under src/.
-
 ---
 
 # Tools and Software
