@@ -20,7 +20,7 @@
  *	- Size = num_regs x WORD_SIZE
  *	- Dual port combinational reads and single port synchronous write.
  *	- Program counter read (comb) and write (sync).
- *	- Dedicated link register (r1) and stack pointer (r2) outputs.
+ *	- Dedicated return address (r1) and stack pointer (r2) outputs.
  *
  * Input ports:
  *	i_clk: Clock signal (positive edge is used for write).
