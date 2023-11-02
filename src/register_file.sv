@@ -18,12 +18,12 @@
  *
  * Features:
  *	- Size = num_regs x WORD_SIZE
- *	- Dual port reads and single port write.
- *	- Program counter read and write.
- *	- Dedicated link register (r1) and stack pointer (r2) outputs.
+ *	- Dual port combinational reads and single port synchronous write.
+ *	- Program counter read (comb) and write (sync).
+ *	- Dedicated return address (r1) and stack pointer (r2) outputs.
  *
  * Input ports:
- *	i_clk: Clock signal (positive edge is used for trigger).
+ *	i_clk: Clock signal (positive edge is used for write).
  *	i_read_gpr_A_sel: Register select #1 for read.
  *	i_read_gpr_B_sel: Register select #2 for read.
  *	i_load_gpr: High to load into a register (r1 to r31 only).

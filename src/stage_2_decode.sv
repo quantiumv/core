@@ -30,53 +30,73 @@
  * please modify these macros appropriately.
  */
 
+`define PASS_REG_A_IN_IMM_1(reg_addr)		\
+	o_read_gpr_A_sel <= reg_addr; 		\
+	internal_imm_1 <= 0;			\
+;
+
+`define PASS_REG_B_IN_IMM_2(reg_addr)		\
+	o_read_gpr_B_sel <= reg_addr; 		\
+	internal_imm_2 <= 0;			\
+;
+
+`define PASS_IMM_IN_IMM_1(imm)			\
+	o_read_gpr_A_sel <= 0; 			\
+	internal_imm_1 <= imm;			\
+;
+
+`define PASS_IMM_IN_IMM_2(imm)			\
+	o_read_gpr_B_sel <= 0; 			\
+	internal_imm_2 <= imm;			\
+;
+
 `define OUTPUT_R_TYPE_INSTR(instr_name)				\
 	o_decoded_instruction <= `INSTR_CODE(instr_name);	\
-	o_reg_1 <= source_1;					\
-	o_reg_2 <= source_2;					\
-	o_imm_or_reg_3 <= destination;				\
+	`PASS_REG_A_IN_IMM_1(source_1);				\
+	`PASS_REG_B_IN_IMM_2(source_2);				\
+	o_imm_3_or_dest_addr <= destination;			\
 ;
 
 `define OUTPUT_I_TYPE_INSTR(instr_name)				\
 	o_decoded_instruction <= `INSTR_CODE(instr_name);	\
-	o_reg_1 <= source_1;					\
-	o_reg_2 <= destination;					\
-	o_imm_or_reg_3 <= imm_i;				\
+	`PASS_REG_A_IN_IMM_1(source_1);				\
+	`PASS_IMM_IN_IMM_2(imm_i);				\
+	o_imm_3_or_dest_addr <= destination;			\
 ;
 
 `define OUTPUT_S_TYPE_INSTR(instr_name)				\
 	o_decoded_instruction <= `INSTR_CODE(instr_name);	\
-	o_reg_1 <= source_1;					\
-	o_reg_2 <= source_2;					\
-	o_imm_or_reg_3 <= imm_s;				\
+	`PASS_REG_A_IN_IMM_1(source_1);				\
+	`PASS_REG_B_IN_IMM_2(source_2);				\
+	o_imm_3_or_dest_addr <= imm_s;				\
 ;
 
 `define OUTPUT_B_TYPE_INSTR(instr_name)				\
 	o_decoded_instruction <= `INSTR_CODE(instr_name);	\
-	o_reg_1 <= source_1;					\
-	o_reg_2 <= source_2;					\
-	o_imm_or_reg_3 <= imm_b;				\
+	`PASS_REG_A_IN_IMM_1(source_1);				\
+	`PASS_REG_B_IN_IMM_2(source_2);				\
+	o_imm_3_or_dest_addr <= imm_b;				\
 ;
 
 `define OUTPUT_U_TYPE_INSTR(instr_name)				\
 	o_decoded_instruction <= `INSTR_CODE(instr_name);	\
-	o_reg_1 <= 0;						\
-	o_reg_2 <= destination;					\
-	o_imm_or_reg_3 <= imm_u;				\
+	`PASS_IMM_IN_IMM_1(imm_u);				\
+	`PASS_IMM_IN_IMM_2(0);					\
+	o_imm_3_or_dest_addr <= destination;			\
 ;
 
 `define OUTPUT_J_TYPE_INSTR(instr_name)				\
 	o_decoded_instruction <= `INSTR_CODE(instr_name);	\
-	o_reg_1 <= 0;						\
-	o_reg_2 <= destination;					\
-	o_imm_or_reg_3 <= imm_j;				\
+	`PASS_IMM_IN_IMM_1(imm_j);				\
+	`PASS_IMM_IN_IMM_2(0);					\
+	o_imm_3_or_dest_addr <= destination;			\
 ;
 
 `define OUTPUT_NONE_TYPE_INSTR(instr_name)			\
 	o_decoded_instruction <= `INSTR_CODE(instr_name);	\
-	o_reg_1 <= 0;						\
-	o_reg_2 <= 0;						\
-	o_imm_or_reg_3 <= 0;					\
+	`PASS_IMM_IN_IMM_1(0);					\
+	`PASS_IMM_IN_IMM_2(0);					\
+	o_imm_3_or_dest_addr <= 0;				\
 ;
 
 
@@ -86,31 +106,65 @@
 /*
  * Module: Decoder
  *
+ * This needs access to register file to fetch value in registers.
+ *
  * Input ports:
  *	i_instruction: The instruction to decode.
  *	i_instruction_address: Address of the instruction to decode.
+ *	i_read_gpr_A_data: Data read from register file's port A.
+ *	i_read_gpr_B_data: Data read from register file's port B.
  *
  * Output ports:
+ *	o_read_gpr_A_sel: Register to read from register file's port A.
+ *	o_read_gpr_B_sel: Register to read from register file's port B.
  *	o_decoded_instruction: The internal code for the decoded instruction.
  *	o_instruction_address: Address of the decoded instruction
  *			       (same as i_instruction_address).
- *	o_reg_1: Address of a register.
- *	o_reg_2: Address of a register.
- *	o_imm_or_reg_3: Either an immediate value, or an address of a register.
+ *	o_imm_1: Immediate value (either from instr or from a reg), or 0.
+ *	o_imm_2: Immediate value (either from instr or from a reg), or 0.
+ *	o_imm_3_or_dest_addr: For S and B type insturctions, this is the given
+ *			      immediate value. For most other instructions, it
+ *			      is the address to the destination register. It is
+ *			      0 otherwise.
  */
 module decoder (
 	input logic	[(`INSTR_SIZE - 1):0]	i_instruction,
 	input logic	[(`WORD_SIZE - 1):0]	i_instruction_address,
+	output logic	[(`WORD_SIZE - 1):0]	o_instruction_address,
 
+	output logic	[(`L2_REG_FILE_SIZE - 1):0]	o_read_gpr_A_sel,
+	input logic	[(`WORD_SIZE - 1):0]		i_read_gpr_A_data,
+
+	output logic	[(`L2_REG_FILE_SIZE - 1):0]	o_read_gpr_B_sel,
+	input logic	[(`WORD_SIZE - 1):0]		i_read_gpr_B_data,
 
 	output logic	[(`INSTR_CODE_SIZE - 1):0]	o_decoded_instruction,
-	output logic	[(`WORD_SIZE - 1):0]		o_instruction_address,
-	output logic	[(`L2_REG_FILE_SIZE - 1):0]	o_reg_1,
-	output logic	[(`L2_REG_FILE_SIZE - 1):0]	o_reg_2,
-	output logic	[(`MAX_IMM_SIZE - 1):0]		o_imm_or_reg_3
+	output logic	[(`WORD_SIZE - 1):0]		o_imm_1,
+	output logic	[(`WORD_SIZE - 1):0]		o_imm_2,
+	output logic	[(`B_IMM_SIZE - 1):0]		o_imm_3_or_dest_addr
 );
 	/* Pass through the instruction address. */
 	assign o_instruction_address = i_instruction_address;
+
+	/*
+	 * To fetch data in a register, we write to the register file's
+	 * select lines, which then outputs the value on its read data lines.
+	 * This entire process is combinational, so whenever we write to the
+	 * select lines, we will have a data output after a fixed delay, which
+	 * can be factored into the overall decoder's delay.
+	 *
+	 * Since we "decoded" the register address and got the value, we can
+	 * now just simply pass it through.
+	 *
+	 * But if we want to pass an immediate decoded from the instruction
+	 * directly, we need to stop data entering from the register file.
+	 * We will check if register select is zero to not use the registers.
+	 */
+
+	logic [(`WORD_SIZE - 1):0] internal_imm_1;
+	logic [(`WORD_SIZE - 1):0] internal_imm_2;
+	assign o_imm_1 = o_read_gpr_A_sel ? i_read_gpr_A_data : internal_imm_1;
+	assign o_imm_2 = o_read_gpr_B_sel ? i_read_gpr_B_data : internal_imm_2;
 
 	/*
 	 * Extract potential constituents from the instruction beforehand
@@ -156,7 +210,6 @@ module decoder (
 
 
 	/* Match the instruction and do appropriate decoding. */
-
 	always_comb begin: detect_and_assign
 
 		/* Upper immediate instructions (U type). */
