@@ -1,8 +1,6 @@
-`timescale 1ps/1ps
+`include "tb.pkg"
 
-`include "debug_def.sv"
-
-module soc
+module tb
 (
     `ifndef __sim__
     input logic clk, 
@@ -42,8 +40,8 @@ end
 logic clk;
 logic rst;
 initial begin
-    $dumpfile("soc.vcd");
-    $dumpvars(0,soc);
+    $dumpfile("tb.vcd");
+    $dumpvars(0,tb);
     $display("Initializing Simulations");
     clk_gen = 0;
     //RST Starts at a value of 1 to simulate the pull up resistor
@@ -68,8 +66,6 @@ initial begin
 	end
 end
 `endif
-
-
 
 wb_test_master wb_test_master_0
 (

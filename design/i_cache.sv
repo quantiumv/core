@@ -20,13 +20,13 @@ module i_cache
 );
 
 
-typedef enum logic [1:0] { 
+typedef enum logic [2:0] { 
     IDDLE, 
     CACHE_HIT, 
     CACHE_MISS, 
     CACHE_LOAD_MISSALIGNED_B1,
     CACHE_LOAD_MISSALIGNED_B2,
-    CACHE_WRITE_BACK_B1
+    CACHE_WRITE_BACK_B1,
     CACHE_WRITE_BACK_B2
 } cache_state_t;
 
@@ -50,18 +50,5 @@ reg [28:0] TAG_LVL2 [127:0];
 reg [28:0] TAG_LVL3 [127:0];
 reg [28:0] TAG_LVL4 [127:0];
 reg V_BIT [127:0];
-reg V_BIT [127:0];
-reg V_BIT [127:0];
-reg V_BIT [127:0];
-reg V_BIT [127:0];
-reg V_BIT [127:0];
-reg V_BIT [127:0];
-reg V_BIT [127:0];
-
-
-always@(posedge clk or posedge rst)
-begin
-    
-end
 
 endmodule
