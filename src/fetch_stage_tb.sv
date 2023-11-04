@@ -13,11 +13,11 @@ logic ERR_I;
 logic RTY_I;
 logic [2:0] CTI_O = 0;
 
-logic [31:0] INS_O;
-logic stall;
-
-logic [31:0] PC_JMP = 0;
-logic jmp_s = 0;
+logic [31:0] ins_o; //instruction data
+logic [31:0] pc_o;
+logic stall_o;
+logic [31:0] jmp_addr_i = 0;
+logic jmp_i = 0;
 
 initial begin
     $dumpfile("fetch_stage_tb.vcd");
@@ -49,21 +49,22 @@ fetch_stage fetch_stage_0
     .clk(clk),
     .rst(rst),
     //Master Wishbone interface
-    .ACK(ACK_I),
-    .ERR(ERR_I),
-    .RTY(RTY_I),
-    .STB(STB_O),
-    .CYC(CYC_O),
-    .ADR(ADR_O),
+    .ACK_I(ACK_I),
+    .ERR_I(ERR_I),
+    .RTY_I(RTY_I),
+    .STB_O(STB_O),
+    .CYC_O(CYC_O),
+    .ADR_O(ADR_O),
     .DAT_I(DAT_I),
     .DAT_O(DAT_O),
-    .WE(WE_O),
+    .WE_O(WE_O),
     //Stage Outputs
-    .INS_O(INS_O), //Instruction Data
-    .stall_ff(stall),
-    //Jump instruction signals
-    .PC_JMP(PC_JMP),
-    .jmp_s(jmp_s)
+    .ins_o(ins_o), //instruction data
+    .pc_o(pc_o),
+    .stall_o(stall_o),
+    //jump instruction signals
+    .jmp_addr_i(jmp_addr_i),
+    .jmp_i(jmp_i)
 );
 
 ram ram_0
