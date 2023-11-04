@@ -1,0 +1,7 @@
+`include "debug_def.sv"
+
+`ifdef TB_ONLY
+    `include "ram.sv"
+`endif
+
+`include "wb_test_master.sv"
