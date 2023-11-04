@@ -1,0 +1,9 @@
+#-c $(CORE_REPO_PATH)/design/core.filelist
+#-c $(CORE_REPO_PATH)/testbench/tb.filelist
+
++incdir+$(CORE_REPO_PATH)/common
++incdir+$(CORE_REPO_PATH)/design/defaults
++incdir+$(CORE_REPO_PATH)/design
+
++incdir+$(CORE_REPO_PATH)/common
++incdir+$(CORE_REPO_PATH)/testbench

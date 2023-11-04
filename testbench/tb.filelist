@@ -1,0 +1,3 @@
++incdir+$(CORE_REPO_PATH)/common
++incdir+$(CORE_REPO_PATH)/testbench
++define+TB_ONLY
