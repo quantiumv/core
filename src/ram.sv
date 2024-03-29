@@ -30,6 +30,12 @@ localparam EOB = 3'b111;
 
 initial begin
 //   $readmemh("firmware/ROM.hex", mem);
+    
+    //Only for simulation purposes initialize memory to 0
+    for (int i = 0; i < SIZE; i++) begin
+        mem[i] = i+1;
+    end
+    
     WB_DAT_O = 0;
 end
 
