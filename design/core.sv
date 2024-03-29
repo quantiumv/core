@@ -1,3 +1,5 @@
+`include "core.pkg"
+
 module core
   (
     input clk,
