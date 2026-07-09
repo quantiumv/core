@@ -4,6 +4,30 @@ RISCV SoC Collab work.
 
 Join On [Discord](https://discord.gg/sQjhBvWXjF) if you interested in the project!
 
+# *UPDATE*
+
+Team has decided to change course. Implementation of a simpler core will begin.
+2 Cycle implementation in the works. RV32I. This is early development before we break
+it down into a 5 stage pipeline.
+
+
+---
+
+## Simulation instructions
+
+
+Setup environment variables.
+
+Run the following command inside the top directory of this project.
+```sh
+source setup.sh 
+```
+
+Run make command in sim directory to build simulation.
+```sh
+make
+```
+
 ---
 
 # General SoC Architecture idea
