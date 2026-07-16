@@ -3,7 +3,8 @@
 /* ------------------------------------------------------------------------- */
 
 
-`include "defaults/defaults.sv"
+//TODO: Will need to redo defaults.
+// `include "defaults/defaults.sv"
 
 
 /* ------------------------------------------------------------------------- */
@@ -16,7 +17,7 @@
  *  num_words: Number of words in the memory (default = 4096).
  *
  */
-module sram #(
+module wb4_sram #(
     parameter num_words = 4096
 ) (
     input logic clk,
@@ -37,8 +38,12 @@ module sram #(
 
     // For address calculation
     localparam ADDR_WIDTH = $clog2(num_words);
-    logic [ADDR_WIDTH-1:0] word_addr;
-    logic addr_valid;
+    wire [ADDR_WIDTH-1:0] word_addr;
+    wire addr_valid;
+
+    initial begin
+        $readmemh("../firmware/crt0.hex", memory);
+    end
 
     assign word_addr = addr_i[ADDR_WIDTH+1:2]; // Byte to word address
     assign addr_valid = (addr_i[31:ADDR_WIDTH+2] == 0); // Check upper bits are 0

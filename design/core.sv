@@ -1,5 +1,3 @@
-`include "core.pkg"
-
 module core
 (
     //Clock is shared with WB4 BUS
@@ -20,11 +18,11 @@ module core
 
 );
   
-typedef enum logic  [0:1] { FETCH, EXECUTE } exec_state;
+typedef enum logic [1:0] { FETCH, EXECUTE } exec_state_t;
 
-exec_state current_state = FETCH;
+exec_state_t current_state = FETCH;
 
-logic [31:0] IR = 0;
+logic [64:0] IR = 0;
 
 wire [6:0]  funct7   = IR[31:25];
 wire [4:0]  rs2      = IR[24:20];

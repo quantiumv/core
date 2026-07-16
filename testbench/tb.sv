@@ -1,28 +1,23 @@
-`include "tb.pkg"
+`timescale 1ps/1ps
 
-module tb
-(
-    `ifndef __sim__
-    input logic clk, 
-    input logic rst
-    `endif
-);
+
+module tb();
 
 //Internal RAM for BOOT ROM
 parameter SDRAM_LENGHT = 4096;
 
 //Wishobne interface
-logic [31:0] ADR_O;
-logic [31:0] DAT_O;
-logic [31:0] DAT_I;
-logic WE_O;
-logic STB_O;
-logic ACK_I;
-logic CYC_O;
-logic ERR_I;
-logic RTY_I;
-logic [2:0] CTI_O;
-logic STALL_I;
+logic [31:0] wb_addr;
+logic [31:0] wb_dat_i; //Master Side naming.
+logic [31:0] wb_dat_o; //Master Side naming.
+logic wb_ack;
+logic wb_err;
+logic wb_cyc;
+logic wb_stb;
+logic wb_we;
+
+
+logic rst;
 
 //Generated clock signal for out simulation
 logic clk_gen = 0;
@@ -34,11 +29,6 @@ begin
     rst_gen = ~rst;
 end
 
-
-`ifdef __sim__
-
-logic clk;
-logic rst;
 initial begin
     $dumpfile("tb.vcd");
     $dumpvars(0,tb);
@@ -65,40 +55,39 @@ initial begin
     	end
 	end
 end
-`endif
 
-wb_test_master wb_test_master_0
+
+core core0
 (
-    .WB_CLK_I(clk_gen),
-    .WB_RST_I(rst_gen),
-    .WB_ADR_O(ADR_O),
-    .WB_DAT_O(DAT_O),
-    .WB_DAT_I(DAT_I),
-    .WB_WE_O(WE_O),
-    .WB_STB_O(STB_O),
-    .WB_ACK_I(ACK_I),
-    .WB_CYC_O(CYC_O),
-    .WB_ERR_I(ERR_I),
-    .WB_RTY_I(RTY_I),
-    .WB_CTI_O(CTI_O),
-    .WB_STALL_I(STALL_I)
+    //Clock is shared with WB4 BUS
+    .clk(clk_gen),
+    .rst(rst_gen),
+
+    //Wishbone signals
+    .addr_o(wb_addr),
+    .dat_i(wb_dat_i),
+    .dat_o(wb_dat_o),
+
+    .ack_i(wb_ack),
+    .err_i(wb_err),
+    .cyc_o(wb_cyc),
+    .stb_o(wb_stb),
+    .we_o(wb_we)
+
 );
 
-ram ram_0
-(
-    .WB_CLK_I(clk_gen),
-    .WB_RST_I(rst_gen),
-    .WB_ADR_I(ADR_O),
-    .WB_DAT_O(DAT_I),
-    .WB_DAT_I(DAT_O),
-    .WB_WE_I(WE_O),
-    .WB_STB_I(STB_O),
-    .WB_ACK_O(ACK_I),
-    .WB_CYC_I(CYC_O),
-    .WB_ERR_O(ERR_I),
-    .WB_RTY_O(RTY_I),
-    .WB_CTI_I(CTI_O),
-    .WB_STALL_O(STALL_I)
+wb4_sram sram0 (
+    .clk(clk_gen),
+    .rst(rst_gen),
+    // Wishbone signals
+    .addr_i(wb_addr),
+    .dat_i(wb_dat),
+    .dat_o(wb_dat),
+    .ack_o(wb_ack),
+    .err_o(wb_err),
+    .cyc_i(wb_cyc),
+    .stb_i(wb_stb),
+    .we_i(wb_we)
 );
 
 
