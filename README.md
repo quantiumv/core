@@ -13,10 +13,12 @@ flowchart TD
     subgraph CPU["CPU"]
         direction TB
         CPI["CPI"]
-        L1D["L1D"]
-        L1I["L1I"]
-        CPI --- L1D
-        CPI --- L1I
+        subgraph L1["  "]
+            direction LR
+            L1D["L1D"]
+            L1I["L1I"]
+        end
+        CPI ~~~ L1
     end
 
     L1D <--> MI["MATRIX INTERCONNECT"]
