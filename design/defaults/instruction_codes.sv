@@ -119,4 +119,25 @@
 /* ------------------------------------------------------------------------- */
 
 
+/* RV64I-only instructions. */
+
+`define INSTR_CODE_LWU      101001
+`define INSTR_CODE_LD       101010
+`define INSTR_CODE_SD       101011
+
+`define INSTR_CODE_ADDIW    101100
+`define INSTR_CODE_SLLIW    101101
+`define INSTR_CODE_SRLIW    101110
+`define INSTR_CODE_SRAIW    101111
+
+`define INSTR_CODE_ADDW     110000
+`define INSTR_CODE_SUBW     110001
+`define INSTR_CODE_SLLW     110010
+`define INSTR_CODE_SRLW     110011
+`define INSTR_CODE_SRAW     110100
+
+
+/* ------------------------------------------------------------------------- */
+
+
 /* End of file. */
