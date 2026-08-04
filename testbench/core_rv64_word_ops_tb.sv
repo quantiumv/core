@@ -33,7 +33,23 @@ module core_rv64_word_ops_tb;
 
     logic rst = 1;
 
-    core dut (.clk(clk), .rst(rst));
+    logic [31:0] wb_addr;
+    logic [63:0] wb_dat_m2s, wb_dat_s2m;
+    logic [7:0]  wb_sel;
+    logic        wb_we, wb_cyc, wb_stb, wb_ack, wb_err;
+
+    core dut (
+        .clk(clk), .rst(rst),
+        .wb_addr_o(wb_addr), .wb_dat_o(wb_dat_m2s), .wb_dat_i(wb_dat_s2m),
+        .wb_sel_o(wb_sel), .wb_we_o(wb_we), .wb_cyc_o(wb_cyc), .wb_stb_o(wb_stb),
+        .wb_ack_i(wb_ack), .wb_err_i(wb_err)
+    );
+
+    wb4_sram #(.num_words(128)) sram0 (
+        .clk(clk), .rst(rst),
+        .addr_i(wb_addr), .dat_i(wb_dat_m2s), .dat_o(wb_dat_s2m), .sel_i(wb_sel),
+        .ack_o(wb_ack), .err_o(wb_err), .cyc_i(wb_cyc), .stb_i(wb_stb), .we_i(wb_we)
+    );
 
     int pass_count = 0;
     int fail_count = 0;
@@ -48,6 +64,8 @@ module core_rv64_word_ops_tb;
     endtask
 
     initial begin
+        #1; // run after wb4_sram's own time-0 init (zero-fill + $readmemh) -- see core_wb_tb.sv
+
         /*
          * addi x1,x0,-1     x1 = 0xFFFFFFFFFFFFFFFF
          * slli x1,x1,32     x1 = 0xFFFFFFFF00000000
@@ -69,16 +87,16 @@ module core_rv64_word_ops_tb;
          *                         0x0000000100000000 -- completely different, easy to catch)
          * ebreak
          */
-        dut.imem0.mem[0] = encode_i(-32'sd1, 5'd0, 3'b000, 5'd1, `OPC_OP_IMM);
-        dut.imem0.mem[1] = encode_shift64(6'b000000, 6'd32, 5'd1, 3'b001, 5'd1, `OPC_OP_IMM); // slli
-        dut.imem0.mem[2] = encode_shift64(6'b000000, 6'd32, 5'd1, 3'b101, 5'd1, `OPC_OP_IMM); // srli
-        dut.imem0.mem[3] = encode_r(7'b0000000, 5'd0, 5'd1, 3'b000, 5'd2, `OPC_OP_32);        // addw
-        dut.imem0.mem[4] = encode_r(7'b0000000, 5'd0, 5'd1, 3'b000, 5'd3, `OPC_OP);           // add
-        dut.imem0.mem[5] = encode_i(32'sd4, 5'd0, 3'b000, 5'd5, `OPC_OP_IMM);                 // addi x5,x0,4
-        dut.imem0.mem[6] = encode_r(7'b0100000, 5'd5, 5'd1, 3'b101, 5'd6, `OPC_OP_32);        // sraw
-        dut.imem0.mem[7] = encode_r(7'b0000000, 5'd5, 5'd1, 3'b101, 5'd7, `OPC_OP_32);        // srlw
-        dut.imem0.mem[8] = encode_i(32'sd1, 5'd1, 3'b000, 5'd9, `OPC_OP_IMM_32);              // addiw
-        dut.imem0.mem[9] = {11'b0, 1'b1, 13'b0, `OPC_SYSTEM};                                  // ebreak
+        sram0.memory[0] = {encode_shift64(6'b000000, 6'd32, 5'd1, 3'b001, 5'd1, `OPC_OP_IMM), // slli
+                            encode_i(-32'sd1, 5'd0, 3'b000, 5'd1, `OPC_OP_IMM)};
+        sram0.memory[1] = {encode_r(7'b0000000, 5'd0, 5'd1, 3'b000, 5'd2, `OPC_OP_32),        // addw
+                            encode_shift64(6'b000000, 6'd32, 5'd1, 3'b101, 5'd1, `OPC_OP_IMM)}; // srli
+        sram0.memory[2] = {encode_i(32'sd4, 5'd0, 3'b000, 5'd5, `OPC_OP_IMM),                 // addi x5,x0,4
+                            encode_r(7'b0000000, 5'd0, 5'd1, 3'b000, 5'd3, `OPC_OP)};          // add
+        sram0.memory[3] = {encode_r(7'b0000000, 5'd5, 5'd1, 3'b101, 5'd7, `OPC_OP_32),        // srlw
+                            encode_r(7'b0100000, 5'd5, 5'd1, 3'b101, 5'd6, `OPC_OP_32)};       // sraw
+        sram0.memory[4] = {{11'b0, 1'b1, 13'b0, `OPC_SYSTEM},                                  // ebreak
+                            encode_i(32'sd1, 5'd1, 3'b000, 5'd9, `OPC_OP_IMM_32)};             // addiw
 
         @(posedge clk); #1;
         rst = 0;
@@ -86,7 +104,7 @@ module core_rv64_word_ops_tb;
         fork
             wait (dut.halted === 1'b1);
             begin
-                repeat (50) @(posedge clk);
+                repeat (150) @(posedge clk);
                 $display("TIMEOUT: dut.halted never went high");
                 $finish;
             end
