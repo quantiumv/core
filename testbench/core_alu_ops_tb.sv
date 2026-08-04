@@ -14,12 +14,14 @@
  * Testbench: core, register-immediate / register-register ALU ops
  *
  * First integration test -- exercises the plain fetch -> decode -> ALU ->
- * writeback path only, no memory or branch/jump complexity yet (those
- * are added one at a time by the testbenches after this one).
+ * writeback path only, no branch/jump complexity yet (those are added
+ * one at a time by the testbenches after this one).
  *
  * Instructions are hand-encoded via riscv_encode.sv and poked directly
- * into imem0 -- no riscv64-unknown-elf toolchain dependency for this
- * stage.
+ * into a real wb4_sram instance's memory[] array, packed two 32-bit
+ * instructions per 64-bit word (core.sv fetches over the Wishbone bus
+ * now, not from a private imem0) -- no riscv64-unknown-elf toolchain
+ * dependency for this stage.
  */
 module core_alu_ops_tb;
 
@@ -28,7 +30,25 @@ module core_alu_ops_tb;
 
     logic rst = 1;
 
-    core dut (.clk(clk), .rst(rst));
+    logic [31:0] wb_addr;
+    logic [63:0] wb_dat_m2s, wb_dat_s2m;
+    logic [7:0]  wb_sel;
+    logic        wb_we, wb_cyc, wb_stb, wb_ack, wb_err;
+
+    core dut (
+        .clk(clk), .rst(rst),
+        .wb_addr_o(wb_addr), .wb_dat_o(wb_dat_m2s), .wb_dat_i(wb_dat_s2m),
+        .wb_sel_o(wb_sel), .wb_we_o(wb_we), .wb_cyc_o(wb_cyc), .wb_stb_o(wb_stb),
+        .wb_ack_i(wb_ack), .wb_err_i(wb_err)
+    );
+
+    /* No UART/decoder needed -- this test never touches a memory-mapped
+     * peripheral, so core is wired straight to a single wb4_sram. */
+    wb4_sram #(.num_words(128)) sram0 (
+        .clk(clk), .rst(rst),
+        .addr_i(wb_addr), .dat_i(wb_dat_m2s), .dat_o(wb_dat_s2m), .sel_i(wb_sel),
+        .ack_o(wb_ack), .err_o(wb_err), .cyc_i(wb_cyc), .stb_i(wb_stb), .we_i(wb_we)
+    );
 
     int pass_count = 0;
     int fail_count = 0;
@@ -43,6 +63,8 @@ module core_alu_ops_tb;
     endtask
 
     initial begin
+        #1; // run after wb4_sram's own time-0 init (zero-fill + $readmemh) -- see core_wb_tb.sv
+
         /*
          * addi x1, x0, 5        x1 = 5
          * addi x2, x0, -3       x2 = -3  (negative I-immediate sign-extension)
@@ -55,14 +77,14 @@ module core_alu_ops_tb;
          *                                              SRA fix to land on the right answer)
          * ebreak
          */
-        dut.imem0.mem[0] = encode_i(32'sd5, 5'd0, 3'b000, 5'd1, `OPC_OP_IMM);
-        dut.imem0.mem[1] = encode_i(-32'sd3, 5'd0, 3'b000, 5'd2, `OPC_OP_IMM);
-        dut.imem0.mem[2] = encode_r(7'b0000000, 5'd2, 5'd1, 3'b000, 5'd3, `OPC_OP);
-        dut.imem0.mem[3] = encode_r(7'b0100000, 5'd2, 5'd1, 3'b000, 5'd4, `OPC_OP);
-        dut.imem0.mem[4] = encode_i(32'sd0, 5'd2, 3'b010, 5'd5, `OPC_OP_IMM);
-        dut.imem0.mem[5] = encode_shift64(6'b000000, 6'd2, 5'd1, 3'b001, 5'd6, `OPC_OP_IMM);
-        dut.imem0.mem[6] = encode_shift64(6'b010000, 6'd1, 5'd2, 3'b101, 5'd7, `OPC_OP_IMM);
-        dut.imem0.mem[7] = {11'b0, 1'b1, 13'b0, `OPC_SYSTEM}; // ebreak
+        sram0.memory[0] = {encode_i(-32'sd3, 5'd0, 3'b000, 5'd2, `OPC_OP_IMM),
+                            encode_i(32'sd5, 5'd0, 3'b000, 5'd1, `OPC_OP_IMM)};
+        sram0.memory[1] = {encode_r(7'b0100000, 5'd2, 5'd1, 3'b000, 5'd4, `OPC_OP),
+                            encode_r(7'b0000000, 5'd2, 5'd1, 3'b000, 5'd3, `OPC_OP)};
+        sram0.memory[2] = {encode_shift64(6'b000000, 6'd2, 5'd1, 3'b001, 5'd6, `OPC_OP_IMM),
+                            encode_i(32'sd0, 5'd2, 3'b010, 5'd5, `OPC_OP_IMM)};
+        sram0.memory[3] = {{11'b0, 1'b1, 13'b0, `OPC_SYSTEM}, // ebreak
+                            encode_shift64(6'b010000, 6'd1, 5'd2, 3'b101, 5'd7, `OPC_OP_IMM)};
 
         @(posedge clk); #1;
         rst = 0;
@@ -70,7 +92,7 @@ module core_alu_ops_tb;
         fork
             wait (dut.halted === 1'b1);
             begin
-                repeat (50) @(posedge clk);
+                repeat (150) @(posedge clk);
                 $display("TIMEOUT: dut.halted never went high");
                 $finish;
             end
