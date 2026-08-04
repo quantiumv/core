@@ -24,7 +24,23 @@ module core_upper_imm_tb;
 
     logic rst = 1;
 
-    core dut (.clk(clk), .rst(rst));
+    logic [31:0] wb_addr;
+    logic [63:0] wb_dat_m2s, wb_dat_s2m;
+    logic [7:0]  wb_sel;
+    logic        wb_we, wb_cyc, wb_stb, wb_ack, wb_err;
+
+    core dut (
+        .clk(clk), .rst(rst),
+        .wb_addr_o(wb_addr), .wb_dat_o(wb_dat_m2s), .wb_dat_i(wb_dat_s2m),
+        .wb_sel_o(wb_sel), .wb_we_o(wb_we), .wb_cyc_o(wb_cyc), .wb_stb_o(wb_stb),
+        .wb_ack_i(wb_ack), .wb_err_i(wb_err)
+    );
+
+    wb4_sram #(.num_words(128)) sram0 (
+        .clk(clk), .rst(rst),
+        .addr_i(wb_addr), .dat_i(wb_dat_m2s), .dat_o(wb_dat_s2m), .sel_i(wb_sel),
+        .ack_o(wb_ack), .err_o(wb_err), .cyc_i(wb_cyc), .stb_i(wb_stb), .we_i(wb_we)
+    );
 
     int pass_count = 0;
     int fail_count = 0;
@@ -39,6 +55,8 @@ module core_upper_imm_tb;
     endtask
 
     initial begin
+        #1; // run after wb4_sram's own time-0 init (zero-fill + $readmemh) -- see core_wb_tb.sv
+
         /*
          * lui x1, 0xFFFFF      x1 = 0xFFFFFFFFFFFFF000  (bit 19 set -> must sign-extend
          *                       negative; the old bug never shifted at all, so this would
@@ -48,10 +66,10 @@ module core_upper_imm_tb;
          * auipc x3, 0x00001    at PC=0x8: x3 = 0x8 + 0x1000 = 0x1008
          * ebreak
          */
-        dut.imem0.mem[0] = encode_u(20'hFFFFF, 5'd1, `OPC_LUI);
-        dut.imem0.mem[1] = encode_u(20'h00001, 5'd2, `OPC_LUI);
-        dut.imem0.mem[2] = encode_u(20'h00001, 5'd3, `OPC_AUIPC);
-        dut.imem0.mem[3] = {11'b0, 1'b1, 13'b0, `OPC_SYSTEM}; // ebreak
+        sram0.memory[0] = {encode_u(20'h00001, 5'd2, `OPC_LUI),
+                            encode_u(20'hFFFFF, 5'd1, `OPC_LUI)};
+        sram0.memory[1] = {{11'b0, 1'b1, 13'b0, `OPC_SYSTEM}, // ebreak
+                            encode_u(20'h00001, 5'd3, `OPC_AUIPC)};
 
         @(posedge clk); #1;
         rst = 0;
@@ -59,7 +77,7 @@ module core_upper_imm_tb;
         fork
             wait (dut.halted === 1'b1);
             begin
-                repeat (50) @(posedge clk);
+                repeat (150) @(posedge clk);
                 $display("TIMEOUT: dut.halted never went high");
                 $finish;
             end
