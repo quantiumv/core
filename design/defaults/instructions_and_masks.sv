@@ -84,6 +84,14 @@
 `define INSTR_LHU       `LOAD_INSTR_CREATE(3'b101)
 `define INSTR_MASK_LHU  `LOAD_INSTRS_MASK
 
+/* RV64I: 32-bit load, zero-extended (LW sign-extends; this doesn't). */
+`define INSTR_LWU       `LOAD_INSTR_CREATE(3'b110)
+`define INSTR_MASK_LWU  `LOAD_INSTRS_MASK
+
+/* RV64I: full 64-bit (doubleword) load. */
+`define INSTR_LD        `LOAD_INSTR_CREATE(3'b011)
+`define INSTR_MASK_LD   `LOAD_INSTRS_MASK
+
 
 /* ------------------------------------------------------------------------- */
 
@@ -102,6 +110,10 @@
 
 `define INSTR_SW        `STORE_INSTR_CREATE(3'b010)
 `define INSTR_MASK_SW   `STORE_INSTRS_MASK
+
+/* RV64I: full 64-bit (doubleword) store. */
+`define INSTR_SD        `STORE_INSTR_CREATE(3'b011)
+`define INSTR_MASK_SD   `STORE_INSTRS_MASK
 
 
 /* ------------------------------------------------------------------------- */
@@ -138,7 +150,18 @@
 
 `define IMM_SHIFT_INSTR_CREATE(bit30, funct3) \
                                {1'b0, bit30, 15'b0, funct3, 5'b0, 7'b0010011}
-`define IMM_SHIFT_INSTRS_MASK   {7'b1111111, 10'b0, 3'b111, 5'b0, 7'b1111111}
+/*
+ * RV64I widens the shift amount from 5 to 6 bits (log2(64) instead of
+ * log2(32)) -- bit 25, which used to be a fixed part of a 7-bit funct7,
+ * becomes shamt's top bit instead. So only funct6 (bits 31:26, 6 bits) is
+ * checked as a fixed pattern now; bit 25 must be a don't-care alongside
+ * the rest of the shamt field, not forced to 0 -- otherwise any shift
+ * amount of 32 or more (which sets bit 25/shamt[5]) would fail to match
+ * SLLI/SRLI/SRAI at all. IMM_SHIFT_INSTR_CREATE itself is unchanged: its
+ * "15'b0" block already covers bit 25 with a 0 that's now simply ignored
+ * (mask=0 there) rather than enforced.
+ */
+`define IMM_SHIFT_INSTRS_MASK   {6'b111111, 11'b0, 3'b111, 5'b0, 7'b1111111}
 
 `define INSTR_SLLI      `IMM_SHIFT_INSTR_CREATE(1'b0, 3'b001)
 `define INSTR_MASK_SLLI `IMM_SHIFT_INSTRS_MASK
@@ -148,6 +171,40 @@
 
 `define INSTR_SRAI      `IMM_SHIFT_INSTR_CREATE(1'b1, 3'b101)
 `define INSTR_MASK_SRAI `IMM_SHIFT_INSTRS_MASK
+
+
+/* ------------------------------------------------------------------------- */
+
+
+/*
+ * RV64I word-width immediate instructions (opcode 0011011): ADDIW is a
+ * plain I-type op, identical in shape to the IMM_AL family above just at
+ * a different opcode. SLLIW/SRLIW/SRAIW keep a 5-bit shamt (word-shifts
+ * are always 32-bit, regardless of WORD_SIZE) so, unlike the base shifts
+ * above, their funct7 stays a full 7 fixed bits -- same shape as the
+ * ORIGINAL (RV32I) IMM_SHIFT_INSTR_CREATE, just re-targeted to this
+ * opcode.
+ */
+
+`define IMM_AL32_INSTR_CREATE(funct3) {17'b0, funct3, 5'b0, 7'b0011011}
+`define IMM_AL32_INSTRS_MASK          {17'b0, 3'b111, 5'b0, 7'b1111111}
+
+`define INSTR_ADDIW         `IMM_AL32_INSTR_CREATE(3'b000)
+`define INSTR_MASK_ADDIW    `IMM_AL32_INSTRS_MASK
+
+
+`define IMM_SHIFT32_INSTR_CREATE(bit30, funct3) \
+                               {1'b0, bit30, 15'b0, funct3, 5'b0, 7'b0011011}
+`define IMM_SHIFT32_INSTRS_MASK   {7'b1111111, 10'b0, 3'b111, 5'b0, 7'b1111111}
+
+`define INSTR_SLLIW      `IMM_SHIFT32_INSTR_CREATE(1'b0, 3'b001)
+`define INSTR_MASK_SLLIW `IMM_SHIFT32_INSTRS_MASK
+
+`define INSTR_SRLIW      `IMM_SHIFT32_INSTR_CREATE(1'b0, 3'b101)
+`define INSTR_MASK_SRLIW `IMM_SHIFT32_INSTRS_MASK
+
+`define INSTR_SRAIW      `IMM_SHIFT32_INSTR_CREATE(1'b1, 3'b101)
+`define INSTR_MASK_SRAIW `IMM_SHIFT32_INSTRS_MASK
 
 
 /* ------------------------------------------------------------------------- */
@@ -189,6 +246,39 @@
 
 `define INSTR_AND       `ALU_INSTR_CREATE(1'b0, 3'b111)
 `define INSTR_MASK_AND  `ALU_INSTRS_MASK
+
+
+/* ------------------------------------------------------------------------- */
+
+
+/*
+ * RV64I word-width register-register instructions (opcode 0111011),
+ * keyed on {bit30, funct3} exactly like ALU_INSTR_CREATE above, just at a
+ * different opcode. Only 5 of the 8 combinations base ALU_INSTR_CREATE
+ * supports are defined by the ISA here (no word-width OR/AND/XOR/SLT/
+ * SLTU -- bitwise and compare ops are identical whether you consider the
+ * upper 32 bits or not, so RV64I doesn't define separate "W" forms for
+ * them).
+ */
+
+`define ALU32_INSTR_CREATE(bit30, funct3) \
+                           {1'b0, bit30, 15'b0, funct3, 5'b0, 7'b0111011}
+`define ALU32_INSTRS_MASK     {7'b1111111, 10'b0, 3'b111, 5'b0, 7'b1111111}
+
+`define INSTR_ADDW       `ALU32_INSTR_CREATE(1'b0, 3'b000)
+`define INSTR_MASK_ADDW  `ALU32_INSTRS_MASK
+
+`define INSTR_SUBW       `ALU32_INSTR_CREATE(1'b1, 3'b000)
+`define INSTR_MASK_SUBW  `ALU32_INSTRS_MASK
+
+`define INSTR_SLLW       `ALU32_INSTR_CREATE(1'b0, 3'b001)
+`define INSTR_MASK_SLLW  `ALU32_INSTRS_MASK
+
+`define INSTR_SRLW       `ALU32_INSTR_CREATE(1'b0, 3'b101)
+`define INSTR_MASK_SRLW  `ALU32_INSTRS_MASK
+
+`define INSTR_SRAW       `ALU32_INSTR_CREATE(1'b1, 3'b101)
+`define INSTR_MASK_SRAW  `ALU32_INSTRS_MASK
 
 
 /* ------------------------------------------------------------------------- */
