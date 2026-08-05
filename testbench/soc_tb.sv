@@ -50,7 +50,15 @@ module soc_tb;
         fork
             wait (dut.core0.halted === 1'b1);
             begin
-                repeat (300) @(posedge clk);
+                /*
+                 * Generous on purpose: unlike the earlier hand-written
+                 * assembly firmware (2 instructions per byte), an -O0 C
+                 * build reloads everything from the stack constantly --
+                 * around 7 memory ops per loop iteration, each costing 5
+                 * bus edges -- so this budget needs real headroom, not
+                 * just margin.
+                 */
+                repeat (3000) @(posedge clk);
                 $display("TIMEOUT: dut.core0.halted never went high -- is firmware/crt0.hex built?");
                 $finish;
             end
