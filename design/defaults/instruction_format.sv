@@ -74,6 +74,20 @@
 `define WSHAMT_LSB  20
 
 
+/*
+ * CSR fields (Zicsr). Same precedent as SHAMT/WSHAMT above: new field,
+ * same bit range as an existing one, different kind of value.
+ */
+
+`define CSR_ADDR_SIZE   12   // instr[31:20], zero-extended CSR index (never sign-extended)
+`define CSR_ADDR_MSB    31
+`define CSR_ADDR_LSB    20
+
+`define CSR_UIMM_SIZE   5    // instr[19:15] -- for CSRRWI/SI/CI, a LITERAL zero-extended value,
+`define CSR_UIMM_MSB    19   // not a register-select index (numerically = SRC1's position)
+`define CSR_UIMM_LSB    15
+
+
 /* ------------------------------------------------------------------------- */
 
 
