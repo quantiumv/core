@@ -1,48 +1,42 @@
     .section .text
     .globl _start
 
-# Hello-world for the minimal SoC (design/soc.sv): print "Hello, World!\n"
-# one byte at a time through the UART's memory-mapped TX_DATA register
-# (design/uart_tx.sv, address 0x8000). x1 holds that address for the
-# whole program; x2 is reused as the one-byte payload for each write.
+# Startup stub for the minimal SoC (design/soc.sv) -- sets up the two
+# things any nontrivial C function needs before it's safe to call into
+# C at all, then hands off to main() (firmware/hello.c). Previously this
+# file WAS the whole program, hand-written to avoid depending on
+# unverified section-placement behavior; now that firmware/link.ld
+# exists and has been verified against a real build, the actual program
+# logic lives in C instead. See git history for the assembly-only version.
 #
-# Deliberately a flat, repeated li+sb sequence rather than a string
-# constant walked in a loop -- this milestone links with a bare
-# `-Ttext=0x0` and no linker script, so there's no established, verified
-# convention yet for where a .data/.rodata section would actually land.
-# A loop over a real string is the natural next step once that exists;
-# until then, this avoids depending on section-placement behavior that
-# hasn't been proven on this toolchain/link setup.
+#  - sp (x2): without this, the first push (e.g. a saved return address,
+#    or any register a called function spills) writes to address 0 --
+#    which happens to be this program's own first instruction. Set to
+#    _stack_top (firmware/link.ld), the top of RAM, growing down.
+#  - .bss zeroed: C assumes zero-initialized globals/statics.
+#
+# gp (x3, RISC-V's "global pointer") is deliberately NOT set up --
+# firmware/Makefile passes -mno-relax to both the assembler and gcc,
+# which disables the linker relaxation that would otherwise rewrite
+# small-data accesses into gp-relative instructions. Without that
+# relaxation, gp-relative addressing never gets emitted, so gp can stay
+# uninitialized without breaking anything.
 _start:
-    li x1, 0x8000
+    la sp, _stack_top
 
-    li x2, 'H'
-    sb x2, 0(x1)
-    li x2, 'e'
-    sb x2, 0(x1)
-    li x2, 'l'
-    sb x2, 0(x1)
-    li x2, 'l'
-    sb x2, 0(x1)
-    li x2, 'o'
-    sb x2, 0(x1)
-    li x2, ','
-    sb x2, 0(x1)
-    li x2, ' '
-    sb x2, 0(x1)
-    li x2, 'W'
-    sb x2, 0(x1)
-    li x2, 'o'
-    sb x2, 0(x1)
-    li x2, 'r'
-    sb x2, 0(x1)
-    li x2, 'l'
-    sb x2, 0(x1)
-    li x2, 'd'
-    sb x2, 0(x1)
-    li x2, '!'
-    sb x2, 0(x1)
-    li x2, '\n'
-    sb x2, 0(x1)
+    la t0, _bss_start
+    la t1, _bss_end
+zero_bss:
+    bge t0, t1, zero_bss_done
+    sb x0, 0(t0)
+    addi t0, t0, 1
+    j zero_bss
+zero_bss_done:
 
+    call main
+
+    # main() has no OS to return to -- halt the same way every other
+    # firmware image in this repo signals "done" (see core.sv's halt
+    # latch). main()'s return value (a0) is deliberately not inspected;
+    # there's nothing to report it to yet.
     ebreak
