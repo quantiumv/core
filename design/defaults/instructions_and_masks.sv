@@ -307,4 +307,37 @@
 /* ------------------------------------------------------------------------- */
 
 
+/*
+ * Zicsr (CSR) instructions. Same opcode (SYSTEM, 7'b1110011) as ECALL/
+ * EBREAK above, disambiguated by funct3 -- all 6 Zicsr funct3 values are
+ * nonzero, while ECALL/EBREAK's own mask (ENV_INSTRS_MASK, a full exact
+ * match) forces funct3=000, so neither family can ever collide with the
+ * other.
+ */
+
+`define CSR_INSTR_CREATE(funct3)   {17'b0, funct3, 5'b0, 7'b1110011}
+`define CSR_INSTRS_MASK            {17'b0, 3'b111, 5'b0, 7'b1111111}
+
+`define INSTR_CSRRW      `CSR_INSTR_CREATE(3'b001)
+`define INSTR_MASK_CSRRW `CSR_INSTRS_MASK
+
+`define INSTR_CSRRS      `CSR_INSTR_CREATE(3'b010)
+`define INSTR_MASK_CSRRS `CSR_INSTRS_MASK
+
+`define INSTR_CSRRC      `CSR_INSTR_CREATE(3'b011)
+`define INSTR_MASK_CSRRC `CSR_INSTRS_MASK
+
+`define INSTR_CSRRWI      `CSR_INSTR_CREATE(3'b101)
+`define INSTR_MASK_CSRRWI `CSR_INSTRS_MASK
+
+`define INSTR_CSRRSI      `CSR_INSTR_CREATE(3'b110)
+`define INSTR_MASK_CSRRSI `CSR_INSTRS_MASK
+
+`define INSTR_CSRRCI      `CSR_INSTR_CREATE(3'b111)
+`define INSTR_MASK_CSRRCI `CSR_INSTRS_MASK
+
+
+/* ------------------------------------------------------------------------- */
+
+
 /* End of file. */
