@@ -38,6 +38,20 @@ function automatic logic [31:0] encode_i(
 endfunction
 
 /*
+ * Thin wrapper around encode_i -- its existing bit layout already matches
+ * all 6 CSR instructions exactly (CSR address -> imm field, rs1/uimm ->
+ * rs1 field), so this exists purely for call-site readability: takes
+ * csr_addr as an unsigned 12-bit field (a CSR address is never signed)
+ * instead of encode_i's signed int.
+ */
+function automatic logic [31:0] encode_csr(
+    input logic [11:0] csr_addr, input logic [4:0] rs1_or_uimm,
+    input logic [2:0] funct3, input logic [4:0] rd, input logic [6:0] opcode
+);
+    return encode_i(int'(csr_addr), rs1_or_uimm, funct3, rd, opcode);
+endfunction
+
+/*
  * Shift-immediate, RV64I base shifts (SLLI/SRLI/SRAI): 6-bit shamt,
  * 6-bit funct6 -- bit 25, which used to be funct7's LSB under RV32I, is
  * now shamt's top bit (see instructions_and_masks.sv's IMM_SHIFT fix).
@@ -122,6 +136,24 @@ endfunction
 `define OPC_JALR      7'b1100111
 `define OPC_BRANCH    7'b1100011
 `define OPC_SYSTEM    7'b1110011
+
+/* SYSTEM-opcode funct3 encodings for the 6 Zicsr instructions, for readability at call sites. */
+`define FUNCT3_CSRRW  3'b001
+`define FUNCT3_CSRRS  3'b010
+`define FUNCT3_CSRRC  3'b011
+`define FUNCT3_CSRRWI 3'b101
+`define FUNCT3_CSRRSI 3'b110
+`define FUNCT3_CSRRCI 3'b111
+
+/* CSR addresses backed by design/csr_file.sv, for readable call sites in the Zicsr testbenches. */
+`define CSR_MISA      12'h301
+`define CSR_MVENDORID 12'hF11
+`define CSR_MARCHID   12'hF12
+`define CSR_MIMPID    12'hF13
+`define CSR_MHARTID   12'hF14
+`define CSR_MSCRATCH  12'h340
+`define CSR_MCYCLE    12'hB00
+`define CSR_MINSTRET  12'hB02
 
 
 /* ------------------------------------------------------------------------- */
