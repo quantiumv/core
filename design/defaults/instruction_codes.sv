@@ -140,4 +140,17 @@
 /* ------------------------------------------------------------------------- */
 
 
+/* Zicsr (CSR) instructions. */
+
+`define INSTR_CODE_CSRRW    110101   // 53
+`define INSTR_CODE_CSRRS    110110   // 54
+`define INSTR_CODE_CSRRC    110111   // 55
+`define INSTR_CODE_CSRRWI   111000   // 56
+`define INSTR_CODE_CSRRSI   111001   // 57
+`define INSTR_CODE_CSRRCI   111010   // 58
+
+
+/* ------------------------------------------------------------------------- */
+
+
 /* End of file. */
