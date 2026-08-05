@@ -156,6 +156,37 @@
     o_imm_3_or_dest_addr = 0;                            \
 ;
 
+/*
+ * CSR-type (Zicsr), register source form (CSRRW/CSRRS/CSRRC): rs1 (the
+ * VALUE, when read -- see PASS_REG_A_IN_IMM_1) lands on imm_1 exactly
+ * like an R/I-type source register, and the CSR address (an immediate
+ * field, never a register select) lands on imm_2 via PASS_IMM_IN_IMM_2
+ * -- same "recognizable primitive, new wire" composition
+ * OUTPUT_U_TYPE_INSTR/OUTPUT_J_TYPE_INSTR already use, no new decoder
+ * primitive needed. o_read_gpr_A_sel (== source_1, the rs1 FIELD) is
+ * what core.sv's csr_write_suppress reads directly for CSRRS/CSRRC's
+ * field-vs-value distinction -- see core.sv's own comment on that.
+ */
+`define OUTPUT_CSR_TYPE_INSTR(instr_name)             \
+    o_decoded_instruction = `INSTR_CODE(instr_name);  \
+    `PASS_REG_A_IN_IMM_1(source_1);                    \
+    `PASS_IMM_IN_IMM_2(csr_addr_zext);                  \
+    o_imm_3_or_dest_addr = `B_IMM_SIZE'(destination);  \
+;
+
+/*
+ * CSR-type (Zicsr), immediate source form (CSRRWI/CSRRSI/CSRRCI): uimm
+ * is a LITERAL (zero-extended, never a register index) -- PASS_IMM_IN_
+ * IMM_1 instead of PASS_REG_A_IN_IMM_1, unlike the register form above.
+ * CSR address still lands on imm_2 the same way.
+ */
+`define OUTPUT_CSRI_TYPE_INSTR(instr_name)            \
+    o_decoded_instruction = `INSTR_CODE(instr_name);  \
+    `PASS_IMM_IN_IMM_1(csr_uimm_zext);                  \
+    `PASS_IMM_IN_IMM_2(csr_addr_zext);                  \
+    o_imm_3_or_dest_addr = `B_IMM_SIZE'(destination);  \
+;
+
 
 /* ------------------------------------------------------------------------- */
 
@@ -332,6 +363,22 @@ module decoder (
     assign wshamt = i_instruction[`WSHAMT_MSB:`WSHAMT_LSB];
     logic [(`WORD_SIZE - 1):0] wshamt_zext;
     assign wshamt_zext = {{(`WORD_SIZE - `WSHAMT_SIZE){1'b0}}, wshamt};
+
+    /*
+     * CSR fields (Zicsr): csr_addr is instr[31:20], zero-extended (never
+     * sign-extended -- it's an index, not a value). csr_uimm is
+     * instr[19:15], zero-extended -- for CSRRWI/SI/CI only, a LITERAL,
+     * not a register-select index (see OUTPUT_CSRI_TYPE_INSTR above).
+     */
+    logic [(`CSR_ADDR_SIZE - 1):0] csr_addr;
+    assign csr_addr = i_instruction[`CSR_ADDR_MSB:`CSR_ADDR_LSB];
+    logic [(`WORD_SIZE - 1):0] csr_addr_zext;
+    assign csr_addr_zext = {{(`WORD_SIZE - `CSR_ADDR_SIZE){1'b0}}, csr_addr};
+
+    logic [(`CSR_UIMM_SIZE - 1):0] csr_uimm;
+    assign csr_uimm = i_instruction[`CSR_UIMM_MSB:`CSR_UIMM_LSB];
+    logic [(`WORD_SIZE - 1):0] csr_uimm_zext;
+    assign csr_uimm_zext = {{(`WORD_SIZE - `CSR_UIMM_SIZE){1'b0}}, csr_uimm};
 
 
     /* Match the instruction and do appropriate decoding. */
@@ -658,6 +705,42 @@ module decoder (
         else if (`IS_INSTR(i_instruction, EBREAK)) begin: ebreak_instr
             `OUTPUT_NONE_TYPE_INSTR(EBREAK);
         end: ebreak_instr
+
+
+        /* --------------------------------------------------------- */
+
+
+        /* Zicsr (CSR) instructions -- same SYSTEM opcode as ECALL/EBREAK above, disambiguated by funct3. */
+
+
+        else if (`IS_INSTR(i_instruction, CSRRW)) begin: csrrw_instr
+            `OUTPUT_CSR_TYPE_INSTR(CSRRW);
+        end: csrrw_instr
+
+
+        else if (`IS_INSTR(i_instruction, CSRRS)) begin: csrrs_instr
+            `OUTPUT_CSR_TYPE_INSTR(CSRRS);
+        end: csrrs_instr
+
+
+        else if (`IS_INSTR(i_instruction, CSRRC)) begin: csrrc_instr
+            `OUTPUT_CSR_TYPE_INSTR(CSRRC);
+        end: csrrc_instr
+
+
+        else if (`IS_INSTR(i_instruction, CSRRWI)) begin: csrrwi_instr
+            `OUTPUT_CSRI_TYPE_INSTR(CSRRWI);
+        end: csrrwi_instr
+
+
+        else if (`IS_INSTR(i_instruction, CSRRSI)) begin: csrrsi_instr
+            `OUTPUT_CSRI_TYPE_INSTR(CSRRSI);
+        end: csrrsi_instr
+
+
+        else if (`IS_INSTR(i_instruction, CSRRCI)) begin: csrrci_instr
+            `OUTPUT_CSRI_TYPE_INSTR(CSRRCI);
+        end: csrrci_instr
 
 
         /* --------------------------------------------------------- */
