@@ -4,6 +4,7 @@
 
 
 `include "defaults/defaults.sv"
+`include "defaults/instruction_format.sv"
 
 
 /* ------------------------------------------------------------------------- */
@@ -315,6 +316,14 @@ module core (
             `INSTR_CODE(SRAIW), `INSTR_CODE(SRAW): alu_op = `SRAW;
 
             /*
+             * Zicsr: no new ALU ops needed (see the operand-mux comments
+             * above for the operand-B redirect each of these relies on).
+             */
+            `INSTR_CODE(CSRRS), `INSTR_CODE(CSRRSI): alu_op = `OR;
+            `INSTR_CODE(CSRRC), `INSTR_CODE(CSRRCI): alu_op = `AND;
+            `INSTR_CODE(CSRRW), `INSTR_CODE(CSRRWI): alu_op = `ADD;
+
+            /*
              * Branches/JAL/FENCE/ECALL/EBREAK/INVALID don't use
              * alu_result for anything (branches have their own
              * comparator below; JAL's target/link come from the PC
@@ -373,6 +382,48 @@ module core (
     end: reg_write_control
     assign reg_write = reg_write_ctrl && commit_now;
 
+    /*
+     * Zicsr classification. mem_control/reg_write_control above need no
+     * new arms for these six codes: mem_control's default (is_load=0,
+     * is_store=0) already applies, so a CSR instruction retires in a
+     * single S_EXEC cycle like any ordinary ALU op; reg_write_control's
+     * default (reg_write_ctrl = 1'b1) already applies too, so rd gets
+     * written same as any other non-excluded instruction.
+     */
+    wire is_csrrw  = (decoded_instruction == `INSTR_CODE(CSRRW));
+    wire is_csrrs  = (decoded_instruction == `INSTR_CODE(CSRRS));
+    wire is_csrrc  = (decoded_instruction == `INSTR_CODE(CSRRC));
+    wire is_csrrwi = (decoded_instruction == `INSTR_CODE(CSRRWI));
+    wire is_csrrsi = (decoded_instruction == `INSTR_CODE(CSRRSI));
+    wire is_csrrci = (decoded_instruction == `INSTR_CODE(CSRRCI));
+    wire is_csr_rw = is_csrrw || is_csrrwi;
+    wire is_csr_rs = is_csrrs || is_csrrsi;
+    wire is_csr_rc = is_csrrc || is_csrrci;
+    wire is_csr    = is_csr_rw || is_csr_rs || is_csr_rc;
+
+    /*
+     * Write-suppress condition, per spec: CSRRS/CSRRC suppress the write
+     * when rs1's FIELD is x0 (read_gpr_A_sel == 0) -- a register OTHER
+     * than x0 that happens to hold value 0 must still attempt the write,
+     * so this must NOT be checked as imm_1 == 0 (the runtime value).
+     * CSRRSI/CSRRCI have no such field/value distinction -- uimm IS a
+     * literal -- so imm_1 == 0 (which is where the decoder parks the
+     * zero-extended uimm) is correct there.
+     */
+    wire csr_write_suppress = (is_csrrs || is_csrrc)   ? (read_gpr_A_sel == 0) :
+                               (is_csrrsi || is_csrrci) ? (imm_1 == 0)         :
+                                                           1'b0;
+
+    /*
+     * Forward-declared here, same reason is_load/is_store/halted are
+     * (see the comment near the top of this file): csr_rdata is
+     * referenced below in the operand muxes, textually before csr_file0
+     * -- the instance that actually drives it -- is declared (csr_file0
+     * has to come after alu0, since its write data is alu_result).
+     */
+    logic [(`WORD_SIZE - 1):0] csr_rdata;
+    wire csr_we = is_csr && commit_now && !csr_write_suppress;
+
     /* --------------------------------------------------------------- *
      * Execute
      * --------------------------------------------------------------- */
@@ -387,10 +438,33 @@ module core (
      * immediate that A just displaced -- using the default imm_2 here
      * (0) would silently compute pc+0 and drop the immediate entirely.
      */
-    wire [(`WORD_SIZE - 1):0] alu_operand_a = is_auipc ? pc : imm_1;
-    wire [(`WORD_SIZE - 1):0] alu_operand_b = is_store  ? imm3_sext :
-                                                is_auipc  ? imm_1     :
-                                                             imm_2;
+    /*
+     * CSRRS/CSRRC redirect A to the CSR's CURRENT value -- "OR/AND a
+     * mask into/out of the CSR" reads the CSR, not rs1/uimm -- same
+     * operand-redirect idea AUIPC already uses above, just sourced from
+     * csr_rdata instead of pc. CSRRW/CSRRWI need no redirect: their new
+     * value IS rs1/uimm, which is already sitting on imm_1 by default.
+     */
+    wire [(`WORD_SIZE - 1):0] alu_operand_a = (is_csr_rs || is_csr_rc) ? csr_rdata :
+                                               is_auipc                 ? pc        :
+                                                                          imm_1;
+    /*
+     * CSRRS ORs the rs1/uimm mask (already on imm_1) into the CSR -- B =
+     * imm_1, paired with alu_op_sel's OR arm below. CSRRC ANDs with the
+     * bitwise-complement of that same mask -- B = ~imm_1, paired with
+     * AND (pre-inverting the operand here instead of adding a dedicated
+     * "AND-NOT" ALU op, same trick as AUIPC's operand redirect above).
+     * CSRRW/CSRRWI overwrite the CSR outright -- B forced to 0, paired
+     * with ADD (the same passthrough trick LUI's ADD-with-B=0 already
+     * uses) -- so alu_result ends up uniformly "the new CSR value" for
+     * all 6 variants, and csr_file0's write port needs no extra mux.
+     */
+    wire [(`WORD_SIZE - 1):0] alu_operand_b = is_store  ? imm3_sext      :
+                                               is_auipc  ? imm_1          :
+                                               is_csr_rs ? imm_1          :
+                                               is_csr_rc ? ~imm_1         :
+                                               is_csr_rw ? `WORD_SIZE'(0) :
+                                                            imm_2;
 
     logic [(`WORD_SIZE - 1):0] alu_result;
     alu alu0 (
@@ -398,6 +472,24 @@ module core (
         .i_operation(alu_op),
         .i_operand_B(alu_operand_b),
         .o_result(alu_result)
+    );
+
+    /*
+     * csr_file0: instantiated here, after alu0 rather than up with the
+     * rest of the new Zicsr wires in the Control unit section above --
+     * its write data is alu_result, which by construction (see the
+     * operand-mux/alu_op_sel comments above) is uniformly "the new CSR
+     * value" for all 6 variants, and alu_result doesn't exist until
+     * alu0 above is declared.
+     */
+    csr_file csr_file0 (
+        .i_clk(clk),
+        .i_rst(rst),
+        .i_csr_addr(imm_2[(`CSR_ADDR_SIZE - 1):0]),
+        .o_csr_rdata(csr_rdata),
+        .i_csr_we(csr_we),
+        .i_csr_wdata(alu_result),
+        .i_instr_retired(commit_now)
     );
 
     /*
@@ -560,9 +652,17 @@ module core (
     /* See the is_word_arith comment above for why only some *W ops need this. */
     wire [(`WORD_SIZE - 1):0] alu_result_w_trunc = {{32{alu_result[31]}}, alu_result[31:0]};
 
+    /*
+     * Zicsr writes the OLD CSR value to rd, for all 6 variants (per
+     * spec) -- csr_rdata was captured combinationally off the CSR's
+     * pre-write contents this same cycle, same "read before the
+     * same-edge overwrite" principle as every other read-then-write
+     * already in this design (e.g. the regfile's own read-before-write).
+     */
     assign reg_write_data = is_load               ? load_data :
                              (is_jal || is_jalr)   ? pc_plus_4 :
                              is_word_arith         ? alu_result_w_trunc :
+                             is_csr                ? csr_rdata :
                                                       alu_result; // ALU ops, LUI, AUIPC, *W shifts
 
     /* --------------------------------------------------------------- *
