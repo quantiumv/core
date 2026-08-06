@@ -1,2 +1,0 @@
-`include "core.sv"
-`include "tb.sv"
