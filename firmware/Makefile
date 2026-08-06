@@ -6,6 +6,12 @@
 ASFLAGS = -march=rv64i -mabi=lp64 -mno-relax
 CFLAGS  = -march=rv64i -mabi=lp64 -mno-relax -ffreestanding -nostdlib -O0 -Wall
 
+# csr_test.s uses real CSR mnemonics (csrwi/csrrw/csrrc/csrrs/...), which
+#   plain rv64i rejects ("extension zicsr required") -- crt0.s itself has
+#   no CSR instructions, so it stays plain -march=rv64i (ASFLAGS above)
+#   even when linked into this program.
+CSR_ASFLAGS = -march=rv64i_zicsr -mabi=lp64 -mno-relax
+
 all:
 	riscv64-unknown-elf-as $(ASFLAGS) crt0.s -o crt0.o
 	riscv64-unknown-elf-gcc $(CFLAGS) -c hello.c -o hello.o
@@ -26,3 +32,16 @@ all:
 	#   for, actually produces the WRONG order; don't re-add it without
 	#   re-deriving this by hand against real objdump output first.
 	riscv64-unknown-elf-objcopy -O verilog -j .text -j .rodata -j .data --verilog-data-width=8 crt0.elf crt0.hex
+
+# Pillar 1 of the Zicsr verification-strengthening plan: a real-toolchain-
+#   encoded end-to-end CSR test (firmware/csr_test.s), linked against the
+#   SAME crt0.o/link.ld as the "all" target above -- rebuilt here (plain
+#   -march=rv64i, unchanged) rather than assumed to already exist, so this
+#   target works standalone. Produces a DISTINCT csr_test.hex -- crt0.hex
+#   and the "all" target's hello-world pipeline are untouched either way.
+csr_test:
+	riscv64-unknown-elf-as $(ASFLAGS) crt0.s -o crt0.o
+	riscv64-unknown-elf-as $(CSR_ASFLAGS) csr_test.s -o csr_test.o
+	riscv64-unknown-elf-ld -T link.ld -o csr_test.elf crt0.o csr_test.o
+	riscv64-unknown-elf-objdump -d csr_test.elf
+	riscv64-unknown-elf-objcopy -O verilog -j .text -j .rodata -j .data --verilog-data-width=8 csr_test.elf csr_test.hex
