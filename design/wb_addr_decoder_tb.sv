@@ -67,27 +67,9 @@ module wb_addr_decoder_tb;
 
     int pass_count = 0;
     int fail_count = 0;
-    task automatic check(string name, logic [63:0] actual, logic [63:0] expected);
-        if (actual === expected) begin
-            pass_count++;
-            $display("PASS: %s", name);
-        end else begin
-            fail_count++;
-            $display("FAIL: %s -- expected %h, got %h", name, expected, actual);
-        end
-    endtask
-
-    // Same #1-after-@(posedge clk) discipline established in
-    // wb4_sram_tb.sv/uart_tx_tb.sv -- see those files for why.
-    task automatic wb_cycle(logic [31:0] a);
-        @(negedge clk);
-        addr = a; dat_i = 0; sel = 8'hFF; we = 0; cyc = 1; stb = 1;
-        @(posedge clk); #1;
-        while (!ack) begin
-            @(posedge clk); #1;
-        end
-        cyc = 0; stb = 0;
-    endtask
+    logic quiet_on_pass = 1'b0;
+    `include "check_lib.sv"
+    `include "wb_driver.sv"
 
     initial begin
         cyc = 0; stb = 0; we = 0; addr = 0; dat_i = 0; sel = 8'hFF;
@@ -115,13 +97,13 @@ module wb_addr_decoder_tb;
         // Full round trip, RAM then UART back-to-back -- exercises
         // sel_uart_q actually updating between two different-slave
         // transactions, not just holding whatever it started as.
-        wb_cycle(32'h0000_0200);
+        wb_cycle(32'h0000_0200, 64'h0, 8'hFF, 1'b0);
         check("response routed from RAM", dat_o, 64'hAAAAAAAA_AAAAAAAA);
 
-        wb_cycle(32'h0000_8008);
+        wb_cycle(32'h0000_8008, 64'h0, 8'hFF, 1'b0);
         check("response routed from UART (latch updated, not stuck on RAM)", dat_o, 64'hBBBBBBBB_BBBBBBBB);
 
-        wb_cycle(32'h0000_0300);
+        wb_cycle(32'h0000_0300, 64'h0, 8'hFF, 1'b0);
         check("response routed back to RAM (latch updates both directions)", dat_o, 64'hAAAAAAAA_AAAAAAAA);
 
         $display("");
