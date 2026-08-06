@@ -136,6 +136,7 @@ endfunction
 `define OPC_JALR      7'b1100111
 `define OPC_BRANCH    7'b1100011
 `define OPC_SYSTEM    7'b1110011
+`define OPC_FENCE     7'b0001111
 
 /* SYSTEM-opcode funct3 encodings for the 6 Zicsr instructions, for readability at call sites. */
 `define FUNCT3_CSRRW  3'b001
