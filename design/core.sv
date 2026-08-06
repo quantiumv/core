@@ -530,8 +530,9 @@ module core (
      * bits [2:0] aren't decoded by either slave, and sub-dword access
      * width instead comes from which of the 8 sel_o lanes are asserted.
      * So a byte/half/word access needs its size turned into a lane mask,
-     * shifted into position by the address's low 3 bits -- same
-     * technique design/dmem.sv used for its own byte-enable writes.
+     * shifted into position by the address's low 3 bits -- the same
+     * mask-and-shift technique wb4_sram.sv uses for its own byte-enable
+     * writes.
      */
     wire [7:0] mem_size_mask = (mem_size == 2'b00) ? 8'b0000_0001 :
                                 (mem_size == 2'b01) ? 8'b0000_0011 :
