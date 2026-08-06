@@ -65,7 +65,7 @@ module soc_tb;
         join_any
         #1;
 
-        check("UART received 14 bytes",   {56'b0, dut.uart0.tx_history_count}, 64'd14);
+        check("UART received 14 bytes",   {55'b0, dut.uart0.tx_history_count}, 64'd14);
         check("byte 0  'H'",  {56'b0, dut.uart0.tx_history[0]},  64'h48);
         check("byte 1  'e'",  {56'b0, dut.uart0.tx_history[1]},  64'h65);
         check("byte 2  'l'",  {56'b0, dut.uart0.tx_history[2]},  64'h6C);
