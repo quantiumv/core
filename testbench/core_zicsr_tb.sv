@@ -48,12 +48,19 @@
  *     0 during that specific instruction's S_EXEC cycle, for genuine
  *     confidence rather than a check that would pass even if
  *     suppression were silently broken.
- *  7. A final minstret read matching the exact known instruction count
+ *  7. The immediate-form analogue of item 6: csrrsi x15, mscratch, 0
+ *     and csrrci x16, mscratch, 0, both with uimm=0. core.sv's
+ *     write-suppress condition for these is a genuinely different
+ *     branch (imm_1 == 0, not read_gpr_A_sel == 0 -- see core.sv's
+ *     csr_write_suppress mux) than the rs1=x0 register-form case in
+ *     item 6 exercises, so each gets its own white-box dut.csr_we
+ *     monitor at its own PC, same reasoning as item 6.
+ *  8. A final minstret read matching the exact known instruction count
  *     retired so far, plus a post-halt hierarchical check that
  *     minstret's storage ends at the full program length -- including
  *     ebreak itself, which retires (and so still increments minstret)
  *     even though it doesn't write a register.
- *  8. ebreak.
+ *  9. ebreak.
  *
  * Deliberately NOT re-proven here (already covered by core_wb_tb.sv):
  * ordinary ALU/load/store/branch datapath behavior. This test's only
@@ -118,6 +125,35 @@ module core_zicsr_tb;
         end
     end
 
+    /*
+     * Same pattern, immediate-form analogue (see header comment, item
+     * 7): "csrrsi x15, mscratch, 0" (0x38, idx14) and
+     * "csrrci x16, mscratch, 0" (0x3C, idx15). These exercise a
+     * genuinely different core.sv branch of csr_write_suppress
+     * (imm_1 == 0, not read_gpr_A_sel == 0) than PC_RS1_X0_CHECK above,
+     * so they need their own independent monitors rather than reusing
+     * it.
+     */
+    localparam logic [63:0] PC_CSRRSI_UIMM0_CHECK = 64'h38;
+    logic csrrsi_we_sampled;
+    logic csrrsi_we_sample_captured = 1'b0;
+    always @(negedge clk) begin
+        if (!csrrsi_we_sample_captured && dut.state == 2'd1 && dut.pc == PC_CSRRSI_UIMM0_CHECK) begin
+            csrrsi_we_sampled = dut.csr_we;
+            csrrsi_we_sample_captured = 1'b1;
+        end
+    end
+
+    localparam logic [63:0] PC_CSRRCI_UIMM0_CHECK = 64'h3C;
+    logic csrrci_we_sampled;
+    logic csrrci_we_sample_captured = 1'b0;
+    always @(negedge clk) begin
+        if (!csrrci_we_sample_captured && dut.state == 2'd1 && dut.pc == PC_CSRRCI_UIMM0_CHECK) begin
+            csrrci_we_sampled = dut.csr_we;
+            csrrci_we_sample_captured = 1'b1;
+        end
+    end
+
     initial begin
         #1; // see header comment: run after wb4_sram's own time-0 init
 
@@ -137,8 +173,10 @@ module core_zicsr_tb;
          *  0x2C  11  csrrs  x12, mscratch, x0                  read back; x12 = 0x0F
          *  0x30  12  csrrwi x0, mscratch, 27                   rd=x0 case: mscratch write must still land (mscratch becomes 27)
          *  0x34  13  csrrs  x13, mscratch, x0                  rd=x0 confirm (x13 = 27) AND the rs1=x0 white-box check instruction
-         *  0x38  14  csrrs  x14, minstret, x0                  minstret read; x14 = count of instructions retired strictly before this one = 14
-         *  0x3C  15  ebreak                                    halts; also retires, so minstret's final storage = 16
+         *  0x38  14  csrrsi x15, mscratch, 0                   uimm=0 case: pure read, no mutation (x15 = 27) AND the CSRRSI white-box check instruction
+         *  0x3C  15  csrrci x16, mscratch, 0                   uimm=0 case: pure read, no mutation (x16 = 27) AND the CSRRCI white-box check instruction
+         *  0x40  16  csrrs  x14, minstret, x0                  minstret read; x14 = count of instructions retired strictly before this one = 16
+         *  0x44  17  ebreak                                    halts; also retires, so minstret's final storage = 18
          */
         sram0.memory[0] = {encode_csr(`CSR_MHARTID, 5'd0, `FUNCT3_CSRRW,  5'd2, `OPC_SYSTEM),
                             encode_csr(`CSR_MHARTID, 5'd7, `FUNCT3_CSRRWI, 5'd1, `OPC_SYSTEM)};
@@ -154,8 +192,10 @@ module core_zicsr_tb;
                             encode_csr(`CSR_MSCRATCH, 5'd10, `FUNCT3_CSRRC, 5'd11, `OPC_SYSTEM)};
         sram0.memory[6] = {encode_csr(`CSR_MSCRATCH, 5'd0,  `FUNCT3_CSRRS,  5'd13, `OPC_SYSTEM),
                             encode_csr(`CSR_MSCRATCH, 5'd27, `FUNCT3_CSRRWI, 5'd0,  `OPC_SYSTEM)};
-        sram0.memory[7] = {{11'b0, 1'b1, 13'b0, `OPC_SYSTEM},                                     // idx15: ebreak (0x3C)
-                            encode_csr(`CSR_MINSTRET, 5'd0, `FUNCT3_CSRRS, 5'd14, `OPC_SYSTEM)};   // idx14: csrrs x14, minstret, x0 (0x38)
+        sram0.memory[7] = {encode_csr(`CSR_MSCRATCH, 5'd0, `FUNCT3_CSRRCI, 5'd16, `OPC_SYSTEM),
+                            encode_csr(`CSR_MSCRATCH, 5'd0, `FUNCT3_CSRRSI, 5'd15, `OPC_SYSTEM)};
+        sram0.memory[8] = {{11'b0, 1'b1, 13'b0, `OPC_SYSTEM},                                     // idx17: ebreak (0x44)
+                            encode_csr(`CSR_MINSTRET, 5'd0, `FUNCT3_CSRRS, 5'd14, `OPC_SYSTEM)};   // idx16: csrrs x14, minstret, x0 (0x40)
 
         @(posedge clk); #1;
         rst = 0;
@@ -192,10 +232,24 @@ module core_zicsr_tb;
         check("rs1=x0 case: dut.csr_we reads 0 during that instruction's S_EXEC (true suppression, not coincidence)",
               {63'b0, csr_we_sampled}, 64'd0);
 
+        check("x15 (csrrsi uimm=0 read-back -- pure read, no mutation)",
+              dut.regfile0.gp_registers[15], 64'd27);
+        check("csrrsi white-box sample was actually captured (sanity on the monitor itself)",
+              {63'b0, csrrsi_we_sample_captured}, 64'd1);
+        check("csrrsi uimm=0 case: dut.csr_we reads 0 during that instruction's S_EXEC (true suppression, not coincidence)",
+              {63'b0, csrrsi_we_sampled}, 64'd0);
+
+        check("x16 (csrrci uimm=0 read-back -- pure read, no mutation)",
+              dut.regfile0.gp_registers[16], 64'd27);
+        check("csrrci white-box sample was actually captured (sanity on the monitor itself)",
+              {63'b0, csrrci_we_sample_captured}, 64'd1);
+        check("csrrci uimm=0 case: dut.csr_we reads 0 during that instruction's S_EXEC (true suppression, not coincidence)",
+              {63'b0, csrrci_we_sampled}, 64'd0);
+
         check("x14 (minstret read -- count of instructions retired strictly before this one)",
-              dut.regfile0.gp_registers[14], 64'd14);
+              dut.regfile0.gp_registers[14], 64'd16);
         check("minstret final storage -- full program length, including ebreak's own retirement",
-              dut.csr_file0.minstret_q, 64'd16);
+              dut.csr_file0.minstret_q, 64'd18);
 
         check("core halted (ebreak reached)", {63'b0, dut.halted}, 64'd1);
 
