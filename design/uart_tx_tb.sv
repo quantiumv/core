@@ -30,38 +30,9 @@ module uart_tx_tb;
 
     int pass_count = 0;
     int fail_count = 0;
-    task automatic check(string name, logic [63:0] actual, logic [63:0] expected);
-        if (actual === expected) begin
-            pass_count++;
-            $display("PASS: %s", name);
-        end else begin
-            fail_count++;
-            $display("FAIL: %s -- expected %h, got %h", name, expected, actual);
-        end
-    endtask
-
-    /*
-     * #1 after each @(posedge clk) before checking ack is required, not
-     * decorative: ack_o is updated via <= in the DUT's clocked block, so
-     * it only becomes visible in the NBA region AFTER this same edge's
-     * active region finishes. Checking ack immediately upon resuming
-     * from @(posedge clk) reads its PRE-edge value, one edge stale --
-     * which would make this loop exit one edge late, leaving cyc/stb
-     * asserted for an extra edge and causing the DUT to process the
-     * same transaction a second time (silently harmless for an
-     * idempotent memory read/write, but not for a side-effecting
-     * peripheral like this one -- this bug was found via a duplicated
-     * character in this exact testbench, then fixed here).
-     */
-    task automatic wb_cycle(logic [31:0] a, logic [63:0] d, logic [7:0] s, logic w);
-        @(negedge clk);
-        addr = a; dat_i = d; sel = s; we = w; cyc = 1; stb = 1;
-        @(posedge clk); #1;
-        while (!ack) begin
-            @(posedge clk); #1;
-        end
-        cyc = 0; stb = 0;
-    endtask
+    logic quiet_on_pass = 1'b0;
+    `include "check_lib.sv"
+    `include "wb_driver.sv"
 
     initial begin
         cyc = 0; stb = 0; we = 0; addr = 0; dat_i = 0; sel = 8'h00;
