@@ -10,57 +10,171 @@
 
 
 /*
- * Module: core (single-cycle RV64I)
+ * Module: core (multi-cycle RV64I, Wishbone master)
  *
- * Every instruction completes fetch through writeback within one clock
- * edge-to-edge cycle -- there is no FSM here at all. That's only possible
- * because imem/dmem (below) are purpose-built with combinational reads;
- * see their own header comments for why a Wishbone-attached memory like
- * design/wb4_sram.sv couldn't work here (its ack is a registered output,
- * a minimum 2-edge transaction by construction). Hooking this core up to
- * a real, registered memory system is a later milestone, not this one.
+ * Supersedes the single-cycle version: instead of a combinational-read
+ * imem/dmem pair private to this module, the core is now the SOLE master
+ * on a shared Wishbone bus (see design/wb_addr_decoder.sv,
+ * design/wb4_sram.sv, design/uart_tx.sv) -- instruction fetch and data
+ * access are both real bus transactions now, and both slaves ack one
+ * cycle after being addressed (registered, not combinational). That
+ * multi-cycle reality is why this can no longer be single-cycle: a 3-state
+ * FSM (S_FETCH / S_EXEC / S_MEM) sequences each instruction instead.
  *
- * decoder/alu/register_file are reused as-is (bugs fixed separately, see
- * their own files) rather than re-implemented here -- this module is
- * purely the glue between them: the PC, the control unit that decides
- * what each of them should do for a given decoded instruction, and the
- * muxes that route data between them.
+ * decoder/alu/register_file are reused completely unchanged from the
+ * single-cycle version -- they were already purely combinational glue
+ * with no notion of "cycle" baked in, so nothing about them needed to
+ * change. What's new here is entirely the FSM: WHEN the bus is driven,
+ * and WHEN the results of that already-combinational logic are allowed to
+ * actually commit (register-file write, pc update). See `commit_now`
+ * below -- that one signal is the entire difference between this file and
+ * the single-cycle version's control-flow shape.
  *
- * `INSTR_CODE(name)` (used throughout the control logic below) and every
- * ALU op name (`ADD, `SLTW, etc.) are inherited from decoder.sv's and
- * alu.sv's own `includes -- not re-included here, since both of those
- * modules are necessarily compiled/instantiated below already.
+ * Per-instruction flow:
+ *  S_FETCH: issue a bus read at pc (dword-aligned -- the bus is 64-bit
+ *           wide, so one beat fetches TWO adjacent 32-bit instructions;
+ *           pc[2] selects which half this instruction actually is).
+ *           Wait for ack, latch the 64-bit line, move to S_EXEC.
+ *  S_EXEC:  bus idle. decoder/alu/register_file settle combinationally
+ *           off the latched instruction (exactly the single-cycle
+ *           version's Decode/Control/Execute/Writeback/Next-PC logic,
+ *           verbatim). If this instruction is a load or store, move to
+ *           S_MEM without committing anything yet. Otherwise this is the
+ *           instruction's last cycle: commit (regfile write + pc update)
+ *           on this edge and return to S_FETCH.
+ *  S_MEM:   (loads/stores only) issue a bus read or write at alu_result.
+ *           Wait for ack; on that edge commit (a load's regfile write
+ *           happens HERE, not in S_EXEC, since the loaded value doesn't
+ *           exist yet when S_EXEC ends) and return to S_FETCH.
+ *
+ * Why nothing needs re-latching between S_EXEC and S_MEM: pc doesn't
+ * change until commit_now, and the fetched instruction doesn't change
+ * until the next S_FETCH's ack -- so every combinational signal derived
+ * from them (decoded_instruction, imm_1/imm_2, alu_result, next_pc, ...)
+ * is already stable for the instruction's entire multi-cycle lifetime,
+ * with no extra latching required beyond the one real latch this design
+ * adds (the fetched instruction line itself).
  *
  * Scope: full RV64I base ISA. No M/A/C extensions, no Zicsr/CSRs, no
  * privilege modes, no Sv39, no interrupts/exceptions -- all later
  * milestones. Misaligned access, FENCE, and ECALL are deliberately
  * under-implemented here (see their handling below) for the same reason.
+ * wb_err_i is likewise not acted on -- no trap mechanism exists yet for
+ * it to feed into.
  *
  * Input ports:
  *  clk: Clock.
- *  rst: Synchronous reset (active high) -- resets pc to 0 and clears
+ *  rst: Synchronous reset (active high) -- resets pc, FSM state, and
  *       `halted`. Does NOT reset register/memory contents; the ISA
  *       doesn't require it, and real hardware doesn't guarantee it
  *       either (only the reset vector is architecturally defined).
+ *
+ * Wishbone master port: standard CLASSIC-cycle signal names, written
+ * from this module's (the master's) point of view -- `_o` drives the
+ * bus, `_i` reads it. Connects to design/wb_addr_decoder.sv's CPU-facing
+ * port one-for-one (that module's `_i`/`_o` are the mirror image of
+ * these, as expected for a master/slave pair).
  */
 module core (
     input logic clk,
-    input logic rst
+    input logic rst,
+
+    output logic [31:0] wb_addr_o,
+    output logic [63:0] wb_dat_o,
+    input  logic [63:0] wb_dat_i,
+    output logic [7:0]  wb_sel_o,
+    output logic        wb_we_o,
+    output logic        wb_cyc_o,
+    output logic        wb_stb_o,
+    input  logic        wb_ack_i,
+    /* verilator lint_off UNUSEDSIGNAL */
+    input  logic        wb_err_i
+    /* verilator lint_on UNUSEDSIGNAL */
 );
+
+    /* --------------------------------------------------------------- *
+     * FSM state
+     * --------------------------------------------------------------- */
+
+    typedef enum logic [1:0] {
+        S_FETCH,
+        S_EXEC,
+        S_MEM
+    } state_t;
+
+    state_t state;
+
+    logic [(`WORD_SIZE - 1):0] pc;
+    logic [(`WORD_SIZE - 1):0] next_pc;
+
+    /*
+     * Forward-declared here (driven later, in the Control unit and
+     * PC/halt sections respectively) purely because Icarus Verilog wants
+     * a signal declared before its first use, textually -- unlike the
+     * rest of this file, mem_phase_needed/wb_master_drive genuinely need
+     * to reference them earlier in the file than where they're driven.
+     */
+    logic is_load, is_store;
+    logic halted;
+
+    /*
+     * commit_now: the single edge, per instruction, where the
+     * register-file write and the pc update are allowed to actually
+     * happen. Every other cycle of an instruction's multi-cycle lifetime
+     * (bus wait states, the settle cycle itself) must NOT commit, even
+     * though decoder/alu outputs are sitting there fully formed the
+     * whole time -- reg_write/next_pc are free-running combinational
+     * signals with no notion of "am I allowed to land yet", so this is
+     * the one gate that turns "instruction is decoded" into "instruction
+     * has retired". Non-memory instructions retire at the end of
+     * S_EXEC; loads/stores retire when S_MEM's bus transaction acks.
+     */
+    wire mem_phase_needed = is_load || is_store;
+    wire commit_now = (state == S_EXEC && !mem_phase_needed)
+                    || (state == S_MEM && wb_ack_i);
+
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            state <= S_FETCH;
+        end else begin
+            case (state)
+                S_FETCH: if (wb_ack_i) state <= S_EXEC;
+                S_EXEC:  state <= state_t'(mem_phase_needed ? S_MEM : S_FETCH);
+                S_MEM:   if (wb_ack_i) state <= S_FETCH;
+                default: state <= S_FETCH;
+            endcase
+        end
+    end
 
     /* --------------------------------------------------------------- *
      * Fetch
      * --------------------------------------------------------------- */
 
-    logic [(`WORD_SIZE - 1):0] pc;
-    logic [(`WORD_SIZE - 1):0] next_pc;
+    /*
+     * The bus is 64-bit wide and word-addressed (low 3 address bits
+     * unused, same convention as wb4_sram.sv/wb_addr_decoder.sv), but
+     * instructions are 32-bit -- one fetch beat brings in two of them.
+     * pc[2] (always a real address bit for a 4-byte-aligned pc) picks
+     * which half is the one actually being executed; pc[1:0] are always
+     * 0 and play no role here.
+     */
+    logic [63:0] instr_line_q;
+    always_ff @(posedge clk) begin
+        if (state == S_FETCH && wb_ack_i)
+            instr_line_q <= wb_dat_i;
+    end
 
     logic [(`INSTR_SIZE - 1):0] instruction;
+    assign instruction = pc[2] ? instr_line_q[63:32] : instr_line_q[31:0];
 
-    imem imem0 (
-        .i_addr(pc),
-        .o_instruction(instruction)
-    );
+    /*
+     * Dword-aligned fetch address, precomputed as a plain wire rather
+     * than inline inside wb_master_drive's always_comb below -- same
+     * "Icarus doesn't fully support constant selects inside always_*
+     * processes" reason as everywhere else this pattern appears in this
+     * file.
+     */
+    wire [31:0] fetch_addr = {pc[31:3], 3'b0};
 
     /* --------------------------------------------------------------- *
      * Decode
@@ -79,7 +193,9 @@ module core (
      * decoder uses to produce o_imm_1/o_imm_2) but it isn't a real
      * combinational cycle: the *_sel outputs depend ONLY on
      * i_instruction inside decoder, never on the data that comes back.
-     * It settles in zero simulated time as a plain feedforward chain.
+     * It settles in zero simulated time as a plain feedforward chain --
+     * and since `instruction` is latched (stable for the whole
+     * instruction), so is everything downstream of it here.
      */
     decoder decoder0 (
         .i_instruction(instruction),
@@ -141,9 +257,10 @@ module core (
      * Control unit
      * --------------------------------------------------------------- */
 
-    wire is_auipc = (decoded_instruction == `INSTR_CODE(AUIPC));
-    wire is_jal   = (decoded_instruction == `INSTR_CODE(JAL));
-    wire is_jalr  = (decoded_instruction == `INSTR_CODE(JALR));
+    wire is_auipc  = (decoded_instruction == `INSTR_CODE(AUIPC));
+    wire is_jal    = (decoded_instruction == `INSTR_CODE(JAL));
+    wire is_jalr   = (decoded_instruction == `INSTR_CODE(JALR));
+    wire is_ebreak = (decoded_instruction == `INSTR_CODE(EBREAK));
 
     /*
      * ADDW/SUBW/ADDIW reuse the plain ADD/SUB ALU ops on full 64-bit
@@ -209,7 +326,6 @@ module core (
         endcase
     end: alu_op_sel
 
-    logic is_load, is_store;
     logic [1:0] mem_size;
     logic load_signed;
     always_comb begin: mem_control
@@ -237,7 +353,10 @@ module core (
      * reg_write: computed by excluding the SHORT list of instructions
      * that don't write rd, rather than enumerating the long list that
      * does -- fewer places to accidentally miss an entry when a future
-     * milestone adds more instructions.
+     * milestone adds more instructions. Gated by commit_now (see its own
+     * comment above) so this only actually reaches regfile0 on the one
+     * edge each instruction is allowed to retire, not throughout the
+     * whole multi-cycle window it happens to be decoded.
      */
     logic reg_write_ctrl;
     always_comb begin: reg_write_control
@@ -252,7 +371,7 @@ module core (
                 reg_write_ctrl = 1'b1;
         endcase
     end: reg_write_control
-    assign reg_write = reg_write_ctrl;
+    assign reg_write = reg_write_ctrl && commit_now;
 
     /* --------------------------------------------------------------- *
      * Execute
@@ -308,33 +427,43 @@ module core (
      * --------------------------------------------------------------- */
 
     /*
-     * alu_result does double duty here: it's "the ALU's answer" for
-     * every non-memory instruction, and "the memory address" for
+     * alu_result does triple duty here: it's "the ALU's answer" for
+     * every non-memory instruction, "the memory address" for
      * loads/stores (base register + offset, computed by the same adder
-     * via the operand muxing above) -- deliberate reuse of one datapath,
-     * not a coincidence.
+     * via the operand muxing above), AND the source of the bus's
+     * dword-aligned address plus the byte-lane shift amount below --
+     * deliberate reuse of one datapath, not a coincidence.
+     *
+     * The bus (see wb4_sram.sv/uart_tx.sv) is word-granular: address
+     * bits [2:0] aren't decoded by either slave, and sub-dword access
+     * width instead comes from which of the 8 sel_o lanes are asserted.
+     * So a byte/half/word access needs its size turned into a lane mask,
+     * shifted into position by the address's low 3 bits -- same
+     * technique design/dmem.sv used for its own byte-enable writes.
      */
-    logic [(`WORD_SIZE - 1):0] dmem_rdata;
-    dmem dmem0 (
-        .i_clk(clk),
-        .i_addr(alu_result),
-        .i_size(mem_size),
-        .i_write_enable(is_store),
-        .i_write_data(imm_2),  // rs2 -- OUTPUT_S_TYPE_INSTR puts the store's source value here
-        .o_read_data(dmem_rdata)
-    );
+    wire [7:0] mem_size_mask = (mem_size == 2'b00) ? 8'b0000_0001 :
+                                (mem_size == 2'b01) ? 8'b0000_0011 :
+                                (mem_size == 2'b10) ? 8'b0000_1111 :
+                                                       8'b1111_1111;
+    wire [7:0] mem_sel = mem_size_mask << alu_result[2:0];
 
-    /* Shift dmem's line so the byte(s) we actually want start at bit 0. */
-    wire [(`WORD_SIZE - 1):0] dmem_rdata_shifted = dmem_rdata >> (alu_result[2:0] * 8);
+    /* Dword-aligned memory address -- same precompute-outside-always_comb reason as fetch_addr above. */
+    wire [31:0] mem_addr = {alu_result[31:3], 3'b0};
+
+    /* Store data, pre-shifted into the byte lane(s) it'll land in. */
+    wire [(`WORD_SIZE - 1):0] mem_wdata = imm_2 << (alu_result[2:0] * 8);
+
+    /* Read response, shifted back down so the wanted byte(s) start at bit 0. */
+    wire [(`WORD_SIZE - 1):0] mem_rdata_shifted = wb_dat_i >> (alu_result[2:0] * 8);
 
     /*
      * Precomputed slices, not inline inside load_format's case statement
      * below -- Icarus Verilog doesn't fully support constant selects
      * inside always_* processes (same reason as alu.sv's shamt_masked).
      */
-    wire [7:0]  load_byte  = dmem_rdata_shifted[7:0];
-    wire [15:0] load_half  = dmem_rdata_shifted[15:0];
-    wire [31:0] load_word  = dmem_rdata_shifted[31:0];
+    wire [7:0]  load_byte  = mem_rdata_shifted[7:0];
+    wire [15:0] load_half  = mem_rdata_shifted[15:0];
+    wire [31:0] load_word  = mem_rdata_shifted[31:0];
     /* Sign bits, precomputed too -- same reason (also used inside a replication below). */
     wire load_byte_sign = load_byte[7];
     wire load_half_sign = load_half[15];
@@ -349,9 +478,78 @@ module core (
                                             : {48'b0, load_half};
             2'b10: load_data = load_signed ? {{32{load_word_sign}}, load_word}
                                             : {32'b0, load_word};
-            default: load_data = dmem_rdata_shifted; // 2'b11: doubleword, no extension needed
+            default: load_data = mem_rdata_shifted; // 2'b11: doubleword, no extension needed
         endcase
     end: load_format
+
+    /* --------------------------------------------------------------- *
+     * Wishbone master: bus driving
+     * --------------------------------------------------------------- */
+
+    /*
+     * Idle by default (every field), overridden per-state below -- keeps
+     * this a clean combinational mux with no inferred latches, same
+     * defaults-then-case idiom already used for mem_control/
+     * reg_write_control above. S_EXEC drives nothing: the bus is only
+     * needed to fetch (S_FETCH) or to access memory (S_MEM), never
+     * during the settle-and-decode cycle in between.
+     *
+     * Both S_FETCH and S_MEM additionally gate cyc_o/stb_o with
+     * !wb_ack_i, NOT just `state == S_*` -- this is load-bearing, not
+     * decoration. `state` only updates on the NEXT clock edge after
+     * wb_ack_i is observed (see the state always_ff below), so for the
+     * entire cycle in between -- from the moment the slave's registered
+     * ack_o first becomes 1 to the edge core.sv's FSM actually reacts to
+     * it -- cyc_o/stb_o would otherwise still read as asserted. A slave
+     * that simply does `if (cyc_i && stb_i) <act once, ack>` (both
+     * wb4_sram.sv and uart_tx.sv do exactly this, and correctly so --
+     * nothing about the spec obligates a slave to guess whether a
+     * still-asserted cyc/stb is a new request or the master being slow
+     * to notice the old one) would then see cyc/stb still high on that
+     * extra cycle and serve the SAME request a second time. Found via
+     * this exact symptom: the UART printed "HH" for a single-byte write.
+     * Gating with !wb_ack_i drops cyc_o/stb_o combinationally the moment
+     * ack_i is observed, so the slave sees the request deasserted before
+     * it would ever re-fire -- standard Wishbone master practice, and
+     * the same root cause (not the same fix -- that one patched a
+     * testbench's own master-role loop) as the wb_cycle ack-timing bug
+     * in wb4_sram_tb.sv/uart_tx_tb.sv.
+     */
+    always_comb begin: wb_master_drive
+        wb_cyc_o  = 1'b0;
+        wb_stb_o  = 1'b0;
+        wb_we_o   = 1'b0;
+        wb_addr_o = 32'b0;
+        wb_dat_o  = 64'b0;
+        wb_sel_o  = 8'b0;
+        case (state)
+            S_FETCH: begin
+                /*
+                 * Once halted, never issue another fetch -- see the
+                 * halt-latch comment below for why parking here (rather
+                 * than, say, forcing state to hold) is sufficient to
+                 * freeze the whole core.
+                 */
+                if (!halted && !wb_ack_i) begin
+                    wb_cyc_o  = 1'b1;
+                    wb_stb_o  = 1'b1;
+                    wb_addr_o = fetch_addr;
+                    wb_sel_o  = 8'hFF; // don't-care for a read; full line for clarity
+                end
+            end
+            S_MEM: begin
+                if (!wb_ack_i) begin
+                    wb_cyc_o  = 1'b1;
+                    wb_stb_o  = 1'b1;
+                    wb_we_o   = is_store;
+                    wb_addr_o = mem_addr;
+                    wb_sel_o  = mem_sel;
+                    wb_dat_o  = mem_wdata;
+                end
+            end
+            default: ; // S_EXEC: bus idle
+        endcase
+    end: wb_master_drive
 
     /* --------------------------------------------------------------- *
      * Writeback
@@ -394,26 +592,32 @@ module core (
 
     /*
      * EBREAK latches `halted` and freezes pc -- the only piece of
-     * "extra" state in this design, beyond pc itself and the two
-     * memories' write ports. Freezing pc (rather than letting it run on
-     * into whatever follows EBREAK) is a deliberate choice: once
-     * halted, the core would otherwise keep fetching and "executing"
-     * subsequent memory contents, which is harmless if that's zeroed
-     * (decodes as INVALID, a no-op) but isn't guaranteed to be zero in
-     * every testbench. Testbenches watch this signal via a hierarchical
-     * reference (e.g. dut.halted) to know when a test program has
-     * finished running, without guessing a cycle count.
+     * "extra" state in this design, beyond pc/state/instr_line_q. Both
+     * commit only on commit_now (EBREAK is never a load/store, so it
+     * always retires at the end of S_EXEC). pc is deliberately excluded
+     * from advancing on the SAME edge halted is set (`!is_ebreak` below)
+     * -- otherwise pc would jump past EBREAK on the very edge that's
+     * supposed to freeze it. After that edge, state parks in S_FETCH
+     * forever (the bus-driving block above stops issuing fetches once
+     * halted), so commit_now can never become true again and both
+     * registers stay frozen with no further gating needed.
+     *
+     * Testbenches watch `halted` via a hierarchical reference (e.g.
+     * dut.halted) to know when a test program has finished running,
+     * without guessing a cycle count.
      */
-    logic halted;
     always_ff @(posedge clk) begin
         if (rst)
             halted <= 1'b0;
-        else if (decoded_instruction == `INSTR_CODE(EBREAK))
+        else if (commit_now && is_ebreak)
             halted <= 1'b1;
     end
 
     always_ff @(posedge clk) begin
-        pc <= rst ? '0 : (halted ? pc : next_pc);
+        if (rst)
+            pc <= '0;
+        else if (commit_now && !is_ebreak)
+            pc <= next_pc;
     end
 
 endmodule

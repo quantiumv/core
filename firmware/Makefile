@@ -1,7 +1,28 @@
 
 
+# -mno-relax on both the assembler and gcc: disables linker relaxation
+#   of small-data accesses into gp-relative instructions, so crt0.s
+#   doesn't need to set up gp at all -- see that file's own header.
+ASFLAGS = -march=rv64i -mabi=lp64 -mno-relax
+CFLAGS  = -march=rv64i -mabi=lp64 -mno-relax -ffreestanding -nostdlib -O0 -Wall
+
 all:
-	riscv64-unknown-elf-as -march=rv64i -mabi=lp64 crt0.s -o crt0.o
-	riscv64-unknown-elf-ld -Ttext=0x0 -o crt0.elf crt0.o
+	riscv64-unknown-elf-as $(ASFLAGS) crt0.s -o crt0.o
+	riscv64-unknown-elf-gcc $(CFLAGS) -c hello.c -o hello.o
+	riscv64-unknown-elf-ld -T link.ld -o crt0.elf crt0.o hello.o
 	riscv64-unknown-elf-objdump -d crt0.elf
-	riscv64-unknown-elf-objcopy -O verilog --verilog-data-width=4 crt0.elf crt0.hex
+	# -j .text -j .rodata -j .data: only convert sections holding real
+	#   runtime content -- excludes .riscv.attributes (toolchain metadata,
+	#   not something we want loaded into memory) and .bss (zero-
+	#   initialized, holds no file content to begin with; crt0.s zeros it
+	#   at runtime instead -- see link.ld's comment on that section).
+	# --verilog-data-width=8: one 64-bit $$readmemh element per line, matching
+	#   wb4_sram.sv's memory[] (widened to 64 bits -- see that file's own header).
+	# NO --reverse-bytes: verified by hand against a real build (objdump -d
+	#   plus the raw hex output) that objcopy's verilog writer already emits
+	#   bytes in the order $$readmemh needs for this design's convention --
+	#   memory[i][7:0] == byte@lowest_address -- with no extra flag. Adding
+	#   --reverse-bytes=8, which an earlier untested assumption here called
+	#   for, actually produces the WRONG order; don't re-add it without
+	#   re-deriving this by hand against real objdump output first.
+	riscv64-unknown-elf-objcopy -O verilog -j .text -j .rodata -j .data --verilog-data-width=8 crt0.elf crt0.hex
