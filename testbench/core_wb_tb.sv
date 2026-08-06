@@ -14,9 +14,10 @@
  * Testbench: core (Wishbone-master FSM) against real bus slaves, via soc
  *
  * Unlike the five core_*_tb.sv testbenches from the single-cycle
- * milestone (which poked instructions into a private imem0 and no longer
- * even compile against this core.sv -- it has no imem0 anymore), this
- * exercises exactly what's NEW in the FSM rewrite: multi-cycle fetch,
+ * milestone (which still compile and pass against this core.sv, poking
+ * their programs directly into a real wb4_sram instance instead of the
+ * private imem0 they were originally written against), this exercises
+ * exactly what's NEW in the FSM rewrite: multi-cycle fetch,
  * multi-cycle load/store, and routing through a real wb_addr_decoder to
  * two real slaves (wb4_sram, uart_tx). It deliberately does NOT re-prove
  * individual ALU ops, branch types, or the *W op family -- that datapath logic is
