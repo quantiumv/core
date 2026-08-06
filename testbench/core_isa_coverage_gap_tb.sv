@@ -24,6 +24,7 @@
  *
  *   Bitwise, both forms:        AND, OR, XOR, ANDI, ORI, XORI
  *   Compare/shift, reg-reg:     SLT, SLTU, SLL, SRL, SRA
+ *   Compare, immediate:         SLTIU
  *   Loads/stores:               LH, LHU, LWU, SH
  *   Branch:                     BGEU
  *   RV64 word-ops:              SUBW, SLLW, SLLIW, SRLIW, SRAIW
@@ -151,7 +152,8 @@ module core_isa_coverage_gap_tb;
          * 47   0xBC  addi x23, x0, 222             x23 = 222 (ecall marker)
          * 48   0xC0  ecall                          no-op on this core
          * 49   0xC4  addi x23, x23, 1              x23 = 223  [CHECK: ECALL] -- proves ecall fell through
-         * 50   0xC8  ebreak
+         * 50   0xC8  sltiu x24, x26, 10            x24 = 0    [CHECK: SLTIU] (unsigned: huge < 10)
+         * 51   0xCC  ebreak
          */
         dut.sram0.memory[0]  = {encode_i(32'sd166, 5'd0, 3'b000, 5'd25, `OPC_OP_IMM),
                                  encode_i(32'sd202, 5'd0, 3'b000, 5'd24, `OPC_OP_IMM)};
@@ -203,7 +205,8 @@ module core_isa_coverage_gap_tb;
                                  encode_i(32'sd222, 5'd0, 3'b000, 5'd23, `OPC_OP_IMM)};
         dut.sram0.memory[24] = {32'h0, // never fetched (idx50 halts first)
                                  encode_i(32'sd1, 5'd23, 3'b000, 5'd23, `OPC_OP_IMM)};
-        dut.sram0.memory[25] = {32'h0, {11'b0, 1'b1, 13'b0, `OPC_SYSTEM}}; // idx50: ebreak
+        dut.sram0.memory[25] = {{11'b0, 1'b1, 13'b0, `OPC_SYSTEM}, // idx51: ebreak
+                                 encode_i(32'sd10, 5'd26, 3'b011, 5'd24, `OPC_OP_IMM)}; // idx50: sltiu x24,x26,10 -- x26 (=-5) and x24 (SLT/SLTU's old rs2) are both long-dead by here, safe to reuse
 
         @(posedge clk); #1;
         rst = 0;
@@ -218,6 +221,7 @@ module core_isa_coverage_gap_tb;
         check("XORI",  dut.core0.regfile0.gp_registers[6],  64'h6C);
         check("SLT (signed, -5 < 202)",      dut.core0.regfile0.gp_registers[7],  64'd1);
         check("SLTU (unsigned, huge < 202)", dut.core0.regfile0.gp_registers[8],  64'd0);
+        check("SLTIU (unsigned, huge < 10)", dut.core0.regfile0.gp_registers[24], 64'd0);
         check("SLL",   dut.core0.regfile0.gp_registers[9],  64'hFFFFFFFFFFFFFFE0);
         check("SRL",   dut.core0.regfile0.gp_registers[10], 64'h3FFFFFFFFFFFFFFE);
         check("SRA",   dut.core0.regfile0.gp_registers[11], 64'hFFFFFFFFFFFFFFFE);
