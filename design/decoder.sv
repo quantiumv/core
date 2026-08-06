@@ -30,73 +30,161 @@
  * please modify these macros appropriately.
  */
 
+/*
+ * NB: these use blocking (=) assignment throughout, matching the
+ * always_comb block they're used inside (detect_and_assign, below) --
+ * non-blocking (<=) inside always_comb is non-idiomatic and both iverilog
+ * and verilator flag it (verilator: COMBDLY). Icarus tolerates it and
+ * simulates it correctly, but there's no reason to rely on that leniency.
+ *
+ * Also NB: `B_IMM_SIZE'(destination) below is an explicit width cast, not
+ * a stylistic flourish -- destination is 5 bits (DEST_SIZE) and
+ * o_imm_3_or_dest_addr is 13 (B_IMM_SIZE); the implicit zero-extension is
+ * correct (a register index is unsigned) but verilator's -Wall flags the
+ * implicit width change, so it's made explicit rather than left as a
+ * warning to re-triage every time this file is linted.
+ */
+
 `define PASS_REG_A_IN_IMM_1(reg_addr)   \
-    o_read_gpr_A_sel <= reg_addr;       \
-    internal_imm_1 <= 0;                \
+    o_read_gpr_A_sel = reg_addr;        \
+    internal_imm_1 = 0;                 \
 ;
 
 `define PASS_REG_B_IN_IMM_2(reg_addr)   \
-    o_read_gpr_B_sel <= reg_addr;       \
-    internal_imm_2 <= 0;                \
+    o_read_gpr_B_sel = reg_addr;        \
+    internal_imm_2 = 0;                 \
 ;
 
 `define PASS_IMM_IN_IMM_1(imm)  \
-    o_read_gpr_A_sel <= 0;      \
-    internal_imm_1 <= imm;      \
+    o_read_gpr_A_sel = 0;       \
+    internal_imm_1 = imm;       \
 ;
 
 `define PASS_IMM_IN_IMM_2(imm)  \
-    o_read_gpr_B_sel <= 0;      \
-    internal_imm_2 <= imm;      \
+    o_read_gpr_B_sel = 0;       \
+    internal_imm_2 = imm;       \
 ;
 
 `define OUTPUT_R_TYPE_INSTR(instr_name)                 \
-    o_decoded_instruction <= `INSTR_CODE(instr_name);   \
-    `PASS_REG_A_IN_IMM_1(source_1);                     \
-    `PASS_REG_B_IN_IMM_2(source_2);                     \
-    o_imm_3_or_dest_addr <= destination;                \
+    o_decoded_instruction = `INSTR_CODE(instr_name);    \
+    `PASS_REG_A_IN_IMM_1(source_1);                      \
+    `PASS_REG_B_IN_IMM_2(source_2);                      \
+    o_imm_3_or_dest_addr = `B_IMM_SIZE'(destination);   \
 ;
 
+/*
+ * I-type, general (ADDI/SLTI/.../loads/JALR/ADDIW): imm_i_sext is the
+ * 12-bit I-immediate, sign-extended to WORD_SIZE. NOT used for the
+ * shift-immediate instructions (SLLI/SRLI/SRAI/SLLIW/SRLIW/SRAIW) -- see
+ * OUTPUT_I_SHIFT_TYPE_INSTR/OUTPUT_IW_SHIFT_TYPE_INSTR below, since a
+ * shift amount is an unsigned magnitude occupying only part of this same
+ * field, not a sign-extended value occupying all of it.
+ */
 `define OUTPUT_I_TYPE_INSTR(instr_name)                 \
-    o_decoded_instruction <= `INSTR_CODE(instr_name);   \
-    `PASS_REG_A_IN_IMM_1(source_1);                     \
-    `PASS_IMM_IN_IMM_2(imm_i);                          \
-    o_imm_3_or_dest_addr <= destination;                \
+    o_decoded_instruction = `INSTR_CODE(instr_name);    \
+    `PASS_REG_A_IN_IMM_1(source_1);                      \
+    `PASS_IMM_IN_IMM_2(imm_i_sext);                      \
+    o_imm_3_or_dest_addr = `B_IMM_SIZE'(destination);   \
 ;
 
+/*
+ * I-type, shift-immediate (SLLI/SRLI/SRAI): shamt_zext is just the 6-bit
+ * shift-amount field, ZERO-extended (a shift amount is a magnitude, never
+ * sign-extended) -- NOT the generic imm_i_sext, which would incorrectly
+ * carry the instruction's funct6 bits along as if they were part of a
+ * signed immediate.
+ */
+`define OUTPUT_I_SHIFT_TYPE_INSTR(instr_name)            \
+    o_decoded_instruction = `INSTR_CODE(instr_name);     \
+    `PASS_REG_A_IN_IMM_1(source_1);                       \
+    `PASS_IMM_IN_IMM_2(shamt_zext);                       \
+    o_imm_3_or_dest_addr = `B_IMM_SIZE'(destination);     \
+;
+
+/*
+ * I-type, RV64I word-shift-immediate (SLLIW/SRLIW/SRAIW): same idea as
+ * OUTPUT_I_SHIFT_TYPE_INSTR, but the shift amount is only 5 bits wide
+ * here (word-shifts are always 32-bit, so 5 bits is always enough) --
+ * see wshamt_zext.
+ */
+`define OUTPUT_IW_SHIFT_TYPE_INSTR(instr_name)           \
+    o_decoded_instruction = `INSTR_CODE(instr_name);     \
+    `PASS_REG_A_IN_IMM_1(source_1);                       \
+    `PASS_IMM_IN_IMM_2(wshamt_zext);                      \
+    o_imm_3_or_dest_addr = `B_IMM_SIZE'(destination);     \
+;
+
+/*
+ * S-type (stores): imm_s is declared WIDER than its natural 12 bits (see
+ * its declaration below) specifically so it already carries a correct
+ * sign bit at the same position B-type's imm_b does -- no separate _sext
+ * variant needed here, imm_s IS the port-ready, already-sign-extended-by-
+ * construction value.
+ */
 `define OUTPUT_S_TYPE_INSTR(instr_name)                 \
-    o_decoded_instruction <= `INSTR_CODE(instr_name);   \
-    `PASS_REG_A_IN_IMM_1(source_1);                     \
-    `PASS_REG_B_IN_IMM_2(source_2);                     \
-    o_imm_3_or_dest_addr <= imm_s;                      \
+    o_decoded_instruction = `INSTR_CODE(instr_name);    \
+    `PASS_REG_A_IN_IMM_1(source_1);                      \
+    `PASS_REG_B_IN_IMM_2(source_2);                      \
+    o_imm_3_or_dest_addr = imm_s;                        \
 ;
 
 `define OUTPUT_B_TYPE_INSTR(instr_name)                 \
-    o_decoded_instruction <= `INSTR_CODE(instr_name);   \
-    `PASS_REG_A_IN_IMM_1(source_1);                     \
-    `PASS_REG_B_IN_IMM_2(source_2);                     \
-    o_imm_3_or_dest_addr <= imm_b;                      \
+    o_decoded_instruction = `INSTR_CODE(instr_name);    \
+    `PASS_REG_A_IN_IMM_1(source_1);                      \
+    `PASS_REG_B_IN_IMM_2(source_2);                      \
+    o_imm_3_or_dest_addr = imm_b;                        \
 ;
 
 `define OUTPUT_U_TYPE_INSTR(instr_name)                 \
-    o_decoded_instruction <= `INSTR_CODE(instr_name);   \
-    `PASS_IMM_IN_IMM_1(imm_u);                          \
-    `PASS_IMM_IN_IMM_2(0);                              \
-    o_imm_3_or_dest_addr <= destination;                \
+    o_decoded_instruction = `INSTR_CODE(instr_name);    \
+    `PASS_IMM_IN_IMM_1(imm_u_sext);                      \
+    `PASS_IMM_IN_IMM_2(0);                               \
+    o_imm_3_or_dest_addr = `B_IMM_SIZE'(destination);   \
 ;
 
 `define OUTPUT_J_TYPE_INSTR(instr_name)                 \
-    o_decoded_instruction <= `INSTR_CODE(instr_name);   \
-    `PASS_IMM_IN_IMM_1(imm_j);                          \
-    `PASS_IMM_IN_IMM_2(0);                              \
-    o_imm_3_or_dest_addr <= destination;                \
+    o_decoded_instruction = `INSTR_CODE(instr_name);    \
+    `PASS_IMM_IN_IMM_1(imm_j_sext);                      \
+    `PASS_IMM_IN_IMM_2(0);                               \
+    o_imm_3_or_dest_addr = `B_IMM_SIZE'(destination);   \
 ;
 
 `define OUTPUT_NONE_TYPE_INSTR(instr_name)              \
-    o_decoded_instruction <= `INSTR_CODE(instr_name);   \
-    `PASS_IMM_IN_IMM_1(0);                              \
-    `PASS_IMM_IN_IMM_2(0);                              \
-    o_imm_3_or_dest_addr <= 0;                          \
+    o_decoded_instruction = `INSTR_CODE(instr_name);    \
+    `PASS_IMM_IN_IMM_1(0);                               \
+    `PASS_IMM_IN_IMM_2(0);                               \
+    o_imm_3_or_dest_addr = 0;                            \
+;
+
+/*
+ * CSR-type (Zicsr), register source form (CSRRW/CSRRS/CSRRC): rs1 (the
+ * VALUE, when read -- see PASS_REG_A_IN_IMM_1) lands on imm_1 exactly
+ * like an R/I-type source register, and the CSR address (an immediate
+ * field, never a register select) lands on imm_2 via PASS_IMM_IN_IMM_2
+ * -- same "recognizable primitive, new wire" composition
+ * OUTPUT_U_TYPE_INSTR/OUTPUT_J_TYPE_INSTR already use, no new decoder
+ * primitive needed. o_read_gpr_A_sel (== source_1, the rs1 FIELD) is
+ * what core.sv's csr_write_suppress reads directly for CSRRS/CSRRC's
+ * field-vs-value distinction -- see core.sv's own comment on that.
+ */
+`define OUTPUT_CSR_TYPE_INSTR(instr_name)             \
+    o_decoded_instruction = `INSTR_CODE(instr_name);  \
+    `PASS_REG_A_IN_IMM_1(source_1);                    \
+    `PASS_IMM_IN_IMM_2(csr_addr_zext);                  \
+    o_imm_3_or_dest_addr = `B_IMM_SIZE'(destination);  \
+;
+
+/*
+ * CSR-type (Zicsr), immediate source form (CSRRWI/CSRRSI/CSRRCI): uimm
+ * is a LITERAL (zero-extended, never a register index) -- PASS_IMM_IN_
+ * IMM_1 instead of PASS_REG_A_IN_IMM_1, unlike the register form above.
+ * CSR address still lands on imm_2 the same way.
+ */
+`define OUTPUT_CSRI_TYPE_INSTR(instr_name)            \
+    o_decoded_instruction = `INSTR_CODE(instr_name);  \
+    `PASS_IMM_IN_IMM_1(csr_uimm_zext);                  \
+    `PASS_IMM_IN_IMM_2(csr_addr_zext);                  \
+    o_imm_3_or_dest_addr = `B_IMM_SIZE'(destination);  \
 ;
 
 
@@ -120,12 +208,23 @@
  *  o_decoded_instruction: The internal code for the decoded instruction.
  *  o_instruction_address: Address of the decoded instruction
  *                         (same as i_instruction_address).
- *  o_imm_1: Immediate value (either from instr or from a reg), or 0.
- *  o_imm_2: Immediate value (either from instr or from a reg), or 0.
- *  o_imm_3_or_dest_addr: For S and B type insturctions, this is the given
- *                        immediate value. For most other instructions, it
- *                        is the address to the destination register. It is
- *                        0 otherwise.
+ *  o_imm_1: Immediate value (either from instr or from a reg), or 0. Any
+ *           immediate here is already sign- or zero-extended to
+ *           WORD_SIZE as appropriate (sign-extended for ordinary
+ *           immediates, zero-extended for shift amounts -- see
+ *           shamt_zext/wshamt_zext below).
+ *  o_imm_2: Same as o_imm_1, for the second operand slot.
+ *  o_imm_3_or_dest_addr: For S and B type instructions, this is the
+ *                        immediate value -- 13 bits (B_IMM_SIZE), with
+ *                        the sign bit always at bit 12 regardless of
+ *                        which of the two types it came from (see imm_s's
+ *                        declaration below for why S-type needs an extra
+ *                        bit to make that true). For most other
+ *                        instructions, it is the destination register
+ *                        index (5 bits, zero-extended into the same
+ *                        13-bit port). 0 otherwise. Sign/zero-extending
+ *                        this further to WORD_SIZE, when needed, is
+ *                        core.sv's job, not the decoder's.
  */
 module decoder (
     input logic     [(`INSTR_SIZE - 1):0]   i_instruction,
@@ -163,8 +262,15 @@ module decoder (
 
     logic [(`WORD_SIZE - 1):0] internal_imm_1;
     logic [(`WORD_SIZE - 1):0] internal_imm_2;
-    assign o_imm_1 = o_read_gpr_A_sel ? i_read_gpr_A_data : internal_imm_1;
-    assign o_imm_2 = o_read_gpr_B_sel ? i_read_gpr_B_data : internal_imm_2;
+    /*
+     * != 0 here (rather than relying on o_read_gpr_A_sel's truth value
+     * directly) is explicit about this being a "is this the x0 sentinel"
+     * check, not an arithmetic use of the select value -- also avoids a
+     * multi-bit-to-1-bit implicit truthiness cast that verilator flags
+     * under -Wall (WIDTHTRUNC).
+     */
+    assign o_imm_1 = (o_read_gpr_A_sel != 0) ? i_read_gpr_A_data : internal_imm_1;
+    assign o_imm_2 = (o_read_gpr_B_sel != 0) ? i_read_gpr_B_data : internal_imm_2;
 
     /*
      * Extract potential constituents from the instruction beforehand
@@ -183,8 +289,27 @@ module decoder (
     logic [(`I_IMM_SIZE - 1):0] imm_i;
     assign imm_i = i_instruction[`I_IMM_MSB:`I_IMM_LSB];
 
-    logic [(`S_IMM_SIZE - 1):0] imm_s;
-    assign imm_s = {i_instruction[`S_IMM_H_MSB:`S_IMM_H_LSB],
+    /* imm_i, sign-extended: bit 11 (imm_i's own MSB) is the sign bit. */
+    logic [(`WORD_SIZE - 1):0] imm_i_sext;
+    assign imm_i_sext = {{(`WORD_SIZE - `I_IMM_SIZE){imm_i[`I_IMM_SIZE - 1]}}, imm_i};
+
+    /*
+     * imm_s is deliberately declared B_IMM_SIZE (13) bits wide, not its
+     * "natural" 12 -- one bit wider than the raw S-immediate field, with
+     * the extra top bit an explicit copy of the sign bit (instruction bit
+     * 31, same sign-bit position I/S/B all share). This puts imm_s's sign
+     * bit at position 12, the SAME position imm_b's sign bit naturally
+     * lands at (see imm_b below) -- so o_imm_3_or_dest_addr (which is
+     * B_IMM_SIZE wide and carries either of these two, depending on
+     * instruction type) can be sign-extended by core.sv with a single
+     * formula that works for both S and B types, instead of two.
+     * Without this, assigning the narrower 12-bit imm_s into that 13-bit
+     * port would implicitly ZERO-pad bit 12, silently making every store
+     * offset read as non-negative downstream regardless of its true sign.
+     */
+    logic [(`B_IMM_SIZE - 1):0] imm_s;
+    assign imm_s = {i_instruction[`S_IMM_H_MSB],
+                    i_instruction[`S_IMM_H_MSB:`S_IMM_H_LSB],
                     i_instruction[`S_IMM_L_MSB:`S_IMM_L_LSB]};
 
     logic [(`B_IMM_SIZE - 1):0] imm_b;
@@ -199,6 +324,17 @@ module decoder (
     logic [(`U_IMM_SIZE - 1):0] imm_u;
     assign imm_u = i_instruction[`U_IMM_MSB:`U_IMM_LSB];
 
+    /*
+     * imm_u, turned into the actual usable upper-immediate value: LUI/
+     * AUIPC's 20-bit field is bits [31:12] of the result, not the low 20
+     * bits -- shift it into place, THEN sign-extend the resulting 32-bit
+     * value out to WORD_SIZE using what is now bit 31 (= imm_u's own bit
+     * 19, the field's original top bit). Without the shift, LUI/AUIPC
+     * would be numerically wrong even before considering sign at all.
+     */
+    logic [(`WORD_SIZE - 1):0] imm_u_sext;
+    assign imm_u_sext = {{(`WORD_SIZE - 32){imm_u[`U_IMM_SIZE - 1]}}, imm_u, 12'b0};
+
     logic [(`J_IMM_SIZE - 1):0] imm_j;
     assign imm_j = {
         i_instruction[`J_IMM_MSB],
@@ -207,6 +343,42 @@ module decoder (
         i_instruction[`J_IMM_LOW_BITS_MSB:`J_IMM_LOW_BITS_LSB],
         1'b0
     };
+
+    /* imm_j, sign-extended: bit 20 (imm_j's own MSB) is the sign bit. */
+    logic [(`WORD_SIZE - 1):0] imm_j_sext;
+    assign imm_j_sext = {{(`WORD_SIZE - `J_IMM_SIZE){imm_j[`J_IMM_SIZE - 1]}}, imm_j};
+
+    /*
+     * Shift amounts: extracted separately from imm_i on purpose (see
+     * OUTPUT_I_SHIFT_TYPE_INSTR/OUTPUT_IW_SHIFT_TYPE_INSTR above) and
+     * ZERO-, not sign-, extended -- a shift amount is an unsigned
+     * magnitude, not a two's-complement value.
+     */
+    logic [(`SHAMT_SIZE - 1):0] shamt;
+    assign shamt = i_instruction[`SHAMT_MSB:`SHAMT_LSB];
+    logic [(`WORD_SIZE - 1):0] shamt_zext;
+    assign shamt_zext = {{(`WORD_SIZE - `SHAMT_SIZE){1'b0}}, shamt};
+
+    logic [(`WSHAMT_SIZE - 1):0] wshamt;
+    assign wshamt = i_instruction[`WSHAMT_MSB:`WSHAMT_LSB];
+    logic [(`WORD_SIZE - 1):0] wshamt_zext;
+    assign wshamt_zext = {{(`WORD_SIZE - `WSHAMT_SIZE){1'b0}}, wshamt};
+
+    /*
+     * CSR fields (Zicsr): csr_addr is instr[31:20], zero-extended (never
+     * sign-extended -- it's an index, not a value). csr_uimm is
+     * instr[19:15], zero-extended -- for CSRRWI/SI/CI only, a LITERAL,
+     * not a register-select index (see OUTPUT_CSRI_TYPE_INSTR above).
+     */
+    logic [(`CSR_ADDR_SIZE - 1):0] csr_addr;
+    assign csr_addr = i_instruction[`CSR_ADDR_MSB:`CSR_ADDR_LSB];
+    logic [(`WORD_SIZE - 1):0] csr_addr_zext;
+    assign csr_addr_zext = {{(`WORD_SIZE - `CSR_ADDR_SIZE){1'b0}}, csr_addr};
+
+    logic [(`CSR_UIMM_SIZE - 1):0] csr_uimm;
+    assign csr_uimm = i_instruction[`CSR_UIMM_MSB:`CSR_UIMM_LSB];
+    logic [(`WORD_SIZE - 1):0] csr_uimm_zext;
+    assign csr_uimm_zext = {{(`WORD_SIZE - `CSR_UIMM_SIZE){1'b0}}, csr_uimm};
 
 
     /* Match the instruction and do appropriate decoding. */
@@ -308,6 +480,19 @@ module decoder (
         end: lhu_instr
 
 
+        /* RV64I-only loads. */
+
+
+        else if (`IS_INSTR(i_instruction, LWU)) begin: lwu_instr
+            `OUTPUT_I_TYPE_INSTR(LWU);
+        end: lwu_instr
+
+
+        else if (`IS_INSTR(i_instruction, LD)) begin: ld_instr
+            `OUTPUT_I_TYPE_INSTR(LD);
+        end: ld_instr
+
+
         /* --------------------------------------------------------- */
 
 
@@ -327,6 +512,14 @@ module decoder (
         else if (`IS_INSTR(i_instruction, SW)) begin: sw_instr
             `OUTPUT_S_TYPE_INSTR(SW);
         end: sw_instr
+
+
+        /* RV64I-only store. */
+
+
+        else if (`IS_INSTR(i_instruction, SD)) begin: sd_instr
+            `OUTPUT_S_TYPE_INSTR(SD);
+        end: sd_instr
 
 
         /* --------------------------------------------------------- */
@@ -401,7 +594,7 @@ module decoder (
 
 
         else if (`IS_INSTR(i_instruction, SLLI)) begin: slli_instr
-            `OUTPUT_I_TYPE_INSTR(SLLI);
+            `OUTPUT_I_SHIFT_TYPE_INSTR(SLLI);
         end: slli_instr
 
 
@@ -411,7 +604,7 @@ module decoder (
 
 
         else if (`IS_INSTR(i_instruction, SRLI)) begin: srli_instr
-            `OUTPUT_I_TYPE_INSTR(SRLI);
+            `OUTPUT_I_SHIFT_TYPE_INSTR(SRLI);
         end: srli_instr
 
 
@@ -421,13 +614,72 @@ module decoder (
 
 
         else if (`IS_INSTR(i_instruction, SRAI)) begin: srai_instr
-            `OUTPUT_I_TYPE_INSTR(SRAI);
+            `OUTPUT_I_SHIFT_TYPE_INSTR(SRAI);
         end: srai_instr
 
 
         else if (`IS_INSTR(i_instruction, SRA)) begin: sra_instr
             `OUTPUT_R_TYPE_INSTR(SRA);
         end: sra_instr
+
+
+        /* --------------------------------------------------------- */
+
+
+        /*
+         * RV64I word-width instructions: operate on the low 32 bits of
+         * their operands and sign-extend the result back to 64 -- see
+         * the comment above SLLW/SRLW/SRAW's `defines in
+         * defaults/alu_ops.sv for why the shift variants need dedicated
+         * ALU ops rather than reusing SLL/SRL/SRA, and the comment on
+         * `is_word_arith`-style write-back muxing (in core.sv) for why
+         * ADDW/SUBW/ADDIW instead reuse the plain ADD/SUB ALU ops.
+         */
+
+
+        else if (`IS_INSTR(i_instruction, ADDIW)) begin: addiw_instr
+            `OUTPUT_I_TYPE_INSTR(ADDIW);
+        end: addiw_instr
+
+
+        else if (`IS_INSTR(i_instruction, SLLIW)) begin: slliw_instr
+            `OUTPUT_IW_SHIFT_TYPE_INSTR(SLLIW);
+        end: slliw_instr
+
+
+        else if (`IS_INSTR(i_instruction, SRLIW)) begin: srliw_instr
+            `OUTPUT_IW_SHIFT_TYPE_INSTR(SRLIW);
+        end: srliw_instr
+
+
+        else if (`IS_INSTR(i_instruction, SRAIW)) begin: sraiw_instr
+            `OUTPUT_IW_SHIFT_TYPE_INSTR(SRAIW);
+        end: sraiw_instr
+
+
+        else if (`IS_INSTR(i_instruction, ADDW)) begin: addw_instr
+            `OUTPUT_R_TYPE_INSTR(ADDW);
+        end: addw_instr
+
+
+        else if (`IS_INSTR(i_instruction, SUBW)) begin: subw_instr
+            `OUTPUT_R_TYPE_INSTR(SUBW);
+        end: subw_instr
+
+
+        else if (`IS_INSTR(i_instruction, SLLW)) begin: sllw_instr
+            `OUTPUT_R_TYPE_INSTR(SLLW);
+        end: sllw_instr
+
+
+        else if (`IS_INSTR(i_instruction, SRLW)) begin: srlw_instr
+            `OUTPUT_R_TYPE_INSTR(SRLW);
+        end: srlw_instr
+
+
+        else if (`IS_INSTR(i_instruction, SRAW)) begin: sraw_instr
+            `OUTPUT_R_TYPE_INSTR(SRAW);
+        end: sraw_instr
 
 
         /* --------------------------------------------------------- */
@@ -453,6 +705,42 @@ module decoder (
         else if (`IS_INSTR(i_instruction, EBREAK)) begin: ebreak_instr
             `OUTPUT_NONE_TYPE_INSTR(EBREAK);
         end: ebreak_instr
+
+
+        /* --------------------------------------------------------- */
+
+
+        /* Zicsr (CSR) instructions -- same SYSTEM opcode as ECALL/EBREAK above, disambiguated by funct3. */
+
+
+        else if (`IS_INSTR(i_instruction, CSRRW)) begin: csrrw_instr
+            `OUTPUT_CSR_TYPE_INSTR(CSRRW);
+        end: csrrw_instr
+
+
+        else if (`IS_INSTR(i_instruction, CSRRS)) begin: csrrs_instr
+            `OUTPUT_CSR_TYPE_INSTR(CSRRS);
+        end: csrrs_instr
+
+
+        else if (`IS_INSTR(i_instruction, CSRRC)) begin: csrrc_instr
+            `OUTPUT_CSR_TYPE_INSTR(CSRRC);
+        end: csrrc_instr
+
+
+        else if (`IS_INSTR(i_instruction, CSRRWI)) begin: csrrwi_instr
+            `OUTPUT_CSRI_TYPE_INSTR(CSRRWI);
+        end: csrrwi_instr
+
+
+        else if (`IS_INSTR(i_instruction, CSRRSI)) begin: csrrsi_instr
+            `OUTPUT_CSRI_TYPE_INSTR(CSRRSI);
+        end: csrrsi_instr
+
+
+        else if (`IS_INSTR(i_instruction, CSRRCI)) begin: csrrci_instr
+            `OUTPUT_CSRI_TYPE_INSTR(CSRRCI);
+        end: csrrci_instr
 
 
         /* --------------------------------------------------------- */

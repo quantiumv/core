@@ -9,8 +9,8 @@
  * Word size for the processor.
  * This also defines the register file width, bus width, etc.
  */
-`define WORD_SIZE       32
-`define L2_WORD_SIZE    5   /* log2(WORD_SIZE) = Number of bits. */
+`define WORD_SIZE       64
+`define L2_WORD_SIZE    6   /* log2(WORD_SIZE) = Number of bits. */
 
 
 /* Number of registers (as in x0-x31) in the register file. */

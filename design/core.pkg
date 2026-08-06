@@ -1,2 +1,0 @@
-`include "ram.sv"
-`include "fetch_stage.sv"
