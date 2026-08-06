@@ -53,3 +53,4 @@ dkms.conf
 
 #Iverilog Simulation Files
 *.vcd
+*a.out

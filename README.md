@@ -1,209 +1,104 @@
 # QuantiumV
 
-RISCV SoC Collab work.
+A RISC-V SoC, built collaboratively from scratch in SystemVerilog.
 
-Join On [Discord](https://discord.gg/sQjhBvWXjF) if you interested in the project!
+Join on [Discord](https://discord.gg/sQjhBvWXjF) if you're interested in the project!
 
 ---
 
-# General SoC Architecture idea
+## Current state
 
-```mermaid
-flowchart TD
-    subgraph CPU["CPU"]
-        direction TB
-        CPI["CPI"]
-        subgraph L1["  "]
-            direction LR
-            L1D["L1D"]
-            L1I["L1I"]
-        end
-        CPI ~~~ L1
-    end
+**RV64I base ISA + Zicsr (CSR instructions)**, non-pipelined, single-hart, fully
+verified. The core is a multi-cycle Wishbone-master FSM (fetch → execute →
+memory, one instruction fully retires before the next begins -- no forwarding,
+no hazards to design around yet) driving a real Wishbone bus out to two real
+peripherals.
 
-    L1D <--> MI["MATRIX INTERCONNECT"]
-    L1I <--> MI
+### Architecture
 
-    MI <--> Cache["Cache"]
-    MI <--> DeviceA["Device"]
-    MI <--> DeviceB["Device"]
+- `design/decoder.sv`, `design/alu.sv`, `design/register_file.sv`,
+  `design/csr_file.sv` -- the datapath: instruction decode, ALU (full RV64I
+  arithmetic/logic/shift ops including the `*W` word-width family), a 32-entry
+  general-purpose register file, and the 8 machine-mode CSRs this milestone
+  backs (`misa`, `mvendorid`/`marchid`/`mimpid`/`mhartid`, `mscratch`,
+  `mcycle`, `minstret`).
+- `design/core.sv` -- ties the above together as a Wishbone bus master. No
+  private instruction/data memory of its own; every fetch and load/store goes
+  out over the bus.
+- `design/wb4_sram.sv`, `design/uart_tx.sv`, `design/wb_addr_decoder.sv` --
+  the two real Wishbone slaves (a flat 64-bit-word memory, and a
+  simulation-only UART that transmits via `$write`) plus the address decoder
+  routing between them.
+- `design/soc.sv` -- top-level integration: `core` + `wb_addr_decoder` +
+  `wb4_sram` + `uart_tx`, `clk`/`rst` are its only ports.
 
-    Cache <--> MC["Memory Controlller"]
-    MC <--> RAM["RAM"]
+Privilege modes, traps/interrupts, and virtual memory (Sv39) don't exist yet --
+every access currently runs unconstrained, `ECALL` is a no-op, and the CSRs
+backed today are exactly the ones meaningful without that infrastructure. See
+`design/csr_file.sv`'s own header for the full scope note.
+
+### Verification
+
+17 testbenches (unit-level for the ALU/register file/CSR file in isolation,
+integration-level driving the real Wishbone bus, one running a real
+`riscv64-unknown-elf`-assembled program), all passing. Shared infrastructure
+lives in `testbench/`: `check_lib.sv` (a `check()` primitive), `wb_driver.sv`
+(a Wishbone bus-cycle task), `halt_wait.sv` (timeout-guarded halt waiting),
+`pc_trigger_sample_monitor.sv` and `core_wb4_sram_harness.sv` (reusable
+monitor/harness modules) -- pulled into new testbenches via `` `include ``
+rather than hand-rolled each time.
+
+Real code coverage has been measured (line/branch/toggle/expression, via
+Verilator) across every live design file, not just claimed. Current whole-design
+coverage: 97.6% line, 99.0% branch, 100% expression -- what's left uncovered
+is understood and benign (a couple of structurally-unreachable default arms,
+one genuinely unused ALU op, one buffer-full guard that'd need over 256 writes
+in a single test to trigger).
+
+---
+
+## Building and simulating
+
+Everything here is developed and verified against **Icarus Verilog**
+(`iverilog`/`vvp`) and **Verilator**, run through WSL on Windows. There is no
+single top-level build script yet -- compile the specific file set a given
+testbench needs directly, e.g.:
+
+```sh
+iverilog -g2012 -I design -I testbench -o /tmp/soc_tb.out \
+  design/alu.sv design/decoder.sv design/register_file.sv design/csr_file.sv \
+  design/core.sv design/wb4_sram.sv design/uart_tx.sv design/wb_addr_decoder.sv \
+  design/soc.sv testbench/soc_tb.sv
+cd design && vvp /tmp/soc_tb.out
 ```
 
----
+`-I design -I testbench` resolves every `` `include `` (Icarus does not
+resolve include paths relative to the including file, only via `-I`). Run
+from inside `design/` when a testbench instantiates `wb4_sram` directly, so
+its `$readmemh` of `../firmware/crt0.hex` resolves.
 
-# CPI - CoProcessor Interface
+A Verilator lint pass over the full SoC:
 
-Basic idea of the coprocessor interface. This can later of extended.
-
-This will allow custom instructions to be executed and registers passed to the coprocessor.
-
-The ready and ack signals are a handshake in order to stall the processor's pipeline.
-
-Signals:
-
-```sv
-wire rdy
-wire ack
-wire clk
-wire [31:0] rd;
-wire [31:0] rs1;
-wire [31:0] rs2;
+```sh
+verilator --lint-only -Wall -Idesign -Itestbench --top-module soc \
+  design/alu.sv design/decoder.sv design/register_file.sv design/csr_file.sv \
+  design/core.sv design/wb4_sram.sv design/uart_tx.sv design/wb_addr_decoder.sv \
+  design/soc.sv
 ```
 
----
+(Verilator wants `-Idesign`, no space; Icarus accepts either form.)
 
-# Processor Components
-
-- [ ] MMU
-- [ ] MPU
-- [ ] M Mode CSRs
-- [ ] S Mode CSRs
-- [ ] U Mode CSRs
-- [ ] Memory Access Unit for instructions stream.
-- [ ] Memory Access Unit for datga stream.
-- [ ] Pipeline design.
-- [ ] D Cache
-- [ ] I Cache
-- [ ] WB4 to AXI Bridge
-- [ ] AXI to WB4 Bridge
-- [x] ALU
-- [x] Register File
-- [ ] Fetch Stage
-- [x] Decode Stage
-- [ ] Execute Stage
-- [ ] Memory Stage
-- [ ] Write Back Stage
-- [ ] Forwading Unit
-- [ ] Hazard detection
-- [ ] Pipeline Stall
-- [ ] Branch Prediction
-- [ ] D-I Cache Coherence
+`firmware/` holds a real C toolchain build (`riscv64-unknown-elf-gcc`/`-as`/
+`-ld`) producing the hex images some testbenches load -- see
+`firmware/Makefile`.
 
 ---
 
-# First Stage Pipeline
+## Roadmap
 
-No Unaligned memory access. CPU throws an unalinged memory access exemption.
-
-```mermaid
-flowchart LR
-    FOUR(["4"])
-    JMP(["jump / branch target<br/>(from later stage)"])
-
-    subgraph IF["IF"]
-        direction LR
-        MUX{{"MUX<br/>0 / 1"}}
-        PC["PC"]
-        ADD["A + B"]
-        ICACHE["I Cache<br/>AXI / Wb4"]
-
-        FOUR -->|A| ADD
-        PC -->|B| ADD
-        ADD -->|"0"| MUX
-        MUX --> PC
-        PC -->|ADDR| ICACHE
-    end
-
-    JMP -->|"1"| MUX
-    ICACHE <-->|I BUS| IBUS(["external bus"])
-    ICACHE --> IFOUT(["instruction out"])
-```
-
-Unaligned memory access control logic on the instruction cache. 
-Pipeline stall while cache logic fetches data blocks and aligns them.
-
-```mermaid
-flowchart LR
-    FOUR(["4"])
-    JMP(["jump / branch target<br/>(from later stage)"])
-
-    subgraph IF["IF"]
-        direction LR
-        MUX{{"MUX<br/>0 / 1"}}
-        PC["PC"]
-        ADD["A + B"]
-        subgraph CACHEBLK[" "]
-            direction LR
-            UAL["UAL"]
-            ICACHE["I Cache<br/>AXI / Wb4"]
-            UAL --> ICACHE
-        end
-
-        FOUR -->|A| ADD
-        PC -->|B| ADD
-        ADD -->|"0"| MUX
-        MUX --> PC
-        PC -->|ADDR| UAL
-    end
-
-    JMP -->|"1"| MUX
-    ICACHE <-->|I BUS| IBUS(["external bus"])
-    ICACHE --> IFOUT(["instruction out"])
-```
-
----
-
-# Wishbone 4 interface
-
-Use Advanced synchronous termination or simple synchrnous termination for the ACK signal.
-
-It's not a requirement but it will lower the routing delay allowing for higher clock speeds.
-
-For more information look at the following in the Wishbone spec:
-
-- Chapter 4: WISHBONE Registered Feedback Bus Cycles
-- Chapter 4.1: Introduction, Synchronous vs. Asynchronous cycle termination
-- Illustration 4-2: WISHBONE Classic synchronous cycle terminated burst
-- Illustration 4-3: Advanced synchronous terminated burst
-
-```sv
-interface WB4(input clk, input rst);
-    logic ACK;
-    logic ERR;
-    logic RTY;
-    logic STB;
-    logic [31:0] ADR;
-    logic CYC;
-    logic [31:0] DAT_I;
-    logic [31:0] DAT_O;
-    logic WE;
-    logic [2:0] CTI_O;
-    modport slave(input clk, rst,
-    input STB,
-    input ADR,
-    input CYC,
-    output DAT_I,
-    input  DAT_O,
-    input CTI_O,
-    output ACK,
-    output ERR,
-    output RTY,
-    input WE);
-    modport master(input clk, rst,
-    output STB,
-    output ADR,
-    output CYC,
-    input  DAT_I,
-    output DAT_O,
-    output CTI_O,
-    input ACK,
-    input ERR,
-    input RTY,
-    output WE);
-endinterface //WB4
-```
-
----
-
-# Tools and Software
-
-Quartus or Vivado will be convenient. Otherwise, the following are some open source alternatives:
-
-- iverilog
-- iverilator
-- gtkwave
-
----
+RV64**IMAC** + Zicsr + U/S/M privilege + Sv39, non-pipelined and in-order,
+before any pipelining/OoO work starts -- deliberately, so out-of-order
+correctness has a trusted in-order reference to debug against. M (multiply/
+divide) is next: no privilege or trap prerequisites, unlike A or C eventually
+will need. Bus protocol stays Wishbone at the core; AXI4 is a future fabric
+concern at the edge, not a core-level one.
