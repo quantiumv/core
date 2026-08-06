@@ -32,39 +32,28 @@ make
 
 # General SoC Architecture idea
 
-```
-                    +-------+
-                    |  CPI  |
-            +-------+-------+
-            |      CPU      |
-            +-------+-------+
-            |  L1D  |  L1I  |
-            +-------+-------+
-                /\     /\
-                ||     ||
-                \/     \/
-    +------------------------------------------------------------------+
-    |                           MATRIX INTERCONNECT                    |
-    +------------------------------------------------------------------+
-                /\                     /\                     /\
-                ||                     ||                     ||
-                \/                     \/                     \/
-            +---------+            +---------+            +---------+
-            |  Cache  |            |  Device |            |  Device |
-            +---------+            +---------+            +---------+
-                /\
-                ||
-                \/
-      +----------------------+
-      |  Memory Controlller  |
-      +----------------------+
-                /\
-                ||
-                \/
-            +---------+
-            |   RAM   |
-            +---------+
-            
+```mermaid
+flowchart TD
+    subgraph CPU["CPU"]
+        direction TB
+        CPI["CPI"]
+        subgraph L1["  "]
+            direction LR
+            L1D["L1D"]
+            L1I["L1I"]
+        end
+        CPI ~~~ L1
+    end
+
+    L1D <--> MI["MATRIX INTERCONNECT"]
+    L1I <--> MI
+
+    MI <--> Cache["Cache"]
+    MI <--> DeviceA["Device"]
+    MI <--> DeviceB["Device"]
+
+    Cache <--> MC["Memory Controlller"]
+    MC <--> RAM["RAM"]
 ```
 
 ---
@@ -123,49 +112,60 @@ wire [31:0] rs2;
 
 No Unaligned memory access. CPU throws an unalinged memory access exemption.
 
-```sv
-   ++============================================================
-   || ++============================================++     +----+
-   || ||                           +-+   +------+   ||     |    |
-   || ||                           |4|==>| A    |   ||     |    |
-   || ||                           +-+   | +    |===++     |    |
-   || ||                           ++===>| B    |          |    |
-   || ||                           ||    +------+          |    |
-   || ||                           ||                      |    |
-   || ||    +------+    +------+   ||    +-----------+     | IF |
-   || ++===>| 0    |    |      |   ||    |           |     |    |
-   ||       | MUX  |===>|  PC  |===++===>|  I Cache  |====>|    |
-   ++======>| 1    |    |      |  ADDR   |           |     |    |
-            +------+    +------+         +-----------+     |    |
-                                         |  AXI/Wb4  |     |    |
-                                         +-----------+     |    |
-                                               /\          |    |
-                                               || I BUS    |    |
-                                               \/          +----+
+```mermaid
+flowchart LR
+    FOUR(["4"])
+    JMP(["jump / branch target<br/>(from later stage)"])
+
+    subgraph IF["IF"]
+        direction LR
+        MUX{{"MUX<br/>0 / 1"}}
+        PC["PC"]
+        ADD["A + B"]
+        ICACHE["I Cache<br/>AXI / Wb4"]
+
+        FOUR -->|A| ADD
+        PC -->|B| ADD
+        ADD -->|"0"| MUX
+        MUX --> PC
+        PC -->|ADDR| ICACHE
+    end
+
+    JMP -->|"1"| MUX
+    ICACHE <-->|I BUS| IBUS(["external bus"])
+    ICACHE --> IFOUT(["instruction out"])
 ```
 
 Unaligned memory access control logic on the instruction cache. 
 Pipeline stall while cache logic fetches data blocks and aligns them.
 
-```sv
-   ++============================================================
-   || ++============================================++     +----+
-   || ||                           +-+   +------+   ||     |    |
-   || ||                           |4|==>| A    |   ||     |    |
-   || ||                           +-+   | +    |===++     |    |
-   || ||                           ++===>| B    |          |    |
-   || ||                           ||    +------+          |    |
-   || ||                           ||                      |    |
-   || ||    +------+    +------+   ||    +---+-------+     | IF |
-   || ++===>| 0    |    |      |   ||    | U |       |     |    |
-   ||       | MUX  |===>|  PC  |===++===>| A |I Cache|====>|    |
-   ++======>| 1    |    |      |  ADDR   | L |       |     |    |
-            +------+    +------+         +---+-------+     |    |
-                                         |  AXI/Wb4  |     |    |
-                                         +-----------+     |    |
-                                               /\          |    |
-                                               || I BUS    |    |
-                                               \/          +----+
+```mermaid
+flowchart LR
+    FOUR(["4"])
+    JMP(["jump / branch target<br/>(from later stage)"])
+
+    subgraph IF["IF"]
+        direction LR
+        MUX{{"MUX<br/>0 / 1"}}
+        PC["PC"]
+        ADD["A + B"]
+        subgraph CACHEBLK[" "]
+            direction LR
+            UAL["UAL"]
+            ICACHE["I Cache<br/>AXI / Wb4"]
+            UAL --> ICACHE
+        end
+
+        FOUR -->|A| ADD
+        PC -->|B| ADD
+        ADD -->|"0"| MUX
+        MUX --> PC
+        PC -->|ADDR| UAL
+    end
+
+    JMP -->|"1"| MUX
+    ICACHE <-->|I BUS| IBUS(["external bus"])
+    ICACHE --> IFOUT(["instruction out"])
 ```
 
 ---
