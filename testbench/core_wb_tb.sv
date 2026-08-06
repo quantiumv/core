@@ -112,7 +112,7 @@ module core_wb_tb;
         check("x7 (lui, UART base address)",   dut.core0.regfile0.gp_registers[7], 64'h8000);
         check("x8 (addi, RAM base address)",   dut.core0.regfile0.gp_registers[8], 64'h100);
         check("RAM contents at 0x100",         {32'b0, dut.sram0.memory[32][31:0]}, 64'd15);
-        check("UART received exactly one byte", {56'b0, dut.uart0.tx_history_count}, 64'd1);
+        check("UART received exactly one byte", {55'b0, dut.uart0.tx_history_count}, 64'd1);
         check("UART byte is 'H'",              {56'b0, dut.uart0.tx_history[0]}, 64'h48);
         check("core halted (ebreak reached)",  {63'b0, dut.core0.halted}, 64'd1);
 
