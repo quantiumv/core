@@ -42,13 +42,13 @@ module uart_tx_tb;
         // Write "Hi" -- prints live to console.
         wb_cycle(32'h8000, 64'h48, 8'h01, 1'b1); // 'H'
         wb_cycle(32'h8000, 64'h69, 8'h01, 1'b1); // 'i'
-        check("two characters captured", {56'b0, dut.tx_history_count}, 64'd2);
+        check("two characters captured", {55'b0, dut.tx_history_count}, 64'd2);
         check("history[0] == 'H'", {56'b0, dut.tx_history[0]}, 64'h48);
         check("history[1] == 'i'", {56'b0, dut.tx_history[1]}, 64'h69);
 
         // Write with byte-enable OFF (sel[0]=0) -- must not capture.
         wb_cycle(32'h8000, 64'hFF, 8'h00, 1'b1);
-        check("write without sel[0] is ignored", {56'b0, dut.tx_history_count}, 64'd2);
+        check("write without sel[0] is ignored", {55'b0, dut.tx_history_count}, 64'd2);
 
         // TX_STATUS always reads ready.
         wb_cycle(32'h8008, 64'h0, 8'h00, 1'b0);
