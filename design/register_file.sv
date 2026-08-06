@@ -56,8 +56,8 @@ module register_file #(
     logic [(`WORD_SIZE - 1):0]  gp_registers [0:(num_regs - 1)];
 
     /*
-     * Simulation-only zero-fill, same reasoning as imem.sv/dmem.sv: real
-     * hardware has no defined power-up register state, but zeroing here
+     * Simulation-only zero-fill: real hardware has no defined power-up
+     * register state, but zeroing here
      * keeps waveform/$display output readable and makes "this register
      * was never written" a clean, checkable 0 instead of 'X in
      * testbenches.
