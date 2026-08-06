@@ -16,6 +16,11 @@
  * full round-trip write/read and, specifically, that a partial
  * byte-enable write leaves the other lanes of the same line untouched
  * (the actual new behavior this edit added).
+ *
+ * check() and wb_cycle() come from testbench/check_lib.sv and
+ * testbench/wb_driver.sv (see each for its required-signal contract) --
+ * resolved via a bare filename plus -I testbench on the iverilog command
+ * line, per those files' own headers.
  */
 module wb4_sram_tb;
 
@@ -36,38 +41,9 @@ module wb4_sram_tb;
 
     int pass_count = 0;
     int fail_count = 0;
-    task automatic check(string name, logic [63:0] actual, logic [63:0] expected);
-        if (actual === expected) begin
-            pass_count++;
-            $display("PASS: %s", name);
-        end else begin
-            fail_count++;
-            $display("FAIL: %s -- expected %h, got %h", name, expected, actual);
-        end
-    endtask
-
-    /*
-     * Issue one WB transaction and wait for ack, mirroring core.sv's own
-     * "hold the request, advance on ack" convention. The #1 after each
-     * @(posedge clk) before checking ack is required: ack_o updates via
-     * <= in the DUT's clocked block, only visible in the NBA region
-     * after this edge's active region finishes -- checking immediately
-     * on resuming from @(posedge clk) would read ack one edge stale,
-     * leaving cyc/stb asserted for an extra edge and causing a second,
-     * spurious transaction (silently harmless here since a repeated
-     * identical read/write is idempotent, but the same task shape
-     * caused a real duplicate-write bug in uart_tx_tb.sv, where it
-     * isn't -- fixed in both places).
-     */
-    task automatic wb_cycle(logic [31:0] a, logic [63:0] d, logic [7:0] s, logic w);
-        @(negedge clk);
-        addr = a; dat_i = d; sel = s; we = w; cyc = 1; stb = 1;
-        @(posedge clk); #1;
-        while (!ack) begin
-            @(posedge clk); #1;
-        end
-        cyc = 0; stb = 0;
-    endtask
+    logic quiet_on_pass = 1'b0;
+    `include "check_lib.sv"
+    `include "wb_driver.sv"
 
     initial begin
         cyc = 0; stb = 0; we = 0; addr = 0; dat_i = 0; sel = 8'h00;
@@ -95,15 +71,11 @@ module wb4_sram_tb;
         check("adjacent line unaffected", dat_o, 64'h0);
 
         // Out-of-range address (num_words=64 -> valid range is 0x000-0x1FF)
-        // must assert err_o, not silently succeed.
-        @(negedge clk);
-        addr = 32'h1000; dat_i = 64'h0; sel = 8'h00; we = 0; cyc = 1; stb = 1;
-        @(posedge clk); #1;
-        while (!ack && !err) begin
-            @(posedge clk); #1;
-        end
+        // must assert err_o, not silently succeed. Safe as a plain
+        // wb_cycle call now that the shared task waits on !ack && !err
+        // instead of !ack only.
+        wb_cycle(32'h1000, 64'h0, 8'h00, 1'b0);
         check("out-of-range address asserts err_o", {63'b0, err}, 64'd1);
-        cyc = 0; stb = 0;
 
         $display("");
         $display("wb4_sram_tb: %0d passed, %0d failed", pass_count, fail_count);
@@ -112,3 +84,8 @@ module wb4_sram_tb;
     end
 
 endmodule
+
+/* ------------------------------------------------------------------------- */
+
+
+/* End of file. */
