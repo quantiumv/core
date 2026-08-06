@@ -19,18 +19,18 @@
  * Features:
  *  - Size = num_regs x WORD_SIZE
  *  - Dual port combinational reads and single port synchronous write.
- *  - Program counter read (comb) and write (sync).
- *  - Dedicated return address (r1) and stack pointer (r2) outputs.
+ *  - x0 always reads as 0, regardless of what (if anything) is ever
+ *    written to it -- writes to x0 are simply no-ops, as required by the
+ *    ISA. (No PC or dedicated RA/SP ports here -- those live in core.sv;
+ *    this module is a plain 32x64 register file.)
  *
  * Input ports:
  *  i_clk: Clock signal (positive edge is used for write).
  *  i_read_gpr_A_sel: Register select #1 for read.
  *  i_read_gpr_B_sel: Register select #2 for read.
- *  i_load_gpr: High to load into a register (r1 to r31 only).
- *  i_load_gpr_sel: Register select for load/write.
- *  i_load_gpr_data: Data to load into the selected register.
- *  i_load_pc: High to load into program counter (preferred).
- *  i_load_pc_data: Data to load in the program counter.
+ *  i_load_gpr: High to write i_load_gpr_data into the selected register.
+ *  i_load_gpr_sel: Register select for write.
+ *  i_load_gpr_data: Data to write into the selected register.
  *
  * Output ports:
  *  o_read_gpr_A_data: Data read from the selected register #1.
@@ -55,23 +55,40 @@ module register_file #(
     /* num_regs general purpose registers, each WORD_SIZE bit wide. */
     logic [(`WORD_SIZE - 1):0]  gp_registers [0:(num_regs - 1)];
 
+    /*
+     * Simulation-only zero-fill: real hardware has no defined power-up
+     * register state, but zeroing here
+     * keeps waveform/$display output readable and makes "this register
+     * was never written" a clean, checkable 0 instead of 'X in
+     * testbenches.
+     */
+    integer init_i;
+    initial begin
+        for (init_i = 0; init_i < num_regs; init_i = init_i + 1)
+            gp_registers[init_i] = '0;
+    end
 
-    /* Read at both ports (NB: r0 is hardwired to 0). */
-    assign o_read_gpr_A_data = gp_registers[i_read_gpr_A_sel];
-    assign o_read_gpr_B_data = gp_registers[i_read_gpr_B_sel];
+    /*
+     * Read at both ports. x0 is forced to 0 here explicitly -- it's never
+     * actually written (see below), so without this the array's index-0
+     * slot would sit at its uninitialized 'X value for the entire
+     * simulation instead of reading as the architectural constant 0.
+     */
+    assign o_read_gpr_A_data = (i_read_gpr_A_sel == 0) ? '0 : gp_registers[i_read_gpr_A_sel];
+    assign o_read_gpr_B_data = (i_read_gpr_B_sel == 0) ? '0 : gp_registers[i_read_gpr_B_sel];
 
 
     /* Write. */
     always @(posedge i_clk) begin: write
         /*
-         * Load GPR.
-         * NB: We don't write at r0. Thus, select must be non-zero.
+         * Write only when the caller asks for one (i_load_gpr) AND targets
+         * a real register (i_load_gpr_sel != 0 -- x0 excluded, since
+         * writes to it are architecturally no-ops; handled here by simply
+         * never writing gp_registers[0], rather than writing it and
+         * masking the value back out on read).
          */
-        if (i_load_gpr_sel) begin: load_gpr
-            if (i_load_gpr)
-                gp_registers[0] <= 0;
-            else
-                gp_registers[i_load_gpr_sel] <= i_load_gpr_data;
+        if (i_load_gpr && (i_load_gpr_sel != 0)) begin: load_gpr
+            gp_registers[i_load_gpr_sel] <= i_load_gpr_data;
         end: load_gpr
     end: write
 endmodule: register_file

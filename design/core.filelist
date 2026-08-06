@@ -1,3 +1,0 @@
-+incdir+$(CORE_REPO_PATH)/common
-+incdir+$(CORE_REPO_PATH)/design/defaults
-+incdir+$(CORE_REPO_PATH)/design

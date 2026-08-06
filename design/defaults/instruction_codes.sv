@@ -119,4 +119,38 @@
 /* ------------------------------------------------------------------------- */
 
 
+/* RV64I-only instructions. */
+
+`define INSTR_CODE_LWU      101001
+`define INSTR_CODE_LD       101010
+`define INSTR_CODE_SD       101011
+
+`define INSTR_CODE_ADDIW    101100
+`define INSTR_CODE_SLLIW    101101
+`define INSTR_CODE_SRLIW    101110
+`define INSTR_CODE_SRAIW    101111
+
+`define INSTR_CODE_ADDW     110000
+`define INSTR_CODE_SUBW     110001
+`define INSTR_CODE_SLLW     110010
+`define INSTR_CODE_SRLW     110011
+`define INSTR_CODE_SRAW     110100
+
+
+/* ------------------------------------------------------------------------- */
+
+
+/* Zicsr (CSR) instructions. */
+
+`define INSTR_CODE_CSRRW    110101   // 53
+`define INSTR_CODE_CSRRS    110110   // 54
+`define INSTR_CODE_CSRRC    110111   // 55
+`define INSTR_CODE_CSRRWI   111000   // 56
+`define INSTR_CODE_CSRRSI   111001   // 57
+`define INSTR_CODE_CSRRCI   111010   // 58
+
+
+/* ------------------------------------------------------------------------- */
+
+
 /* End of file. */

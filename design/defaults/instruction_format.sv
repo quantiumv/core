@@ -50,6 +50,44 @@
 `define I_IMM_LSB   20
 
 
+/*
+ * Shift amount fields. These overlap the I-immediate's bit range but are
+ * NOT sign-extended like a normal I-immediate -- a shift amount is an
+ * unsigned magnitude, and under RV64I only its low bits are meaningful
+ * (the rest of what would be the I-immediate field is funct6/funct7,
+ * fixed by the instruction's mask/pattern, not part of the shift amount).
+ *
+ * SHAMT (6 bits, instr[25:20]): SLLI/SRLI/SRAI -- full WORD_SIZE shifts,
+ * so the amount needs enough bits for log2(64)=6.
+ *
+ * WSHAMT (5 bits, instr[24:20]): SLLIW/SRLIW/SRAIW -- these are always
+ * 32-bit operations regardless of WORD_SIZE, so 5 bits (log2(32)) is
+ * always enough, and bit 25 belongs to funct7 for these instead.
+ */
+
+`define SHAMT_SIZE  6
+`define SHAMT_MSB   25
+`define SHAMT_LSB   20
+
+`define WSHAMT_SIZE 5
+`define WSHAMT_MSB  24
+`define WSHAMT_LSB  20
+
+
+/*
+ * CSR fields (Zicsr). Same precedent as SHAMT/WSHAMT above: new field,
+ * same bit range as an existing one, different kind of value.
+ */
+
+`define CSR_ADDR_SIZE   12   // instr[31:20], zero-extended CSR index (never sign-extended)
+`define CSR_ADDR_MSB    31
+`define CSR_ADDR_LSB    20
+
+`define CSR_UIMM_SIZE   5    // instr[19:15] -- for CSRRWI/SI/CI, a LITERAL zero-extended value,
+`define CSR_UIMM_MSB    19   // not a register-select index (numerically = SRC1's position)
+`define CSR_UIMM_LSB    15
+
+
 /* ------------------------------------------------------------------------- */
 
 
