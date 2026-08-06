@@ -45,7 +45,7 @@ module uart_tx (
      * and sel_i[0] (byte-enable for that same byte) are used -- this is
      * a byte-wide peripheral behind a 64-bit bus, so the rest of these
      * ports' bits are genuinely don't-care by design, same pattern
-     * already used for wb4_sram.sv's/dmem.sv's address ports.
+     * already used for wb4_sram.sv's address ports.
      */
     /* verilator lint_off UNUSEDSIGNAL */
     input  logic [31:0] addr_i,
