@@ -18,6 +18,19 @@ CSR_ASFLAGS = -march=rv64i_zicsr -mabi=lp64 -mno-relax
 #   above) even when linked into this program.
 M_ASFLAGS = -march=rv64im -mabi=lp64 -mno-relax
 
+# priv_test.s uses real CSR mnemonics (csrw/csrr) AND privileged-mode
+#   mnemonics (mret/sret/ecall) -- confirmed empirically (a standalone
+#   assemble-and-objdump check, not assumed) that riscv64-unknown-elf-as
+#   accepts mret/sret/ecall/wfi/sfence.vma under the SAME -march=rv64i_zicsr
+#   flag CSR_ASFLAGS above already uses for plain CSR instructions; no
+#   separate "privileged" extension letter is needed by this toolchain.
+#   Same value as CSR_ASFLAGS, kept as its own named variable anyway
+#   (matching M_ASFLAGS's own precedent of a distinctly-named flag set per
+#   program) so this target's requirements are self-documenting and don't
+#   silently start diverging from CSR_ASFLAGS's if that ever changes for
+#   Zicsr-only reasons.
+PRIV_ASFLAGS = -march=rv64i_zicsr -mabi=lp64 -mno-relax
+
 all:
 	riscv64-unknown-elf-as $(ASFLAGS) crt0.s -o crt0.o
 	riscv64-unknown-elf-gcc $(CFLAGS) -c hello.c -o hello.o
@@ -65,3 +78,18 @@ m_test:
 	riscv64-unknown-elf-ld -T link.ld -o m_test.elf crt0.o m_test.o
 	riscv64-unknown-elf-objdump -d m_test.elf
 	riscv64-unknown-elf-objcopy -O verilog -j .text -j .rodata -j .data --verilog-data-width=8 m_test.elf m_test.hex
+
+# Pillar C of the U/S/M privilege-mode verification-strengthening plan: a
+#   real-toolchain-encoded end-to-end privilege-mode test
+#   (firmware/priv_test.s), linked against the SAME crt0.o/link.ld as the
+#   "all"/csr_test/m_test targets above -- rebuilt here (plain
+#   -march=rv64i, unchanged) rather than assumed to already exist, so this
+#   target works standalone. Produces a DISTINCT priv_test.hex --
+#   crt0.hex/csr_test.hex/m_test.hex and the "all" target's hello-world
+#   pipeline are untouched either way.
+priv_test:
+	riscv64-unknown-elf-as $(ASFLAGS) crt0.s -o crt0.o
+	riscv64-unknown-elf-as $(PRIV_ASFLAGS) priv_test.s -o priv_test.o
+	riscv64-unknown-elf-ld -T link.ld -o priv_test.elf crt0.o priv_test.o
+	riscv64-unknown-elf-objdump -d priv_test.elf
+	riscv64-unknown-elf-objcopy -O verilog -j .text -j .rodata -j .data --verilog-data-width=8 priv_test.elf priv_test.hex
