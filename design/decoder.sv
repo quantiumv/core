@@ -746,6 +746,87 @@ module decoder (
         /* --------------------------------------------------------- */
 
 
+        /*
+         * M extension (integer multiply/divide). All 13 are R-type, same
+         * as the base ALU reg-reg ops and the *W family above -- OUTPUT_R_
+         * TYPE_INSTR is fully generic across opcode/funct7 (it only routes
+         * rs1/rs2/rd, none of which are opcode-specific), so it's reused
+         * here unchanged, exactly like it already is for ADDW/SUBW/etc.
+         * DIV/DIVU/REM/REMU (and their W variants) execute via
+         * design/divider.sv, not the ALU -- but decode doesn't care where
+         * an instruction executes, only what it is, so they get ordinary
+         * decode arms here like everything else.
+         */
+
+
+        else if (`IS_INSTR(i_instruction, MUL)) begin: mul_instr
+            `OUTPUT_R_TYPE_INSTR(MUL);
+        end: mul_instr
+
+
+        else if (`IS_INSTR(i_instruction, MULH)) begin: mulh_instr
+            `OUTPUT_R_TYPE_INSTR(MULH);
+        end: mulh_instr
+
+
+        else if (`IS_INSTR(i_instruction, MULHSU)) begin: mulhsu_instr
+            `OUTPUT_R_TYPE_INSTR(MULHSU);
+        end: mulhsu_instr
+
+
+        else if (`IS_INSTR(i_instruction, MULHU)) begin: mulhu_instr
+            `OUTPUT_R_TYPE_INSTR(MULHU);
+        end: mulhu_instr
+
+
+        else if (`IS_INSTR(i_instruction, DIV)) begin: div_instr
+            `OUTPUT_R_TYPE_INSTR(DIV);
+        end: div_instr
+
+
+        else if (`IS_INSTR(i_instruction, DIVU)) begin: divu_instr
+            `OUTPUT_R_TYPE_INSTR(DIVU);
+        end: divu_instr
+
+
+        else if (`IS_INSTR(i_instruction, REM)) begin: rem_instr
+            `OUTPUT_R_TYPE_INSTR(REM);
+        end: rem_instr
+
+
+        else if (`IS_INSTR(i_instruction, REMU)) begin: remu_instr
+            `OUTPUT_R_TYPE_INSTR(REMU);
+        end: remu_instr
+
+
+        else if (`IS_INSTR(i_instruction, MULW)) begin: mulw_instr
+            `OUTPUT_R_TYPE_INSTR(MULW);
+        end: mulw_instr
+
+
+        else if (`IS_INSTR(i_instruction, DIVW)) begin: divw_instr
+            `OUTPUT_R_TYPE_INSTR(DIVW);
+        end: divw_instr
+
+
+        else if (`IS_INSTR(i_instruction, DIVUW)) begin: divuw_instr
+            `OUTPUT_R_TYPE_INSTR(DIVUW);
+        end: divuw_instr
+
+
+        else if (`IS_INSTR(i_instruction, REMW)) begin: remw_instr
+            `OUTPUT_R_TYPE_INSTR(REMW);
+        end: remw_instr
+
+
+        else if (`IS_INSTR(i_instruction, REMUW)) begin: remuw_instr
+            `OUTPUT_R_TYPE_INSTR(REMUW);
+        end: remuw_instr
+
+
+        /* --------------------------------------------------------- */
+
+
         /* No instruction matched. */
 
         else begin: invalid_instr
