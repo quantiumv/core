@@ -171,6 +171,11 @@
 `define INSTR_CODE_REMW     1000110   // 70
 `define INSTR_CODE_REMUW    1000111   // 71
 
+`define INSTR_CODE_MRET         1001000   // 72
+`define INSTR_CODE_SRET         1001001   // 73
+`define INSTR_CODE_WFI          1001010   // 74
+`define INSTR_CODE_SFENCE_VMA   1001011   // 75
+
 
 /* ------------------------------------------------------------------------- */
 
