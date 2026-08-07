@@ -28,7 +28,7 @@
  *   Loads/stores:               LH, LHU, LWU, SH
  *   Branch:                     BGEU
  *   RV64 word-ops:              SUBW, SLLW, SLLIW, SRLIW, SRAIW
- *   Control:                    FENCE, ECALL
+ *   Control:                    FENCE
  *
  * (ADDI/ADD/SUB/SLTI/SLLI/SRLI/SRAI/LB/LBU/LW/LD/SB/SW/SD/BEQ/BNE/BLT/
  * BLTU/BGE/JAL/JALR/LUI/AUIPC/ADDIW/ADDW/SRAW/EBREAK are all already
@@ -61,11 +61,18 @@
  *     SUBW must truncate-then-resign to a NEGATIVE 64-bit value while
  *     SUB stays positive -- the same "does NOT truncate" contrast
  *     core_rv64_word_ops_tb.sv already uses for ADDW vs ADD.
- *   - FENCE/ECALL are both spec-legal no-ops on this core (no other bus
- *     master, no traps implemented) -- checked by bracketing each with
- *     a marker register write before and after, proving execution falls
- *     through to the next instruction rather than stalling, corrupting
- *     a register, or (for ECALL) trapping into nothing.
+ *   - FENCE is a spec-legal no-op on this core (no other bus master) --
+ *     checked by bracketing it with a marker register write before and
+ *     after, proving execution falls through to the next instruction
+ *     rather than stalling or corrupting a register. ECALL used to get
+ *     the same bracketed-no-op treatment here, back when it was a
+ *     literal fall-through -- as of the U/S/M privilege-mode milestone
+ *     it's a real synchronous trap instead, so exercising it here (this
+ *     program sets up no mtvec at all) would just infinite-loop back to
+ *     address 0. ECALL's real semantics are now exhaustively covered by
+ *     testbench/core_priv_tb.sv instead; this file keeps the same
+ *     instruction slot as a second, genuine `addi x0,x0,0` NOP so every
+ *     downstream address stays unchanged.
  *
  * Register allocation: x1-x23 each hold exactly one independently-
  * checked final result and are never written again after their
@@ -149,11 +156,21 @@ module core_isa_coverage_gap_tb;
          * 44   0xB0  addi x22, x0, 111             x22 = 111 (fence marker)
          * 45   0xB4  fence                          no-op (pred/succ deliberately nonzero)
          * 46   0xB8  addi x22, x22, 1              x22 = 112  [CHECK: FENCE] -- proves fence fell through
-         * 47   0xBC  addi x23, x0, 222             x23 = 222 (ecall marker)
-         * 48   0xC0  ecall                          no-op on this core
-         * 49   0xC4  addi x23, x23, 1              x23 = 223  [CHECK: ECALL] -- proves ecall fell through
-         * 50   0xC8  sltiu x24, x26, 10            x24 = 0    [CHECK: SLTIU] (unsigned: huge < 10)
-         * 51   0xCC  ebreak
+         * 47   0xB8  addi x23, x0, 222             x23 = 222 (no-op marker)
+         * 48   0xBC  addi x0, x0, 0                 plain NOP (formerly ecall -- see header comment)
+         * 49   0xC0  addi x23, x23, 1              x23 = 223  [CHECK: NOP fallthrough] -- second no-op bracket, distinct from FENCE's own
+         * 50   0xC4  addi x0, x0, 0                 plain NOP (was a stray, always-fetched 32'h0 padding word -- see its own comment below)
+         * 51   0xC8  sltiu x24, x26, 10            x24 = 0    [CHECK: SLTIU] (unsigned: huge < 10)
+         * 52   0xCC  ebreak
+         *
+         * (Note: addresses in this trailing section, idx43 onward, were
+         * previously off by one 4-byte slot in this table relative to
+         * the actual memory[] placement below -- a pre-existing,
+         * purely-cosmetic transcription slip that never mattered while
+         * every comment-adjacent instruction was still correctly
+         * identified by name. Corrected here while fixing the real bug
+         * above; not re-audited further back in the table, since
+         * nothing before idx43 was touched by this fix.)
          */
         dut.sram0.memory[0]  = {encode_i(32'sd166, 5'd0, 3'b000, 5'd25, `OPC_OP_IMM),
                                  encode_i(32'sd202, 5'd0, 3'b000, 5'd24, `OPC_OP_IMM)};
@@ -201,9 +218,15 @@ module core_isa_coverage_gap_tb;
                                  encode_shift32w(7'b0100000, 5'd4, 5'd30, 3'b101, 5'd21, `OPC_OP_IMM_32)};
         dut.sram0.memory[22] = {encode_i(32'sd1, 5'd22, 3'b000, 5'd22, `OPC_OP_IMM),
                                  encode_i(32'h000000FF, 5'd0, 3'b000, 5'd0, `OPC_FENCE)};
-        dut.sram0.memory[23] = {encode_i(32'sd0, 5'd0, 3'b000, 5'd0, `OPC_SYSTEM), // ecall
+        dut.sram0.memory[23] = {encode_i(32'sd0, 5'd0, 3'b000, 5'd0, `OPC_OP_IMM), // addi x0,x0,0 (plain NOP -- formerly ecall, see header comment)
                                  encode_i(32'sd222, 5'd0, 3'b000, 5'd23, `OPC_OP_IMM)};
-        dut.sram0.memory[24] = {32'h0, // never fetched (idx50 halts first)
+        dut.sram0.memory[24] = {encode_i(32'sd0, 5'd0, 3'b000, 5'd0, `OPC_OP_IMM), // addi x0,x0,0 (plain NOP -- was a stray 32'h0 padding word;
+                                                                                    // genuinely fetched and executed every run, tolerated
+                                                                                    // silently before only because an unrecognized encoding
+                                                                                    // was itself a no-op pre-privilege-mode-milestone -- now
+                                                                                    // that illegal-instruction trapping is real, 32'h0 here
+                                                                                    // would trap to mtvec=0 (never set by this program) and
+                                                                                    // infinite-loop back to the start)
                                  encode_i(32'sd1, 5'd23, 3'b000, 5'd23, `OPC_OP_IMM)};
         dut.sram0.memory[25] = {{11'b0, 1'b1, 13'b0, `OPC_SYSTEM}, // idx51: ebreak
                                  encode_i(32'sd10, 5'd26, 3'b011, 5'd24, `OPC_OP_IMM)}; // idx50: sltiu x24,x26,10 -- x26 (=-5) and x24 (SLT/SLTU's old rs2) are both long-dead by here, safe to reuse
@@ -236,7 +259,7 @@ module core_isa_coverage_gap_tb;
         check("SRLIW logical-shifts then resigns", dut.core0.regfile0.gp_registers[20], 64'h0FFFFFFF);
         check("SRAIW arithmetic-shifts then resigns", dut.core0.regfile0.gp_registers[21], 64'hFFFFFFFFF8000000);
         check("FENCE fell through (no stall/corruption)", dut.core0.regfile0.gp_registers[22], 64'd112);
-        check("ECALL fell through (no trap/hang)", dut.core0.regfile0.gp_registers[23], 64'd223);
+        check("plain NOP fell through (no stall/corruption)", dut.core0.regfile0.gp_registers[23], 64'd223);
         check("core halted (ebreak reached)", {63'b0, dut.core0.halted}, 64'd1);
 
         $display("");
