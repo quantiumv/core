@@ -12,7 +12,7 @@
 
 
 /* Width of the codes. */
-`define INSTR_CODE_SIZE 6
+`define INSTR_CODE_SIZE 7
 
 /* Code for signifying invalid instruction. */
 `define INSTR_CODE_INVALID 000000
@@ -148,6 +148,28 @@
 `define INSTR_CODE_CSRRWI   111000   // 56
 `define INSTR_CODE_CSRRSI   111001   // 57
 `define INSTR_CODE_CSRRCI   111010   // 58
+
+
+/* ------------------------------------------------------------------------- */
+
+
+/* M extension (integer multiply/divide) instructions. */
+
+`define INSTR_CODE_MUL      0111011   // 59
+`define INSTR_CODE_MULH     0111100   // 60
+`define INSTR_CODE_MULHSU   0111101   // 61
+`define INSTR_CODE_MULHU    0111110   // 62
+`define INSTR_CODE_MULW     0111111   // 63
+
+`define INSTR_CODE_DIV      1000000   // 64
+`define INSTR_CODE_DIVU     1000001   // 65
+`define INSTR_CODE_REM      1000010   // 66
+`define INSTR_CODE_REMU     1000011   // 67
+
+`define INSTR_CODE_DIVW     1000100   // 68
+`define INSTR_CODE_DIVUW    1000101   // 69
+`define INSTR_CODE_REMW     1000110   // 70
+`define INSTR_CODE_REMUW    1000111   // 71
 
 
 /* ------------------------------------------------------------------------- */
