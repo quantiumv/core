@@ -14,8 +14,16 @@
  * Testbench: csr_file
  *
  * Standalone, drives csr_file directly -- no core involved. Needs a clock
- * (mscratch_q/mcycle_q/minstret_q are all synchronous) and a reset (all
- * three flip-flops zero on i_rst, unlike register_file.sv's gp_registers).
+ * (every flip-flop in the DUT is synchronous) and a reset (everything
+ * zeros on i_rst, unlike register_file.sv's gp_registers).
+ *
+ * As of the U/S/M privilege-mode milestone, this also directly drives the
+ * trap-entry/MRET/SRET side channel (i_trap_taken/i_mret_taken/etc.) --
+ * core.sv is the only other place these ports are ever driven, so this
+ * file is the sole standalone proof that csr_file.sv's own atomic-update
+ * logic (mstatus_q's four writers, mepc/sepc/mcause/scause/mtval/stval's
+ * two writers each) is correct, independent of whether core.sv's own
+ * classification wires (is_illegal_instr, trap_to_s, etc.) are right.
  */
 module csr_file_tb;
 
@@ -29,6 +37,19 @@ module csr_file_tb;
     logic [(`WORD_SIZE - 1):0]     csr_wdata;
     logic                          instr_retired;
 
+    logic [1:0]                    current_priv;
+    logic                          trap_taken;
+    logic [(`WORD_SIZE - 1):0]     trap_cause;
+    logic [(`WORD_SIZE - 1):0]     trap_val;
+    logic [(`WORD_SIZE - 1):0]     trap_pc;
+    logic                          trap_to_s;
+    logic                          mret_taken;
+    logic                          sret_taken;
+
+    logic [(`WORD_SIZE - 1):0]     mtvec_w, stvec_w, mepc_w, sepc_w, medeleg_w;
+    logic [1:0]                    mstatus_mpp_w;
+    logic                          mstatus_spp_w;
+
     csr_file dut (
         .i_clk(clk),
         .i_rst(rst),
@@ -36,7 +57,24 @@ module csr_file_tb;
         .o_csr_rdata(csr_rdata),
         .i_csr_we(csr_we),
         .i_csr_wdata(csr_wdata),
-        .i_instr_retired(instr_retired)
+        .i_instr_retired(instr_retired),
+
+        .i_current_priv(current_priv),
+        .i_trap_taken(trap_taken),
+        .i_trap_cause(trap_cause),
+        .i_trap_val(trap_val),
+        .i_trap_pc(trap_pc),
+        .i_trap_to_s(trap_to_s),
+        .i_mret_taken(mret_taken),
+        .i_sret_taken(sret_taken),
+
+        .o_mtvec(mtvec_w),
+        .o_stvec(stvec_w),
+        .o_mepc(mepc_w),
+        .o_sepc(sepc_w),
+        .o_medeleg(medeleg_w),
+        .o_mstatus_mpp(mstatus_mpp_w),
+        .o_mstatus_spp(mstatus_spp_w)
     );
 
     /* Local mirrors of csr_file.sv's address map -- this testbench drives
@@ -53,6 +91,51 @@ module csr_file_tb;
     localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_UNMAPPED  = 12'h000;
 
     localparam logic [(`WORD_SIZE - 1):0] MISA_VALUE = 64'h8000_0000_0000_0100;
+
+    /* U/S/M privilege-mode milestone additions -- independently
+     * transcribed from the spec (not read from csr_file.sv's own
+     * internals), same "don't test against your own implementation"
+     * discipline this project has used throughout. */
+    localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_SSTATUS    = 12'h100;
+    localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_SIE        = 12'h104;
+    localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_STVEC      = 12'h105;
+    localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_SCOUNTEREN = 12'h106;
+    localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_SSCRATCH   = 12'h140;
+    localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_SEPC       = 12'h141;
+    localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_SCAUSE     = 12'h142;
+    localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_STVAL      = 12'h143;
+    localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_SIP        = 12'h144;
+    localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_SATP       = 12'h180;
+    localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_MSTATUS    = 12'h300;
+    localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_MEDELEG    = 12'h302;
+    localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_MIDELEG    = 12'h303;
+    localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_MIE        = 12'h304;
+    localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_MTVEC      = 12'h305;
+    localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_MCOUNTEREN = 12'h306;
+    localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_MEPC       = 12'h341;
+    localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_MCAUSE     = 12'h342;
+    localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_MTVAL      = 12'h343;
+    localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_MIP        = 12'h344;
+
+    /* mstatus bit positions, independently transcribed from the spec. */
+    localparam int SIE_BIT=1, MIE_BIT=3, SPIE_BIT=5, MPIE_BIT=7, SPP_BIT=8;
+    localparam int MPP_LSB=11, MPP_MSB=12;
+    localparam int MPRV_BIT=17, SUM_BIT=18, MXR_BIT=19, TVM_BIT=20, TW_BIT=21, TSR_BIT=22;
+    localparam logic [(`WORD_SIZE-1):0] UXL_FIXED = (`WORD_SIZE'(2) << 32);
+    localparam logic [(`WORD_SIZE-1):0] SXL_FIXED = (`WORD_SIZE'(2) << 34);
+    /* Every real mstatus bit set to 1 -- used both as an all-1s write
+     * (to prove ONLY these bits stick) and to build expected values. */
+    localparam logic [(`WORD_SIZE-1):0] MSTATUS_ALL_REAL_BITS =
+        (`WORD_SIZE'(1) << SIE_BIT) | (`WORD_SIZE'(1) << MIE_BIT) |
+        (`WORD_SIZE'(1) << SPIE_BIT) | (`WORD_SIZE'(1) << MPIE_BIT) |
+        (`WORD_SIZE'(1) << SPP_BIT) |
+        (`WORD_SIZE'(3) << MPP_LSB) |
+        (`WORD_SIZE'(1) << MPRV_BIT) | (`WORD_SIZE'(1) << SUM_BIT) | (`WORD_SIZE'(1) << MXR_BIT) |
+        (`WORD_SIZE'(1) << TVM_BIT) | (`WORD_SIZE'(1) << TW_BIT) | (`WORD_SIZE'(1) << TSR_BIT);
+    /* sstatus's own visible subset, independently transcribed. */
+    localparam logic [(`WORD_SIZE-1):0] SSTATUS_VISIBLE_BITS =
+        (`WORD_SIZE'(1) << SIE_BIT) | (`WORD_SIZE'(1) << SPIE_BIT) |
+        (`WORD_SIZE'(1) << SPP_BIT) | (`WORD_SIZE'(1) << SUM_BIT) | (`WORD_SIZE'(1) << MXR_BIT);
 
     int pass_count = 0;
     int fail_count = 0;
@@ -88,6 +171,8 @@ module csr_file_tb;
 
     initial begin
         csr_addr = 0; csr_we = 0; csr_wdata = 0; instr_retired = 0;
+        current_priv = 0; trap_taken = 0; trap_cause = 0; trap_val = 0; trap_pc = 0; trap_to_s = 0;
+        mret_taken = 0; sret_taken = 0;
 
         @(posedge clk); #1;
         @(posedge clk); #1;
@@ -205,6 +290,229 @@ module csr_file_tb;
             read_csr(CSR_ADDR_MINSTRET, minstret_after);
             check("direct write to minstret is ignored (i_instr_retired stayed low)", minstret_after, rdata);
         end
+
+        /*
+         * ===================================================================
+         * U/S/M privilege-mode milestone additions, below.
+         * ===================================================================
+         */
+
+        /*
+         * 9. Post-reset: every new backed CSR reads its correct reset
+         * value. mstatus/sstatus read the UXL/SXL WARL-fixed pattern even
+         * though their underlying storage is all-zero (the fixed bits are
+         * OR'd in on every read, not stored) -- everything else reads a
+         * plain 0.
+         */
+        read_csr(CSR_ADDR_MSTATUS, rdata);
+        check("post-reset mstatus reads UXL/SXL fixed pattern only", rdata, UXL_FIXED | SXL_FIXED);
+        read_csr(CSR_ADDR_SSTATUS, rdata);
+        check("post-reset sstatus reads UXL fixed pattern only", rdata, UXL_FIXED);
+        read_csr(CSR_ADDR_MEDELEG, rdata);  check("post-reset medeleg reads 0", rdata, `WORD_SIZE'(0));
+        read_csr(CSR_ADDR_MIDELEG, rdata);  check("post-reset mideleg reads 0", rdata, `WORD_SIZE'(0));
+        read_csr(CSR_ADDR_MIE, rdata);      check("post-reset mie reads 0", rdata, `WORD_SIZE'(0));
+        read_csr(CSR_ADDR_MTVEC, rdata);    check("post-reset mtvec reads 0", rdata, `WORD_SIZE'(0));
+        read_csr(CSR_ADDR_MEPC, rdata);     check("post-reset mepc reads 0", rdata, `WORD_SIZE'(0));
+        read_csr(CSR_ADDR_MCAUSE, rdata);   check("post-reset mcause reads 0", rdata, `WORD_SIZE'(0));
+        read_csr(CSR_ADDR_MTVAL, rdata);    check("post-reset mtval reads 0", rdata, `WORD_SIZE'(0));
+        read_csr(CSR_ADDR_MIP, rdata);      check("post-reset mip reads 0", rdata, `WORD_SIZE'(0));
+        read_csr(CSR_ADDR_STVEC, rdata);    check("post-reset stvec reads 0", rdata, `WORD_SIZE'(0));
+        read_csr(CSR_ADDR_SEPC, rdata);     check("post-reset sepc reads 0", rdata, `WORD_SIZE'(0));
+        read_csr(CSR_ADDR_SCAUSE, rdata);   check("post-reset scause reads 0", rdata, `WORD_SIZE'(0));
+        read_csr(CSR_ADDR_STVAL, rdata);    check("post-reset stval reads 0", rdata, `WORD_SIZE'(0));
+        read_csr(CSR_ADDR_SIE, rdata);      check("post-reset sie reads 0", rdata, `WORD_SIZE'(0));
+        read_csr(CSR_ADDR_SIP, rdata);      check("post-reset sip reads 0", rdata, `WORD_SIZE'(0));
+        read_csr(CSR_ADDR_SATP, rdata);     check("post-reset satp reads 0", rdata, `WORD_SIZE'(0));
+
+        /*
+         * 10. mstatus bit-by-bit round trip: write ALL-ONES (the most
+         * disambiguating input possible -- exercises every bit at once)
+         * and confirm ONLY the real bits stick, everything else (SD/FS/
+         * XS/VS/unimplemented fields) reads back 0 regardless of what was
+         * written, plus the WARL-fixed UXL/SXL pattern.
+         */
+        write_csr(CSR_ADDR_MSTATUS, {`WORD_SIZE{1'b1}});
+        read_csr(CSR_ADDR_MSTATUS, rdata);
+        check("mstatus all-1s write: only real bits stick, plus WARL-fixed UXL/SXL",
+              rdata, MSTATUS_ALL_REAL_BITS | UXL_FIXED | SXL_FIXED);
+
+        /*
+         * 11. sstatus's masked view, both directions:
+         *  (a) mstatus's MIE/MPP (NOT in sstatus's visible set) must not
+         *      leak through a sstatus read, even though they're currently
+         *      set from check 10 above.
+         *  (b) writing sstatus must not disturb mstatus's MIE/MPP/MPRV/
+         *      TVM/TW/TSR (the bits sstatus can't see).
+         */
+        read_csr(CSR_ADDR_SSTATUS, rdata);
+        check("sstatus view: MIE/MPP don't leak through, only the visible subset shows",
+              rdata, SSTATUS_VISIBLE_BITS | UXL_FIXED);
+
+        write_csr(CSR_ADDR_SSTATUS, `WORD_SIZE'(0));  // clear every sstatus-visible bit
+        read_csr(CSR_ADDR_MSTATUS, rdata);
+        check("sstatus write to 0: mstatus's MIE/MPP/MPRV/TVM/TW/TSR survive untouched",
+              rdata,
+              (MSTATUS_ALL_REAL_BITS & ~SSTATUS_VISIBLE_BITS) | UXL_FIXED | SXL_FIXED);
+        read_csr(CSR_ADDR_SSTATUS, rdata);
+        check("sstatus write to 0: sstatus's own visible bits actually cleared",
+              rdata, UXL_FIXED);
+
+        /* Restore mstatus to all-1s for the sie/sip tests below, so SIE/MIE are known-1. */
+        write_csr(CSR_ADDR_MSTATUS, {`WORD_SIZE{1'b1}});
+
+        /*
+         * 12. sie/sip masked-by-mideleg round trip: delegate only bits 1
+         * and 5 (arbitrary, disambiguating choice), write mie directly to
+         * all-1s, then write sie to all-0s -- only the delegated bits
+         * (1,5) should clear; everything else stays 1.
+         */
+        write_csr(CSR_ADDR_MIDELEG, (`WORD_SIZE'(1) << 1) | (`WORD_SIZE'(1) << 5));
+        write_csr(CSR_ADDR_MIE, {`WORD_SIZE{1'b1}});
+        read_csr(CSR_ADDR_SIE, rdata);
+        check("sie read: masked by mideleg, shows only delegated bits", rdata,
+              {`WORD_SIZE{1'b1}} & ((`WORD_SIZE'(1) << 1) | (`WORD_SIZE'(1) << 5)));
+        write_csr(CSR_ADDR_SIE, `WORD_SIZE'(0));
+        read_csr(CSR_ADDR_MIE, rdata);
+        check("sie write to 0: only mideleg-delegated bits (1,5) cleared in mie, rest stay 1",
+              rdata, {`WORD_SIZE{1'b1}} & ~((`WORD_SIZE'(1) << 1) | (`WORD_SIZE'(1) << 5)));
+        /* sip: identical shape, spot-checked once (mip/mie share the same masked-write logic). */
+        write_csr(CSR_ADDR_MIP, {`WORD_SIZE{1'b1}});
+        write_csr(CSR_ADDR_SIP, `WORD_SIZE'(0));
+        read_csr(CSR_ADDR_MIP, rdata);
+        check("sip write to 0: only mideleg-delegated bits cleared in mip, rest stay 1",
+              rdata, {`WORD_SIZE{1'b1}} & ~((`WORD_SIZE'(1) << 1) | (`WORD_SIZE'(1) << 5)));
+        write_csr(CSR_ADDR_MIDELEG, `WORD_SIZE'(0));  // clean up for later sections
+
+        /*
+         * 13. Plain read/write registers -- one round trip each, distinct
+         * per-register values so a copy-paste mistake (writing the wrong
+         * register) would produce a visibly wrong readback.
+         */
+        write_csr(CSR_ADDR_STVEC, 64'h0000_0000_1000_2004);  read_csr(CSR_ADDR_STVEC, rdata);
+        check("stvec round trip", rdata, 64'h0000_0000_1000_2004);
+        write_csr(CSR_ADDR_MTVEC, 64'h0000_0000_2000_3008);  read_csr(CSR_ADDR_MTVEC, rdata);
+        check("mtvec round trip", rdata, 64'h0000_0000_2000_3008);
+        write_csr(CSR_ADDR_MCOUNTEREN, 64'h0000_0000_0000_0007);  read_csr(CSR_ADDR_MCOUNTEREN, rdata);
+        check("mcounteren round trip", rdata, 64'h0000_0000_0000_0007);
+        write_csr(CSR_ADDR_SCOUNTEREN, 64'h0000_0000_0000_0003);  read_csr(CSR_ADDR_SCOUNTEREN, rdata);
+        check("scounteren round trip", rdata, 64'h0000_0000_0000_0003);
+        write_csr(CSR_ADDR_SSCRATCH, 64'hFEED_FACE_BEEF_CAFE);  read_csr(CSR_ADDR_SSCRATCH, rdata);
+        check("sscratch round trip", rdata, 64'hFEED_FACE_BEEF_CAFE);
+        write_csr(CSR_ADDR_SATP, 64'h8000_0000_0004_0000);  read_csr(CSR_ADDR_SATP, rdata);
+        check("satp round trip (real storage, no PTW consumer yet)", rdata, 64'h8000_0000_0004_0000);
+        write_csr(CSR_ADDR_MEDELEG, 64'h0000_0000_0000_B3FF);  read_csr(CSR_ADDR_MEDELEG, rdata);
+        check("medeleg round trip", rdata, 64'h0000_0000_0000_B3FF);
+
+        /*
+         * 14. Trap-entry, M-target: drive the side channel directly (no
+         * core.sv involved), confirm mepc_q/mcause_q/mtval_q AND
+         * mstatus's MPIE/MIE/MPP all update atomically on the same edge
+         * -- and that the S-side fields (SIE/SPIE/SPP) are left alone.
+         *
+         * Setup: mstatus's SIE=1/MIE=1 beforehand (via ordinary write),
+         * so pushing MIE->MPIE and clearing MIE is a real, observable
+         * 1->0 transition, not a 0->0 coincidence.
+         */
+        write_csr(CSR_ADDR_MSTATUS, (`WORD_SIZE'(1) << SIE_BIT) | (`WORD_SIZE'(1) << MIE_BIT));
+        @(negedge clk);
+        current_priv = 2'b01;  // S -- the mode the trap is taken FROM
+        trap_taken = 1'b1; trap_to_s = 1'b0;  // targets M
+        trap_cause = `WORD_SIZE'(2);          // illegal-instruction
+        trap_val   = 64'hDEAD_BEEF_0000_0001;
+        trap_pc    = 64'h0000_0000_0000_1000;
+        @(posedge clk); #1;
+        trap_taken = 1'b0;
+
+        read_csr(CSR_ADDR_MEPC, rdata);   check("M-target trap: mepc captured", rdata, 64'h0000_0000_0000_1000);
+        read_csr(CSR_ADDR_MCAUSE, rdata); check("M-target trap: mcause captured", rdata, `WORD_SIZE'(2));
+        read_csr(CSR_ADDR_MTVAL, rdata);  check("M-target trap: mtval captured", rdata, 64'hDEAD_BEEF_0000_0001);
+        read_csr(CSR_ADDR_MSTATUS, rdata);
+        check("M-target trap: mstatus MPIE<-old MIE(1), MIE<-0, MPP<-S(01), SIE/SPIE/SPP untouched",
+              rdata,
+              (`WORD_SIZE'(1) << MPIE_BIT)       // MPIE <- old MIE (1)
+            | (`WORD_SIZE'(1) << SIE_BIT)         // SIE: untouched, still 1 from setup
+            | (`WORD_SIZE'(1) << MPP_LSB)         // MPP <- 2'b01 (S)
+            | UXL_FIXED | SXL_FIXED);
+        check("M-target trap: o_mepc output matches", mepc_w, 64'h0000_0000_0000_1000);
+        check("M-target trap: o_mstatus_mpp output matches", {62'b0, mstatus_mpp_w}, `WORD_SIZE'(2'b01));
+
+        /*
+         * 15. Trap-entry, S-target: same shape, different values, and
+         * critically confirms the M-side fields captured in check 14
+         * above (mepc/mcause/mtval/MPIE/MIE/MPP) are UNCHANGED by an
+         * S-target trap -- proves the two target groups are genuinely
+         * independent, not just "happens to also work".
+         */
+        /* A CSR write to mstatus fully replaces every writable bit (per
+         * spec -- not a merge/OR), so MPIE/MPP from check 14 must be
+         * explicitly carried forward here alongside setting SIE=1, or
+         * this setup write would itself wipe them before the S-target
+         * trap even runs, corrupting the very thing this check means to
+         * prove untouched. */
+        write_csr(CSR_ADDR_MSTATUS,
+                  (`WORD_SIZE'(1) << SIE_BIT) | (`WORD_SIZE'(1) << MPIE_BIT) | (`WORD_SIZE'(1) << MPP_LSB));
+        @(negedge clk);
+        current_priv = 2'b00;  // U -- the mode the trap is taken FROM
+        trap_taken = 1'b1; trap_to_s = 1'b1;  // targets S
+        trap_cause = `WORD_SIZE'(8);          // ECALL from U
+        trap_val   = `WORD_SIZE'(0);
+        trap_pc    = 64'h0000_0000_0000_2000;
+        @(posedge clk); #1;
+        trap_taken = 1'b0;
+
+        read_csr(CSR_ADDR_SEPC, rdata);   check("S-target trap: sepc captured", rdata, 64'h0000_0000_0000_2000);
+        read_csr(CSR_ADDR_SCAUSE, rdata); check("S-target trap: scause captured", rdata, `WORD_SIZE'(8));
+        read_csr(CSR_ADDR_STVAL, rdata);  check("S-target trap: stval captured", rdata, `WORD_SIZE'(0));
+        read_csr(CSR_ADDR_MSTATUS, rdata);
+        check("S-target trap: mstatus SPIE<-old SIE(1), SIE<-0, SPP<-U(0), M-side fields from check 14 untouched",
+              rdata,
+              (`WORD_SIZE'(1) << SPIE_BIT)   // SPIE <- old SIE (1)
+            | (`WORD_SIZE'(1) << MPIE_BIT)   // still set from check 14 -- M-target trap's own field
+            | (`WORD_SIZE'(1) << MPP_LSB)    // still MPP=01(S) from check 14
+            | UXL_FIXED | SXL_FIXED);
+        check("S-target trap: o_sepc output matches", sepc_w, 64'h0000_0000_0000_2000);
+        check("S-target trap: o_mstatus_spp output matches (SPP<-U, i.e. 0)", `WORD_SIZE'(mstatus_spp_w), `WORD_SIZE'(0));
+        /* M-side fields genuinely untouched by the S-target trap -- direct regression. */
+        read_csr(CSR_ADDR_MEPC, rdata);   check("S-target trap didn't disturb mepc from check 14", rdata, 64'h0000_0000_0000_1000);
+        read_csr(CSR_ADDR_MCAUSE, rdata); check("S-target trap didn't disturb mcause from check 14", rdata, `WORD_SIZE'(2));
+
+        /*
+         * 16. MRET: restores MIE from MPIE, sets MPIE=1, resets MPP to U
+         * (2'b00) per spec. Current mstatus state entering this check:
+         * MIE=0/MPIE=1/MPP=01(S) from check 14 (S-target trap didn't
+         * touch these), SIE=0/SPIE=1/SPP=0 from check 15.
+         */
+        @(negedge clk);
+        mret_taken = 1'b1;
+        @(posedge clk); #1;
+        mret_taken = 1'b0;
+        read_csr(CSR_ADDR_MSTATUS, rdata);
+        check("mret: MIE<-old MPIE(1), MPIE<-1, MPP<-U(00), S-side fields untouched",
+              rdata,
+              (`WORD_SIZE'(1) << MIE_BIT)    // MIE <- old MPIE (1)
+            | (`WORD_SIZE'(1) << MPIE_BIT)   // MPIE <- 1 per spec
+            | (`WORD_SIZE'(1) << SPIE_BIT)   // untouched, still 1 from check 15
+            | UXL_FIXED | SXL_FIXED);        // MPP is now 00 -- contributes nothing
+        check("mret: o_mstatus_mpp reads back U (00)", `WORD_SIZE'(mstatus_mpp_w), `WORD_SIZE'(0));
+
+        /*
+         * 17. SRET: restores SIE from SPIE, sets SPIE=1, resets SPP to U
+         * per spec. Entering this check: SIE=0/SPIE=1/SPP=0 (check 15,
+         * untouched by mret above).
+         */
+        @(negedge clk);
+        sret_taken = 1'b1;
+        @(posedge clk); #1;
+        sret_taken = 1'b0;
+        read_csr(CSR_ADDR_MSTATUS, rdata);
+        check("sret: SIE<-old SPIE(1), SPIE<-1, SPP<-U(0), M-side fields untouched",
+              rdata,
+              (`WORD_SIZE'(1) << SIE_BIT)    // SIE <- old SPIE (1)
+            | (`WORD_SIZE'(1) << SPIE_BIT)   // SPIE <- 1 per spec
+            | (`WORD_SIZE'(1) << MIE_BIT)    // untouched, still 1 from check 16 (mret)
+            | (`WORD_SIZE'(1) << MPIE_BIT)   // untouched, still 1 from check 16 (mret)
+            | UXL_FIXED | SXL_FIXED);
+        check("sret: o_mstatus_spp reads back U (0)", `WORD_SIZE'(mstatus_spp_w), `WORD_SIZE'(0));
 
         $display("");
         $display("csr_file_tb: %0d passed, %0d failed", pass_count, fail_count);
