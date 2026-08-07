@@ -156,6 +156,46 @@ endfunction
 `define CSR_MCYCLE    12'hB00
 `define CSR_MINSTRET  12'hB02
 
+/*
+ * U/S/M privilege-mode instructions -- MRET/SRET/WFI are each a single
+ * fixed 32-bit pattern (no operand fields at all), so unlike every
+ * encode_* function above there's nothing to assemble -- these are
+ * plain literal-hex defines, not functions, matching
+ * design/defaults/instructions_and_masks.sv's own INSTR_MRET/SRET/WFI
+ * values exactly (independently re-verified by hand against the R-type
+ * field layout, not copy-pasted).
+ */
+`define INSTR_HEX_MRET 32'h30200073
+`define INSTR_HEX_SRET 32'h10200073
+`define INSTR_HEX_WFI  32'h10500073
+
+/* SFENCE.VMA: real rs1/rs2 operands, so this uses encode_r like any
+ * ordinary R-type instruction (funct7=0001001, funct3=000, rd=0 always). */
+`define FUNCT7_SFENCE_VMA 7'b0001001
+
+/* U/S/M privilege-mode CSR addresses backed by design/csr_file.sv, for
+ * readable call sites in testbench/core_priv_tb.sv. */
+`define CSR_SSTATUS    12'h100
+`define CSR_SIE        12'h104
+`define CSR_STVEC      12'h105
+`define CSR_SCOUNTEREN 12'h106
+`define CSR_SSCRATCH   12'h140
+`define CSR_SEPC       12'h141
+`define CSR_SCAUSE     12'h142
+`define CSR_STVAL      12'h143
+`define CSR_SIP        12'h144
+`define CSR_SATP       12'h180
+`define CSR_MSTATUS    12'h300
+`define CSR_MEDELEG    12'h302
+`define CSR_MIDELEG    12'h303
+`define CSR_MIE        12'h304
+`define CSR_MTVEC      12'h305
+`define CSR_MCOUNTEREN 12'h306
+`define CSR_MEPC       12'h341
+`define CSR_MCAUSE     12'h342
+`define CSR_MTVAL      12'h343
+`define CSR_MIP        12'h344
+
 
 /* ------------------------------------------------------------------------- */
 
