@@ -105,6 +105,19 @@ module core (
 
     state_t state;
 
+    /*
+     * Current privilege level (U/S/M privilege-mode milestone). Standard
+     * RISC-V encoding -- bare local enum, no defaults.sv entry, same
+     * precedent as state_t immediately above.
+     */
+    typedef enum logic [1:0] {
+        PRIV_U = 2'b00,
+        PRIV_S = 2'b01,
+        PRIV_M = 2'b11
+    } priv_t;
+
+    priv_t current_priv;
+
     logic [(`WORD_SIZE - 1):0] pc;
     logic [(`WORD_SIZE - 1):0] next_pc;
 
@@ -191,7 +204,27 @@ module core (
      * processes" reason as everywhere else this pattern appears in this
      * file.
      */
-    wire [31:0] fetch_addr = {pc[31:3], 3'b0};
+    /*
+     * fetch_paddr: named indirection point for a future Sv39 MMU stage.
+     * Today a pure passthrough (pc IS the physical address -- no
+     * translation exists yet); when Sv39 lands, only this wire's RHS
+     * needs to change (e.g. to a page-table-walker's translated
+     * output), with no restructuring of the surrounding FSM/bus-driving
+     * logic below. (`instruction`'s pc[2] half-select above is
+     * deliberately left as raw pc -- it's a page-OFFSET bit, always
+     * identity-mapped even under Sv39, so there's nothing for
+     * translation to ever change there.)
+     *
+     * Deliberately WORD_SIZE-wide even though only bits[31:3] are
+     * consumed today (this core's physical address space is 32 bits) --
+     * a real translated address should be able to occupy the full seam
+     * width without a resize, so the unused bits are structural, not an
+     * oversight.
+     */
+    /* verilator lint_off UNUSEDSIGNAL */
+    wire [(`WORD_SIZE - 1):0] fetch_paddr = pc;
+    /* verilator lint_on UNUSEDSIGNAL */
+    wire [31:0] fetch_addr = {fetch_paddr[31:3], 3'b0};
 
     /* --------------------------------------------------------------- *
      * Decode
@@ -416,13 +449,13 @@ module core (
             `INSTR_CODE(BEQ), `INSTR_CODE(BNE), `INSTR_CODE(BLT),
             `INSTR_CODE(BGE), `INSTR_CODE(BLTU), `INSTR_CODE(BGEU),
             `INSTR_CODE(FENCE), `INSTR_CODE(ECALL), `INSTR_CODE(EBREAK),
+            `INSTR_CODE(MRET), `INSTR_CODE(SRET), `INSTR_CODE(WFI), `INSTR_CODE(SFENCE_VMA),
             `INSTR_CODE(INVALID):
                 reg_write_ctrl = 1'b0;
             default:
                 reg_write_ctrl = 1'b1;
         endcase
     end: reg_write_control
-    assign reg_write = reg_write_ctrl && commit_now;
 
     /*
      * Zicsr classification. mem_control/reg_write_control above need no
@@ -464,7 +497,76 @@ module core (
      * has to come after alu0, since its write data is alu_result).
      */
     logic [(`WORD_SIZE - 1):0] csr_rdata;
-    wire csr_we = is_csr && commit_now && !csr_write_suppress;
+
+    /*
+     * Privilege / trap classification (U/S/M privilege-mode milestone).
+     * Forward-declared, same reason csr_rdata is above: medeleg_w is
+     * driven by csr_file0, not instantiated until Execute (needs
+     * alu_result first), but trap_to_s below needs its value now, at
+     * classification time.
+     */
+    logic [(`WORD_SIZE - 1):0] medeleg_w;
+
+    wire is_mret = (decoded_instruction == `INSTR_CODE(MRET));
+    wire is_sret = (decoded_instruction == `INSTR_CODE(SRET));
+
+    /*
+     * Illegal-instruction sources this milestone: a genuinely
+     * unrecognized encoding, OR a CSR access below its address-encoded
+     * minimum privilege (bits[9:8], computed from the ADDRESS,
+     * independent of whether csr_file.sv actually backs it), OR MRET
+     * below M-mode / SRET below S-mode (also illegal-instruction per
+     * spec, not a separate source).
+     *
+     * Deliberately NOT covered: read-only-CSR-write attempts
+     * (bits[11:10]) -- csr_file.sv already silently ignores these
+     * (Zicsr milestone's own decision; core_zicsr_tb.sv's csrrwi-to-
+     * mhartid case depends on that silent-ignore) -- and SFENCE.VMA
+     * from U-mode (spec-should-trap, but decoded as an unconditional
+     * NOP this milestone -- see its own comment in
+     * instructions_and_masks.sv).
+     */
+    wire is_invalid_instr    = (decoded_instruction == `INSTR_CODE(INVALID));
+    wire csr_priv_violation  = is_csr  && (imm_2[9:8] > 2'(current_priv));
+    wire mret_priv_violation = is_mret && (current_priv != PRIV_M);
+    wire sret_priv_violation = is_sret && (current_priv == PRIV_U);
+    wire is_illegal_instr = is_invalid_instr || csr_priv_violation
+                          || mret_priv_violation || sret_priv_violation;
+    wire is_ecall = (decoded_instruction == `INSTR_CODE(ECALL));
+
+    /* Exception codes, per spec's machine-cause table (synchronous only
+     * -- bit 63/Interrupt is always 0, no interrupt source exists yet). */
+    wire [3:0] exc_code = is_illegal_instr                     ? 4'd2  :
+                           (is_ecall && current_priv == PRIV_U) ? 4'd8  :
+                           (is_ecall && current_priv == PRIV_S) ? 4'd9  :
+                           (is_ecall && current_priv == PRIV_M) ? 4'd11 :
+                                                                   4'd0; // don't-care, gated by trap_taken
+
+    wire trap_taken = commit_now && (is_illegal_instr || is_ecall);
+    /* An M-mode trap never delegates, regardless of medeleg -- falls out
+     * naturally here since current_priv==M forces this wire to 0. */
+    wire trap_to_s  = trap_taken && (current_priv != PRIV_M) && medeleg_w[6'(exc_code)];
+    wire [(`WORD_SIZE - 1):0] trap_cause = {60'b0, exc_code};
+    wire [(`WORD_SIZE - 1):0] trap_val = is_illegal_instr
+        ? {{(`WORD_SIZE - `INSTR_SIZE){1'b0}}, instruction} : `WORD_SIZE'(0);
+
+    wire mret_taken = commit_now && is_mret && !mret_priv_violation;
+    wire sret_taken = commit_now && is_sret && !sret_priv_violation;
+
+    wire csr_we = is_csr && commit_now && !csr_write_suppress && !trap_taken;
+
+    /*
+     * reg_write: relocated here (from immediately after reg_write_control
+     * above) since it now depends on trap_taken, which isn't computed
+     * until this classification section -- reg_write itself is already
+     * forward-declared near the top of the Decode section (`logic
+     * reg_write;`), so driving it later in the file is a continuation of
+     * that same established pattern, not a new one. A trapping
+     * instruction never writes rd -- its "normal" semantics (including
+     * whatever reg_write_ctrl computed) are entirely overridden by
+     * trap-entry.
+     */
+    assign reg_write = reg_write_ctrl && commit_now && !trap_taken;
 
     /*
      * M extension: divide. DIV/DIVU/REM/REMU (and their W variants)
@@ -603,6 +705,10 @@ module core (
      * value" for all 6 variants, and alu_result doesn't exist until
      * alu0 above is declared.
      */
+    wire [(`WORD_SIZE - 1):0] mtvec_w, stvec_w, mepc_w, sepc_w;
+    wire [1:0] mstatus_mpp_w;
+    wire mstatus_spp_w;
+
     csr_file csr_file0 (
         .i_clk(clk),
         .i_rst(rst),
@@ -610,7 +716,24 @@ module core (
         .o_csr_rdata(csr_rdata),
         .i_csr_we(csr_we),
         .i_csr_wdata(alu_result),
-        .i_instr_retired(commit_now)
+        .i_instr_retired(commit_now),
+
+        .i_current_priv(current_priv),
+        .i_trap_taken(trap_taken),
+        .i_trap_cause(trap_cause),
+        .i_trap_val(trap_val),
+        .i_trap_pc(pc),
+        .i_trap_to_s(trap_to_s),
+        .i_mret_taken(mret_taken),
+        .i_sret_taken(sret_taken),
+
+        .o_mtvec(mtvec_w),
+        .o_stvec(stvec_w),
+        .o_mepc(mepc_w),
+        .o_sepc(sepc_w),
+        .o_medeleg(medeleg_w),
+        .o_mstatus_mpp(mstatus_mpp_w),
+        .o_mstatus_spp(mstatus_spp_w)
     );
 
     /*
@@ -659,16 +782,28 @@ module core (
                                 (mem_size == 2'b01) ? 8'b0000_0011 :
                                 (mem_size == 2'b10) ? 8'b0000_1111 :
                                                        8'b1111_1111;
-    wire [7:0] mem_sel = mem_size_mask << alu_result[2:0];
+    /*
+     * mem_paddr: named indirection point for a future Sv39 MMU stage,
+     * mirroring fetch_paddr above. All FOUR downstream consumers of
+     * "alu_result as an address" route through this one wire, not just
+     * mem_addr, so there's exactly one RHS to touch when Sv39 lands and
+     * no risk of missing a spot. Deliberately WORD_SIZE-wide even though
+     * only bits[31:0] are consumed today, same reasoning as fetch_paddr
+     * above.
+     */
+    /* verilator lint_off UNUSEDSIGNAL */
+    wire [(`WORD_SIZE - 1):0] mem_paddr = alu_result;
+    /* verilator lint_on UNUSEDSIGNAL */
+    wire [7:0] mem_sel = mem_size_mask << mem_paddr[2:0];
 
     /* Dword-aligned memory address -- same precompute-outside-always_comb reason as fetch_addr above. */
-    wire [31:0] mem_addr = {alu_result[31:3], 3'b0};
+    wire [31:0] mem_addr = {mem_paddr[31:3], 3'b0};
 
     /* Store data, pre-shifted into the byte lane(s) it'll land in. */
-    wire [(`WORD_SIZE - 1):0] mem_wdata = imm_2 << (alu_result[2:0] * 8);
+    wire [(`WORD_SIZE - 1):0] mem_wdata = imm_2 << (mem_paddr[2:0] * 8);
 
     /* Read response, shifted back down so the wanted byte(s) start at bit 0. */
-    wire [(`WORD_SIZE - 1):0] mem_rdata_shifted = wb_dat_i >> (alu_result[2:0] * 8);
+    wire [(`WORD_SIZE - 1):0] mem_rdata_shifted = wb_dat_i >> (mem_paddr[2:0] * 8);
 
     /*
      * Precomputed slices, not inline inside load_format's case statement
@@ -805,7 +940,25 @@ module core (
      */
     wire [(`WORD_SIZE - 1):0] jalr_target = {alu_result[63:1], 1'b0};
 
-    assign next_pc = (is_jal || take_branch) ? pc_rel_target :
+    /*
+     * Trap-vector redirect (U/S/M privilege-mode milestone). Direct mode
+     * only -- mtvec/stvec's MODE bits[1:0] are stored as written (WARL)
+     * but never consulted; Vectored mode's only benefit (cause-indexed
+     * jump) is moot with no interrupt source, and even real
+     * Vectored-mode hardware jumps straight to BASE for synchronous
+     * exceptions regardless, per spec. trap_vector_base's own low 2
+     * bits (the MODE field) are structurally never read below -- masked
+     * off, not an oversight.
+     */
+    /* verilator lint_off UNUSEDSIGNAL */
+    wire [(`WORD_SIZE - 1):0] trap_vector_base = trap_to_s ? stvec_w : mtvec_w;
+    /* verilator lint_on UNUSEDSIGNAL */
+    wire [(`WORD_SIZE - 1):0] trap_vector = {trap_vector_base[63:2], 2'b00};
+
+    assign next_pc = trap_taken              ? trap_vector   :
+                      mret_taken              ? mepc_w        :
+                      sret_taken              ? sepc_w        :
+                      (is_jal || take_branch) ? pc_rel_target :
                       is_jalr                 ? jalr_target   :
                                                  pc_plus_4;
 
@@ -841,6 +994,26 @@ module core (
             pc <= '0;
         else if (commit_now && !is_ebreak)
             pc <= next_pc;
+    end
+
+    /*
+     * current_priv (U/S/M privilege-mode milestone): resets to M per
+     * spec. Updated by whichever of trap-entry/MRET/SRET fired this
+     * edge -- at most one of the three can ever be true on the same
+     * edge (see this file's Hazards reasoning in the project plan: a
+     * trap always overrides an under-privileged MRET/SRET's own
+     * mret_taken/sret_taken, via their !mret_priv_violation/
+     * !sret_priv_violation gating).
+     */
+    always_ff @(posedge clk) begin
+        if (rst)
+            current_priv <= PRIV_M;
+        else if (trap_taken)
+            current_priv <= priv_t'(trap_to_s ? PRIV_S : PRIV_M);
+        else if (mret_taken)
+            current_priv <= priv_t'(mstatus_mpp_w);
+        else if (sret_taken)
+            current_priv <= priv_t'(mstatus_spp_w ? PRIV_S : PRIV_U);
     end
 
 endmodule
