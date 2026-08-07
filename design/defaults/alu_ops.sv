@@ -6,7 +6,7 @@
 /* ------------------------------------------------------------------------- */
 
 
-`define ALU_OPSIZE 4    /* Since we have 14 ops, we need 4 bits. */
+`define ALU_OPSIZE 5    /* Since we have 18 ops, we need 5 bits. */
 
 
 /* ------------------------------------------------------------------------- */
@@ -14,19 +14,19 @@
 
 /* Standard ISA instructions. */
 
-`define ADD     4'b0000     /* Word addition, overflow ignored */
-`define SUB     4'b0001     /* Word subtraction, overflow ignored */
+`define ADD     5'b00000     /* Word addition, overflow ignored */
+`define SUB     5'b00001     /* Word subtraction, overflow ignored */
 
-`define OR      4'b0010     /* Bitwise OR */
-`define AND     4'b0011     /* Bitwise AND */
-`define XOR     4'b0100     /* Bitwise Exclusive OR */
+`define OR      5'b00010     /* Bitwise OR */
+`define AND     5'b00011     /* Bitwise AND */
+`define XOR     5'b00100     /* Bitwise Exclusive OR */
 
-`define SLT     4'b0101     /* Set less than (Y = A < B; signed A, B) */
-`define SLTU    4'b0110     /* Set less than unsigned (unsigned A, B) */
+`define SLT     5'b00101     /* Set less than (Y = A < B; signed A, B) */
+`define SLTU    5'b00110     /* Set less than unsigned (unsigned A, B) */
 
-`define SLL     4'b0111     /* Shift left (logical) */
-`define SRL     4'b1000     /* Shift right (logical) */
-`define SRA     4'b1001     /* Shift right (arithmetic) */
+`define SLL     5'b00111     /* Shift left (logical) */
+`define SRL     5'b01000     /* Shift right (logical) */
+`define SRA     5'b01001     /* Shift right (arithmetic) */
 
 
 /* ------------------------------------------------------------------------- */
@@ -34,7 +34,7 @@
 
 /* Custom instructions. */
 
-`define NOT     4'b1010     /* Bitwise NOT / inversion */
+`define NOT     5'b01010     /* Bitwise NOT / inversion */
 
 
 /* ------------------------------------------------------------------------- */
@@ -54,9 +54,30 @@
  * get their own dedicated ops instead of reusing SLL/SRL/SRA.
  */
 
-`define SLLW    4'b1011     /* Shift left word: (A[31:0] << B[4:0]), sign-extended */
-`define SRLW    4'b1100     /* Shift right word logical: (A[31:0] >> B[4:0]), sign-extended */
-`define SRAW    4'b1101     /* Shift right word arithmetic: (A[31:0] >>> B[4:0]), sign-extended */
+`define SLLW    5'b01011     /* Shift left word: (A[31:0] << B[4:0]), sign-extended */
+`define SRLW    5'b01100     /* Shift right word logical: (A[31:0] >> B[4:0]), sign-extended */
+`define SRAW    5'b01101     /* Shift right word arithmetic: (A[31:0] >>> B[4:0]), sign-extended */
+
+
+/* ------------------------------------------------------------------------- */
+
+
+/*
+ * M extension: multiply. DIV/DIVU/REM/REMU (and their W variants) do NOT
+ * get ops here -- they route through design/divider.sv instead, a separate
+ * multi-cycle module, not the (purely combinational) ALU. MULW needs no
+ * dedicated op either: a 32x32-truncated-to-32 product is bit-identical
+ * regardless of what sits in the operands' upper 32 bits (multiplication
+ * mod 2^32 is invariant to that), so MULW just reuses MUL and gets
+ * truncated+resigned centrally in core.sv, the same way ADDW/SUBW reuse
+ * ADD/SUB -- unlike SLLW/SRLW/SRAW above, which genuinely need their own
+ * ops because a shift is NOT width-agnostic the same way.
+ */
+
+`define MUL     5'b01110   /* Low WORD_SIZE bits of A * B (signedness irrelevant to low bits) */
+`define MULH    5'b01111   /* High WORD_SIZE bits of A * B, both signed */
+`define MULHSU  5'b10000   /* High WORD_SIZE bits of A * B, A signed / B unsigned */
+`define MULHU   5'b10001   /* High WORD_SIZE bits of A * B, both unsigned */
 
 
 /* ------------------------------------------------------------------------- */
