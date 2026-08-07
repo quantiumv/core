@@ -827,6 +827,40 @@ module decoder (
         /* --------------------------------------------------------- */
 
 
+        /*
+         * Privilege-mode instructions (M/S/U). MRET/SRET/WFI take no
+         * operands at all -- same zero-operand shape as ECALL/EBREAK, so
+         * they reuse OUTPUT_NONE_TYPE_INSTR unchanged. SFENCE.VMA takes
+         * real rs1/rs2 operands, so it reuses OUTPUT_R_TYPE_INSTR
+         * mechanically (already proven for the base ALU ops, the *W
+         * family, and all 13 M-extension instructions) -- rd decodes to
+         * 0 harmlessly, since INSTR_MASK_SFENCE_VMA already forces it to
+         * 0 for any encoding that reaches this arm at all.
+         */
+
+        else if (`IS_INSTR(i_instruction, MRET)) begin: mret_instr
+            `OUTPUT_NONE_TYPE_INSTR(MRET);
+        end: mret_instr
+
+
+        else if (`IS_INSTR(i_instruction, SRET)) begin: sret_instr
+            `OUTPUT_NONE_TYPE_INSTR(SRET);
+        end: sret_instr
+
+
+        else if (`IS_INSTR(i_instruction, WFI)) begin: wfi_instr
+            `OUTPUT_NONE_TYPE_INSTR(WFI);
+        end: wfi_instr
+
+
+        else if (`IS_INSTR(i_instruction, SFENCE_VMA)) begin: sfence_vma_instr
+            `OUTPUT_R_TYPE_INSTR(SFENCE_VMA);
+        end: sfence_vma_instr
+
+
+        /* --------------------------------------------------------- */
+
+
         /* No instruction matched. */
 
         else begin: invalid_instr
