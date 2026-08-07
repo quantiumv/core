@@ -128,6 +128,48 @@ module alu_tb;
         operation = `SRAW;
         check("SRAW: 0xFFFFFFFF>>>4=0xFFFFFFFF, result sign-extends negative", 64'hFFFFFFFFFFFFFFFF);
 
+        /*
+         * M extension: MUL. -1 * 2 in full precision is -2, but MUL only
+         * keeps the low WORD_SIZE bits -- this is a genuine wraparound
+         * case (0xFFFF...FFFE), not just a small in-range product, so a
+         * bug that only computes a narrow/saturating product would show up.
+         */
+        operand_A = 64'hFFFFFFFFFFFFFFFF; operand_B = 64'd2;
+        operation = `MUL;
+        check("MUL: -1 * 2, low 64 bits wrap to 0xFFFF...FFFE", 64'hFFFFFFFFFFFFFFFE);
+
+        /*
+         * MULH: INT64_MIN * 2 = -2^64 exactly -- upper 64 bits of that
+         * 128-bit signed value are all 1s (-1), lower 64 are all 0. Picked
+         * specifically because MUL's own result here (the low half) is 0,
+         * so a bug that accidentally read MUL's output instead of MULH's
+         * own upper-half product would be caught immediately (0 vs -1).
+         */
+        operand_A = 64'h8000000000000000; operand_B = 64'd2;
+        operation = `MULH;
+        check("MULH: INT64_MIN * 2, upper 64 bits", 64'hFFFFFFFFFFFFFFFF);
+
+        /*
+         * MULHSU: A=-1 (signed), B=0xFFFF...FFFF treated as UNSIGNED (the
+         * max u64 value, not -1). The decisive case: if B were wrongly
+         * treated as signed too, -1*-1=1 would give upper=0x0 -- wildly
+         * different from the correct unsigned-B answer (upper=0xFFFF...FFFF,
+         * since -1 * (2^64-1) is a huge-magnitude negative number).
+         */
+        operand_A = 64'hFFFFFFFFFFFFFFFF; operand_B = 64'hFFFFFFFFFFFFFFFF;
+        operation = `MULHSU;
+        check("MULHSU: -1 (signed) * max-u64 (unsigned), upper 64 bits", 64'hFFFFFFFFFFFFFFFF);
+
+        /*
+         * MULHU: both operands unsigned max (2^64-1). If this were wrongly
+         * computed as signed*signed instead (both read as -1), the product
+         * would be +1 (upper=0) -- unmistakably different from the correct
+         * unsigned answer.
+         */
+        operand_A = 64'hFFFFFFFFFFFFFFFF; operand_B = 64'hFFFFFFFFFFFFFFFF;
+        operation = `MULHU;
+        check("MULHU: max-u64 * max-u64 (both unsigned), upper 64 bits", 64'hFFFFFFFFFFFFFFFE);
+
         $display("");
         $display("alu_tb: %0d passed, %0d failed", pass_count, fail_count);
         if (fail_count > 0) $display("alu_tb: FAILURES PRESENT");
