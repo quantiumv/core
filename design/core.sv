@@ -114,9 +114,13 @@ module core (
      * a signal declared before its first use, textually -- unlike the
      * rest of this file, mem_phase_needed/wb_master_drive genuinely need
      * to reference them earlier in the file than where they're driven.
+     * div_stall joins them for the same reason -- commit_now/the S_EXEC
+     * transition below need it, but it isn't actually driven until the
+     * "M extension: divide" section, much further down.
      */
     logic is_load, is_store;
     logic halted;
+    logic div_stall;
 
     /*
      * commit_now: the single edge, per instruction, where the
@@ -129,9 +133,21 @@ module core (
      * the one gate that turns "instruction is decoded" into "instruction
      * has retired". Non-memory instructions retire at the end of
      * S_EXEC; loads/stores retire when S_MEM's bus transaction acks.
+     *
+     * div_stall generalizes this same idea to the one OTHER thing that
+     * can now make a non-memory instruction take more than a single
+     * S_EXEC cycle: an in-flight divide (see "M extension: divide"
+     * below, and design/divider.sv's own header -- this is the first
+     * variable-latency non-memory instruction this core has ever had).
+     * div_stall/is_div_family are declared further down, in the M
+     * extension section, but referenced here -- same forward-reference
+     * pattern is_load/is_store already use from this exact spot.
+     * mem_phase_needed and div_stall can never both be true together (a
+     * single decoded instruction can't be both a divide and a load/store),
+     * so there's no ordering/priority to arbitrate between them below.
      */
     wire mem_phase_needed = is_load || is_store;
-    wire commit_now = (state == S_EXEC && !mem_phase_needed)
+    wire commit_now = (state == S_EXEC && !mem_phase_needed && !div_stall)
                     || (state == S_MEM && wb_ack_i);
 
     always_ff @(posedge clk) begin
@@ -140,7 +156,7 @@ module core (
         end else begin
             case (state)
                 S_FETCH: if (wb_ack_i) state <= S_EXEC;
-                S_EXEC:  state <= state_t'(mem_phase_needed ? S_MEM : S_FETCH);
+                S_EXEC:  state <= state_t'(mem_phase_needed ? S_MEM : (div_stall ? S_EXEC : S_FETCH));
                 S_MEM:   if (wb_ack_i) state <= S_FETCH;
                 default: state <= S_FETCH;
             endcase
@@ -275,9 +291,21 @@ module core (
      * correctly-extended 64-bit value; they fall through the write-back
      * mux untouched, same as any ordinary ALU result.
      */
+    /*
+     * MULW joins this same group for the same reason ADDW/SUBW do: a
+     * 32x32-truncated-to-32 product is bit-identical regardless of what's
+     * in the operands' upper 32 bits (multiplication mod 2^32 doesn't
+     * depend on that), so MULW reuses MUL wholesale and just needs the
+     * same central truncate+resign as ADDW/SUBW/ADDIW -- see
+     * design/defaults/alu_ops.sv's own header comment on MUL for the
+     * full argument. DIVW/DIVUW/REMW/REMUW do NOT belong here -- see the
+     * "M extension: divide" section below for why they need their own
+     * (non-ALU) truncation path instead.
+     */
     wire is_word_arith = (decoded_instruction == `INSTR_CODE(ADDW))
                        || (decoded_instruction == `INSTR_CODE(SUBW))
-                       || (decoded_instruction == `INSTR_CODE(ADDIW));
+                       || (decoded_instruction == `INSTR_CODE(ADDIW))
+                       || (decoded_instruction == `INSTR_CODE(MULW));
 
     logic [(`ALU_OPSIZE - 1):0] alu_op;
     always_comb begin: alu_op_sel
@@ -322,6 +350,20 @@ module core (
             `INSTR_CODE(CSRRS), `INSTR_CODE(CSRRSI): alu_op = `OR;
             `INSTR_CODE(CSRRC), `INSTR_CODE(CSRRCI): alu_op = `AND;
             `INSTR_CODE(CSRRW), `INSTR_CODE(CSRRWI): alu_op = `ADD;
+
+            /*
+             * M extension: multiply. MULW reuses MUL (see is_word_arith
+             * above). DIV/DIVU/REM/REMU (and their W variants) get no
+             * arms here at all -- they don't use alu_result any more than
+             * branches/JAL do (see the "M extension: divide" section
+             * below), so they correctly fall through to the same
+             * don't-care default as everything else that bypasses the
+             * ALU.
+             */
+            `INSTR_CODE(MUL), `INSTR_CODE(MULW): alu_op = `MUL;
+            `INSTR_CODE(MULH):                   alu_op = `MULH;
+            `INSTR_CODE(MULHSU):                 alu_op = `MULHSU;
+            `INSTR_CODE(MULHU):                  alu_op = `MULHU;
 
             /*
              * Branches/JAL/FENCE/ECALL/EBREAK/INVALID don't use
@@ -423,6 +465,85 @@ module core (
      */
     logic [(`WORD_SIZE - 1):0] csr_rdata;
     wire csr_we = is_csr && commit_now && !csr_write_suppress;
+
+    /*
+     * M extension: divide. DIV/DIVU/REM/REMU (and their W variants)
+     * execute via design/divider.sv, a separate multi-cycle module, not
+     * the (purely combinational) ALU -- mem_control/reg_write_control
+     * above still need no new arms for these 8 codes, same reasoning as
+     * the CSR classification above: mem_control's default (is_load=0,
+     * is_store=0) and reg_write_control's default (reg_write_ctrl=1'b1)
+     * both already do the right thing.
+     *
+     * The *W variants need their low-32-bit operands correctly sign- or
+     * zero-extended to WORD_SIZE before reaching the divider (matching
+     * DIVW/DIVUW/REMW/REMUW's spec-defined 32-bit-domain semantics) --
+     * unlike MULW, this can't just reuse the 64-bit path and truncate
+     * the RESULT afterward, since division (unlike multiplication mod
+     * 2^n) genuinely depends on the operands' actual magnitude, not just
+     * their low bits. The result side mirrors is_word_arith/
+     * alu_result_w_trunc below: truncate+resign whichever of quotient/
+     * remainder the instruction actually wants.
+     */
+    wire is_div    = (decoded_instruction == `INSTR_CODE(DIV));
+    wire is_divu   = (decoded_instruction == `INSTR_CODE(DIVU));
+    wire is_rem    = (decoded_instruction == `INSTR_CODE(REM));
+    wire is_remu   = (decoded_instruction == `INSTR_CODE(REMU));
+    wire is_divw   = (decoded_instruction == `INSTR_CODE(DIVW));
+    wire is_divuw  = (decoded_instruction == `INSTR_CODE(DIVUW));
+    wire is_remw   = (decoded_instruction == `INSTR_CODE(REMW));
+    wire is_remuw  = (decoded_instruction == `INSTR_CODE(REMUW));
+    wire is_div_family = is_div || is_divu || is_rem || is_remu
+                       || is_divw || is_divuw || is_remw || is_remuw;
+    wire is_div_w_family      = is_divw || is_divuw || is_remw || is_remuw;
+    wire is_div_signed_family = is_div || is_rem || is_divw || is_remw;
+    wire is_div_wants_quotient = is_div || is_divu || is_divw || is_divuw;
+
+    wire [(`WORD_SIZE - 1):0] div_dividend_in =
+        !is_div_w_family      ? imm_1 :
+        is_div_signed_family  ? {{32{imm_1[31]}}, imm_1[31:0]} : {32'b0, imm_1[31:0]};
+    wire [(`WORD_SIZE - 1):0] div_divisor_in =
+        !is_div_w_family      ? imm_2 :
+        is_div_signed_family  ? {{32{imm_2[31]}}, imm_2[31:0]} : {32'b0, imm_2[31:0]};
+
+    /*
+     * i_start deliberately does NOT need its own "have I already pulsed
+     * this" flag -- divider_o_busy rises (registered, one cycle after
+     * i_start) exactly in time to naturally gate this back to 0 on every
+     * subsequent cycle of the same divide, so this is a clean one-cycle
+     * pulse without extra bookkeeping here.
+     *
+     * (state == S_EXEC) is a REQUIRED third condition here, not
+     * belt-and-suspenders -- decoded_instruction (and so is_div_family)
+     * is only meaningful once a fetch has actually settled. During
+     * S_FETCH's transient window, `instruction` still reads whatever the
+     * PREVIOUS fetch's instr_line_q held, indexed by the NEW pc's own
+     * pc[2] bit -- a stale, arbitrary combination that can alias to a
+     * genuine div-family encoding purely by coincidence (found exactly
+     * this way: DIVU's own encoding, still sitting in instr_line_q's low
+     * half, aliased as "the next instruction" for one cycle while its
+     * successor's real fetch was still in flight -- spuriously
+     * retriggering the divider). commit_now and the S_EXEC transition
+     * below don't need this same guard -- both are already nested inside
+     * their own `state == S_EXEC` conditions -- but i_start drives
+     * divider0 directly and unconditionally, so it has to check for
+     * itself.
+     */
+    logic divider_o_busy, divider_o_done;
+    logic [(`WORD_SIZE - 1):0] divider_o_quotient, divider_o_remainder;
+    divider divider0 (
+        .i_clk(clk), .i_rst(rst),
+        .i_start(is_div_family && (state == S_EXEC) && !divider_o_busy && !divider_o_done),
+        .i_dividend(div_dividend_in), .i_divisor(div_divisor_in), .i_signed(is_div_signed_family),
+        .o_busy(divider_o_busy), .o_done(divider_o_done),
+        .o_quotient(divider_o_quotient), .o_remainder(divider_o_remainder)
+    );
+
+    assign div_stall = is_div_family && !divider_o_done;
+    wire [(`WORD_SIZE - 1):0] div_result_raw = is_div_wants_quotient ? divider_o_quotient : divider_o_remainder;
+    wire [(`WORD_SIZE - 1):0] div_result = is_div_w_family
+                                            ? {{32{div_result_raw[31]}}, div_result_raw[31:0]}
+                                            : div_result_raw;
 
     /* --------------------------------------------------------------- *
      * Execute
@@ -664,6 +785,7 @@ module core (
                              (is_jal || is_jalr)   ? pc_plus_4 :
                              is_word_arith         ? alu_result_w_trunc :
                              is_csr                ? csr_rdata :
+                             is_div_family         ? div_result :
                                                       alu_result; // ALU ops, LUI, AUIPC, *W shifts
 
     /* --------------------------------------------------------------- *
