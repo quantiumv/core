@@ -70,6 +70,59 @@ module alu (
     logic [(`L2_WORD_SIZE - 1):0] shamt_masked;
     assign shamt_masked = i_operand_B[(`L2_WORD_SIZE - 1):0];
 
+    /*
+     * M extension: full 2*WORD_SIZE products, computed unconditionally
+     * (same "cheap combinational logic, synthesizes away when unused"
+     * reasoning as the *W intermediates above) -- the first time this file
+     * has ever needed a wider-than-WORD_SIZE intermediate. MUL's low half
+     * and MULHU's high half share product_uu (one unsigned multiply, not
+     * two); MULH needs its own signed*signed product (product_ss).
+     *
+     * MULHSU (signed A * unsigned B) is the fiddly one: naively multiplying
+     * a signed and an unsigned operand in the same expression makes the
+     * WHOLE expression unsigned per Verilog's sign-context rules, which
+     * would be wrong. Fix: sign-extend A to WORD_SIZE+1 bits, zero-extend B
+     * to WORD_SIZE+1 bits (representing it as an always-non-negative signed
+     * value), multiply as two same-width SIGNED values, then take the high
+     * WORD_SIZE bits of that product. The extra bit of headroom beyond
+     * 2*WORD_SIZE doesn't matter -- the true product's magnitude (|A| <
+     * 2^(WORD_SIZE-1) times B < 2^WORD_SIZE) already fits comfortably
+     * within 2*WORD_SIZE bits.
+     */
+    logic [(2*`WORD_SIZE - 1):0] product_uu;
+    /*
+     * product_ss/product_su are only ever read for their UPPER half
+     * (mulh_hi/mulhsu_hi below) -- their lower bits (and, for product_su,
+     * its 2 bits of extra headroom past 2*WORD_SIZE) are genuinely
+     * unused, not an oversight: getting the upper half at all requires
+     * computing the FULL product first, there's no narrower way to do
+     * it. product_uu doesn't need the same treatment -- it serves double
+     * duty (MUL's low half AND MULHU's high half both read it), so all
+     * of it is used.
+     */
+    /* verilator lint_off UNUSEDSIGNAL */
+    logic signed [(2*`WORD_SIZE - 1):0] product_ss;
+    logic signed [`WORD_SIZE:0] mulhsu_a_ext, mulhsu_b_ext;
+    logic signed [(2*`WORD_SIZE + 1):0] product_su;
+    /* verilator lint_on UNUSEDSIGNAL */
+    assign product_uu = i_operand_A * i_operand_B;
+    assign product_ss = $signed(i_operand_A) * $signed(i_operand_B);
+    assign mulhsu_a_ext = {i_operand_A[(`WORD_SIZE - 1)], i_operand_A};
+    assign mulhsu_b_ext = {1'b0, i_operand_B};
+    assign product_su = mulhsu_a_ext * mulhsu_b_ext;
+
+    /*
+     * Low/high WORD_SIZE-bit halves, precomputed via plain assign rather
+     * than as inline bit-selects inside the always_comb case below -- same
+     * "Icarus doesn't fully support constant selects inside always_*
+     * processes" reasoning as w_sll_result_ext etc. above.
+     */
+    logic [(`WORD_SIZE - 1):0] mul_lo, mulh_hi, mulhsu_hi, mulhu_hi;
+    assign mul_lo    = product_uu[(`WORD_SIZE - 1):0];
+    assign mulh_hi   = product_ss[(2*`WORD_SIZE - 1):`WORD_SIZE];
+    assign mulhsu_hi = product_su[(2*`WORD_SIZE - 1):`WORD_SIZE];
+    assign mulhu_hi  = product_uu[(2*`WORD_SIZE - 1):`WORD_SIZE];
+
     always_comb begin: alu_ops
         case (i_operation)
 
@@ -132,6 +185,21 @@ module alu (
         `SLLW:  o_result = w_sll_result_ext;
         `SRLW:  o_result = w_srl_result_ext;
         `SRAW:  o_result = w_sra_result_ext;
+
+        /*
+         * M extension: multiply. MUL's low WORD_SIZE bits are sign-agnostic
+         * (multiplication mod 2^WORD_SIZE doesn't depend on how the
+         * operands' would-be-wider bits are populated), so MULW reuses this
+         * op entirely rather than needing its own -- see core.sv's
+         * is_word_arith for the truncate+resign step that handles MULW.
+         * DIV/DIVU/REM/REMU (and their W variants) have no arms here at
+         * all -- they route through design/divider.sv, a separate
+         * multi-cycle module, not this (purely combinational) ALU.
+         */
+        `MUL:     o_result = mul_lo;
+        `MULH:    o_result = mulh_hi;
+        `MULHSU:  o_result = mulhsu_hi;
+        `MULHU:   o_result = mulhu_hi;
 
         default: o_result = 0;
 
