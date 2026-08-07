@@ -397,4 +397,43 @@
 /* ------------------------------------------------------------------------- */
 
 
+/*
+ * Privilege-mode instructions (M/S/U). Same opcode (SYSTEM, 7'b1110011)
+ * and same funct3=000 as ECALL/EBREAK above, disambiguated by the rest of
+ * the 32-bit encoding instead -- MRET/SRET/WFI take no operands at all
+ * (fixed rs2/rs1/rd, only funct7 varies), so each is just one exact
+ * 32-bit pattern, same shape as ENV_INSTR_CREATE's own family but with no
+ * varying bit left to parameterize; no collision with ECALL/EBREAK
+ * (whose own funct7 field is always 0000000/0000001) since MRET/SRET/
+ * WFI's funct7 fields (0011000/0001000/0001000) never match either.
+ */
+
+`define INSTR_MRET         32'h30200073
+`define INSTR_MASK_MRET    32'hFFFFFFFF
+
+`define INSTR_SRET         32'h10200073
+`define INSTR_MASK_SRET    32'hFFFFFFFF
+
+`define INSTR_WFI          32'h10500073
+`define INSTR_MASK_WFI     32'hFFFFFFFF
+
+/*
+ * SFENCE.VMA: funct7=0001001 fixed, rs2/rs1 real variable operands
+ * (unlike MRET/SRET/WFI above), funct3=000 fixed, and rd MUST be exactly
+ * 00000 -- unlike MUL_INSTR_CREATE's own rd field, which is deliberately
+ * don't-care there since rd is a real destination register for MUL. No
+ * existing *_INSTR_CREATE family fits this shape, so this is a genuinely
+ * new one-off mask/pattern pair rather than a macro (SFENCE.VMA is the
+ * only instruction that needs it). Confirmed collision-free with
+ * ECALL/EBREAK/MRET/SRET/WFI above (all funct3=000 too): their funct7
+ * fields are fixed at 0000000/0011000/0001000, differing from
+ * SFENCE.VMA's 0001001 in the low bit either way.
+ */
+`define INSTR_SFENCE_VMA       {7'b0001001, 10'b0, 3'b000, 5'b0, 7'b1110011}
+`define INSTR_MASK_SFENCE_VMA  {7'b1111111, 10'b0, 3'b111, 5'b11111, 7'b1111111}
+
+
+/* ------------------------------------------------------------------------- */
+
+
 /* End of file. */
