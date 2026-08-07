@@ -340,4 +340,61 @@
 /* ------------------------------------------------------------------------- */
 
 
+/*
+ * M extension (integer multiply/divide). Same opcodes as the base ALU
+ * reg-reg ops (0110011) and the RV64I word-width family (0111011) above,
+ * disambiguated by funct7 = 0000001 -- ALU_INSTRS_MASK/ALU32_INSTRS_MASK
+ * already assert all 7 funct7 bits (their leading 7'b1111111 covers bits
+ * [31:25], the whole field), so they're reused verbatim here; only a new
+ * *_INSTR_CREATE is needed, since ALU_INSTR_CREATE/ALU32_INSTR_CREATE only
+ * parameterize funct7 bit 30 and hardcode the rest to values that can only
+ * ever produce 0000000 or 0100000 -- structurally incapable of 0000001.
+ */
+
+`define MUL_INSTR_CREATE(funct3)     {7'b0000001, 10'b0, funct3, 5'b0, 7'b0110011}
+`define MUL32_INSTR_CREATE(funct3)   {7'b0000001, 10'b0, funct3, 5'b0, 7'b0111011}
+
+`define INSTR_MUL         `MUL_INSTR_CREATE(3'b000)
+`define INSTR_MASK_MUL    `ALU_INSTRS_MASK
+
+`define INSTR_MULH        `MUL_INSTR_CREATE(3'b001)
+`define INSTR_MASK_MULH   `ALU_INSTRS_MASK
+
+`define INSTR_MULHSU      `MUL_INSTR_CREATE(3'b010)
+`define INSTR_MASK_MULHSU `ALU_INSTRS_MASK
+
+`define INSTR_MULHU       `MUL_INSTR_CREATE(3'b011)
+`define INSTR_MASK_MULHU  `ALU_INSTRS_MASK
+
+`define INSTR_DIV         `MUL_INSTR_CREATE(3'b100)
+`define INSTR_MASK_DIV    `ALU_INSTRS_MASK
+
+`define INSTR_DIVU        `MUL_INSTR_CREATE(3'b101)
+`define INSTR_MASK_DIVU   `ALU_INSTRS_MASK
+
+`define INSTR_REM         `MUL_INSTR_CREATE(3'b110)
+`define INSTR_MASK_REM    `ALU_INSTRS_MASK
+
+`define INSTR_REMU        `MUL_INSTR_CREATE(3'b111)
+`define INSTR_MASK_REMU   `ALU_INSTRS_MASK
+
+`define INSTR_MULW        `MUL32_INSTR_CREATE(3'b000)
+`define INSTR_MASK_MULW   `ALU32_INSTRS_MASK
+
+`define INSTR_DIVW        `MUL32_INSTR_CREATE(3'b100)
+`define INSTR_MASK_DIVW   `ALU32_INSTRS_MASK
+
+`define INSTR_DIVUW       `MUL32_INSTR_CREATE(3'b101)
+`define INSTR_MASK_DIVUW  `ALU32_INSTRS_MASK
+
+`define INSTR_REMW        `MUL32_INSTR_CREATE(3'b110)
+`define INSTR_MASK_REMW   `ALU32_INSTRS_MASK
+
+`define INSTR_REMUW       `MUL32_INSTR_CREATE(3'b111)
+`define INSTR_MASK_REMUW  `ALU32_INSTRS_MASK
+
+
+/* ------------------------------------------------------------------------- */
+
+
 /* End of file. */
