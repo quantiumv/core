@@ -1,0 +1,7 @@
+name: quantiumv-rv64im
+compiler_exe: /mnt/c/Users/Potato/Desktop/core/verification/riscv-arch-test/quantiumv-rv64im/gcc-norelax-wrapper.sh # forces -mno-relax; see that file's header comment for why
+objdump_exe: riscv64-unknown-elf-objdump # executable name on $PATH or full path to executable, optional
+ref_model_exe: sail_riscv_sim # executable name on $PATH or full path to executable
+udb_config: quantiumv-rv64im.yaml
+linker_script: link.ld
+dut_include_dir: . # Directory containing DUT specific rvmodel_macros.h header

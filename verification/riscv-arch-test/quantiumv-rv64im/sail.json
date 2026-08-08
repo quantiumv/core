@@ -1,0 +1,191 @@
+// sail.json -- Sail reference-model config matching quantiumv-rv64im.yaml
+// (design/core.sv + design/csr_file.sv on the `dev` branch, 2026-08-08).
+// Started from `sail_riscv_sim --print-default-config` (v0.10) and trimmed
+// to only what this core actually implements. See quantiumv-rv64im.yaml for
+// the UDB-side rationale behind each of these -- kept in sync deliberately.
+{
+  "base": {
+    "xlen": 64,
+    "E": false,
+    "writable_misa": false, // csr_file.sv: misa is a hardwired constant, writes ignored
+    "writable_fiom": true,
+    "writable_hpm_counters": {
+      "len": 32,
+      "value": "0x5" // only mcycle (bit 0) and minstret (bit 2) exist
+    },
+    "xtval_nonzero": {
+      "illegal_instruction": true, // core.sv: trap_val = raw instruction on illegal-instr
+      "software_breakpoint": false,
+      "hardware_breakpoint": false,
+      "load_address_misaligned": false,
+      "load_access_fault": false,
+      "load_page_fault": false,
+      "samo_address_misaligned": false,
+      "samo_access_fault": false,
+      "samo_page_fault": false,
+      "fetch_address_misaligned": false,
+      "fetch_access_fault": false,
+      "fetch_page_fault": false,
+      "software_check": false,
+      "reserved_exceptions": false
+    },
+    "reserved_behavior": {
+      "amocas_odd_register": "AMOCAS_Illegal",
+      "fcsr_rm": "Fcsr_RM_Illegal",
+      "pmpcfg_write_only": "PMP_ClearPermissions",
+      "xenvcfg_cbie": "Xenvcfg_ClearPermissions",
+      "rv32zdinx_odd_register": "Zdinx_Illegal"
+    }
+  },
+  "memory": {
+    "pmp": {
+      "grain": 0,
+      "count": 0, // no PMP
+      "usable_count": 0,
+      "tor_supported": false,
+      "na4_supported": false,
+      "napot_supported": false
+    },
+    "misaligned": {
+      "supported": false, // no misaligned-access exception exists in this core (known gap, see UDB config note)
+      "byte_by_byte": false,
+      "order_decreasing": false,
+      "allowed_within_exp": 0
+    },
+    "translation": {
+      "dirty_update": false
+    },
+    "dtb_address": {
+      "len": 64,
+      "value": "0x1000"
+    },
+    "regions": [
+      // Single flat RAM at address 0, matching wb4_sram.sv (every testbench
+      // in this repo assumes program+data start at 0) and link.ld's `. = 0x0`.
+      // 4 MiB is generous headroom for a self-checking ACT ELF.
+      {
+        "base": {
+          "len": 64,
+          "value": "0x0"
+        },
+        "size": {
+          "len": 64,
+          "value": "0x400000"
+        },
+        "attributes": {
+          "cacheable": true,
+          "coherent": true,
+          "executable": true,
+          "readable": true,
+          "writable": true,
+          "read_idempotent": true,
+          "write_idempotent": true,
+          "misaligned_fault": "NoFault",
+          "reservability": "RsrvNone",
+          "supports_cbo_zero": false
+        },
+        "include_in_device_tree": true
+      }
+    ]
+  },
+  "platform": {
+    "vendorid": 0,
+    "archid": 0,
+    "impid": 0,
+    "hartid": 0,
+    "cache_block_size_exp": 6,
+    "reservation_set_size_exp": 3,
+    "clint": {
+      "base": 33554432,
+      "size": 786432
+    },
+    "clock_frequency": 1000000000,
+    "instructions_per_tick": 2,
+    "wfi_is_nop": true // matches core.sv: WFI decodes as an unconditional NOP
+  },
+  "extensions": {
+    "M": { "supported": true },
+    "A": { "supported": false },
+    "F": { "supported": false },
+    "D": { "supported": false },
+    "V": { "support_level": "Disabled", "vlen_exp": 8, "elen_exp": 6, "vl_use_ceil": false },
+    "B": { "supported": false },
+    "S": { "supported": true },
+    "U": { "supported": true },
+    "Zibi": { "supported": false },
+    "Zicbom": { "supported": false },
+    "Zicbop": { "supported": false },
+    "Zicboz": { "supported": false },
+    "Zic64b": { "supported": false },
+    "Zicfilp": { "supported": false },
+    "Zicond": { "supported": false },
+    "Zicntr": { "supported": false }, // unprivileged 0xC00-range cycle/time/instret shadows not implemented
+    "Zicsr": { "supported": true },
+    "Zifencei": { "supported": false },
+    "Zihintntl": { "supported": false },
+    "Zihintpause": { "supported": false },
+    "Zihpm": { "supported": false },
+    "Zimop": { "supported": false },
+    "Zmmul": { "supported": false },
+    "Zaamo": { "supported": false },
+    "Zabha": { "supported": false },
+    "Zacas": { "supported": false },
+    "Zalrsc": { "supported": false },
+    "Zawrs": { "supported": false, "nto": { "is_nop": false }, "sto": { "is_nop": false } },
+    "Zfa": { "supported": false },
+    "Zfbfmin": { "supported": false },
+    "Zfh": { "supported": false },
+    "Zfhmin": { "supported": false },
+    "Zfinx": { "supported": false },
+    "Zdinx": { "supported": false },
+    "Zca": { "supported": false },
+    "Zcf": { "supported": false },
+    "Zcd": { "supported": false },
+    "Zcb": { "supported": false },
+    "Zcmop": { "supported": false },
+    "Zba": { "supported": false },
+    "Zbb": { "supported": false },
+    "Zbs": { "supported": false },
+    "Zbc": { "supported": false },
+    "Zbkb": { "supported": false },
+    "Zbkc": { "supported": false },
+    "Zbkx": { "supported": false },
+    "Zknd": { "supported": false },
+    "Zkne": { "supported": false },
+    "Zknh": { "supported": false },
+    "Zkr": { "supported": false, "sseed_reset_value": false, "useed_reset_value": false, "sseed_read_only_zero": false, "useed_read_only_zero": false },
+    "Zksed": { "supported": false },
+    "Zksh": { "supported": false },
+    "Zkt": { "supported": false },
+    "Zhinx": { "supported": false },
+    "Zhinxmin": { "supported": false },
+    "Zvabd": { "supported": false },
+    "Zvfbfmin": { "supported": false },
+    "Zvfbfwma": { "supported": false },
+    "Zvfh": { "supported": false },
+    "Zvfhmin": { "supported": false },
+    "Zvbb": { "supported": false },
+    "Zvbc": { "supported": false },
+    "Zvkb": { "supported": false },
+    "Zvkg": { "supported": false },
+    "Zvkned": { "supported": false },
+    "Zvknha": { "supported": false },
+    "Zvknhb": { "supported": false },
+    "Zvksed": { "supported": false },
+    "Zvksh": { "supported": false },
+    "Zvkt": { "supported": false },
+    "Sscofpmf": { "supported": false },
+    "Sstc": { "supported": false },
+    "Sstvala": { "supported": false },
+    "Svinval": { "supported": false },
+    "Svrsw60t59b": { "supported": false },
+    "Smcntrpmf": { "supported": false },
+    "Svbare": { "supported": true, "sfence_vma_illegal_if_svbare_only": false }, // core.sv: SFENCE.VMA is an unconditional NOP, never illegal (documented deferral to the Sv39 milestone)
+    "Sv32": { "supported": false },
+    "Sv39": { "supported": false },
+    "Sv48": { "supported": false },
+    "Sv57": { "supported": false },
+    "Stateen": { "Smstateen": { "supported": false }, "Ssstateen": { "supported": false }, "C_readonly_zero": true, "SE0_readonly_zero": false },
+    "Ssqosid": { "supported": false, "rcid_length": 12, "mcid_length": 12 }
+  }
+}
