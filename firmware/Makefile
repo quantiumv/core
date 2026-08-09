@@ -31,6 +31,12 @@ M_ASFLAGS = -march=rv64im -mabi=lp64 -mno-relax
 #   Zicsr-only reasons.
 PRIV_ASFLAGS = -march=rv64i_zicsr -mabi=lp64 -mno-relax
 
+# a_test.s uses real A-extension mnemonics (lr.w/sc.w/amoadd.d/...), which
+#   plain rv64i rejects ("unrecognized opcode") -- crt0.s itself has no
+#   A-extension instructions, so it stays plain -march=rv64i (ASFLAGS
+#   above) even when linked into this program.
+A_ASFLAGS = -march=rv64ima -mabi=lp64 -mno-relax
+
 all:
 	riscv64-unknown-elf-as $(ASFLAGS) crt0.s -o crt0.o
 	riscv64-unknown-elf-gcc $(CFLAGS) -c hello.c -o hello.o
@@ -93,3 +99,21 @@ priv_test:
 	riscv64-unknown-elf-ld -T link.ld -o priv_test.elf crt0.o priv_test.o
 	riscv64-unknown-elf-objdump -d priv_test.elf
 	riscv64-unknown-elf-objcopy -O verilog -j .text -j .rodata -j .data --verilog-data-width=8 priv_test.elf priv_test.hex
+
+# Pillar C of the A-extension verification plan: a real-toolchain-encoded
+#   end-to-end A-extension (atomics) test (firmware/a_test.s), linked
+#   against the SAME crt0.o/link.ld as the "all"/csr_test/m_test/priv_test
+#   targets above -- rebuilt here (plain -march=rv64i, unchanged) rather
+#   than assumed to already exist, so this target works standalone.
+#   Produces a DISTINCT a_test.hex -- every other target's hex output is
+#   untouched either way. Unlike m_test/priv_test, a_test.s genuinely
+#   needs memory (LR/SC/AMO all operate on a real address) -- it uses
+#   link.ld's existing .data section, so -j .data (already present below)
+#   carries real, non-zero initialized content for the first time among
+#   these targets, rather than just reserving space .bss-style.
+a_test:
+	riscv64-unknown-elf-as $(ASFLAGS) crt0.s -o crt0.o
+	riscv64-unknown-elf-as $(A_ASFLAGS) a_test.s -o a_test.o
+	riscv64-unknown-elf-ld -T link.ld -o a_test.elf crt0.o a_test.o
+	riscv64-unknown-elf-objdump -d a_test.elf
+	riscv64-unknown-elf-objcopy -O verilog -j .text -j .rodata -j .data --verilog-data-width=8 a_test.elf a_test.hex
