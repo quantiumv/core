@@ -196,6 +196,37 @@ endfunction
 `define CSR_MTVAL      12'h343
 `define CSR_MIP        12'h344
 
+/*
+ * A extension (atomics): R-type shaped, but funct7's role is split into
+ * funct5[4:0]+aq+rl rather than one plain 7-bit field -- encode_r's
+ * existing funct7 parameter already accepts any 7-bit value, including
+ * this packing, so this exists purely for call-site readability (named
+ * funct5/aq/rl fields instead of a hand-packed blob), same reason
+ * encode_csr thinly wraps encode_i.
+ */
+function automatic logic [31:0] encode_amo(
+    input logic [4:0] funct5, input logic aq, input logic rl,
+    input logic [4:0] rs2, input logic [4:0] rs1,
+    input logic [2:0] funct3, input logic [4:0] rd, input logic [6:0] opcode
+);
+    return encode_r({funct5, aq, rl}, rs2, rs1, funct3, rd, opcode);
+endfunction
+
+`define OPC_AMO         7'b0101111
+`define FUNCT3_AMO_W    3'b010
+`define FUNCT3_AMO_D    3'b011
+`define FUNCT5_LR       5'h02
+`define FUNCT5_SC       5'h03
+`define FUNCT5_AMOSWAP  5'h01
+`define FUNCT5_AMOADD   5'h00
+`define FUNCT5_AMOXOR   5'h04
+`define FUNCT5_AMOOR    5'h08
+`define FUNCT5_AMOAND   5'h0C
+`define FUNCT5_AMOMIN   5'h10
+`define FUNCT5_AMOMAX   5'h14
+`define FUNCT5_AMOMINU  5'h18
+`define FUNCT5_AMOMAXU  5'h1C
+
 
 /* ------------------------------------------------------------------------- */
 
