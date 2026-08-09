@@ -50,6 +50,13 @@ module wb4_sram_tb;
         @(posedge clk); #1;
         rst = 0;
 
+        // Write a known marker into a different line (addr 0x8) BEFORE
+        // touching address 0x0, so the "adjacent line unaffected" check
+        // below proves no aliasing without assuming what's already there --
+        // this memory is preloaded from firmware/crt0.hex, so address 0x8
+        // isn't actually zero at power-on.
+        wb_cycle(32'h8, 64'h5A5A5A5A_5A5A5A5A, 8'hFF, 1'b1);
+
         // Full-word write/read round trip.
         wb_cycle(32'h0, 64'hDEADBEEF_CAFEF00D, 8'hFF, 1'b1);
         wb_cycle(32'h0, 64'h0, 8'h00, 1'b0);
@@ -64,11 +71,12 @@ module wb4_sram_tb;
         #1;
         check("byte-enable write only touches enabled lanes", dat_o, 64'hDEADBEEF_CAFEA5A5);
 
-        // A different line entirely stays at its power-on-zero value --
-        // proves word_addr's bit-slice isn't accidentally aliasing lines.
+        // A different line entirely (0x8) still holds the marker written
+        // above -- proves word_addr's bit-slice isn't accidentally
+        // aliasing lines with address 0x0's writes.
         wb_cycle(32'h8, 64'h0, 8'h00, 1'b0);
         #1;
-        check("adjacent line unaffected", dat_o, 64'h0);
+        check("adjacent line unaffected", dat_o, 64'h5A5A5A5A_5A5A5A5A);
 
         // Out-of-range address (num_words=64 -> valid range is 0x000-0x1FF)
         // must assert err_o, not silently succeed. Safe as a plain
