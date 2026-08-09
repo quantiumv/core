@@ -436,4 +436,84 @@
 /* ------------------------------------------------------------------------- */
 
 
+/*
+ * A extension (atomics). funct5 selects the operation; funct3 selects
+ * width (010 = .W, 011 = .D). aq/rl (bits 26/25) and rs2 (bits 24/20) are
+ * ALWAYS don't-care in the mask below -- not just rs2 for LR -- since
+ * none of the 22 variants has any fixed value in either field (aq/rl are
+ * real, independently-settable ordering hints on every one of them; rs2
+ * is a real operand for SC/AMO* and simply unused-but-unenforced for LR,
+ * same "don't over-constrain a variable field" principle every existing
+ * *_INSTRS_MASK in this file already follows for rs1/rs2/rd). This
+ * single mask is reused verbatim by all 22 defines below, the same way
+ * ALU_INSTRS_MASK is reused across all 8 base ALU reg-reg ops.
+ *
+ * aq/rl themselves are decoded only in the sense that the mask accepts
+ * any value for those 2 bits -- there is no dedicated decoder output
+ * port for them, since this core is single-hart/non-pipelined/single-
+ * bus-master/cacheless and has nothing to order against (same "spec-
+ * legal no-op absent something to constrain" reasoning as FENCE).
+ */
+`define AMO_INSTR_CREATE(funct5, funct3) {funct5, 12'b0, funct3, 5'b0, 7'b0101111}
+`define AMO_INSTRS_MASK                  {5'b11111, 12'b0, 3'b111, 5'b0, 7'b1111111}
+
+`define INSTR_LR_W        `AMO_INSTR_CREATE(5'b00010, 3'b010)
+`define INSTR_MASK_LR_W   `AMO_INSTRS_MASK
+`define INSTR_LR_D        `AMO_INSTR_CREATE(5'b00010, 3'b011)
+`define INSTR_MASK_LR_D   `AMO_INSTRS_MASK
+
+`define INSTR_SC_W        `AMO_INSTR_CREATE(5'b00011, 3'b010)
+`define INSTR_MASK_SC_W   `AMO_INSTRS_MASK
+`define INSTR_SC_D        `AMO_INSTR_CREATE(5'b00011, 3'b011)
+`define INSTR_MASK_SC_D   `AMO_INSTRS_MASK
+
+`define INSTR_AMOSWAP_W      `AMO_INSTR_CREATE(5'b00001, 3'b010)
+`define INSTR_MASK_AMOSWAP_W `AMO_INSTRS_MASK
+`define INSTR_AMOSWAP_D      `AMO_INSTR_CREATE(5'b00001, 3'b011)
+`define INSTR_MASK_AMOSWAP_D `AMO_INSTRS_MASK
+
+`define INSTR_AMOADD_W       `AMO_INSTR_CREATE(5'b00000, 3'b010)
+`define INSTR_MASK_AMOADD_W  `AMO_INSTRS_MASK
+`define INSTR_AMOADD_D       `AMO_INSTR_CREATE(5'b00000, 3'b011)
+`define INSTR_MASK_AMOADD_D  `AMO_INSTRS_MASK
+
+`define INSTR_AMOXOR_W       `AMO_INSTR_CREATE(5'b00100, 3'b010)
+`define INSTR_MASK_AMOXOR_W  `AMO_INSTRS_MASK
+`define INSTR_AMOXOR_D       `AMO_INSTR_CREATE(5'b00100, 3'b011)
+`define INSTR_MASK_AMOXOR_D  `AMO_INSTRS_MASK
+
+`define INSTR_AMOOR_W        `AMO_INSTR_CREATE(5'b01000, 3'b010)
+`define INSTR_MASK_AMOOR_W   `AMO_INSTRS_MASK
+`define INSTR_AMOOR_D        `AMO_INSTR_CREATE(5'b01000, 3'b011)
+`define INSTR_MASK_AMOOR_D   `AMO_INSTRS_MASK
+
+`define INSTR_AMOAND_W       `AMO_INSTR_CREATE(5'b01100, 3'b010)
+`define INSTR_MASK_AMOAND_W  `AMO_INSTRS_MASK
+`define INSTR_AMOAND_D       `AMO_INSTR_CREATE(5'b01100, 3'b011)
+`define INSTR_MASK_AMOAND_D  `AMO_INSTRS_MASK
+
+`define INSTR_AMOMIN_W       `AMO_INSTR_CREATE(5'b10000, 3'b010)
+`define INSTR_MASK_AMOMIN_W  `AMO_INSTRS_MASK
+`define INSTR_AMOMIN_D       `AMO_INSTR_CREATE(5'b10000, 3'b011)
+`define INSTR_MASK_AMOMIN_D  `AMO_INSTRS_MASK
+
+`define INSTR_AMOMAX_W       `AMO_INSTR_CREATE(5'b10100, 3'b010)
+`define INSTR_MASK_AMOMAX_W  `AMO_INSTRS_MASK
+`define INSTR_AMOMAX_D       `AMO_INSTR_CREATE(5'b10100, 3'b011)
+`define INSTR_MASK_AMOMAX_D  `AMO_INSTRS_MASK
+
+`define INSTR_AMOMINU_W      `AMO_INSTR_CREATE(5'b11000, 3'b010)
+`define INSTR_MASK_AMOMINU_W `AMO_INSTRS_MASK
+`define INSTR_AMOMINU_D      `AMO_INSTR_CREATE(5'b11000, 3'b011)
+`define INSTR_MASK_AMOMINU_D `AMO_INSTRS_MASK
+
+`define INSTR_AMOMAXU_W      `AMO_INSTR_CREATE(5'b11100, 3'b010)
+`define INSTR_MASK_AMOMAXU_W `AMO_INSTRS_MASK
+`define INSTR_AMOMAXU_D      `AMO_INSTR_CREATE(5'b11100, 3'b011)
+`define INSTR_MASK_AMOMAXU_D `AMO_INSTRS_MASK
+
+
+/* ------------------------------------------------------------------------- */
+
+
 /* End of file. */

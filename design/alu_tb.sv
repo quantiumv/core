@@ -170,6 +170,35 @@ module alu_tb;
         operation = `MULHU;
         check("MULHU: max-u64 * max-u64 (both unsigned), upper 64 bits", 64'hFFFFFFFFFFFFFFFE);
 
+        /*
+         * A extension: MIN/MAX/MINU/MAXU. The decisive case for all four:
+         * A=0xFFFF...FFFF (-1 signed / max u64) vs B=1. Signed: -1 < 1, so
+         * MIN picks A, MAX picks B. Unsigned: max-u64 > 1, so MINU picks B,
+         * MAXU picks A -- the exact opposite choice on the exact same bit
+         * patterns, so a signed/unsigned mixup produces a visibly wrong
+         * (not just subtly wrong) answer either way.
+         */
+        operand_A = 64'hFFFFFFFFFFFFFFFF; operand_B = 64'd1;
+        operation = `MIN;
+        check("MIN: signed -1 vs 1 -> -1 (A)", 64'hFFFFFFFFFFFFFFFF);
+        operation = `MAX;
+        check("MAX: signed -1 vs 1 -> 1 (B)", 64'd1);
+        operation = `MINU;
+        check("MINU: unsigned max-u64 vs 1 -> 1 (B)", 64'd1);
+        operation = `MAXU;
+        check("MAXU: unsigned max-u64 vs 1 -> max-u64 (A)", 64'hFFFFFFFFFFFFFFFF);
+
+        /*
+         * MIN/MAX at INT64_MIN, same rigor as SLT's own INT_MIN case above:
+         * a negate-based comparison would break here, $signed() cast
+         * comparison doesn't.
+         */
+        operand_A = 64'h8000000000000000; operand_B = 64'd0;
+        operation = `MIN;
+        check("MIN: INT64_MIN vs 0 -> INT64_MIN (A)", 64'h8000000000000000);
+        operation = `MAX;
+        check("MAX: INT64_MIN vs 0 -> 0 (B)", 64'd0);
+
         $display("");
         $display("alu_tb: %0d passed, %0d failed", pass_count, fail_count);
         if (fail_count > 0) $display("alu_tb: FAILURES PRESENT");

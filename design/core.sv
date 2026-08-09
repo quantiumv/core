@@ -19,8 +19,9 @@
  * design/wb4_sram.sv, design/uart_tx.sv) -- instruction fetch and data
  * access are both real bus transactions now, and both slaves ack one
  * cycle after being addressed (registered, not combinational). That
- * multi-cycle reality is why this can no longer be single-cycle: a 3-state
- * FSM (S_FETCH / S_EXEC / S_MEM) sequences each instruction instead.
+ * multi-cycle reality is why this can no longer be single-cycle: a 4-state
+ * FSM (S_FETCH / S_EXEC / S_MEM / S_AMO_WRITE) sequences each instruction
+ * instead.
  *
  * decoder/alu/register_file are reused completely unchanged from the
  * single-cycle version -- they were already purely combinational glue
@@ -46,7 +47,15 @@
  *  S_MEM:   (loads/stores only) issue a bus read or write at alu_result.
  *           Wait for ack; on that edge commit (a load's regfile write
  *           happens HERE, not in S_EXEC, since the loaded value doesn't
- *           exist yet when S_EXEC ends) and return to S_FETCH.
+ *           exist yet when S_EXEC ends) and return to S_FETCH -- UNLESS
+ *           this is one of the 9 read-modify-write AMO ops, in which case
+ *           this ack was only the READ half and next state is
+ *           S_AMO_WRITE instead.
+ *  S_AMO_WRITE: (the 9 read-modify-write AMO ops only) issue a bus write
+ *           at the SAME address S_MEM just read from, using a value
+ *           computed from the just-captured old memory value and rs2.
+ *           Wait for ack; commit (both the memory write's effect and
+ *           rd = the OLD value) happens HERE, not in S_MEM.
  *
  * Why nothing needs re-latching between S_EXEC and S_MEM: pc doesn't
  * change until commit_now, and the fetched instruction doesn't change
@@ -100,7 +109,8 @@ module core (
     typedef enum logic [1:0] {
         S_FETCH,
         S_EXEC,
-        S_MEM
+        S_MEM,
+        S_AMO_WRITE
     } state_t;
 
     state_t state;
@@ -129,11 +139,25 @@ module core (
      * to reference them earlier in the file than where they're driven.
      * div_stall joins them for the same reason -- commit_now/the S_EXEC
      * transition below need it, but it isn't actually driven until the
-     * "M extension: divide" section, much further down.
+     * "M extension: divide" section, much further down. is_amo_rmw joins
+     * them for the identical reason (A extension) -- driven later via a
+     * plain assign, never redeclared as `wire ... = ...` at its point of
+     * computation.
+     *
+     * amo_rdata_q/amo_addr_q/amo_sel_q are forward-declared for a
+     * different reason: they're REGISTERS (driven by an always_ff),
+     * needed by alu_operand_a/b (Execute, textually early) but only
+     * correctly drivable after Memory's load_data/mem_addr/mem_sel exist
+     * (textually late) -- same "declare early, drive late" split
+     * csr_rdata/medeleg_w already use.
      */
     logic is_load, is_store;
     logic halted;
     logic div_stall;
+    logic is_amo_rmw;
+    logic [(`WORD_SIZE - 1):0] amo_rdata_q;
+    logic [31:0] amo_addr_q;
+    logic [7:0]  amo_sel_q;
 
     /*
      * commit_now: the single edge, per instruction, where the
@@ -160,18 +184,29 @@ module core (
      * so there's no ordering/priority to arbitrate between them below.
      */
     wire mem_phase_needed = is_load || is_store;
+    /*
+     * commit_now, extended for the A extension: an AMO op's
+     * mem_phase_needed=1 now spans TWO sequential bus transactions
+     * (S_MEM's read, then S_AMO_WRITE's write), not one -- S_MEM's ack
+     * must NOT commit for an AMO op (it only ends the read half), only
+     * S_AMO_WRITE's ack does. LR/SC/plain loads/stores are unaffected:
+     * is_amo_rmw is false for all of them, so the new `&& !is_amo_rmw`
+     * term is a no-op and they still commit at S_MEM exactly as before.
+     */
     wire commit_now = (state == S_EXEC && !mem_phase_needed && !div_stall)
-                    || (state == S_MEM && wb_ack_i);
+                    || (state == S_MEM && wb_ack_i && !is_amo_rmw)
+                    || (state == S_AMO_WRITE && wb_ack_i);
 
     always_ff @(posedge clk) begin
         if (rst) begin
             state <= S_FETCH;
         end else begin
             case (state)
-                S_FETCH: if (wb_ack_i) state <= S_EXEC;
-                S_EXEC:  state <= state_t'(mem_phase_needed ? S_MEM : (div_stall ? S_EXEC : S_FETCH));
-                S_MEM:   if (wb_ack_i) state <= S_FETCH;
-                default: state <= S_FETCH;
+                S_FETCH:     if (wb_ack_i) state <= S_EXEC;
+                S_EXEC:      state <= state_t'(mem_phase_needed ? S_MEM : (div_stall ? S_EXEC : S_FETCH));
+                S_MEM:       if (wb_ack_i) state <= state_t'(is_amo_rmw ? S_AMO_WRITE : S_FETCH);
+                S_AMO_WRITE: if (wb_ack_i) state <= S_FETCH;
+                default:     state <= S_FETCH;
             endcase
         end
     end
@@ -340,8 +375,162 @@ module core (
                        || (decoded_instruction == `INSTR_CODE(ADDIW))
                        || (decoded_instruction == `INSTR_CODE(MULW));
 
+    /*
+     * A extension: LR/SC/AMO classification. Placed here, before
+     * alu_op_sel/mem_control below -- load-bearing, not stylistic:
+     * mem_control's SC arm needs sc_success, so this whole block must be
+     * textually established first (unlike CSR's own classification,
+     * which comes AFTER mem_control today, since nothing in mem_control
+     * needs it).
+     */
+    wire is_lr_w = (decoded_instruction == `INSTR_CODE(LR_W));
+    wire is_lr_d = (decoded_instruction == `INSTR_CODE(LR_D));
+    wire is_lr   = is_lr_w || is_lr_d;
+
+    wire is_sc_w = (decoded_instruction == `INSTR_CODE(SC_W));
+    wire is_sc_d = (decoded_instruction == `INSTR_CODE(SC_D));
+    wire is_sc   = is_sc_w || is_sc_d;
+
+    wire is_amoswap_w = (decoded_instruction == `INSTR_CODE(AMOSWAP_W));
+    wire is_amoswap_d = (decoded_instruction == `INSTR_CODE(AMOSWAP_D));
+    wire is_amoadd_w  = (decoded_instruction == `INSTR_CODE(AMOADD_W));
+    wire is_amoadd_d  = (decoded_instruction == `INSTR_CODE(AMOADD_D));
+    wire is_amoxor_w  = (decoded_instruction == `INSTR_CODE(AMOXOR_W));
+    wire is_amoxor_d  = (decoded_instruction == `INSTR_CODE(AMOXOR_D));
+    wire is_amoor_w   = (decoded_instruction == `INSTR_CODE(AMOOR_W));
+    wire is_amoor_d   = (decoded_instruction == `INSTR_CODE(AMOOR_D));
+    wire is_amoand_w  = (decoded_instruction == `INSTR_CODE(AMOAND_W));
+    wire is_amoand_d  = (decoded_instruction == `INSTR_CODE(AMOAND_D));
+    wire is_amomin_w  = (decoded_instruction == `INSTR_CODE(AMOMIN_W));
+    wire is_amomin_d  = (decoded_instruction == `INSTR_CODE(AMOMIN_D));
+    wire is_amomax_w  = (decoded_instruction == `INSTR_CODE(AMOMAX_W));
+    wire is_amomax_d  = (decoded_instruction == `INSTR_CODE(AMOMAX_D));
+    wire is_amominu_w = (decoded_instruction == `INSTR_CODE(AMOMINU_W));
+    wire is_amominu_d = (decoded_instruction == `INSTR_CODE(AMOMINU_D));
+    wire is_amomaxu_w = (decoded_instruction == `INSTR_CODE(AMOMAXU_W));
+    wire is_amomaxu_d = (decoded_instruction == `INSTR_CODE(AMOMAXU_D));
+
+    wire is_amoswap = is_amoswap_w || is_amoswap_d;
+
+    wire is_amo_rmw_w = is_amoswap_w || is_amoadd_w || is_amoxor_w || is_amoor_w
+                      || is_amoand_w || is_amomin_w || is_amomax_w || is_amominu_w || is_amomaxu_w;
+    wire is_amo_rmw_d = is_amoswap_d || is_amoadd_d || is_amoxor_d || is_amoor_d
+                      || is_amoand_d || is_amomin_d || is_amomax_d || is_amominu_d || is_amomaxu_d;
+    assign is_amo_rmw = is_amo_rmw_w || is_amo_rmw_d;   // drives the forward-declared logic above
+
+    /* All 22 -- used only by the address-phase operand-B redirect below. */
+    wire is_amo_family = is_lr || is_sc || is_amo_rmw;
+
+    /*
+     * amo_modify_phase: true for exactly the cycles alu0's inputs must be
+     * redirected from "compute the address" to "compute the modify
+     * value" -- gated purely on state, not on is_amo_rmw, since
+     * S_AMO_WRITE is a state ONLY an is_amo_rmw instruction can ever
+     * reach (LR/SC never transition there), so the state check alone is
+     * unambiguous.
+     */
+    wire amo_modify_phase = (state == S_AMO_WRITE);
+
+    /*
+     * LR/SC/AMO's address is rs1 alone, no offset -- imm_1 IS the
+     * address, available immediately post-decode. Deliberately NOT
+     * alu_result/mem_paddr here (even though they're numerically equal
+     * during S_EXEC): sc_success below is needed by mem_control, which
+     * is declared textually BEFORE alu0 exists (Execute comes later) --
+     * using imm_1 sidesteps that ordering entirely rather than requiring
+     * mem_control to be relocated after Execute.
+     */
+    wire [(`WORD_SIZE - 1):0] amo_target_addr = imm_1;
+
+    /*
+     * Reservation register (LR/SC). Set unconditionally on LR's own
+     * retirement (a fresh LR always creates a new reservation,
+     * superseding any prior one -- a plain overwrite, not a conditional
+     * set). Cleared on ANY store-class instruction's retirement: ordinary
+     * SB/SH/SW/SD (is_store), SC either way (is_sc, since is_store alone
+     * only catches SC's MATCHED case), or an AMO's write (is_amo_rmw) --
+     * matching the spec requirement that a used reservation can't be
+     * reused.
+     */
+    logic reservation_valid_q;
+    logic [(`WORD_SIZE - 1):0] reservation_addr_q;
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            reservation_valid_q <= 1'b0;
+        end else if (commit_now && is_lr) begin
+            reservation_valid_q <= 1'b1;
+            reservation_addr_q  <= amo_target_addr;
+        end else if (commit_now && (is_store || is_sc || is_amo_rmw)) begin
+            reservation_valid_q <= 1'b0;
+        end
+    end
+
+    /*
+     * sc_success: a pure register compare, no bus access needed -- known
+     * combinationally as soon as decode settles in S_EXEC, and stable
+     * for SC's entire (possibly multi-cycle) lifetime, since nothing
+     * else can retire (and so mutate the reservation) while SC itself is
+     * in flight.
+     */
+    wire sc_addr_match = reservation_valid_q && (reservation_addr_q == amo_target_addr);
+    wire sc_success = is_sc && sc_addr_match;
+    wire [(`WORD_SIZE - 1):0] sc_result = sc_success ? `WORD_SIZE'(0) : `WORD_SIZE'(1);
+
+    /*
+     * amo_rs2_operand: rs2, width-adjusted for the modify-phase
+     * computation. Per spec, only rs2's low 32 bits are ever meaningful
+     * for a .W op -- sign-extended here to 64 bits uniformly for ALL 9
+     * RMW ops (not just the signed-compare ones), same pattern
+     * is_div_w_family already uses for DIVW's divisor. Safe for every
+     * op, not just the "obviously signed" ones: ADD/XOR/OR/AND's low-32-
+     * bit result is provably invariant to how the upper 32 bits of
+     * either 64-bit operand are populated, and MINU/MAXU's unsigned
+     * 32-bit comparison is provably identical to an unsigned 64-bit
+     * comparison of the two sign-extended operands (sign extension is an
+     * order-preserving embedding for unsigned comparison too).
+     */
+    wire [(`WORD_SIZE - 1):0] amo_rs2_operand = is_amo_rmw_w ? {{32{imm_2[31]}}, imm_2[31:0]} : imm_2;
+
+    /*
+     * amo_modify_operand_a/b: AMOSWAP's "new value" is rs2 verbatim --
+     * same "operand_b=0, ADD" passthrough trick LUI/CSRRW already use,
+     * just with operand_a set to amo_rs2_operand instead of the default
+     * imm_1. Every other RMW op reads the just-captured OLD value
+     * (amo_rdata_q) as operand_a and rs2 as operand_b.
+     */
+    wire [(`WORD_SIZE - 1):0] amo_modify_operand_a = is_amoswap ? amo_rs2_operand : amo_rdata_q;
+    wire [(`WORD_SIZE - 1):0] amo_modify_operand_b = is_amoswap ? `WORD_SIZE'(0)  : amo_rs2_operand;
+
+    logic [(`ALU_OPSIZE - 1):0] amo_modify_op;
+    always_comb begin: amo_modify_op_sel
+        case (decoded_instruction)
+            `INSTR_CODE(AMOSWAP_W), `INSTR_CODE(AMOSWAP_D): amo_modify_op = `ADD;  // passthrough
+            `INSTR_CODE(AMOADD_W),  `INSTR_CODE(AMOADD_D):  amo_modify_op = `ADD;
+            `INSTR_CODE(AMOXOR_W),  `INSTR_CODE(AMOXOR_D):  amo_modify_op = `XOR;
+            `INSTR_CODE(AMOOR_W),   `INSTR_CODE(AMOOR_D):   amo_modify_op = `OR;
+            `INSTR_CODE(AMOAND_W),  `INSTR_CODE(AMOAND_D):  amo_modify_op = `AND;
+            `INSTR_CODE(AMOMIN_W),  `INSTR_CODE(AMOMIN_D):  amo_modify_op = `MIN;
+            `INSTR_CODE(AMOMAX_W),  `INSTR_CODE(AMOMAX_D):  amo_modify_op = `MAX;
+            `INSTR_CODE(AMOMINU_W), `INSTR_CODE(AMOMINU_D): amo_modify_op = `MINU;
+            `INSTR_CODE(AMOMAXU_W), `INSTR_CODE(AMOMAXU_D): amo_modify_op = `MAXU;
+            default: amo_modify_op = `ADD; // don't-care -- LR/SC never reach S_AMO_WRITE
+        endcase
+    end: amo_modify_op_sel
+
     logic [(`ALU_OPSIZE - 1):0] alu_op;
     always_comb begin: alu_op_sel
+        /*
+         * A extension: during S_AMO_WRITE, alu0 is being reused for the
+         * modify computation (old value op rs2), not the address
+         * computation every other state uses it for -- the first
+         * state-dependent alu_op in this file. LR/SC/AMO-during-address-
+         * phase need no arm inside the case below at all -- they fall
+         * through the existing default: alu_op = `ADD, exactly like
+         * branches/loads/stores/CSR do today.
+         */
+        if (amo_modify_phase) begin
+            alu_op = amo_modify_op;
+        end else
         case (decoded_instruction)
             `INSTR_CODE(ADDI), `INSTR_CODE(ADD),
             `INSTR_CODE(ADDIW), `INSTR_CODE(ADDW),
@@ -429,6 +618,36 @@ module core (
             `INSTR_CODE(SH):  begin is_store = 1'b1; mem_size = 2'b01; end
             `INSTR_CODE(SW):  begin is_store = 1'b1; mem_size = 2'b10; end
             `INSTR_CODE(SD):  begin is_store = 1'b1; mem_size = 2'b11; end
+
+            /*
+             * A extension. LR/AMO's read phase behaves exactly like
+             * LW/LD (reusing load_data's existing byte/half/word/dword
+             * formatting infrastructure with zero changes to it, per
+             * spec's requirement that a .W AMO/LR sign-extend the loaded
+             * word). SC's arm makes is_store a DYNAMIC, reservation-
+             * dependent value: when sc_success=0, is_store=0 for that SC
+             * => mem_phase_needed=0 => SC commits immediately in S_EXEC
+             * via the unmodified existing commit_now formula, with
+             * rd = sc_result = 1. No new logic needed for that path
+             * specifically -- it falls out of the existing machinery
+             * once is_store is correctly 0.
+             */
+            `INSTR_CODE(LR_W): begin is_load = 1'b1; mem_size = 2'b10; load_signed = 1'b1; end
+            `INSTR_CODE(LR_D): begin is_load = 1'b1; mem_size = 2'b11; load_signed = 1'b1; end
+
+            `INSTR_CODE(SC_W): begin is_store = sc_success; mem_size = 2'b10; end
+            `INSTR_CODE(SC_D): begin is_store = sc_success; mem_size = 2'b11; end
+
+            `INSTR_CODE(AMOSWAP_W), `INSTR_CODE(AMOADD_W), `INSTR_CODE(AMOXOR_W), `INSTR_CODE(AMOOR_W),
+            `INSTR_CODE(AMOAND_W), `INSTR_CODE(AMOMIN_W), `INSTR_CODE(AMOMAX_W), `INSTR_CODE(AMOMINU_W),
+            `INSTR_CODE(AMOMAXU_W):
+                begin is_load = 1'b1; mem_size = 2'b10; load_signed = 1'b1; end
+
+            `INSTR_CODE(AMOSWAP_D), `INSTR_CODE(AMOADD_D), `INSTR_CODE(AMOXOR_D), `INSTR_CODE(AMOOR_D),
+            `INSTR_CODE(AMOAND_D), `INSTR_CODE(AMOMIN_D), `INSTR_CODE(AMOMAX_D), `INSTR_CODE(AMOMINU_D),
+            `INSTR_CODE(AMOMAXU_D):
+                begin is_load = 1'b1; mem_size = 2'b11; load_signed = 1'b1; end
+
             default: ;
         endcase
     end: mem_control
@@ -668,9 +887,19 @@ module core (
      * csr_rdata instead of pc. CSRRW/CSRRWI need no redirect: their new
      * value IS rs1/uimm, which is already sitting on imm_1 by default.
      */
-    wire [(`WORD_SIZE - 1):0] alu_operand_a = (is_csr_rs || is_csr_rc) ? csr_rdata :
-                                               is_auipc                 ? pc        :
-                                                                          imm_1;
+    /*
+     * A extension: amo_modify_phase takes top priority -- during
+     * S_AMO_WRITE, alu0 is computing the modify value (old op rs2), not
+     * an address, and amo_modify_operand_a/b (declared above, in the A
+     * extension classification section) already account for AMOSWAP's
+     * passthrough shape. Outside that phase, LR/SC/AMO's address is rs1
+     * alone (imm_1), so they fall through to the same default every
+     * plain load/store already uses -- no address-phase arm needed here.
+     */
+    wire [(`WORD_SIZE - 1):0] alu_operand_a = amo_modify_phase          ? amo_modify_operand_a :
+                                               (is_csr_rs || is_csr_rc)  ? csr_rdata :
+                                               is_auipc                  ? pc        :
+                                                                           imm_1;
     /*
      * CSRRS ORs the rs1/uimm mask (already on imm_1) into the CSR -- B =
      * imm_1, paired with alu_op_sel's OR arm below. CSRRC ANDs with the
@@ -681,13 +910,28 @@ module core (
      * with ADD (the same passthrough trick LUI's ADD-with-B=0 already
      * uses) -- so alu_result ends up uniformly "the new CSR value" for
      * all 6 variants, and csr_file0's write port needs no extra mux.
+     *
+     * is_amo_family's arm MUST sit above is_store here -- SC's is_store
+     * is DYNAMICALLY 1 when matched (see mem_control above), and without
+     * this arm operand_b would fall through to `is_store ? imm3_sext :
+     * ...`, which is WRONG: imm3_sext reinterprets
+     * o_imm_3_or_dest_addr as a signed S/B offset, but for an R-type-
+     * shaped decode (which is what OUTPUT_R_TYPE_INSTR gives every
+     * A-extension instruction) that port instead holds rd, zero-
+     * extended -- a small positive "offset" that would silently corrupt
+     * the address computation for any matched SC with a nonzero rd.
+     * LR/AMO never set is_store at all, so they'd never have hit this
+     * arm regardless, but SC's dynamic is_store makes the priority
+     * ordering genuinely load-bearing, not just tidy.
      */
-    wire [(`WORD_SIZE - 1):0] alu_operand_b = is_store  ? imm3_sext      :
-                                               is_auipc  ? imm_1          :
-                                               is_csr_rs ? imm_1          :
-                                               is_csr_rc ? ~imm_1         :
-                                               is_csr_rw ? `WORD_SIZE'(0) :
-                                                            imm_2;
+    wire [(`WORD_SIZE - 1):0] alu_operand_b = amo_modify_phase ? amo_modify_operand_b :
+                                               is_amo_family     ? `WORD_SIZE'(0) :
+                                               is_store            ? imm3_sext :
+                                               is_auipc             ? imm_1 :
+                                               is_csr_rs             ? imm_1 :
+                                               is_csr_rc               ? ~imm_1 :
+                                               is_csr_rw                 ? `WORD_SIZE'(0) :
+                                                                            imm_2;
 
     logic [(`WORD_SIZE - 1):0] alu_result;
     alu alu0 (
@@ -696,6 +940,28 @@ module core (
         .i_operand_B(alu_operand_b),
         .o_result(alu_result)
     );
+
+    /*
+     * A extension: amo_result_w_trunc is a SEPARATE wire from
+     * alu_result_w_trunc (Writeback section, further down) rather than a
+     * relocation of it -- deliberate, to avoid perturbing the
+     * already-working M-extension writeback path in the same change.
+     * Same formula, needed here (before Memory) rather than there (after
+     * Wishbone-master bus-driving).
+     *
+     * Needed because a .W AMO's raw 64-bit alu0 output is NOT
+     * automatically the correct sign-extension of the true 32-bit result
+     * for every op -- ADD is the counter-example: sign-extend(0x7FFFFFFF)
+     * + sign-extend(1) = 0x0000000080000000, but the CORRECT
+     * sign-extension of the true 32-bit sum (0x7FFFFFFF+1=0x80000000,
+     * i.e. INT32_MIN) is 0xFFFFFFFF80000000 -- different! (XOR/OR/AND and
+     * MIN/MAX/MINU/MAXU happen to already be correctly sign-extended when
+     * fed sign-extended operands, but applying this truncate+resign step
+     * UNIFORMLY to all 9 ops is far simpler than reasoning per-op about
+     * which ones need it.)
+     */
+    wire [(`WORD_SIZE - 1):0] amo_result_w_trunc = {{32{alu_result[31]}}, alu_result[31:0]};
+    wire [(`WORD_SIZE - 1):0] amo_new_value = is_amo_rmw_w ? amo_result_w_trunc : alu_result;
 
     /*
      * csr_file0: instantiated here, after alu0 rather than up with the
@@ -831,6 +1097,31 @@ module core (
         endcase
     end: load_format
 
+    /*
+     * A extension: amo_rdata_q/amo_addr_q/amo_sel_q, captured on the
+     * S_MEM-ack-to-S_AMO_WRITE transition edge (the same edge
+     * instr_line_q captures a fresh fetch on). amo_rdata_q holds the OLD
+     * (pre-modification) memory value -- destined for rd. amo_addr_q/
+     * amo_sel_q are NECESSARY, not just convenient: mem_addr/mem_sel are
+     * combinational functions of mem_paddr(=alu_result), and alu_result
+     * gets REPURPOSED for the modify value the instant amo_modify_phase
+     * goes high (S_AMO_WRITE) -- so mem_addr/mem_sel, left un-latched,
+     * would silently start reflecting the WRONG thing (the modify
+     * computation, reinterpreted as an address) the moment S_AMO_WRITE
+     * begins. Latching them at the one moment they're still correct
+     * sidesteps that entirely.
+     */
+    always_ff @(posedge clk) begin
+        if (state == S_MEM && wb_ack_i && is_amo_rmw) begin
+            amo_rdata_q <= load_data;
+            amo_addr_q  <= mem_addr;
+            amo_sel_q   <= mem_sel;
+        end
+    end
+
+    /* Shifted into byte-lane position, same idiom mem_wdata already uses. */
+    wire [(`WORD_SIZE - 1):0] amo_wdata = amo_new_value << (amo_addr_q[2:0] * 8);
+
     /* --------------------------------------------------------------- *
      * Wishbone master: bus driving
      * --------------------------------------------------------------- */
@@ -896,6 +1187,21 @@ module core (
                     wb_dat_o  = mem_wdata;
                 end
             end
+            /*
+             * A extension: the write half of a read-modify-write AMO.
+             * Reuses the exact same !wb_ack_i gating discipline as
+             * S_FETCH/S_MEM above -- load-bearing here too, same reason.
+             */
+            S_AMO_WRITE: begin
+                if (!wb_ack_i) begin
+                    wb_cyc_o  = 1'b1;
+                    wb_stb_o  = 1'b1;
+                    wb_we_o   = 1'b1;      // always a write -- this state exists for exactly this
+                    wb_addr_o = amo_addr_q;
+                    wb_sel_o  = amo_sel_q;
+                    wb_dat_o  = amo_wdata;
+                end
+            end
             default: ; // S_EXEC: bus idle
         endcase
     end: wb_master_drive
@@ -916,12 +1222,26 @@ module core (
      * same-edge overwrite" principle as every other read-then-write
      * already in this design (e.g. the regfile's own read-before-write).
      */
-    assign reg_write_data = is_load               ? load_data :
-                             (is_jal || is_jalr)   ? pc_plus_4 :
-                             is_word_arith         ? alu_result_w_trunc :
-                             is_csr                ? csr_rdata :
-                             is_div_family         ? div_result :
-                                                      alu_result; // ALU ops, LUI, AUIPC, *W shifts
+    /*
+     * A extension: is_amo_rmw MUST be checked before is_load: is_load is
+     * TRUE for an AMO's entire decode-level lifetime (see mem_control
+     * above), but AMO only ever COMMITS during S_AMO_WRITE (never
+     * S_MEM), at which point load_data/wb_dat_i reflect the WRITE
+     * transaction's bus lines, not a real read -- using load_data here
+     * would silently write garbage to rd. amo_rdata_q (the captured OLD
+     * value, per spec -- NOT amo_new_value, which is the NEW value
+     * destined for memory, not rd) is the correct, stable value at that
+     * commit edge. is_sc's arm produces the success(0)/failure(1) flag
+     * -- no existing arm could ever produce this.
+     */
+    assign reg_write_data = is_amo_rmw            ? amo_rdata_q :
+                             is_sc                 ? sc_result :
+                             is_load                ? load_data :
+                             (is_jal || is_jalr)     ? pc_plus_4 :
+                             is_word_arith            ? alu_result_w_trunc :
+                             is_csr                    ? csr_rdata :
+                             is_div_family               ? div_result :
+                                                            alu_result; // ALU ops, LUI, AUIPC, *W shifts
 
     /* --------------------------------------------------------------- *
      * Next PC

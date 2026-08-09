@@ -176,6 +176,32 @@
 `define INSTR_CODE_WFI          1001010   // 74
 `define INSTR_CODE_SFENCE_VMA   1001011   // 75
 
+/* A extension (atomics) instructions. */
+
+`define INSTR_CODE_LR_W         1001100   // 76
+`define INSTR_CODE_LR_D         1001101   // 77
+`define INSTR_CODE_SC_W         1001110   // 78
+`define INSTR_CODE_SC_D         1001111   // 79
+
+`define INSTR_CODE_AMOSWAP_W    1010000   // 80
+`define INSTR_CODE_AMOSWAP_D    1010001   // 81
+`define INSTR_CODE_AMOADD_W     1010010   // 82
+`define INSTR_CODE_AMOADD_D     1010011   // 83
+`define INSTR_CODE_AMOXOR_W     1010100   // 84
+`define INSTR_CODE_AMOXOR_D     1010101   // 85
+`define INSTR_CODE_AMOOR_W      1010110   // 86
+`define INSTR_CODE_AMOOR_D      1010111   // 87
+`define INSTR_CODE_AMOAND_W     1011000   // 88
+`define INSTR_CODE_AMOAND_D     1011001   // 89
+`define INSTR_CODE_AMOMIN_W     1011010   // 90
+`define INSTR_CODE_AMOMIN_D     1011011   // 91
+`define INSTR_CODE_AMOMAX_W     1011100   // 92
+`define INSTR_CODE_AMOMAX_D     1011101   // 93
+`define INSTR_CODE_AMOMINU_W    1011110   // 94
+`define INSTR_CODE_AMOMINU_D    1011111   // 95
+`define INSTR_CODE_AMOMAXU_W    1100000   // 96
+`define INSTR_CODE_AMOMAXU_D    1100001   // 97
+
 
 /* ------------------------------------------------------------------------- */
 

@@ -201,6 +201,18 @@ module alu (
         `MULHSU:  o_result = mulhsu_hi;
         `MULHU:   o_result = mulhu_hi;
 
+        /*
+         * A extension: AMOMIN/AMOMAX/AMOMINU/AMOMAXU value selection --
+         * return the winning OPERAND, not a 0/1 flag, so SLT/SLTU can't be
+         * reused here the way a branch comparison would. Same $signed()
+         * idiom as SLT above, for the same reason (correctness at
+         * INT64_MIN, where negate-and-compare-unsigned would break).
+         */
+        `MIN:   o_result = ($signed(i_operand_A) < $signed(i_operand_B)) ? i_operand_A : i_operand_B;
+        `MAX:   o_result = ($signed(i_operand_A) < $signed(i_operand_B)) ? i_operand_B : i_operand_A;
+        `MINU:  o_result = (i_operand_A < i_operand_B) ? i_operand_A : i_operand_B;
+        `MAXU:  o_result = (i_operand_A < i_operand_B) ? i_operand_B : i_operand_A;
+
         default: o_result = 0;
 
         endcase

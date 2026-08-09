@@ -6,7 +6,7 @@
 /* ------------------------------------------------------------------------- */
 
 
-`define ALU_OPSIZE 5    /* Since we have 18 ops, we need 5 bits. */
+`define ALU_OPSIZE 5    /* 22 ops now (18 + MIN/MAX/MINU/MAXU); still fits 5 bits. */
 
 
 /* ------------------------------------------------------------------------- */
@@ -78,6 +78,21 @@
 `define MULH    5'b01111   /* High WORD_SIZE bits of A * B, both signed */
 `define MULHSU  5'b10000   /* High WORD_SIZE bits of A * B, A signed / B unsigned */
 `define MULHU   5'b10001   /* High WORD_SIZE bits of A * B, both unsigned */
+
+
+/* ------------------------------------------------------------------------- */
+
+
+/*
+ * A extension: AMOMIN/AMOMAX/AMOMINU/AMOMAXU value selection. These return
+ * the WINNING OPERAND itself, not a 0/1 flag, so they can't be built from
+ * SLT/SLTU the way a branch comparison can -- genuinely new ops.
+ */
+
+`define MIN     5'b10010   /* Signed minimum: A < B ? A : B */
+`define MAX     5'b10011   /* Signed maximum: A < B ? B : A */
+`define MINU    5'b10100   /* Unsigned minimum */
+`define MAXU    5'b10101   /* Unsigned maximum */
 
 
 /* ------------------------------------------------------------------------- */
