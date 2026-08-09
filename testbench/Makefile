@@ -21,8 +21,9 @@ ASFLAGS_M     = -march=rv64im -mabi=lp64 -mno-relax
 #   csr_encode_check.s (these instructions all read/write CSR-backed
 #   state), not because it's functionally required.
 ASFLAGS_PRIV  = -march=rv64i_zicsr -mabi=lp64 -mno-relax
+ASFLAGS_A     = -march=rv64ima -mabi=lp64 -mno-relax
 
-all: csr_encode_check.hex m_encode_check.hex priv_encode_check.hex
+all: csr_encode_check.hex m_encode_check.hex priv_encode_check.hex a_encode_check.hex
 
 csr_encode_check.hex: csr_encode_check.s
 	riscv64-unknown-elf-as $(ASFLAGS_ZICSR) csr_encode_check.s -o csr_encode_check.o
@@ -47,3 +48,11 @@ priv_encode_check.hex: priv_encode_check.s
 	#   needed (see header above) -- a bare unlinked .o objcopies cleanly for
 	#   this relative-encoding-only purpose.
 	riscv64-unknown-elf-objcopy -O verilog --verilog-data-width=4 priv_encode_check.o priv_encode_check.hex
+
+a_encode_check.hex: a_encode_check.s
+	riscv64-unknown-elf-as $(ASFLAGS_A) a_encode_check.s -o a_encode_check.o
+	# --verilog-data-width=4: one 32-bit instruction word per line, matching
+	#   a_encode_crosscheck_tb.sv's logic [31:0] golden array. No linking
+	#   needed (see header above) -- a bare unlinked .o objcopies cleanly for
+	#   this relative-encoding-only purpose.
+	riscv64-unknown-elf-objcopy -O verilog --verilog-data-width=4 a_encode_check.o a_encode_check.hex
