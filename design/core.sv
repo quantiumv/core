@@ -19,9 +19,9 @@
  * design/wb4_sram.sv, design/uart_tx.sv) -- instruction fetch and data
  * access are both real bus transactions now, and both slaves ack one
  * cycle after being addressed (registered, not combinational). That
- * multi-cycle reality is why this can no longer be single-cycle: a 4-state
- * FSM (S_FETCH / S_EXEC / S_MEM / S_AMO_WRITE) sequences each instruction
- * instead.
+ * multi-cycle reality is why this can no longer be single-cycle: a
+ * 5-state FSM (S_FETCH / S_EXEC / S_MEM / S_AMO_WRITE / S_FETCH_HI)
+ * sequences each instruction instead.
  *
  * decoder/alu/register_file are reused completely unchanged from the
  * single-cycle version -- they were already purely combinational glue
@@ -34,15 +34,28 @@
  *
  * Per-instruction flow:
  *  S_FETCH: issue a bus read at pc (dword-aligned -- the bus is 64-bit
- *           wide, so one beat fetches TWO adjacent 32-bit instructions;
- *           pc[2] selects which half this instruction actually is).
- *           Wait for ack, latch the 64-bit line, move to S_EXEC.
- *  S_EXEC:  bus idle. decoder/alu/register_file settle combinationally
- *           off the latched instruction (exactly the single-cycle
- *           version's Decode/Control/Execute/Writeback/Next-PC logic,
- *           verbatim). If this instruction is a load or store, move to
- *           S_MEM without committing anything yet. Otherwise this is the
- *           instruction's last cycle: commit (regfile write + pc update)
+ *           wide, so one beat fetches up to 4 compressed halfwords or 2
+ *           adjacent 32-bit instructions; pc[2:1] selects which of the
+ *           4 halfword slots this instruction actually starts at -- see
+ *           the C extension note below). Wait for ack, latch the 64-bit
+ *           line, move to S_EXEC -- UNLESS the halfword at pc turns out
+ *           to be the low half of an uncompressed instruction starting
+ *           in the dword's LAST slot, in which case its other 16 bits
+ *           live in the NEXT dword and next state is S_FETCH_HI instead.
+ *  S_FETCH_HI: (C extension only, dword-crossing 32-bit instructions)
+ *           issue a bus read at the NEXT dword. Wait for ack, latch its
+ *           low 16 bits, move to S_EXEC.
+ *  S_EXEC:  bus idle. The fetched halfword(s) are first run through
+ *           design/c_expand.sv (a compressed instruction is expanded
+ *           into its standard 32-bit equivalent; an uncompressed one
+ *           passes through as-is) before decoder/alu/register_file
+ *           settle combinationally off the result (exactly the
+ *           single-cycle version's Decode/Control/Execute/Writeback/
+ *           Next-PC logic, verbatim -- decoder.sv itself needs no C
+ *           extension awareness at all). If this instruction is a load
+ *           or store, move to S_MEM without committing anything yet.
+ *           Otherwise this is the instruction's last cycle: commit
+ *           (regfile write + pc update, by is_compressed ? 2 : 4 bytes)
  *           on this edge and return to S_FETCH.
  *  S_MEM:   (loads/stores only) issue a bus read or write at alu_result.
  *           Wait for ack; on that edge commit (a load's regfile write
@@ -59,16 +72,22 @@
  *
  * Why nothing needs re-latching between S_EXEC and S_MEM: pc doesn't
  * change until commit_now, and the fetched instruction doesn't change
- * until the next S_FETCH's ack -- so every combinational signal derived
- * from them (decoded_instruction, imm_1/imm_2, alu_result, next_pc, ...)
- * is already stable for the instruction's entire multi-cycle lifetime,
- * with no extra latching required beyond the one real latch this design
- * adds (the fetched instruction line itself).
+ * until the next S_FETCH's (or, for a crossing instruction, S_FETCH_HI's)
+ * ack -- so every combinational signal derived from them
+ * (decoded_instruction, imm_1/imm_2, alu_result, next_pc, ...) is already
+ * stable for the instruction's entire multi-cycle lifetime, with no extra
+ * latching required beyond the (now up to two) real latches this design
+ * adds (the fetched instruction line, plus -- only for a dword-crossing
+ * C instruction -- the second dword's low halfword).
  *
- * Scope: full RV64I base ISA. No M/A/C extensions, no Zicsr/CSRs, no
- * privilege modes, no Sv39, no interrupts/exceptions -- all later
- * milestones. Misaligned access, FENCE, and ECALL are deliberately
- * under-implemented here (see their handling below) for the same reason.
+ * Scope: full RV64IMAC base ISA + Zicsr + full U/S/M privilege modes.
+ * No Sv39, no interrupts/exceptions beyond the synchronous traps already
+ * implemented -- later milestones (a different teammate's work for
+ * Sv39). Misaligned DATA access (loads/stores) and FENCE are deliberately
+ * under-implemented here (see their handling below) for the same reason
+ * -- misaligned INSTRUCTION fetch, by contrast, is now a real, exercised
+ * case as of the C extension (any compressed instruction can leave pc
+ * 2-byte- rather than 4-byte-aligned) and IS correctly handled, not a gap.
  * wb_err_i is likewise not acted on -- no trap mechanism exists yet for
  * it to feed into.
  *
@@ -106,11 +125,28 @@ module core (
      * FSM state
      * --------------------------------------------------------------- */
 
-    typedef enum logic [1:0] {
+    /*
+     * C extension: S_FETCH_HI is appended LAST, not inserted after
+     * S_FETCH where it would read more naturally -- load-bearing, not
+     * cosmetic. This preserves S_FETCH=0/S_EXEC=1/S_MEM=2/S_AMO_WRITE=3 at
+     * their CURRENT numeric values (only the enum's bit-width widens,
+     * 2->3 bits), so the 15 existing testbenches that hardcode a numeric
+     * state literal (e.g. 2'd1 for S_EXEC, 2'd3 for S_AMO_WRITE -- see
+     * testbench/core_priv_tb.sv, core_priv_u_ecall_tb.sv, core_zicsr_tb.sv
+     * via pc_trigger_sample_monitor's default STATE_WIDTH=2, and the
+     * hand-rolled checks in core_a_ext_tb.sv/core_m_ext_tb.sv) keep
+     * comparing correctly -- Verilog zero-extends their narrower literal
+     * against this now-wider signal, landing on the same enum value.
+     * Inserting the new state anywhere else would silently renumber
+     * every later state and either misfire or, worse, silently match the
+     * wrong state in all 15 of those pre-existing call sites.
+     */
+    typedef enum logic [2:0] {
         S_FETCH,
         S_EXEC,
         S_MEM,
-        S_AMO_WRITE
+        S_AMO_WRITE,
+        S_FETCH_HI
     } state_t;
 
     state_t state;
@@ -197,12 +233,33 @@ module core (
                     || (state == S_MEM && wb_ack_i && !is_amo_rmw)
                     || (state == S_AMO_WRITE && wb_ack_i);
 
+    /*
+     * C extension: fetch_hi_needed decides, on the SAME edge S_FETCH's
+     * ack arrives, whether the halfword about to become "the current
+     * instruction" is the low half of an uncompressed (32-bit)
+     * instruction that starts in this dword's LAST halfword slot
+     * (pc[2:1]==2'b11) -- the one case where the other 16 bits live in
+     * the NEXT dword, needing a second bus transaction (S_FETCH_HI)
+     * before Execute can begin. Computed directly off the live
+     * wb_dat_i, not the not-yet-updated instr_line_q -- the exact same
+     * "combinationally derive from wb_dat_i on the same edge a sibling
+     * register captures it" pattern the A extension's
+     * amo_rdata_q <= load_data already established (load_data is
+     * itself combinationally wb_dat_i-derived), just applied to a new
+     * spot. A compressed instruction never needs this: any 2-byte-
+     * aligned halfword is always fully inside its own 8-byte dword, so
+     * a quadrant field (the halfword's own low 2 bits) of anything
+     * other than 2'b11 rules out crossing regardless of pc[2:1].
+     */
+    wire fetch_hi_needed = (pc[2:1] == 2'b11) && (wb_dat_i[49:48] == 2'b11);
+
     always_ff @(posedge clk) begin
         if (rst) begin
             state <= S_FETCH;
         end else begin
             case (state)
-                S_FETCH:     if (wb_ack_i) state <= S_EXEC;
+                S_FETCH:     if (wb_ack_i) state <= state_t'(fetch_hi_needed ? S_FETCH_HI : S_EXEC);
+                S_FETCH_HI:  if (wb_ack_i) state <= S_EXEC;
                 S_EXEC:      state <= state_t'(mem_phase_needed ? S_MEM : (div_stall ? S_EXEC : S_FETCH));
                 S_MEM:       if (wb_ack_i) state <= state_t'(is_amo_rmw ? S_AMO_WRITE : S_FETCH);
                 S_AMO_WRITE: if (wb_ack_i) state <= S_FETCH;
@@ -217,20 +274,103 @@ module core (
 
     /*
      * The bus is 64-bit wide and word-addressed (low 3 address bits
-     * unused, same convention as wb4_sram.sv/wb_addr_decoder.sv), but
-     * instructions are 32-bit -- one fetch beat brings in two of them.
-     * pc[2] (always a real address bit for a 4-byte-aligned pc) picks
-     * which half is the one actually being executed; pc[1:0] are always
-     * 0 and play no role here.
+     * unused, same convention as wb4_sram.sv/wb_addr_decoder.sv) -- one
+     * fetch beat brings in a full dword: up to 4 compressed halfwords,
+     * or 2 uncompressed 32-bit instructions. C extension: pc is no
+     * longer always 4-byte-aligned (a compressed instruction is only 2
+     * bytes), so pc[2:1] -- not just pc[2] -- now selects which of the
+     * dword's 4 halfword slots is "first". An uncompressed instruction
+     * starting in the LAST slot (pc[2:1]==2'b11) needs a second dword;
+     * instr_hi_q/crossed_q exist for exactly that case (see
+     * fetch_hi_needed above).
      */
     logic [63:0] instr_line_q;
+    logic [15:0] instr_hi_q;
+    logic        crossed_q;
     always_ff @(posedge clk) begin
-        if (state == S_FETCH && wb_ack_i)
+        if (state == S_FETCH && wb_ack_i) begin
             instr_line_q <= wb_dat_i;
+            crossed_q    <= fetch_hi_needed;
+        end
+        if (state == S_FETCH_HI && wb_ack_i)
+            instr_hi_q <= wb_dat_i[15:0];
     end
 
+    /*
+     * The dword's 4 possible 16-bit slots, and the "first"/"second"
+     * halfword of the instruction actually at pc, selected by pc[2:1].
+     * second_hw's own pc[2:1]==2'b11 arm is structural don't-care, not
+     * a real case -- that combination is exactly what triggers
+     * S_FETCH_HI instead (raw32_noncompressed below reads instr_hi_q in
+     * that case, never second_hw).
+     */
+    wire [15:0] hw0 = instr_line_q[15:0];
+    wire [15:0] hw1 = instr_line_q[31:16];
+    wire [15:0] hw2 = instr_line_q[47:32];
+    wire [15:0] hw3 = instr_line_q[63:48];
+
+    wire [15:0] first_hw  = pc[2:1] == 2'b00 ? hw0 :
+                             pc[2:1] == 2'b01 ? hw1 :
+                             pc[2:1] == 2'b10 ? hw2 : hw3;
+    /* verilator lint_off WIDTHEXPAND */
+    wire [15:0] second_hw = pc[2:1] == 2'b00 ? hw1 :
+                             pc[2:1] == 2'b01 ? hw2 :
+                             pc[2:1] == 2'b10 ? hw3 : 16'bx;
+    /* verilator lint_on WIDTHEXPAND */
+
+    /*
+     * C extension: is_compressed is true iff first_hw's own quadrant
+     * field (its own low 2 bits) isn't 2'b11 -- the RISC-V-standard
+     * "which instruction length is this" test, independent of
+     * crossed_q. A genuinely crossing 32-bit instruction (crossed_q=1)
+     * always has first_hw[1:0]==2'b11 too (that's exactly what
+     * triggered S_FETCH_HI), so the !crossed_q term isn't strictly
+     * required for correctness here, but keeps this wire's meaning
+     * self-evidently right without relying on that cross-reasoning.
+     */
+    wire is_compressed = !crossed_q && (first_hw[1:0] != 2'b11);
+
+    wire [31:0] c_expand_out;
+    wire        c_expand_illegal;
+    c_expand c_expand0 (
+        .i_instr16 (first_hw),
+        .o_instr32 (c_expand_out),
+        .o_illegal (c_expand_illegal)
+    );
+
+    /*
+     * The real 32-bit instruction when !is_compressed: either both
+     * halves already sit in instr_line_q (the common, non-crossing
+     * case), or the low half is first_hw (== hw3 whenever crossed_q,
+     * since crossing only ever happens at pc[2:1]==2'b11) and the high
+     * half is instr_hi_q, captured during S_FETCH_HI.
+     */
+    wire [31:0] raw32_noncompressed = crossed_q ? {instr_hi_q, hw3} : {second_hw, first_hw};
+
     logic [(`INSTR_SIZE - 1):0] instruction;
-    assign instruction = pc[2] ? instr_line_q[63:32] : instr_line_q[31:0];
+    assign instruction = is_compressed
+        ? (c_expand_illegal ? 32'h00000013 /* addi x0,x0,0 -- inert placeholder
+                                               value only, never the real trap
+                                               mechanism: is_illegal_instr below
+                                               (fed by c_expand_illegal
+                                               directly) is what actually traps
+                                               a reserved compressed encoding. */
+                             : c_expand_out)
+        : raw32_noncompressed;
+
+    /*
+     * pc_plus_len: C extension's generalization of the old fixed pc+4
+     * -- this instruction's real length is 2 bytes when compressed, 4
+     * otherwise. Declared here (not down in Writeback, where the old
+     * pc_plus_4 lived) since is_compressed is already available this
+     * early and every consumer downstream just wants the resulting
+     * wire. is_compressed itself is stable for the instruction's whole
+     * multi-cycle lifetime (a pure combinational function of
+     * instr_line_q/crossed_q/pc, all latched no later than S_EXEC),
+     * same stability class as instruction itself.
+     */
+    wire [(`WORD_SIZE - 1):0] instr_len   = is_compressed ? `WORD_SIZE'(2) : `WORD_SIZE'(4);
+    wire [(`WORD_SIZE - 1):0] pc_plus_len = pc + instr_len;
 
     /*
      * Dword-aligned fetch address, precomputed as a plain wire rather
@@ -245,10 +385,10 @@ module core (
      * translation exists yet); when Sv39 lands, only this wire's RHS
      * needs to change (e.g. to a page-table-walker's translated
      * output), with no restructuring of the surrounding FSM/bus-driving
-     * logic below. (`instruction`'s pc[2] half-select above is
-     * deliberately left as raw pc -- it's a page-OFFSET bit, always
-     * identity-mapped even under Sv39, so there's nothing for
-     * translation to ever change there.)
+     * logic below. (The halfword-select logic above is deliberately
+     * left keyed on raw pc, not fetch_paddr -- pc[2:1] are page-OFFSET
+     * bits, always identity-mapped even under Sv39, so there's nothing
+     * for translation to ever change there.)
      *
      * Deliberately WORD_SIZE-wide even though only bits[31:3] are
      * consumed today (this core's physical address space is 32 bits) --
@@ -260,6 +400,16 @@ module core (
     wire [(`WORD_SIZE - 1):0] fetch_paddr = pc;
     /* verilator lint_on UNUSEDSIGNAL */
     wire [31:0] fetch_addr = {fetch_paddr[31:3], 3'b0};
+
+    /*
+     * C extension: the second dword a crossing (S_FETCH_HI) fetch
+     * needs, one dword past fetch_addr. Only ever driven onto the bus
+     * from the S_FETCH_HI arm of wb_master_drive below.
+     */
+    /* verilator lint_off UNUSEDSIGNAL */
+    wire [(`WORD_SIZE - 1):0] fetch_paddr_hi = fetch_paddr + `WORD_SIZE'(8);
+    /* verilator lint_on UNUSEDSIGNAL */
+    wire [31:0] fetch_addr_hi = {fetch_paddr_hi[31:3], 3'b0};
 
     /* --------------------------------------------------------------- *
      * Decode
@@ -591,7 +741,7 @@ module core (
              * Branches/JAL/FENCE/ECALL/EBREAK/INVALID don't use
              * alu_result for anything (branches have their own
              * comparator below; JAL's target/link come from the PC
-             * adder and pc_plus_4 directly) -- alu_op is a don't-care
+             * adder and pc_plus_len directly) -- alu_op is a don't-care
              * for these, defaulted to ADD purely so alu_op always has a
              * defined value.
              */
@@ -749,8 +899,18 @@ module core (
     wire csr_priv_violation  = is_csr  && (imm_2[9:8] > 2'(current_priv));
     wire mret_priv_violation = is_mret && (current_priv != PRIV_M);
     wire sret_priv_violation = is_sret && (current_priv == PRIV_U);
+    /*
+     * C extension: a reserved/unassigned compressed encoding is also
+     * illegal-instruction -- c_expand_illegal is only meaningful when
+     * is_compressed (it's a pure combinational function of first_hw,
+     * computed unconditionally regardless of whether the current
+     * instruction turned out compressed at all), hence the explicit
+     * is_compressed guard here rather than trusting c_expand_illegal
+     * alone.
+     */
     wire is_illegal_instr = is_invalid_instr || csr_priv_violation
-                          || mret_priv_violation || sret_priv_violation;
+                          || mret_priv_violation || sret_priv_violation
+                          || (is_compressed && c_expand_illegal);
     wire is_ecall = (decoded_instruction == `INSTR_CODE(ECALL));
 
     /* Exception codes, per spec's machine-cause table (synchronous only
@@ -766,8 +926,16 @@ module core (
      * naturally here since current_priv==M forces this wire to 0. */
     wire trap_to_s  = trap_taken && (current_priv != PRIV_M) && medeleg_w[6'(exc_code)];
     wire [(`WORD_SIZE - 1):0] trap_cause = {60'b0, exc_code};
+    /*
+     * C extension: for a compressed illegal instruction, the real
+     * faulting bits are the 16-bit halfword (zero-extended), not
+     * `instruction` -- which, in that exact case, holds the inert
+     * 32'h00000013 placeholder substituted above, not anything real.
+     */
     wire [(`WORD_SIZE - 1):0] trap_val = is_illegal_instr
-        ? {{(`WORD_SIZE - `INSTR_SIZE){1'b0}}, instruction} : `WORD_SIZE'(0);
+        ? (is_compressed ? {48'b0, first_hw}
+                          : {{(`WORD_SIZE - `INSTR_SIZE){1'b0}}, instruction})
+        : `WORD_SIZE'(0);
 
     wire mret_taken = commit_now && is_mret && !mret_priv_violation;
     wire sret_taken = commit_now && is_sret && !sret_priv_violation;
@@ -1177,6 +1345,21 @@ module core (
                     wb_sel_o  = 8'hFF; // don't-care for a read; full line for clarity
                 end
             end
+            /*
+             * C extension: the second dword of a crossing fetch --
+             * reuses the exact same !wb_ack_i gating discipline as
+             * every other arm here. Never halts mid-crossing (the
+             * !halted check mirrors S_FETCH's own, for the same reason:
+             * once halted, issue no further bus traffic at all).
+             */
+            S_FETCH_HI: begin
+                if (!halted && !wb_ack_i) begin
+                    wb_cyc_o  = 1'b1;
+                    wb_stb_o  = 1'b1;
+                    wb_addr_o = fetch_addr_hi;
+                    wb_sel_o  = 8'hFF;
+                end
+            end
             S_MEM: begin
                 if (!wb_ack_i) begin
                     wb_cyc_o  = 1'b1;
@@ -1210,8 +1393,6 @@ module core (
      * Writeback
      * --------------------------------------------------------------- */
 
-    wire [(`WORD_SIZE - 1):0] pc_plus_4 = pc + `WORD_SIZE'(4);
-
     /* See the is_word_arith comment above for why only some *W ops need this. */
     wire [(`WORD_SIZE - 1):0] alu_result_w_trunc = {{32{alu_result[31]}}, alu_result[31:0]};
 
@@ -1237,7 +1418,7 @@ module core (
     assign reg_write_data = is_amo_rmw            ? amo_rdata_q :
                              is_sc                 ? sc_result :
                              is_load                ? load_data :
-                             (is_jal || is_jalr)     ? pc_plus_4 :
+                             (is_jal || is_jalr)     ? pc_plus_len :
                              is_word_arith            ? alu_result_w_trunc :
                              is_csr                    ? csr_rdata :
                              is_div_family               ? div_result :
@@ -1255,7 +1436,8 @@ module core (
      * Per spec, JALR's target is (rs1 + sext(imm)) with bit 0 forced to
      * 0 -- guarantees an even target regardless of whether rs1+imm
      * happens to be odd. Only the JUMP TARGET's LSB is cleared here; the
-     * link value written back to rd (pc_plus_4, above) is always
+     * link value written back to rd (pc_plus_len, declared up in Fetch
+     * -- C extension's generalization of the old fixed pc+4) is always
      * unmodified.
      */
     wire [(`WORD_SIZE - 1):0] jalr_target = {alu_result[63:1], 1'b0};
@@ -1280,7 +1462,7 @@ module core (
                       sret_taken              ? sepc_w        :
                       (is_jal || take_branch) ? pc_rel_target :
                       is_jalr                 ? jalr_target   :
-                                                 pc_plus_4;
+                                                 pc_plus_len;
 
     /* --------------------------------------------------------------- *
      * PC register / halt latch
