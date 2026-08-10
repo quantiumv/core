@@ -37,6 +37,17 @@ PRIV_ASFLAGS = -march=rv64i_zicsr -mabi=lp64 -mno-relax
 #   above) even when linked into this program.
 A_ASFLAGS = -march=rv64ima -mabi=lp64 -mno-relax
 
+# c_test.s is deliberately ORDINARY RISC-V assembly (no c.xxx mnemonics
+#   at all) -- under -march=rv64imac the real assembler automatically
+#   compresses any eligible plain instruction, which is the entire point
+#   of this target (see c_test.s's own header). crt0.s itself stays
+#   plain -march=rv64i (ASFLAGS above), same reasoning as every other
+#   *_ASFLAGS variable here -- it never uses C-extension mnemonics
+#   directly, only whatever real auto-compression Pillar 5's separate
+#   hello_c target later applies to it.
+C_ASFLAGS = -march=rv64imac -mabi=lp64 -mno-relax
+CFLAGS_C  = -march=rv64imac -mabi=lp64 -mno-relax -ffreestanding -nostdlib -O0 -Wall
+
 all:
 	riscv64-unknown-elf-as $(ASFLAGS) crt0.s -o crt0.o
 	riscv64-unknown-elf-gcc $(CFLAGS) -c hello.c -o hello.o
@@ -117,3 +128,37 @@ a_test:
 	riscv64-unknown-elf-ld -T link.ld -o a_test.elf crt0.o a_test.o
 	riscv64-unknown-elf-objdump -d a_test.elf
 	riscv64-unknown-elf-objcopy -O verilog -j .text -j .rodata -j .data --verilog-data-width=8 a_test.elf a_test.hex
+
+# Pillar 4 of the C-extension plan: a real-toolchain-encoded end-to-end
+#   C-extension (compressed instructions) test (firmware/c_test.s),
+#   linked against the SAME crt0.o/link.ld as every other target above --
+#   rebuilt here (plain -march=rv64i, unchanged) rather than assumed to
+#   already exist, so this target works standalone. Produces a DISTINCT
+#   c_test.hex -- every other target's hex output is untouched either
+#   way. Like a_test.s, c_test.s genuinely needs memory (a real store/
+#   load round trip) -- reuses link.ld's existing .data section.
+c_test:
+	riscv64-unknown-elf-as $(ASFLAGS) crt0.s -o crt0.o
+	riscv64-unknown-elf-as $(C_ASFLAGS) c_test.s -o c_test.o
+	riscv64-unknown-elf-ld -T link.ld -o c_test.elf crt0.o c_test.o
+	riscv64-unknown-elf-objdump -d c_test.elf
+	riscv64-unknown-elf-objcopy -O verilog -j .text -j .rodata -j .data --verilog-data-width=8 c_test.elf c_test.hex
+
+# Pillar 5 of the C-extension plan: recompile the EXISTING, already-
+#   trusted hello-world firmware (crt0.s + hello.c, unmodified, zero new
+#   source files) under real -march=rv64imac -- no C.xxx mnemonics
+#   anywhere in either source, so any compression that happens here is
+#   the real assembler/compiler's own automatic instruction selection,
+#   not anything hand-picked. This is the strongest available proof that
+#   GENERAL compressed-code density (not just c_test.s's own curated
+#   subset) works end to end. Produces crt0_c.o/hello_c.o/hello_c.elf/
+#   hello_c.hex -- deliberately DISTINCT names from the "all" target's
+#   own crt0.o/hello.o/crt0.elf/crt0.hex, so the canonical hello-world
+#   image every other regression in this repo depends on is completely
+#   untouched by this target.
+hello_c:
+	riscv64-unknown-elf-as $(C_ASFLAGS) crt0.s -o crt0_c.o
+	riscv64-unknown-elf-gcc $(CFLAGS_C) -c hello.c -o hello_c.o
+	riscv64-unknown-elf-ld -T link.ld -o hello_c.elf crt0_c.o hello_c.o
+	riscv64-unknown-elf-objdump -d hello_c.elf
+	riscv64-unknown-elf-objcopy -O verilog -j .text -j .rodata -j .data --verilog-data-width=8 hello_c.elf hello_c.hex
