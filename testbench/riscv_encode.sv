@@ -231,4 +231,174 @@ endfunction
 /* ------------------------------------------------------------------------- */
 
 
+/*
+ * C extension (16-bit compressed instructions, RV64 Zca). Every encoder
+ * below takes LOGICAL values (a real immediate/offset, a real register
+ * index) and does its own bit-scramble internally -- deliberately NOT
+ * shared code with design/c_expand.sv's own mk_r/mk_i/... helpers and
+ * dispatch logic (a completely separate file, written independently
+ * against the same RVC spec tables), so a bug shared between the two
+ * would have to be a genuine shared misunderstanding of the spec, not a
+ * copy-paste-shared mistake. This is the actual reason
+ * testbench/core_c_ext_tb.sv (pillar 2) and
+ * testbench/c_encode_crosscheck_tb.sv (pillar 3) have real, independent
+ * verification value against c_expand.sv, not just a second copy of the
+ * same formulas.
+ *
+ * Register-field convention (mirrors c_expand.sv's own header note):
+ * CR-format fields and every CI-format destination register are full,
+ * UNMAPPED 5-bit indices -- callers pass a plain logic[4:0]. CIW/CL/CS/CA
+ * formats and the arithmetic/branch rows of CB use the compressed 3-bit
+ * "popular register" convention (x8-x15) -- callers pass a plain
+ * logic[2:0] (already relative to x8, i.e. 3'd0 == x8), using the _3
+ * suffix on the parameter name below.
+ */
+
+/* ---- Quadrant 0 (op=00) ---- */
+
+function automatic logic [15:0] encode_c_addi4spn(input logic [9:0] nzuimm, input logic [2:0] rd_3);
+    return {3'b000, nzuimm[5:4], nzuimm[9:6], nzuimm[2], nzuimm[3], rd_3, 2'b00};
+endfunction
+
+function automatic logic [15:0] encode_c_lw(input logic [6:0] off, input logic [2:0] rs1_3, input logic [2:0] rd_3);
+    return {3'b010, off[5:3], rs1_3, off[2], off[6], rd_3, 2'b00};
+endfunction
+
+function automatic logic [15:0] encode_c_ld(input logic [7:0] off, input logic [2:0] rs1_3, input logic [2:0] rd_3);
+    return {3'b011, off[5:3], rs1_3, off[7:6], rd_3, 2'b00};
+endfunction
+
+function automatic logic [15:0] encode_c_sw(input logic [6:0] off, input logic [2:0] rs1_3, input logic [2:0] rs2_3);
+    return {3'b110, off[5:3], rs1_3, off[2], off[6], rs2_3, 2'b00};
+endfunction
+
+function automatic logic [15:0] encode_c_sd(input logic [7:0] off, input logic [2:0] rs1_3, input logic [2:0] rs2_3);
+    return {3'b111, off[5:3], rs1_3, off[7:6], rs2_3, 2'b00};
+endfunction
+
+/* ---- Quadrant 1 (op=01) ---- */
+
+/* Generic plain-6-bit-signed-immediate CI shape: C.ADDI/C.ADDIW/C.LI.
+ * rd_rs1 is a full 5-bit index (0 is a legal, spec-defined HINT for
+ * C.ADDI/C.LI -- callers wanting C.LI pass rs1_field=x0 by construction,
+ * see encode_c_li below). */
+function automatic logic [15:0] encode_c_i_imm(input logic [2:0] funct3, input int imm, input logic [4:0] rd_rs1);
+    return {funct3, imm[5], rd_rs1, imm[4:0], 2'b01};
+endfunction
+
+function automatic logic [15:0] encode_c_addi(input int imm, input logic [4:0] rd_rs1);
+    return encode_c_i_imm(3'b000, imm, rd_rs1);
+endfunction
+
+function automatic logic [15:0] encode_c_addiw(input int imm, input logic [4:0] rd_rs1);
+    return encode_c_i_imm(3'b001, imm, rd_rs1);
+endfunction
+
+function automatic logic [15:0] encode_c_li(input int imm, input logic [4:0] rd);
+    return encode_c_i_imm(3'b010, imm, rd);
+endfunction
+
+function automatic logic [15:0] encode_c_addi16sp(input int nzimm);
+    logic [9:0] u;
+    u = nzimm[9:0];
+    return {3'b011, u[9], 5'b00010, u[4], u[6], u[8:7], u[5], 2'b01};
+endfunction
+
+/* nzimm18 is the raw {bit17, bits16:12} 6-bit field (nzimm17 = sign bit)
+ * -- NOT a pre-shifted 32-bit LUI value; matches how the spec itself
+ * frames C.LUI's immediate, and how design/c_expand.sv's own o_illegal
+ * check for it is phrased ("raw 6 bits all zero"). */
+function automatic logic [15:0] encode_c_lui(input logic [5:0] nzimm6, input logic [4:0] rd);
+    return {3'b011, nzimm6[5], rd, nzimm6[4:0], 2'b01};
+endfunction
+
+function automatic logic [15:0] encode_c_slli(input logic [5:0] shamt, input logic [4:0] rd);
+    return {3'b000, shamt[5], rd, shamt[4:0], 2'b10};
+endfunction
+
+function automatic logic [15:0] encode_c_srli(input logic [5:0] shamt, input logic [2:0] rd_3);
+    return {3'b100, shamt[5], 2'b00, rd_3, shamt[4:0], 2'b01};
+endfunction
+
+function automatic logic [15:0] encode_c_srai(input logic [5:0] shamt, input logic [2:0] rd_3);
+    return {3'b100, shamt[5], 2'b01, rd_3, shamt[4:0], 2'b01};
+endfunction
+
+function automatic logic [15:0] encode_c_andi(input int imm, input logic [2:0] rd_3);
+    return {3'b100, imm[5], 2'b10, rd_3, imm[4:0], 2'b01};
+endfunction
+
+/* CA format: reg-reg among the 8 popular registers. i12 selects
+ * 32-bit-result (0, opcode OP) vs. RV64 *W-result (1, opcode OP-32);
+ * funct2 then picks the specific op within each -- see the funct2
+ * `define`s below. */
+function automatic logic [15:0] encode_c_ca(input logic i12, input logic [1:0] funct2, input logic [2:0] rd_3, input logic [2:0] rs2_3);
+    return {3'b100, i12, 2'b11, rd_3, funct2, rs2_3, 2'b01};
+endfunction
+
+function automatic logic [15:0] encode_c_j(input int offset);
+    logic [11:0] t;
+    t = offset[11:0];
+    return {3'b101, t[11], t[4], t[9], t[8], t[10], t[6], t[7], t[3:1], t[5], 2'b01};
+endfunction
+
+function automatic logic [15:0] encode_c_beqz(input int offset, input logic [2:0] rs1_3);
+    logic [8:0] o;
+    o = offset[8:0];
+    return {3'b110, o[8], o[4:3], rs1_3, o[7:6], o[2:1], o[5], 2'b01};
+endfunction
+
+function automatic logic [15:0] encode_c_bnez(input int offset, input logic [2:0] rs1_3);
+    logic [8:0] o;
+    o = offset[8:0];
+    return {3'b111, o[8], o[4:3], rs1_3, o[7:6], o[2:1], o[5], 2'b01};
+endfunction
+
+/* ---- Quadrant 2 (op=10) ---- */
+
+function automatic logic [15:0] encode_c_lwsp(input logic [7:0] off, input logic [4:0] rd);
+    return {3'b010, off[5], rd, off[4:2], off[7:6], 2'b10};
+endfunction
+
+function automatic logic [15:0] encode_c_ldsp(input logic [8:0] off, input logic [4:0] rd);
+    return {3'b011, off[5], rd, off[4:3], off[8:6], 2'b10};
+endfunction
+
+function automatic logic [15:0] encode_c_jr(input logic [4:0] rs1);
+    return {4'b1000, rs1, 5'b00000, 2'b10};
+endfunction
+
+function automatic logic [15:0] encode_c_mv(input logic [4:0] rd, input logic [4:0] rs2);
+    return {4'b1000, rd, rs2, 2'b10};
+endfunction
+
+function automatic logic [15:0] encode_c_jalr(input logic [4:0] rs1);
+    return {4'b1001, rs1, 5'b00000, 2'b10};
+endfunction
+
+function automatic logic [15:0] encode_c_add(input logic [4:0] rd, input logic [4:0] rs2);
+    return {4'b1001, rd, rs2, 2'b10};
+endfunction
+
+function automatic logic [15:0] encode_c_swsp(input logic [7:0] off, input logic [4:0] rs2);
+    return {3'b110, off[5:2], off[7:6], rs2, 2'b10};
+endfunction
+
+function automatic logic [15:0] encode_c_sdsp(input logic [8:0] off, input logic [4:0] rs2);
+    return {3'b111, off[5:3], off[8:6], rs2, 2'b10};
+endfunction
+
+`define INSTR_C_EBREAK  16'h9002
+`define OPC_C0          2'b00
+`define OPC_C1          2'b01
+`define OPC_C2          2'b10
+`define CA_FUNCT2_SUB   2'b00  /* also C.SUBW when encode_c_ca's i12=1 */
+`define CA_FUNCT2_XOR   2'b01  /* also C.ADDW when encode_c_ca's i12=1 */
+`define CA_FUNCT2_OR    2'b10
+`define CA_FUNCT2_AND   2'b11
+
+
+/* ------------------------------------------------------------------------- */
+
+
 /* End of file. */
