@@ -29,8 +29,8 @@ trap 'rm -rf "$HEX_DIR" "$VVP_BIN"' EXIT
 echo "Compiling act_runner_tb.sv against the current core..."
 iverilog -g2012 -I "$REPO_ROOT/design" -I "$REPO_ROOT/testbench" -o "$VVP_BIN" \
     "$REPO_ROOT/design/alu.sv" "$REPO_ROOT/design/decoder.sv" "$REPO_ROOT/design/register_file.sv" \
-    "$REPO_ROOT/design/csr_file.sv" "$REPO_ROOT/design/divider.sv" "$REPO_ROOT/design/core.sv" \
-    "$REPO_ROOT/design/wb4_sram.sv" "$REPO_ROOT/testbench/act_runner_tb.sv"
+    "$REPO_ROOT/design/csr_file.sv" "$REPO_ROOT/design/divider.sv" "$REPO_ROOT/design/c_expand.sv" \
+    "$REPO_ROOT/design/core.sv" "$REPO_ROOT/design/wb4_sram.sv" "$REPO_ROOT/testbench/act_runner_tb.sv"
 if [ $? -ne 0 ]; then
     echo "COMPILE FAILED"
     exit 1
