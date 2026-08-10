@@ -22,8 +22,9 @@ ASFLAGS_M     = -march=rv64im -mabi=lp64 -mno-relax
 #   state), not because it's functionally required.
 ASFLAGS_PRIV  = -march=rv64i_zicsr -mabi=lp64 -mno-relax
 ASFLAGS_A     = -march=rv64ima -mabi=lp64 -mno-relax
+ASFLAGS_C     = -march=rv64imac -mabi=lp64 -mno-relax
 
-all: csr_encode_check.hex m_encode_check.hex priv_encode_check.hex a_encode_check.hex
+all: csr_encode_check.hex m_encode_check.hex priv_encode_check.hex a_encode_check.hex c_encode_check.hex
 
 csr_encode_check.hex: csr_encode_check.s
 	riscv64-unknown-elf-as $(ASFLAGS_ZICSR) csr_encode_check.s -o csr_encode_check.o
@@ -56,3 +57,13 @@ a_encode_check.hex: a_encode_check.s
 	#   needed (see header above) -- a bare unlinked .o objcopies cleanly for
 	#   this relative-encoding-only purpose.
 	riscv64-unknown-elf-objcopy -O verilog --verilog-data-width=4 a_encode_check.o a_encode_check.hex
+
+c_encode_check.hex: c_encode_check.s
+	riscv64-unknown-elf-as $(ASFLAGS_C) c_encode_check.s -o c_encode_check.o
+	# --verilog-data-width=2: one 16-bit compressed-instruction word per
+	#   line, matching c_encode_crosscheck_tb.sv's logic [15:0] golden
+	#   array -- narrower than every prior encode-check fixture's =4 since
+	#   these are genuinely 16-bit RVC words, not 32-bit standard ones. No
+	#   linking needed (see header above) -- a bare unlinked .o objcopies
+	#   cleanly for this relative-encoding-only purpose.
+	riscv64-unknown-elf-objcopy -O verilog --verilog-data-width=2 c_encode_check.o c_encode_check.hex
