@@ -138,7 +138,7 @@
     "Zfhmin": { "supported": false },
     "Zfinx": { "supported": false },
     "Zdinx": { "supported": false },
-    "Zca": { "supported": false },
+    "Zca": { "supported": true },
     "Zcf": { "supported": false },
     "Zcd": { "supported": false },
     "Zcb": { "supported": false },

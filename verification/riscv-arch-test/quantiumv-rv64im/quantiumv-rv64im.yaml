@@ -5,18 +5,21 @@ kind: architecture configuration
 type: fully configured
 name: quantiumv-rv64im
 description: >
-  QuantiumV single-cycle-retire RV64IM+Zicsr+U/S/M core (design/core.sv on the
-  `dev` branch, 2026-08-08). No A/C/F/D/V. No PMP. No Sv39/Sv48/Sv57 (satp
-  storage exists for a future MMU handoff but only Bare mode is functional
-  today). No misaligned-access exception (misaligned loads/stores are neither
-  guaranteed-correct nor faulted -- a known gap, not a config omission). No
-  interrupts (mie/mip/mideleg are real, inert storage; no interrupt source
-  exists). EBREAK is a permanent sim-only halt, not a real breakpoint trap --
-  a known, tracked pre-tapeout gap (see memory/known-gap-ebreak-sim-halt.md).
+  QuantiumV single-cycle-retire RV64IMZca+Zicsr+U/S/M core (design/core.sv on
+  the `dev` branch, 2026-08-10). No A/F/D/V (A is implemented on `dev` too --
+  atomics -- but not yet declared here; see memory/c-extension-milestone.md).
+  No PMP. No Sv39/Sv48/Sv57 (satp storage exists for a future MMU handoff but
+  only Bare mode is functional today). No misaligned-access exception
+  (misaligned loads/stores are neither guaranteed-correct nor faulted -- a
+  known gap, not a config omission). No interrupts (mie/mip/mideleg are real,
+  inert storage; no interrupt source exists). EBREAK is a permanent sim-only
+  halt, not a real breakpoint trap -- a known, tracked pre-tapeout gap (see
+  memory/known-gap-ebreak-sim-halt.md).
 implemented_extensions:
   - { name: I, version: "= 2.1" }
   - { name: M, version: "= 2.0" }
   - { name: Zicsr, version: "= 2.0" }
+  - { name: Zca, version: "= 1.0.0" } # RV64 compressed instructions -- no Zcf/Zcd (no F/D)
   - { name: U, version: "= 1.0.0" }
   - { name: S, version: "= 1.12.0" }
   - { name: Sm, version: "= 1.12.0" }
