@@ -885,20 +885,36 @@ module core (
      * minimum privilege (bits[9:8], computed from the ADDRESS,
      * independent of whether csr_file.sv actually backs it), OR MRET
      * below M-mode / SRET below S-mode (also illegal-instruction per
-     * spec, not a separate source).
+     * spec, not a separate source), OR SRET executed in S-mode while
+     * mstatus.TSR=1 (spec: "Trap SRET" -- an S-mode SRET must trap to
+     * M-mode when TSR=1, letting M-mode emulate/intercept the return;
+     * found via a real ACT4 S-00 failure tracing an sret-from-S-mode
+     * subtest that expects exactly this trap and got a normal return
+     * instead, since TSR was until now inert storage only).
      *
      * Deliberately NOT covered: read-only-CSR-write attempts
      * (bits[11:10]) -- csr_file.sv already silently ignores these
      * (Zicsr milestone's own decision; core_zicsr_tb.sv's csrrwi-to-
-     * mhartid case depends on that silent-ignore) -- and SFENCE.VMA
-     * from U-mode (spec-should-trap, but decoded as an unconditional
-     * NOP this milestone -- see its own comment in
-     * instructions_and_masks.sv).
+     * mhartid case depends on that silent-ignore) -- SFENCE.VMA from
+     * U-mode (spec-should-trap, but decoded as an unconditional NOP
+     * this milestone -- see its own comment in
+     * instructions_and_masks.sv) -- and TVM/TW (mstatus's other two
+     * "trap on privileged op" bits, same "real storage, not enforced"
+     * status as TSR was -- SFENCE.VMA-under-TVM and WFI-under-TW are a
+     * separate gap, not exercised by the S-00 failure that motivated
+     * this fix, and left as-is rather than speculatively fixed here).
      */
+    // Declared here (ahead of csr_file0's instantiation further down)
+    // purely because Icarus's single-pass elaborator wants a net's
+    // declaration textually before its first use in a continuous
+    // assignment, unlike mstatus_mpp_w/mstatus_spp_w below which are
+    // only ever used later in the file.
+    wire mstatus_tsr_w;
     wire is_invalid_instr    = (decoded_instruction == `INSTR_CODE(INVALID));
     wire csr_priv_violation  = is_csr  && (imm_2[9:8] > 2'(current_priv));
     wire mret_priv_violation = is_mret && (current_priv != PRIV_M);
-    wire sret_priv_violation = is_sret && (current_priv == PRIV_U);
+    wire sret_priv_violation = is_sret && ((current_priv == PRIV_U)
+                              || (current_priv == PRIV_S && mstatus_tsr_w));
     /*
      * C extension: a reserved/unassigned compressed encoding is also
      * illegal-instruction -- c_expand_illegal is only meaningful when
@@ -1167,7 +1183,8 @@ module core (
         .o_sepc(sepc_w),
         .o_medeleg(medeleg_w),
         .o_mstatus_mpp(mstatus_mpp_w),
-        .o_mstatus_spp(mstatus_spp_w)
+        .o_mstatus_spp(mstatus_spp_w),
+        .o_mstatus_tsr(mstatus_tsr_w)
     );
 
     /*

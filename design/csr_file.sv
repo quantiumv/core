@@ -83,10 +83,13 @@
  *
  * Output ports:
  *  o_csr_rdata: Data read from the CSR at i_csr_addr, combinationally.
- *  o_mtvec/o_stvec/o_mepc/o_sepc/o_medeleg/o_mstatus_mpp/o_mstatus_spp:
- *    "control-plane" outputs core.sv's trap/MRET/SRET logic needs every
- *    cycle, independent of whatever i_csr_addr happens to be driven to
- *    that cycle -- unlike o_csr_rdata, which is a single-address mux.
+ *  o_mtvec/o_stvec/o_mepc/o_sepc/o_medeleg/o_mstatus_mpp/o_mstatus_spp/
+ *  o_mstatus_tsr: "control-plane" outputs core.sv's trap/MRET/SRET logic
+ *    needs every cycle, independent of whatever i_csr_addr happens to be
+ *    driven to that cycle -- unlike o_csr_rdata, which is a single-address
+ *    mux. o_mstatus_tsr feeds core.sv's SRET-from-S-mode illegal-instruction
+ *    check (TSR itself is still just inert storage here, same as TVM/TW --
+ *    core.sv is what turns the bit into an actual trap).
  */
 module csr_file (
     input  logic i_clk,
@@ -113,7 +116,8 @@ module csr_file (
     output logic [(`WORD_SIZE - 1):0]     o_sepc,
     output logic [(`WORD_SIZE - 1):0]     o_medeleg,
     output logic [1:0]                    o_mstatus_mpp,
-    output logic                          o_mstatus_spp
+    output logic                          o_mstatus_spp,
+    output logic                          o_mstatus_tsr
 );
     /* ----------------------------------------------------------------- *
      * CSR address map (module-local constants, same register-map-
@@ -444,10 +448,18 @@ module csr_file (
             mstatus_q[MSTATUS_MIE_BIT]  <= mstatus_q[MSTATUS_MPIE_BIT];
             mstatus_q[MSTATUS_MPIE_BIT] <= 1'b1;
             mstatus_q[MSTATUS_MPP_MSB:MSTATUS_MPP_LSB] <= 2'b00; // MPP resets to U after use, per spec
+            // Per spec: an mret/sret that drops privilege below M also clears MPRV
+            // (destination priv is the PRE-update MPP here, i.e. the mode MRET is
+            // returning to). MRET returning to M itself (MPP==2'b11) leaves MPRV alone.
+            if (mstatus_q[MSTATUS_MPP_MSB:MSTATUS_MPP_LSB] != 2'b11)
+                mstatus_q[MSTATUS_MPRV_BIT] <= 1'b0;
         end else if (i_sret_taken) begin
             mstatus_q[MSTATUS_SIE_BIT]  <= mstatus_q[MSTATUS_SPIE_BIT];
             mstatus_q[MSTATUS_SPIE_BIT] <= 1'b1;
             mstatus_q[MSTATUS_SPP_BIT]  <= 1'b0; // SPP resets to U after use, per spec
+            // SPP is 1 bit (U or S only), so SRET's destination is never M --
+            // MPRV unconditionally clears, unlike MRET's MPP-dependent check above.
+            mstatus_q[MSTATUS_MPRV_BIT] <= 1'b0;
         end else if (i_csr_we && (i_csr_addr == CSR_ADDR_MSTATUS)) begin
             mstatus_q[MSTATUS_SIE_BIT]  <= i_csr_wdata[MSTATUS_SIE_BIT];
             mstatus_q[MSTATUS_MIE_BIT]  <= i_csr_wdata[MSTATUS_MIE_BIT];
@@ -479,6 +491,7 @@ module csr_file (
     assign o_medeleg     = medeleg_q;
     assign o_mstatus_mpp = mstatus_q[MSTATUS_MPP_MSB:MSTATUS_MPP_LSB];
     assign o_mstatus_spp = mstatus_q[MSTATUS_SPP_BIT];
+    assign o_mstatus_tsr = mstatus_q[MSTATUS_TSR_BIT];
 
     /*
      * Combinational read mux. The default arm is both "unmapped

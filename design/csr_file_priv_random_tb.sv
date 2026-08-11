@@ -360,10 +360,18 @@ module csr_file_priv_random_tb;
                     shadow_mstatus[MPP_MSB:MPP_LSB] = priv_v;
                 end
             end else if (mret_taken_v) begin
+                /* Per spec: an mret/sret that drops privilege below M also
+                 * clears MPRV. Destination priv here is the PRE-update MPP;
+                 * MRET returning to M itself (MPP==2'b11) leaves MPRV alone. */
+                if (shadow_mstatus[MPP_MSB:MPP_LSB] != 2'b11)
+                    shadow_mstatus[MPRV_BIT] = 1'b0;
                 shadow_mstatus[MIE_BIT]  = shadow_mstatus[MPIE_BIT];
                 shadow_mstatus[MPIE_BIT] = 1'b1;
                 shadow_mstatus[MPP_MSB:MPP_LSB] = 2'b00;
             end else if (sret_taken_v) begin
+                /* SPP is 1 bit (U or S only), so SRET's destination is never
+                 * M -- MPRV unconditionally clears, unlike MRET's check above. */
+                shadow_mstatus[MPRV_BIT] = 1'b0;
                 shadow_mstatus[SIE_BIT]  = shadow_mstatus[SPIE_BIT];
                 shadow_mstatus[SPIE_BIT] = 1'b1;
                 shadow_mstatus[SPP_BIT]  = 1'b0;
