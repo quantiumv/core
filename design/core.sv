@@ -119,6 +119,44 @@ module core (
     /* verilator lint_off UNUSEDSIGNAL */
     input  logic        wb_err_i
     /* verilator lint_on UNUSEDSIGNAL */
+
+    /*
+     * RVFI (RISC-V Formal Interface) -- only present when compiled for
+     * riscv-formal (see verification/riscv-formal/), never in a normal
+     * build/lint/simulation run. Hand-written rather than pulled in via
+     * riscv-formal's own `RVFI_OUTPUTS macro (checks/rvfi_macros.vh) so
+     * core.sv has no dependency on that separately-cloned repo existing
+     * at build time -- these widths are just RVFI_OUTPUTS's own
+     * expansion for our fixed NRET=1/XLEN=64/ILEN=32, spelled out
+     * directly. First slice covers base-ISA checks (isa=rv64i in
+     * checks.cfg) only -- no CSR trace ports yet (those need per-CSR
+     * rvfi_csr_<name>_* ports added deliberately, one extension's worth
+     * at a time, once base-ISA checks are green).
+     */
+`ifdef RISCV_FORMAL
+    ,
+    output logic        rvfi_valid,
+    output logic [63:0] rvfi_order,
+    output logic [31:0] rvfi_insn,
+    output logic        rvfi_trap,
+    output logic        rvfi_halt,
+    output logic        rvfi_intr,
+    output logic [1:0]  rvfi_mode,
+    output logic [1:0]  rvfi_ixl,
+    output logic [4:0]  rvfi_rs1_addr,
+    output logic [4:0]  rvfi_rs2_addr,
+    output logic [63:0] rvfi_rs1_rdata,
+    output logic [63:0] rvfi_rs2_rdata,
+    output logic [4:0]  rvfi_rd_addr,
+    output logic [63:0] rvfi_rd_wdata,
+    output logic [63:0] rvfi_pc_rdata,
+    output logic [63:0] rvfi_pc_wdata,
+    output logic [63:0] rvfi_mem_addr,
+    output logic [7:0]  rvfi_mem_rmask,
+    output logic [7:0]  rvfi_mem_wmask,
+    output logic [63:0] rvfi_mem_rdata,
+    output logic [63:0] rvfi_mem_wdata
+`endif
 );
 
     /* --------------------------------------------------------------- *
@@ -1534,5 +1572,58 @@ module core (
         else if (sret_taken)
             current_priv <= priv_t'(mstatus_spp_w ? PRIV_S : PRIV_U);
     end
+
+`ifdef RISCV_FORMAL
+    /*
+     * RVFI tap -- pure combinational off the same signals that already
+     * drive the real commit (reg_write_data, current_priv, mem_paddr/
+     * mem_sel/mem_wdata, etc.) at the exact commit_now cycle. No new
+     * pipeline stage needed: commit_now is already "this instruction
+     * retires this cycle" for every instruction shape this core has,
+     * including multi-cycle loads/stores/divides -- they just take
+     * longer to REACH that one commit_now cycle, which matches RVFI's
+     * documented model of exactly one rvfi_valid pulse per retired
+     * instruction regardless of cycle count.
+     *
+     * First slice only -- covers isa=rv64i base-ISA checks
+     * (verification/riscv-formal/). No CSR trace ports yet (those need
+     * per-CSR rvfi_csr_<name>_* ports added deliberately once base-ISA
+     * checks are green), and rvfi_insn feeds the C-expanded 32-bit
+     * `instruction` wire rather than a compressed instruction's raw
+     * 16-bit encoding -- fine for isa=rv64i (no Zca check models get
+     * generated to notice), but needs its own raw-halfword tap before
+     * C-extension formal checks can be added.
+     */
+    logic [63:0] rvfi_order_q;
+    always_ff @(posedge clk) begin
+        if (rst)
+            rvfi_order_q <= 64'b0;
+        else if (commit_now)
+            rvfi_order_q <= rvfi_order_q + 64'b1;
+    end
+
+    assign rvfi_valid     = commit_now;
+    assign rvfi_order     = rvfi_order_q;
+    assign rvfi_insn      = instruction;
+    assign rvfi_trap      = trap_taken;
+    assign rvfi_halt      = 1'b0; // no graceful-halt/interrupt model exists yet
+    assign rvfi_intr      = 1'b0; // no interrupt controller exists yet (known gap)
+    assign rvfi_mode      = current_priv; // PRIV_U/S/M already match RVFI's 0/1/3 encoding
+    assign rvfi_ixl       = 2'd2; // always 64-bit -- this core never runs 32-bit mode
+    assign rvfi_rs1_addr  = read_gpr_A_sel;
+    assign rvfi_rs2_addr  = read_gpr_B_sel;
+    assign rvfi_rs1_rdata = read_gpr_A_data;
+    assign rvfi_rs2_rdata = read_gpr_B_data;
+    assign rvfi_rd_addr   = reg_write ? imm_3_or_dest_addr[(`L2_REG_FILE_SIZE - 1):0] : 5'b0;
+    assign rvfi_rd_wdata  = (reg_write && imm_3_or_dest_addr[(`L2_REG_FILE_SIZE - 1):0] != 5'b0)
+                             ? reg_write_data : 64'b0;
+    assign rvfi_pc_rdata  = pc;
+    assign rvfi_pc_wdata  = next_pc;
+    assign rvfi_mem_addr  = (is_load || is_store) ? mem_paddr : 64'b0;
+    assign rvfi_mem_rmask = is_load  ? mem_sel : 8'b0;
+    assign rvfi_mem_wmask = is_store ? mem_sel : 8'b0;
+    assign rvfi_mem_rdata = wb_dat_i;
+    assign rvfi_mem_wdata = mem_wdata;
+`endif
 
 endmodule
