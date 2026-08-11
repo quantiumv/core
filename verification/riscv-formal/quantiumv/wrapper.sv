@@ -10,6 +10,20 @@
 // "insn" check family verifies architectural correctness of whatever the
 // core eventually commits, independent of how many cycles memory took to
 // respond, so there is no concrete SRAM model here on purpose.
+//
+// This file is read via riscv-formal's read_slang frontend (see this
+// core's own checks.cfg comment for why: Yosys's built-in Verilog-2005
+// frontend can't parse two constructs core.sv/decoder.sv/c_expand.sv
+// genuinely need), which runs as its own independent preprocessor pass
+// -- it does NOT share macro state with whatever frontend reads the
+// riscv-formal-generated per-check glue file, so RVFI_OUTPUTS/RVFI_CONN
+// need their own explicit include here rather than relying on some
+// other file having already pulled them in -- "defines.sv" is riscv-
+// formal's own per-check-generated file (NRET/XLEN/ILEN plus
+// `include "rvfi_macros.vh"`), the same one the check-glue file itself
+// uses, so this stays automatically in sync with whatever ISA options
+// checks.cfg selects rather than duplicating those values here.
+`include "defines.sv"
 
 module rvfi_wrapper (
     input         clock,
