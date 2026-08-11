@@ -56,4 +56,29 @@ module rvfi_wrapper (
 
         `RVFI_CONN
     );
+
+`ifndef RISCV_FORMAL_ALLOW_COMPRESSED
+    // Base-ISA-only check scope (isa=rv64i/im/ima/imac's non-Zca checks):
+    // wb_dat_s2m is otherwise fully free, and the solver is entitled to
+    // pick fetched bytes that legitimately decode as a *compressed*
+    // instruction (any 16-bit-aligned halfword with bits[1:0] != 2'b11) --
+    // this core correctly detects that and advances pc by 2, but the
+    // standard riscv-formal insn_*.v spec models (fed via rvfi_insn, which
+    // core.sv's RVFI tap reports as the C-expanded 32-bit *equivalent*,
+    // not the raw 16-bit encoding -- see core.sv's own RVFI comment) always
+    // assume ILEN=32 non-compressed semantics (spec_pc_wdata = pc_rdata+4
+    // unconditionally). Root-caused via a real insn_add_ch0 counterexample
+    // (2026-08-11): the solver picked fetch data that happened to also be
+    // a valid C2-quadrant compressed encoding, our core correctly used
+    // pc+2, the spec model expected pc+4 -- not an RTL bug, a missing
+    // wrapper constraint for this check scope. Remove this whole guard
+    // (and add a proper raw-16-bit rvfi_insn tap) once Zca-specific check
+    // models are added -- see this dir's README.md.
+    always @* begin
+        assume (wb_dat_s2m[ 1: 0] == 2'b11);
+        assume (wb_dat_s2m[17:16] == 2'b11);
+        assume (wb_dat_s2m[33:32] == 2'b11);
+        assume (wb_dat_s2m[49:48] == 2'b11);
+    end
+`endif
 endmodule

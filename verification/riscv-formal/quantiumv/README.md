@@ -1,4 +1,4 @@
-# riscv-formal integration (started 2026-08-11, pipeline working, first real finding under investigation)
+# riscv-formal integration (started 2026-08-11, insn_add_ch0 PASSES)
 
 Formal verification via [riscv-formal](https://github.com/YosysHQ/riscv-formal)
 (Yosys + SymbiYosys + a SAT/BMC solver), proving ISA correctness exhaustively
@@ -7,7 +7,7 @@ is a genuinely different, stronger class of verification than everything else
 in `verification/` and `testbench/` — see the session that started this for
 the full reasoning.
 
-## Status: full pipeline runs end-to-end. `insn_add_ch0` produces a real counterexample, not yet root-caused.
+## Status: `insn_add_ch0` PASSES — the first real check to complete end-to-end, root cause confirmed for the earlier FAIL.
 
 **What works, confirmed end-to-end:**
 - `design/core.sv` carries a native, spec-shaped RVFI (RISC-V Formal
@@ -22,14 +22,17 @@ the full reasoning.
   base-ISA (`isa=rv64i`) check family, no CSR trace ports yet
   (`rvfi_csr_<name>_*`), and `rvfi_insn` feeds the C-expanded 32-bit
   `instruction` wire rather than a compressed instruction's raw 16-bit
-  encoding (fine for `isa=rv64i`, needs its own tap before Zca checks).
+  encoding (fine for `isa=rv64i`, needs its own tap before Zca checks — see
+  "Resolved finding" below for why this specific gap mattered).
 - **Elaboration through Yosys fully resolved** (see "Two real Yosys-frontend
   gaps, both closed" below) — the design elaborates, optimizes, and produces
   an SMT2 model with zero errors.
-- **A real BMC run completes and returns a verdict** — `insn_add_ch0`
-  (the simplest possible RV64I check) runs `sby` end-to-end with the
-  `bitwuzla` solver in ~2 minutes and returns `FAIL` with a genuine
-  counterexample trace, not a tooling error. See "Open finding" below.
+- **`insn_add_ch0` PASSES for real** — full configured depth (15), real
+  `checks.cfg`, `bitwuzla` solver, ~3 minutes wall clock, `Status: passed` /
+  `DONE (PASS, rc=0)`. This is the ADD instruction's architectural
+  correctness proven exhaustively (every register value, every legal
+  memory-response timing within the BMC window), not sampled by directed
+  test vectors. See "Resolved finding" below for the FAIL this superseded.
 
 ## Two real Yosys-frontend gaps, both closed (not RTL bugs — confirmed via isolated repros)
 
@@ -87,51 +90,78 @@ specific, not a sign of a genuinely harder problem. **Always run `sby` with
 a wrapping timeout and a `ulimit -v`** (see `checks.cfg`'s own environment
 notes below) given the WSL-crash history.
 
-## Open finding, not yet root-caused: `insn_add_ch0` FAILs
+## Resolved finding: `insn_add_ch0`'s original FAIL was a missing wrapper constraint, not an RTL bug
 
-`bitwuzla` finds a genuine assertion failure (`rvfi_insn_check.sv:178`,
-`spec_rd_wdata == rd_wdata` — the core's computed ADD result doesn't match
-the independently-derived spec model) at both depth 6 and depth 15
-(ruling out "too shallow a BMC window" as the explanation). ADD itself is
-about as foundational and already-well-tested as RTL gets in this project
-(`core_alu_ops_tb.sv` and others cover it directly), so a genuine ALU bug is
-the least likely explanation. Leading hypothesis, NOT yet confirmed: this
-core's C-extension capture registers (`instr_line_q`, `crossed_q`,
-`instr_hi_q` — see `design/core.sv`) deliberately have no `rst` branch (an
-accepted design choice documented in their own code comments, since real
-hardware/testbenches always perform a genuine `S_FETCH` before ever reading
-them). BMC's adversarial initial-state exploration is not bound by that same
-"always fetch before read" guarantee — the very first counterexample's
-initial state (`engine_0/trace_tb.v`, written by the solver itself) shows
-`state = 3'b111` (outside the FSM's legal 0–4 range) and `crossed_q = 1'b1`
-before reset has ever taken effect, which is exactly the kind of
-solver-chosen initial garbage this design's own reset-completeness
-assumptions don't cover. Not yet traced through to confirm this is the
-actual mechanism, though — could also be a genuine free/unconstrained-input
-modeling gap in `wrapper.sv` (no memory consistency model at all, matching
-`nerv`'s own reference wrapper's convention, but worth double-checking
-against this specific failure before concluding it's the FSM-reset issue).
+The investigation summarized below (VCD/witness archaeology, a hand-built
+Icarus replay flagged as unreliable, an off-by-one in identifying the
+actually-failing assertion line) is preserved as a record of the debugging
+path, since the reliable technique it converges on — Yosys's own native
+witness replay — is worth reusing for any future counterexample.
 
-**Next step for whoever picks this up**: read `engine_0/trace_tb.v` for
-`insn_add_ch0` cycle-by-cycle (163 lines currently, small enough to read
-directly) to see exactly which cycle `rvfi_valid` first pulses and what
-`state`/`crossed_q`/`instr_line_q` look like on that exact cycle — confirm
-or rule out the reset-completeness hypothesis before touching any RTL. If
-confirmed, the fix is almost certainly adding explicit `rst` handling to
-`crossed_q`/`instr_hi_q` in `core.sv` (currently: "garbage before the first
-real fetch is an accepted, existing non-issue" — true for simulation
-testbenches, evidently NOT true for formal's adversarial initial state).
+**Actual root cause (confirmed via `yosys -p "read_rtlil
+model/design_prep.il; sim -r engine_0/trace.yw -vcd out.vcd -a"`, a clean,
+glitch-free replay of the *exact* prepped model the solver reasoned about —
+see `parse_witness.py`/`native_sim_replay.sh` in this session's scratch dir
+for the replay technique)**: not `spec_rd_wdata == rd_wdata` at all — that
+was an off-by-one; the real failing assertion is
+`` `rvformal_addr_eq(spec_pc_wdata, pc_wdata) `` (`rvfi_insn_check.sv:178`).
+`wrapper.sv` leaves `wb_dat_s2m` (the simulated fetched-instruction bytes)
+completely free, per standard riscv-formal convention. For an
+`isa=rv64i`-only check, nothing stopped the solver from picking fetch data
+that happens to *also* be a legitimately valid compressed (RVC) encoding at
+the relevant 16-bit-aligned slot. This core correctly detects that
+(`is_compressed`) and advances `pc` by 2 — spec-correct — but `rvfi_insn`
+(core.sv's RVFI tap reports the C-expanded 32-bit *equivalent*, not the raw
+16-bit encoding) gives the standard `insn_add.v` spec model no way to know
+the retired instruction was actually 2 bytes, so it unconditionally checks
+`spec_pc_wdata = rvfi_pc_rdata + 4`. Genuine mismatch (2 vs 4), entirely a
+formal-harness gap, not a hardware defect.
+
+**Fix** (`wrapper.sv`, matching riscv-formal's own `picorv32` reference
+wrapper's precedent for exactly this class of gap): constrain
+`wb_dat_s2m`'s low 2 bits at every 16-bit-aligned slot within the 64-bit bus
+word to `2'b11`, ruling out compressed encodings for the current
+base-ISA-only (`isa=rv64i`) check scope:
+```systemverilog
+`ifndef RISCV_FORMAL_ALLOW_COMPRESSED
+    always @* begin
+        assume (wb_dat_s2m[ 1: 0] == 2'b11);
+        assume (wb_dat_s2m[17:16] == 2'b11);
+        assume (wb_dat_s2m[33:32] == 2'b11);
+        assume (wb_dat_s2m[49:48] == 2'b11);
+    end
+`endif
+```
+Confirmed: `insn_add_ch0` now `Status: passed` at the real configured depth
+(15) with this constraint in place. This guard is scoped to non-Zca checks
+on purpose — remove it (and add a proper raw-16-bit `rvfi_insn` tap) once
+dedicated Zca check models are added, per the fix's own code comment in
+`wrapper.sv`.
+
+**Debugging notes worth keeping**: the VCD Yosys's own `sim -r -vcd` writes
+pads every multi-bit signal's declared width by 4 characters in the dump
+(e.g. a 32-bit signal's symbol carries a 36-character value) — a real
+quirk of that dumper, not a bug in the design; account for it when grepping
+VCD output by symbol. A hand-built Icarus replay that force-assigns a
+register also driven by a real `always_ff` in the same design produces
+delta-cycle race artifacts in Icarus's SVA evaluation — unreliable for
+exact-value comparison, only trust it for coarse instruction-identity/
+timing checks. Prefer `sim -r <witness.yw>` against `design_prep.il`
+(the solver's own prepped model) for anything needing bit-exact replay.
 
 ## Next steps, roughly in order
 
-1. Root-cause and resolve the `insn_add_ch0` FAIL above.
-2. Get the full `isa=rv64i` set (56 checks) passing.
-3. Scale to `rv64im`, `rv64ima`, `rv64imac`.
-4. Add `` `RISCV_FORMAL_CSR_* `` trace ports to `core.sv` one CSR at a time
+1. Run the remaining 55 of the 56 generated `isa=rv64i` checks against the
+   fixed `wrapper.sv` to confirm the compressed-instruction constraint
+   generalizes beyond `insn_add_ch0` (only that one has been run so far).
+2. Scale to `rv64im`, `rv64ima`, `rv64imac`.
+3. Add `` `RISCV_FORMAL_CSR_* `` trace ports to `core.sv` one CSR at a time
    for privilege-mode checks — `mstatus`/`mepc`/`mcause`/`sepc`/`scause`
    first, matching the CSRs this project's real MPRV/TSR bugs (see
    [[known-gap-mstatus-fs-warl]] in project memory) were found in, since
    that's exactly the class of bug formal verification is strongest against.
+4. Once Zca-specific check models exist: add a raw-16-bit `rvfi_insn` tap
+   and remove the `RISCV_FORMAL_ALLOW_COMPRESSED` guard in `wrapper.sv`.
 
 ## Environment setup (WSL)
 
