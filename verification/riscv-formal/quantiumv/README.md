@@ -1,4 +1,4 @@
-# riscv-formal integration (started 2026-08-11, 55/56 isa=rv64i checks PASS)
+# riscv-formal integration (started 2026-08-11, 56/56 isa=rv64i checks PASS)
 
 Formal verification via [riscv-formal](https://github.com/YosysHQ/riscv-formal)
 (Yosys + SymbiYosys + a SAT/BMC solver), proving ISA correctness exhaustively
@@ -7,7 +7,7 @@ is a genuinely different, stronger class of verification than everything else
 in `verification/` and `testbench/` — see the session that started this for
 the full reasoning.
 
-## Status: 55 of 56 generated `isa=rv64i` checks PASS. Full sweep run, all failures root-caused, one real RTL bug found and fixed.
+## Status: all 56 generated `isa=rv64i` checks PASS. Full sweep run, every failure root-caused, one real RTL bug found and fixed.
 
 Ran the complete `isa=rv64i` set (56 checks) for the first time: 35 passed
 outright, 21 failed. Every failure was root-caused (native witness replay,
@@ -21,10 +21,12 @@ see below) and falls into exactly 4 categories:
 - **`ill_ch0`** — a genuine `rvfi_insn` spec-compliance gap in `core.sv`
   (compounded by the compressed-exclusion wrapper guard from the
   `insn_add_ch0` fix), both fixed. Now PASS.
-- **`reg_ch0`** — solver timeout, not a counterexample. Still open, see
-  "Known open findings" below.
+- **`reg_ch0`** — not a counterexample, a solver-capability gap: neither
+  `bitwuzla` nor `z3` could produce a verdict at all, but `boolector`
+  (built from source, see "Environment setup" below) solves it in ~18
+  minutes. Now PASS.
 
-**Net result: 55/56 PASS.** See "Resolved finding" sections below for the
+**Net result: 56/56 PASS.** See "Resolved finding" sections below for the
 full story on each fixed category.
 
 **What works, confirmed end-to-end:**
@@ -267,7 +269,8 @@ intentionally-truncated `mem_addr` wire — the real bus address stays
 Confirmed: all 11 load/store checks now PASS, including `insn_lw_ch0`,
 which needed a longer solver budget than the other 10 (ordinary
 solver-time variance, not a different bug — same class of thing
-`insn_blt_ch0` hit earlier, see "Known open findings").
+`insn_blt_ch0` hit earlier, both resolved with a bigger `bitwuzla` budget,
+no solver swap needed).
 
 ## Resolved finding: `ill_ch0` PREUNSAT — a real `rvfi_insn` spec-compliance gap, plus a wrapper guard that (correctly, at the time) ruled out its own test vector
 
@@ -321,27 +324,42 @@ checks (`insn_add_ch0`, `insn_lb_ch0`, `insn_beq_ch0`, `cover`,
 `causal_ch0`, spanning every category touched by any change this session)
 against the new config — all still pass.
 
-## Known open findings (not RTL bugs, not yet resolved)
+## Resolved finding: `reg_ch0` — a solver-capability gap, not a counterexample, not an RTL issue
 
-- **`reg_ch0`**: no solver in this environment has produced a verdict.
-  Its property (full 64-bit register-file consistency across the entire
-  free-running BMC trace, symbolic over both register index and retire
-  order) is structurally heavier than every other check in this suite.
-  Tried, each isolated with `ulimit -v 8000000` given the earlier
-  WSL-crash history: **`bitwuzla`** at up to 1800s (30 min) — zero progress
-  reported after reaching "Checking assertions", no crash, no verdict.
-  **`z3`** at up to 1500s — crashed after ~2m34s (`BrokenPipeError` inside
-  `yosys-smtbmc`'s write to the solver process — the z3 subprocess itself
-  died; `DONE (ERROR, rc=16)`, not a real result either way). **`boolector`**
-  (riscv-formal's own best-tested default for this specific check across
-  its reference cores) is not available as a built binary in this
-  environment — only nix package *recipes* exist (`pkgs/by-name/bo/
-  boolector`), nothing pre-built like `bitwuzla`/`sby`/`yosys-slang` — and
-  building it from source was judged not worth the time cost this session.
-  Next person picking this up: try `boolector` first (build it, or find an
-  environment that already has it), since it's the one option not yet
-  actually tried, not just a bigger budget on a solver already shown not
-  to converge here.
+`reg_ch0` checks full 64-bit register-file consistency across the entire
+free-running BMC trace, symbolic over both register index and retire
+order — structurally the heaviest property in this suite, and the only
+check where the choice of solver mattered for whether it could produce
+*any* verdict at all, not just how fast. Every solver already present in
+this environment failed to converge, each isolated with
+`ulimit -v 8000000` given the earlier WSL-crash history: `bitwuzla` at up
+to 1800s (30 min) — zero progress past "Checking assertions", no crash,
+no verdict; `z3` at up to 1500s — crashed after ~2m34s
+(`BrokenPipeError` inside `yosys-smtbmc`'s write to the solver process,
+the z3 subprocess itself died — `DONE (ERROR, rc=16)`, not a real result
+either way).
+
+**Fix**: built `boolector` from source (riscv-formal's own best-tested
+default for this specific check across its reference cores — not
+available as a pre-built binary here, unlike `bitwuzla`/`sby`/
+`yosys-slang`, which all came as ready-made nix-store artifacts). Plain
+upstream build, no patches: CaDiCaL SAT backend + btor2tools + boolector
+itself, via boolector's own `contrib/setup-*.sh` + `configure.sh` +
+`make` — see "Environment setup" below for the exact commands. Confirmed:
+`reg_ch0` now `Status: passed` with `boolector`, ~18 minutes wall clock
+(1090s).
+
+Not wired into `checks.cfg` as the default solver: `genchecks.py`'s
+`solver` option is a single global setting with no per-check-type
+override hook (confirmed by reading the source — unlike `[defines
+<check>]`/`[script-defines <check>]`, which do support per-check
+sections, `solver` is resolved once from `[options]` before any check is
+generated). `bitwuzla` stays the global default since it's dramatically
+faster for the other 55 checks; running `reg_ch0` specifically needs a
+one-line manual solver swap on its generated `.sby` file (see
+"Environment setup" below) rather than a `checks.cfg`-level change. Worth
+revisiting if `genchecks.py` ever gains a real per-check solver hook, or
+if `boolector` turns out fast enough to just use everywhere.
 
 ## Next steps, roughly in order
 
@@ -356,8 +374,6 @@ against the new config — all still pass.
    `RISCV_FORMAL_ALLOW_COMPRESSED` wrapper guard for the checks that no
    longer need it, keeping only what's still required for base-ISA-only
    scope.
-4. `reg_ch0`: build `boolector` from source and retry, or try an even
-   longer `bitwuzla`/`z3` budget on a less resource-constrained machine.
 
 ## Environment setup (WSL)
 
@@ -384,11 +400,37 @@ environment-specific — if they're not present in a future environment,
 search `/nix/store` for the package name, or build from source
 (`YosysHQ/sby`, `povik/yosys-slang`, `bitwuzla/bitwuzla` upstream repos).
 
+**`boolector`** (required only for `reg_ch0`, see its own "Resolved
+finding" above): unlike the three above, NOT a pre-built nix-store
+artifact in this environment — built from source (plain upstream build,
+no patches needed):
+```
+git clone --depth 1 https://github.com/boolector/boolector ~/boolector
+cd ~/boolector
+./contrib/setup-cadical.sh      # SAT backend
+./contrib/setup-btor2tools.sh
+./configure.sh
+cd build && make -j"$(nproc)"
+ln -sf ~/boolector/build/bin/boolector ~/.local/bin/boolector
+```
+Takes a few minutes. `nix build nixpkgs#boolector` would likely also work
+if `nix` itself is on `PATH` in a future environment (it wasn't in this
+one — only pre-populated `/nix/store` artifacts existed, no working `nix`
+CLI) — worth trying first since it'd be faster than a source build.
+
 To (re-)generate checks and try running one, from `~/riscv-formal/cores/`:
 ```
 mkdir -p quantiumv && cp <this-dir>/wrapper.sv <this-dir>/checks.cfg quantiumv/
 cd quantiumv && python3 ../../checks/genchecks.py
 cd checks && ulimit -v 8000000 && timeout 300 sby -f insn_add_ch0.sby
+```
+`reg_ch0` specifically needs `boolector`, not the `bitwuzla` every other
+check uses (see its own "Resolved finding" above for why this isn't just
+a `checks.cfg` setting) — swap solvers on its own generated `.sby` file:
+```
+cd checks
+sed 's/smtbmc bitwuzla/smtbmc boolector/' reg_ch0.sby > reg_ch0_boolector.sby
+ulimit -v 8000000 && timeout 1800 sby -f reg_ch0_boolector.sby
 ```
 (`ulimit -v` + `timeout`: see the WSL-crash history above — always run this
 way, not bare.)
