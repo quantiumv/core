@@ -323,20 +323,25 @@ against the new config — all still pass.
 
 ## Known open findings (not RTL bugs, not yet resolved)
 
-- **`reg_ch0`**: solver timeout (not a counterexample — no witness trace
-  was ever produced). Its property (full 64-bit register-file consistency
-  across the entire free-running BMC trace, symbolic over both register
-  index and retire order) is structurally heavier than every other check
-  in this suite. Tried `bitwuzla` at up to 1800s (30 min) with zero
-  progress reported after reaching "Checking assertions"; `boolector`
+- **`reg_ch0`**: no solver in this environment has produced a verdict.
+  Its property (full 64-bit register-file consistency across the entire
+  free-running BMC trace, symbolic over both register index and retire
+  order) is structurally heavier than every other check in this suite.
+  Tried, each isolated with `ulimit -v 8000000` given the earlier
+  WSL-crash history: **`bitwuzla`** at up to 1800s (30 min) — zero progress
+  reported after reaching "Checking assertions", no crash, no verdict.
+  **`z3`** at up to 1500s — crashed after ~2m34s (`BrokenPipeError` inside
+  `yosys-smtbmc`'s write to the solver process — the z3 subprocess itself
+  died; `DONE (ERROR, rc=16)`, not a real result either way). **`boolector`**
   (riscv-formal's own best-tested default for this specific check across
   its reference cores) is not available as a built binary in this
-  environment (only nix package *recipes* exist, nothing pre-built,
-  unlike `bitwuzla`/`sby`/`yosys-slang`) and building it from source was
-  judged not worth the time cost this session. `z3` was also tried,
-  isolated and resource-capped given the earlier WSL-crash history (see
-  above) — see the commit history / re-run this check to check its
-  current status if picking this up again.
+  environment — only nix package *recipes* exist (`pkgs/by-name/bo/
+  boolector`), nothing pre-built like `bitwuzla`/`sby`/`yosys-slang` — and
+  building it from source was judged not worth the time cost this session.
+  Next person picking this up: try `boolector` first (build it, or find an
+  environment that already has it), since it's the one option not yet
+  actually tried, not just a bigger budget on a solver already shown not
+  to converge here.
 
 ## Next steps, roughly in order
 
