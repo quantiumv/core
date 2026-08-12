@@ -352,15 +352,28 @@ module csr_file (
     logic [(`WORD_SIZE - 1):0] mcause_q, scause_q;
     logic [(`WORD_SIZE - 1):0] mtval_q, stval_q;
 
+    /*
+     * mepc/sepc are WARL: per spec, bit 0 must always read as zero (this
+     * core has IALIGN=16 via Zca, so only bit 0 needs masking, not
+     * bit[1:0] as an IALIGN=32-only core would need). The trap-entry
+     * write (i_trap_pc, sourced from core.sv's own pc register) is
+     * already architecturally guaranteed even -- every next_pc-producing
+     * path there either masks explicitly (jalr_target, trap_vector) or
+     * is a sum of an already-even base and an ISA-guaranteed-even
+     * offset (branch/jump immediates always have bit 0 hardwired 0 in
+     * their encoding) -- so only the direct CSR-write arm needs masking
+     * here: an ordinary `csrrw mepc, x1` can set x1 to any 64-bit value,
+     * including odd, with nothing upstream to stop it.
+     */
     always_ff @(posedge i_clk) begin
         if (i_rst) mepc_q <= '0;
         else if (i_trap_taken && !i_trap_to_s) mepc_q <= i_trap_pc;
-        else if (i_csr_we && (i_csr_addr == CSR_ADDR_MEPC)) mepc_q <= i_csr_wdata;
+        else if (i_csr_we && (i_csr_addr == CSR_ADDR_MEPC)) mepc_q <= {i_csr_wdata[(`WORD_SIZE - 1):1], 1'b0};
     end
     always_ff @(posedge i_clk) begin
         if (i_rst) sepc_q <= '0;
         else if (i_trap_taken && i_trap_to_s) sepc_q <= i_trap_pc;
-        else if (i_csr_we && (i_csr_addr == CSR_ADDR_SEPC)) sepc_q <= i_csr_wdata;
+        else if (i_csr_we && (i_csr_addr == CSR_ADDR_SEPC)) sepc_q <= {i_csr_wdata[(`WORD_SIZE - 1):1], 1'b0};
     end
     always_ff @(posedge i_clk) begin
         if (i_rst) mcause_q <= '0;

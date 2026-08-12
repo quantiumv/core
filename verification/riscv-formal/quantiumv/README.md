@@ -29,6 +29,14 @@ see below) and falls into exactly 4 categories:
 **Net result: 56/56 PASS.** See "Resolved finding" sections below for the
 full story on each fixed category.
 
+**Update 2026-08-12 (continuation)**: the `RISCV_FORMAL_ALLOW_COMPRESSED`
+wrapper guard (added for `insn_add_ch0`, narrowed for `ill_ch0`) has now
+been removed entirely — it was fully obsoleted by the `rvfi_insn` fix, not
+just narrowable (see its own "Resolved finding" below). Removing it
+exposed **two real, previously-undiscovered `core.sv`/`csr_file.sv`
+bugs**, both fixed; all 56 checks still pass with the guard gone. This is
+formal verification doing exactly the job it's for.
+
 **What works, confirmed end-to-end:**
 - `design/core.sv` carries a native, spec-shaped RVFI (RISC-V Formal
   Interface) output port list, gated entirely behind `` `ifdef RISCV_FORMAL ``
@@ -360,6 +368,76 @@ one-line manual solver swap on its generated `.sby` file (see
 "Environment setup" below) rather than a `checks.cfg`-level change. Worth
 revisiting if `genchecks.py` ever gains a real per-check solver hook, or
 if `boolector` turns out fast enough to just use everywhere.
+
+## Resolved finding: removing the compressed-exclusion wrapper guard entirely exposed two real bugs — both fixed, all 56 checks still pass
+
+Started as an attempt to scale `checks.cfg` to `rv64imac`. The plan's first
+step was testing whether `RISCV_FORMAL_ALLOW_COMPRESSED` (added for
+`insn_add_ch0`, narrowed to exempt only `ill_ch0`) could be removed
+entirely now that `rvfi_insn` correctly reports raw compressed encodings
+— reasoning: every base-ISA opcode has `bits[1:0]==11` by construction,
+which a zero-extended 16-bit compressed value can never satisfy, so no
+base-ISA spec model's `spec_valid` pattern should ever be able to
+accidentally match a compressed retiring instruction anymore. Removing
+the guard and re-running all 56 checks (parallel batches at first, which
+introduced solver-contention timeouts unrelated to correctness — see
+below) surfaced real counterexamples on `insn_beq_ch0`, `insn_bge_ch0`,
+`insn_blt_ch0`, `insn_bltu_ch0`, and `pc_fwd_ch0`. Root-caused both via
+native witness replay (Python VCD parsing this time, not manual grep —
+more reliable for exact bit values across signal renames).
+
+**Bug 1 — `mepc`/`sepc` were not WARL-masked (`csr_file.sv`, real
+hardware defect)**: per spec, `mepc`/`sepc` bit 0 must always read as
+zero (this core's IALIGN=16 via Zca means only bit 0 needs masking, not
+`bit[1:0]` as an IALIGN=32-only core would need). The CSR-write path
+(`mepc_q <= i_csr_wdata;`) applied no masking at all — an ordinary
+`csrrw mepc, x1` could set `mepc` to any 64-bit value, including odd. The
+witness for `insn_beq_ch0` showed exactly this: `pc_rdata` reaching a
+retiring instruction as `31` (odd — architecturally impossible for any
+real fetch address), traced back to a preceding `mret` loading an
+unmasked odd `mepc` straight into `pc`. Fixed by masking bit 0 on the
+CSR-write arm only (`{i_csr_wdata[63:1], 1'b0}`) — the trap-entry arm
+(`i_trap_pc`, sourced from `core.sv`'s own `pc`) is already
+architecturally guaranteed even, so it's left untouched. Mirrored the
+same masking into `csr_file_priv_random_tb.sv`'s shadow model (same
+reasoning as the earlier MPRV fix) so the existing 14000-check random
+regression continues to test the real invariant instead of a stale one.
+
+**Bug 2 — `commit_now` wasn't gated by `!halted` (`core.sv`, exposed by
+the formal harness's own documented modeling convention, not reachable
+in real silicon today)**: the PC-register block's own comment already
+claimed "state parks in S_FETCH forever [after halt]... so `commit_now`
+can never become true again" — true for real hardware (a well-behaved
+Wishbone slave has no reason to ever ack once `wb_master_drive` stops
+asserting `wb_cyc_o`/`wb_stb_o`), but not actually *enforced* by the
+expression itself. riscv-formal's wrapper models `wb_ack_i` as a free,
+unconstrained input (standard convention, matches every other
+riscv-formal core integration) — nothing stops the solver from asserting
+it post-halt anyway, pushing `state` back into `S_EXEC` and producing a
+bogus extra `rvfi_valid` pulse with `pc` frozen but `state` still
+oscillating. `pc_fwd_ch0`'s witness showed exactly this pattern
+(`commit_now` pulsing again one step after `halted` latched). Fixed by
+adding `!halted` to `commit_now`'s top-level gate — makes the existing
+code comment's claim actually true, closing a real (if narrow,
+today-formal-only-reachable) gap rather than leaving it as an unstated
+assumption.
+
+Both fixes confirmed via full 38-testbench regression (clean) and
+verilator lint (clean) before any formal re-run. **All 56 checks then
+confirmed passing with the guard fully removed** — the 8 branch/jump
+checks and `pc_fwd_ch0` that surfaced the bugs now pass because the bugs
+are fixed, not because a guard hides the scenario. `wrapper.sv` is now
+simpler: no `RISCV_FORMAL_ALLOW_COMPRESSED`/`RISCV_FORMAL_CHECK_*`
+machinery at all.
+
+**Debugging note worth keeping**: the earlier parallel batch run (4-wide,
+then even 2-wide) produced a cluster of *timeouts* (not failures) on
+checks already known-good — re-running the same checks sequentially,
+uncontended, resolved every one of them. Concurrent heavy SMT solver
+processes competing for this WSL VM's CPU is a real, reproducible source
+of false timeouts, distinct from the earlier documented WSL-crash risk
+(concurrent z3) — don't mistake a contention-timeout for a regression
+without a clean, sequential re-run first.
 
 ## Next steps, roughly in order
 

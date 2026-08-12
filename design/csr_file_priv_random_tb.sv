@@ -400,12 +400,14 @@ module csr_file_priv_random_tb;
              * address -- shadow_mstatus holds. */
 
             /* mepc/sepc: trap-entry to that half, else an ordinary write to
-             * that exact address, else unchanged. */
+             * that exact address (WARL-masked to bit 0, matching the RTL --
+             * this core's IALIGN=16 via Zca means only bit 0 needs
+             * clearing, not bit[1:0]), else unchanged. */
             if (trap_taken_v && !trap_to_s_v) shadow_mepc = trap_pc_v;
-            else if (csr_we_v && (addr_v == CSR_ADDR_MEPC)) shadow_mepc = wdata_v;
+            else if (csr_we_v && (addr_v == CSR_ADDR_MEPC)) shadow_mepc = {wdata_v[(`WORD_SIZE - 1):1], 1'b0};
 
             if (trap_taken_v && trap_to_s_v) shadow_sepc = trap_pc_v;
-            else if (csr_we_v && (addr_v == CSR_ADDR_SEPC)) shadow_sepc = wdata_v;
+            else if (csr_we_v && (addr_v == CSR_ADDR_SEPC)) shadow_sepc = {wdata_v[(`WORD_SIZE - 1):1], 1'b0};
 
             /* mcause/scause: same shape. */
             if (trap_taken_v && !trap_to_s_v) shadow_mcause = trap_cause_v;

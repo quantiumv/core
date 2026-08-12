@@ -279,10 +279,26 @@ module core (
      * S_AMO_WRITE's ack does. LR/SC/plain loads/stores are unaffected:
      * is_amo_rmw is false for all of them, so the new `&& !is_amo_rmw`
      * term is a no-op and they still commit at S_MEM exactly as before.
+     *
+     * `!halted` (2026-08-12): the PC-register comment below claims
+     * "state parks in S_FETCH forever [after halt]... so commit_now can
+     * never become true again" -- true on real hardware (wb_master_drive
+     * stops asserting wb_cyc_o/wb_stb_o once halted, so a well-behaved
+     * slave has no reason to ever ack again), but NOT actually enforced
+     * by this expression: wb_ack_i is just a bus input, and nothing here
+     * stops state from reaching S_EXEC again if something (a formal
+     * solver's free wb_ack_i, exploring exactly this "what if the bus
+     * violates protocol" case; a genuine hardware fault) asserts an
+     * unrequested ack post-halt. Explicit `!halted` here makes that
+     * comment's claim actually true rather than merely usually-true,
+     * closing a real (if narrow) gap a riscv-formal pc_fwd_ch0
+     * counterexample found: without it, a spurious post-halt ack could
+     * produce a bogus extra rvfi_valid pulse with pc frozen but state
+     * still oscillating.
      */
-    wire commit_now = (state == S_EXEC && !mem_phase_needed && !div_stall)
+    wire commit_now = !halted && ((state == S_EXEC && !mem_phase_needed && !div_stall)
                     || (state == S_MEM && wb_ack_i && !is_amo_rmw)
-                    || (state == S_AMO_WRITE && wb_ack_i);
+                    || (state == S_AMO_WRITE && wb_ack_i));
 
     /*
      * C extension: fetch_hi_needed decides, on the SAME edge S_FETCH's
