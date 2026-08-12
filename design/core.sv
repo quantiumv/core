@@ -83,13 +83,18 @@
  * Scope: full RV64IMAC base ISA + Zicsr + full U/S/M privilege modes.
  * No Sv39, no interrupts/exceptions beyond the synchronous traps already
  * implemented -- later milestones (a different teammate's work for
- * Sv39). Misaligned DATA access (loads/stores) and FENCE are deliberately
- * under-implemented here (see their handling below) for the same reason
- * -- misaligned INSTRUCTION fetch, by contrast, is now a real, exercised
- * case as of the C extension (any compressed instruction can leave pc
- * 2-byte- rather than 4-byte-aligned) and IS correctly handled, not a gap.
- * wb_err_i is likewise not acted on -- no trap mechanism exists yet for
- * it to feed into.
+ * Sv39). Misaligned DATA access (loads/stores) traps cleanly (see
+ * mem_load_misaligned/mem_store_misaligned below) rather than being
+ * handled in hardware -- actual misaligned load/store SUPPORT stays
+ * deferred to a later milestone alongside Sv39, but silently truncating
+ * an overflowing access instead of either handling or trapping it, as
+ * this core did before, isn't spec-legal, so the trap half is done now.
+ * FENCE is still deliberately under-implemented (see its handling
+ * below). Misaligned INSTRUCTION fetch, by contrast, is a real,
+ * exercised case as of the C extension (any compressed instruction can
+ * leave pc 2-byte- rather than 4-byte-aligned) and IS correctly
+ * handled, not a gap. wb_err_i is likewise not acted on -- no trap
+ * mechanism exists yet for it to feed into.
  *
  * Input ports:
  *  clk: Clock.
@@ -229,6 +234,7 @@ module core (
     logic halted;
     logic div_stall;
     logic is_amo_rmw;
+    logic mem_load_misaligned, mem_store_misaligned;
     logic [(`WORD_SIZE - 1):0] amo_rdata_q;
     logic [31:0] amo_addr_q;
     logic [7:0]  amo_sel_q;
@@ -256,8 +262,15 @@ module core (
      * mem_phase_needed and div_stall can never both be true together (a
      * single decoded instruction can't be both a divide and a load/store),
      * so there's no ordering/priority to arbitrate between them below.
+     *
+     * mem_load_misaligned/mem_store_misaligned (driven in the Memory
+     * section below, once mem_paddr exists -- same forward-reference
+     * split as is_load/is_store) suppress the bus phase entirely for a
+     * misaligned access: it commits (traps) at the end of S_EXEC instead,
+     * same mechanism illegal-instruction/ecall already use to trap
+     * without ever touching the bus.
      */
-    wire mem_phase_needed = is_load || is_store;
+    wire mem_phase_needed = (is_load || is_store) && !(mem_load_misaligned || mem_store_misaligned);
     /*
      * commit_now, extended for the A extension: an AMO op's
      * mem_phase_needed=1 now spans TWO sequential bus transactions
@@ -968,28 +981,39 @@ module core (
     wire is_ecall = (decoded_instruction == `INSTR_CODE(ECALL));
 
     /* Exception codes, per spec's machine-cause table (synchronous only
-     * -- bit 63/Interrupt is always 0, no interrupt source exists yet). */
+     * -- bit 63/Interrupt is always 0, no interrupt source exists yet).
+     * 4/6 (load/store-AMO address misaligned) are standard RISC-V causes;
+     * mem_load_misaligned/mem_store_misaligned are driven in the Memory
+     * section below, once mem_paddr exists. */
     wire [3:0] exc_code = is_illegal_instr                     ? 4'd2  :
                            (is_ecall && current_priv == PRIV_U) ? 4'd8  :
                            (is_ecall && current_priv == PRIV_S) ? 4'd9  :
                            (is_ecall && current_priv == PRIV_M) ? 4'd11 :
+                           mem_load_misaligned                  ? 4'd4  :
+                           mem_store_misaligned                 ? 4'd6  :
                                                                    4'd0; // don't-care, gated by trap_taken
 
-    wire trap_taken = commit_now && (is_illegal_instr || is_ecall);
+    wire trap_taken = commit_now && (is_illegal_instr || is_ecall
+                                   || mem_load_misaligned || mem_store_misaligned);
     /* An M-mode trap never delegates, regardless of medeleg -- falls out
      * naturally here since current_priv==M forces this wire to 0. */
     wire trap_to_s  = trap_taken && (current_priv != PRIV_M) && medeleg_w[6'(exc_code)];
     wire [(`WORD_SIZE - 1):0] trap_cause = {60'b0, exc_code};
     /*
-     * C extension: for a compressed illegal instruction, the real
-     * faulting bits are the 16-bit halfword (zero-extended), not
-     * `instruction` -- which, in that exact case, holds the inert
-     * 32'h00000013 placeholder substituted above, not anything real.
+     * trap_val: forward-declared (`logic`, not `wire ... =`) -- its
+     * misaligned-access arm needs mem_paddr, which doesn't exist until
+     * the Memory section further down (same "declare early, drive late"
+     * split is_load/is_store/mem_load_misaligned already use). The real
+     * assign lives right after mem_load_misaligned/mem_store_misaligned
+     * are computed.
+     *
+     * C extension note (kept from the original illegal-instruction arm):
+     * for a compressed illegal instruction, the real faulting bits are
+     * the 16-bit halfword (zero-extended), not `instruction` -- which,
+     * in that exact case, holds the inert 32'h00000013 placeholder
+     * substituted above, not anything real.
      */
-    wire [(`WORD_SIZE - 1):0] trap_val = is_illegal_instr
-        ? (is_compressed ? {48'b0, first_hw}
-                          : {{(`WORD_SIZE - `INSTR_SIZE){1'b0}}, instruction})
-        : `WORD_SIZE'(0);
+    logic [(`WORD_SIZE - 1):0] trap_val;
 
     wire mret_taken = commit_now && is_mret && !mret_priv_violation;
     wire sret_taken = commit_now && is_sret && !sret_priv_violation;
@@ -1287,6 +1311,59 @@ module core (
 
     /* Dword-aligned memory address -- same precompute-outside-always_comb reason as fetch_addr above. */
     wire [31:0] mem_addr = {mem_paddr[31:3], 3'b0};
+
+    /*
+     * Misaligned data-access detection. RV64 requires natural alignment:
+     * a byte access is always aligned; halfword/word/dword need address
+     * bits [0], [1:0], [2:0] respectively to be zero. Same case-ladder
+     * idiom as mem_size_mask above, keyed off the same mem_size encoding.
+     * Closes the trap half of a real gap this file's header comment
+     * documents: mem_sel's shift below has no carry into a second bus
+     * word, so an overflowing access used to silently truncate instead
+     * of either correctly handling it or trapping -- the spec requires
+     * one or the other.
+     */
+    wire mem_misaligned = (mem_size == 2'b01) ? (mem_paddr[0]   != 1'b0)   :
+                           (mem_size == 2'b10) ? (mem_paddr[1:0] != 2'b00) :
+                           (mem_size == 2'b11) ? (mem_paddr[2:0] != 3'b000) :
+                                                  1'b0; // byte access: always aligned
+    /*
+     * mem_load_misaligned/mem_store_misaligned classify WHICH cause code
+     * applies (4 vs 6). LR/AMO's read phase sets is_load=1 (mem_control
+     * above) but is classified as "Store/AMO" per the spec's cause
+     * table, hence the explicit is_lr/is_amo_rmw exclusion from the load
+     * side and inclusion on the store side. Checking once here, gating
+     * mem_phase_needed before S_MEM is ever entered, covers both an
+     * AMO's read and write phase with one check -- it does NOT need to
+     * (and must NOT) stay live once past that point: mem_paddr(=
+     * alu_result) gets REPURPOSED for the AMO modify value the instant
+     * S_AMO_WRITE begins (same hazard the amo_addr_q/amo_sel_q capture
+     * registers below already exist to avoid), and is_amo_rmw stays high
+     * throughout both phases -- so without the `state == S_EXEC` guard,
+     * this wire would spuriously reread the modify value's low bits AS
+     * an address every cycle of S_AMO_WRITE too, and could fire a bogus
+     * trap right at the AMO's real commit. Gating to S_EXEC matches
+     * exactly the one place mem_phase_needed/trap_taken actually consult
+     * these signals.
+     *
+     * mem_store_misaligned is keyed off is_sc (the STATIC "this
+     * instruction is SC" signal), not is_store (which for SC is
+     * DYNAMICALLY gated on sc_success in mem_control) -- per spec,
+     * address misalignment is a property of the address alone,
+     * independent of whether SC's reservation matches, so a misaligned
+     * SC must trap even on a mismatch.
+     */
+    assign mem_load_misaligned  = (state == S_EXEC) && mem_misaligned && is_load && !is_lr && !is_amo_rmw;
+    assign mem_store_misaligned = (state == S_EXEC) && mem_misaligned && (is_store || is_sc || is_lr || is_amo_rmw);
+
+    /* trap_val, continued from its forward declaration above: the
+     * misaligned-access causes report the faulting address (mem_paddr),
+     * per spec's mtval/stval convention. */
+    assign trap_val = is_illegal_instr
+        ? (is_compressed ? {48'b0, first_hw}
+                          : {{(`WORD_SIZE - `INSTR_SIZE){1'b0}}, instruction})
+        : (mem_load_misaligned || mem_store_misaligned) ? mem_paddr
+        : `WORD_SIZE'(0);
 
     /* Store data, pre-shifted into the byte lane(s) it'll land in. */
     wire [(`WORD_SIZE - 1):0] mem_wdata = imm_2 << (mem_paddr[2:0] * 8);
@@ -1619,7 +1696,25 @@ module core (
                              ? reg_write_data : 64'b0;
     assign rvfi_pc_rdata  = pc;
     assign rvfi_pc_wdata  = next_pc;
-    assign rvfi_mem_addr  = (is_load || is_store) ? mem_paddr : 64'b0;
+    /*
+     * mem_paddr rounded down to a dword boundary, NOT the bus-facing
+     * mem_addr wire -- matches riscv-formal's RISCV_FORMAL_ALIGNED_MEM
+     * convention (see checks.cfg): rvfi_mem_rmask/wmask/wdata below are
+     * already byte-lane-relative to the aligned bus WORD (mem_sel/
+     * mem_wdata), and rvfi_mem_rdata is the raw unshifted bus response
+     * (wb_dat_i) -- exactly what that convention expects. Deliberately
+     * NOT mem_addr ({mem_paddr[31:3],3'b0}, only 32 bits wide): that's
+     * correct for the real bus (this core's physical address space is
+     * 32-bit by design) but truncates upper address bits the formal
+     * spec model's own 64-bit spec_mem_addr computation doesn't -- a
+     * real counterexample caught rvfi_mem_addr silently dropping bits
+     * 63:32 whenever the solver picked a load/store address with any of
+     * them set. mem_paddr itself is full WORD_SIZE-wide (see its own
+     * comment above), so masking it directly here keeps the RVFI tap
+     * exact while leaving the real, deliberately-32-bit bus address
+     * (mem_addr) untouched.
+     */
+    assign rvfi_mem_addr  = (is_load || is_store) ? {mem_paddr[63:3], 3'b0} : 64'b0;
     assign rvfi_mem_rmask = is_load  ? mem_sel : 8'b0;
     assign rvfi_mem_wmask = is_store ? mem_sel : 8'b0;
     assign rvfi_mem_rdata = wb_dat_i;

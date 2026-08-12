@@ -1,4 +1,4 @@
-# riscv-formal integration (started 2026-08-11, insn_add_ch0 PASSES)
+# riscv-formal integration (started 2026-08-11, 54/56 isa=rv64i checks PASS)
 
 Formal verification via [riscv-formal](https://github.com/YosysHQ/riscv-formal)
 (Yosys + SymbiYosys + a SAT/BMC solver), proving ISA correctness exhaustively
@@ -7,7 +7,25 @@ is a genuinely different, stronger class of verification than everything else
 in `verification/` and `testbench/` — see the session that started this for
 the full reasoning.
 
-## Status: `insn_add_ch0` PASSES — the first real check to complete end-to-end, root cause confirmed for the earlier FAIL.
+## Status: 54 of 56 generated `isa=rv64i` checks PASS. Full sweep run, all failures root-caused, one real RTL bug found and fixed.
+
+Ran the complete `isa=rv64i` set (56 checks) for the first time: 35 passed
+outright, 21 failed. Every failure was root-caused (native witness replay,
+see below) and falls into exactly 4 categories:
+- **8 branch/jump checks** (`insn_{beq,bne,blt,bge,bltu,bgeu,jal,jalr}_ch0`)
+  — formal-harness scope gap, fixed via a `checks.cfg` define. Now PASS.
+- **11 load/store checks** (`insn_{lb,lbu,lh,lhu,lw,lwu,ld,sb,sh,sw,sd}_ch0`)
+  — two real `core.sv` bugs (one a genuine hardware defect, formal's first
+  real find in this integration) plus a formal-harness convention mismatch,
+  all fixed together. Now PASS.
+- **`ill_ch0`** — a structural formal-model gap (the stock check assumes an
+  architecturally-unreachable value on this core), not fixable without a
+  larger tap change. Still open, see "Known open findings" below.
+- **`reg_ch0`** — solver timeout, not a counterexample. Still open, see
+  "Known open findings" below.
+
+**Net result: 54/56 PASS.** See "Resolved finding" sections below for the
+full story on each fixed category.
 
 **What works, confirmed end-to-end:**
 - `design/core.sv` carries a native, spec-shaped RVFI (RISC-V Formal
@@ -149,19 +167,146 @@ exact-value comparison, only trust it for coarse instruction-identity/
 timing checks. Prefer `sim -r <witness.yw>` against `design_prep.il`
 (the solver's own prepped model) for anything needing bit-exact replay.
 
+## Resolved finding: all 8 branch/jump checks FAILed on target-alignment semantics, not an RTL bug
+
+Every control-flow check (`insn_{beq,bne,blt,bge,bltu,bgeu,jal,jalr}_ch0`)
+failed identically at `rvfi_insn_check.sv:198`, `assert(spec_trap == trap)`
+— never the `pc_wdata` line the `insn_add_ch0` fix already covers. Native
+witness replay on several of them showed the RTL and the spec model
+computed the *exact same* target address (bit-identical `pc_wdata` /
+`spec_pc_wdata`), but disagreed on whether that target should trap: the
+RTL correctly did not trap on a target that's 2-byte-aligned but not
+4-byte-aligned; the spec model expected a misaligned-instruction-fetch
+trap.
+
+**Root cause**: riscv-formal's 8 control-flow spec models
+(`insns/insn_{beq,...}.v`) compute `ialign16` from
+`` `ifdef RISCV_FORMAL_COMPRESSED `` — `1` (2-byte alignment required) if
+defined, `0` (strict 4-byte alignment) otherwise. `genchecks.py` only
+auto-emits that define when `isa` contains `'c'`, and this project's
+`checks.cfg` has `isa rv64i` (no `c`, deliberately — see the fix below).
+This core implements Zca (the C extension) **unconditionally**, so
+IALIGN=16 is a permanent hardware property, not an optional one — the RTL
+was right, the check was enforcing a stricter rule than this core actually
+has.
+
+**Fix** (`checks.cfg`'s `[defines]` section): add
+`` `define RISCV_FORMAL_COMPRESSED `` explicitly, without changing `isa`
+itself. Verified via direct read of the riscv-formal source
+(`insns/generate.py`, all 8 affected `.v` models) that this define is
+referenced *only* inside those 8 control-flow models, and only feeds
+`ialign16`/`spec_trap`'s alignment term — never `spec_rd_wdata` or
+anything else — so it's structurally impossible for this to affect any of
+the other 46 checks. Deliberately not done by adding `'c'` to `isa`
+instead: that would also pull in ~30 Zca-specific `c_*` checks that need
+the raw-16-bit `rvfi_insn` tap this project doesn't have yet (see "Next
+steps" below). Confirmed: all 8 checks flipped FAIL→PASS.
+
+## Resolved finding: all 11 load/store checks FAILed — two real `core.sv` bugs plus a harness convention mismatch, all fixed together
+
+**Bug 1 (real hardware defect, formal's first genuine find here)**:
+`core.sv` never checked data-access alignment at all.
+`mem_sel = mem_size_mask << mem_paddr[2:0]` is a plain 8-bit shift with no
+carry into a second bus word, so an overflowing (misaligned) access
+silently truncated and committed corrupted data instead of either handling
+it correctly or trapping — the RISC-V spec requires one or the other. This
+was a known, documented, *deliberately deferred* gap (core.sv's own header
+comment already flagged "Misaligned DATA access... under-implemented"),
+but the deferral had left the core doing the one thing the spec doesn't
+allow: silently corrupting data with no trap.
+
+**Fix**: `mem_load_misaligned`/`mem_store_misaligned` (new wires, keyed off
+`mem_size` and `mem_paddr`'s low bits, same case-ladder idiom as the
+existing `mem_size_mask`) now suppress the bus phase entirely for a
+misaligned access — it traps (`mcause` 4 = Load address misaligned, 6 =
+Store/AMO address misaligned, `mtval` = faulting address) at the end of
+`S_EXEC` instead, reusing the exact trap machinery illegal-instruction/
+ecall already use. New end-to-end coverage in
+`testbench/core_misaligned_trap_tb.sv` (mirrors
+`core_c_illegal_trap_tb.sv`'s pattern): both load- and store-misaligned
+cases, confirming the destination register is untouched and the store
+never reaches memory at all.
+
+**A real bug caught while implementing the fix, not by formal**: the first
+version of this check spuriously fired during an AMO's `S_AMO_WRITE`
+phase, because `mem_paddr` (`=alu_result`) gets repurposed for the AMO
+modify value the instant that state begins (the same hazard
+`amo_addr_q`/`amo_sel_q` already exist to work around elsewhere), and
+`is_amo_rmw` stays high through both phases — so the misalignment check
+was reading the modify value's low bits *as an address* and occasionally
+tripping a bogus store-misaligned trap right at the AMO's real commit.
+Caught by `core_a_ext_tb`'s regression timing out (an infinite trap loop
+with no handler installed), not by riscv-formal (no AMO checks are
+generated for `isa=rv64i`). Fixed by scoping
+`mem_load_misaligned`/`mem_store_misaligned` to `state == S_EXEC` — the
+only state where the decision is actually consulted.
+
+**Bug 2 (formal-harness-only, verification-instrumentation convention
+mismatch)**: the `` `ifdef RISCV_FORMAL `` RVFI memory tap mixed two
+incompatible addressing conventions — `rvfi_mem_addr` reported the exact
+(possibly unaligned) address while `rvfi_mem_rmask`/`rdata`/`wdata` were
+already bus-word-lane-relative (i.e. assumed an *aligned* address). Fixed
+by reporting `rvfi_mem_addr` as the dword-aligned address instead, and
+adding `` `define RISCV_FORMAL_ALIGNED_MEM `` to `checks.cfg` (verified via
+the riscv-formal source that this define is scoped only to the 11
+load/store spec models, same isolation proof as `RISCV_FORMAL_COMPRESSED`
+above).
+
+**A second-order bug in the first version of that fix**: the natural
+choice was to alias `rvfi_mem_addr` to the existing `mem_addr` wire (the
+real Wishbone-bus-facing aligned address) — but `mem_addr` is only 32 bits
+wide (this core's physical address space is 32-bit by design), while
+riscv-formal's spec model computes its own 64-bit expected address
+straight from the solver's free `rs1_rdata`. Every load failed at the
+address-equality assertion because `rvfi_mem_addr`'s upper 32 bits were
+silently zero regardless of what the solver picked for `rs1`'s high bits.
+Fixed by computing the aligned address directly from the full-width
+`mem_paddr` (`{mem_paddr[63:3], 3'b0}`) instead of reusing the
+intentionally-truncated `mem_addr` wire — the real bus address stays
+32-bit (correct, untouched), only the RVFI tap needed the wider value.
+
+Confirmed: all 11 load/store checks now PASS, including `insn_lw_ch0`,
+which needed a longer solver budget than the other 10 (ordinary
+solver-time variance, not a different bug — same class of thing
+`insn_blt_ch0` hit earlier, see "Known open findings").
+
+## Known open findings (not RTL bugs, not yet resolved)
+
+- **`ill_ch0`**: `PREUNSAT` — the stock `rvfi_ill_check.sv` template
+  assumes `rvfi_insn == 32'h00000000` is a reachable illegal-instruction
+  test vector. It structurally isn't, on this core: the non-compressed
+  path always has `instruction[1:0] == 2'b11` when `is_compressed==0`, and
+  the compressed path substitutes the fixed placeholder `32'h00000013` for
+  any illegal/reserved encoding (so RVFI never carries raw garbage) —
+  `rvfi_insn` can never be exactly 0. Not fixable via a `wrapper.sv`
+  `assume` (the solver has no freedom here; the contradiction is inside
+  `core.sv`'s own RVFI-tap logic). Needs either the raw-16-bit `rvfi_insn`
+  tap (see "Next steps") or a core-specific replacement check that reasons
+  about the raw fetched halfword instead of `rvfi_insn` directly. The real
+  illegal-instruction trap behavior is already covered elsewhere
+  (`testbench/core_c_illegal_trap_tb.sv`), so there's no evidence of an
+  actual hardware gap here.
+- **`reg_ch0`**: solver timeout (not a counterexample — no witness trace
+  was ever produced). Its property (full 64-bit register-file consistency
+  across the entire free-running BMC trace, symbolic over both register
+  index and retire order) is structurally heavier than every other
+  check that's passed so far. Worth retrying with a much larger wall-clock
+  budget and/or `boolector` (riscv-formal's own best-tested default for
+  this specific check across its reference cores) before assuming it's
+  genuinely intractable at this depth.
+
 ## Next steps, roughly in order
 
-1. Run the remaining 55 of the 56 generated `isa=rv64i` checks against the
-   fixed `wrapper.sv` to confirm the compressed-instruction constraint
-   generalizes beyond `insn_add_ch0` (only that one has been run so far).
-2. Scale to `rv64im`, `rv64ima`, `rv64imac`.
-3. Add `` `RISCV_FORMAL_CSR_* `` trace ports to `core.sv` one CSR at a time
+1. Scale to `rv64im`, `rv64ima`, `rv64imac`.
+2. Add `` `RISCV_FORMAL_CSR_* `` trace ports to `core.sv` one CSR at a time
    for privilege-mode checks — `mstatus`/`mepc`/`mcause`/`sepc`/`scause`
    first, matching the CSRs this project's real MPRV/TSR bugs (see
    [[known-gap-mstatus-fs-warl]] in project memory) were found in, since
    that's exactly the class of bug formal verification is strongest against.
-4. Once Zca-specific check models exist: add a raw-16-bit `rvfi_insn` tap
-   and remove the `RISCV_FORMAL_ALLOW_COMPRESSED` guard in `wrapper.sv`.
+3. Once Zca-specific check models exist: add a raw-16-bit `rvfi_insn` tap,
+   remove the `RISCV_FORMAL_ALLOW_COMPRESSED` guard in `wrapper.sv`, and
+   revisit `ill_ch0` with a core-specific check that no longer needs it.
+4. Retry `reg_ch0` with a larger timeout and/or `boolector`.
 
 ## Environment setup (WSL)
 
