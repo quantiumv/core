@@ -58,27 +58,38 @@ module rvfi_wrapper (
     );
 
 `ifndef RISCV_FORMAL_ALLOW_COMPRESSED
+`ifndef RISCV_FORMAL_CHECK_ill_ch0
     // Base-ISA-only check scope (isa=rv64i/im/ima/imac's non-Zca checks):
     // wb_dat_s2m is otherwise fully free, and the solver is entitled to
     // pick fetched bytes that legitimately decode as a *compressed*
     // instruction (any 16-bit-aligned halfword with bits[1:0] != 2'b11) --
     // this core correctly detects that and advances pc by 2, but the
-    // standard riscv-formal insn_*.v spec models (fed via rvfi_insn, which
-    // core.sv's RVFI tap reports as the C-expanded 32-bit *equivalent*,
-    // not the raw 16-bit encoding -- see core.sv's own RVFI comment) always
-    // assume ILEN=32 non-compressed semantics (spec_pc_wdata = pc_rdata+4
+    // standard riscv-formal insn_*.v spec models always assume ILEN=32
+    // non-compressed semantics (spec_pc_wdata = pc_rdata+4
     // unconditionally). Root-caused via a real insn_add_ch0 counterexample
     // (2026-08-11): the solver picked fetch data that happened to also be
     // a valid C2-quadrant compressed encoding, our core correctly used
     // pc+2, the spec model expected pc+4 -- not an RTL bug, a missing
     // wrapper constraint for this check scope. Remove this whole guard
-    // (and add a proper raw-16-bit rvfi_insn tap) once Zca-specific check
-    // models are added -- see this dir's README.md.
+    // once Zca-specific check models are added -- see this dir's README.md.
+    //
+    // RISCV_FORMAL_CHECK_ill_ch0 exemption (2026-08-12): `ill_ch0` is the
+    // one check this guard is actively self-defeating for -- its stock
+    // rvfi_ill_check.sv template needs rvfi_insn==0 to be reachable
+    // (riscv-formal's own canonical "obviously illegal" test vector), and
+    // 0 can only ever arise here via the compressed C.ILLEGAL encoding
+    // (16'h0000), which this guard rules out entirely. checks.cfg's
+    // [script-sources] passes `-D RISCV_FORMAL_CHECK_@checkch@`, giving
+    // every generated check a macro named after its own full instance
+    // name (RISCV_FORMAL_CHECK_insn_add_ch0, RISCV_FORMAL_CHECK_ill_ch0,
+    // etc.) -- only ill_ch0 defines this specific one, so only it gets
+    // the guard lifted.
     always @* begin
         assume (wb_dat_s2m[ 1: 0] == 2'b11);
         assume (wb_dat_s2m[17:16] == 2'b11);
         assume (wb_dat_s2m[33:32] == 2'b11);
         assume (wb_dat_s2m[49:48] == 2'b11);
     end
+`endif
 `endif
 endmodule

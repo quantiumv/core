@@ -1665,11 +1665,11 @@ module core (
      * First slice only -- covers isa=rv64i base-ISA checks
      * (verification/riscv-formal/). No CSR trace ports yet (those need
      * per-CSR rvfi_csr_<name>_* ports added deliberately once base-ISA
-     * checks are green), and rvfi_insn feeds the C-expanded 32-bit
-     * `instruction` wire rather than a compressed instruction's raw
-     * 16-bit encoding -- fine for isa=rv64i (no Zca check models get
-     * generated to notice), but needs its own raw-halfword tap before
-     * C-extension formal checks can be added.
+     * checks are green). rvfi_insn DOES correctly report the raw 16-bit
+     * encoding for compressed instructions (see its own assign below) --
+     * real Zca-specific check models still aren't generated yet (isa=rv64i
+     * has none), so that path remains formally unexercised except by
+     * ill_ch0, but the tap itself is already spec-compliant.
      */
     logic [63:0] rvfi_order_q;
     always_ff @(posedge clk) begin
@@ -1681,7 +1681,27 @@ module core (
 
     assign rvfi_valid     = commit_now;
     assign rvfi_order     = rvfi_order_q;
-    assign rvfi_insn      = instruction;
+    /*
+     * Per the RVFI spec (docs/source/rvfi.rst upstream): "For compressed
+     * instructions the compressed instruction word must be output on
+     * this port" -- the RAW 16-bit encoding (zero-extended), not a
+     * C-expanded 32-bit equivalent. Reporting instruction (the expanded
+     * value) unconditionally was a real spec-compliance gap: harmless
+     * for isa=rv64i checks (wrapper.sv's RISCV_FORMAL_ALLOW_COMPRESSED
+     * guard keeps is_compressed=0 throughout their entire BMC trace, so
+     * this branch was never reachable there), but it made
+     * rvfi_insn == 0 architecturally unreachable for the stock
+     * rvfi_ill_check.sv template's canonical all-zero illegal-instruction
+     * test vector even when the wrapper's guard is relaxed for that one
+     * check (see wrapper.sv's RISCV_FORMAL_CHECK_ill exemption) -- a
+     * genuinely illegal compressed encoding like 16'h0000 (C.ILLEGAL)
+     * now correctly reports as 32'h00000000, not the inert 32'h13
+     * placeholder that value still uses internally (that placeholder
+     * still exists and is still correct for `instruction`'s OWN job of
+     * feeding an always-decoder-safe value -- only what RVFI reports
+     * changes here).
+     */
+    assign rvfi_insn      = is_compressed ? {16'b0, first_hw} : instruction;
     assign rvfi_trap      = trap_taken;
     assign rvfi_halt      = 1'b0; // no graceful-halt/interrupt model exists yet
     assign rvfi_intr      = 1'b0; // no interrupt controller exists yet (known gap)

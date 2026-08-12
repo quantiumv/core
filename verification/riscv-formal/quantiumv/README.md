@@ -1,4 +1,4 @@
-# riscv-formal integration (started 2026-08-11, 54/56 isa=rv64i checks PASS)
+# riscv-formal integration (started 2026-08-11, 55/56 isa=rv64i checks PASS)
 
 Formal verification via [riscv-formal](https://github.com/YosysHQ/riscv-formal)
 (Yosys + SymbiYosys + a SAT/BMC solver), proving ISA correctness exhaustively
@@ -7,7 +7,7 @@ is a genuinely different, stronger class of verification than everything else
 in `verification/` and `testbench/` — see the session that started this for
 the full reasoning.
 
-## Status: 54 of 56 generated `isa=rv64i` checks PASS. Full sweep run, all failures root-caused, one real RTL bug found and fixed.
+## Status: 55 of 56 generated `isa=rv64i` checks PASS. Full sweep run, all failures root-caused, one real RTL bug found and fixed.
 
 Ran the complete `isa=rv64i` set (56 checks) for the first time: 35 passed
 outright, 21 failed. Every failure was root-caused (native witness replay,
@@ -18,13 +18,13 @@ see below) and falls into exactly 4 categories:
   — two real `core.sv` bugs (one a genuine hardware defect, formal's first
   real find in this integration) plus a formal-harness convention mismatch,
   all fixed together. Now PASS.
-- **`ill_ch0`** — a structural formal-model gap (the stock check assumes an
-  architecturally-unreachable value on this core), not fixable without a
-  larger tap change. Still open, see "Known open findings" below.
+- **`ill_ch0`** — a genuine `rvfi_insn` spec-compliance gap in `core.sv`
+  (compounded by the compressed-exclusion wrapper guard from the
+  `insn_add_ch0` fix), both fixed. Now PASS.
 - **`reg_ch0`** — solver timeout, not a counterexample. Still open, see
   "Known open findings" below.
 
-**Net result: 54/56 PASS.** See "Resolved finding" sections below for the
+**Net result: 55/56 PASS.** See "Resolved finding" sections below for the
 full story on each fixed category.
 
 **What works, confirmed end-to-end:**
@@ -38,10 +38,9 @@ full story on each fixed category.
   one-`rvfi_valid`-pulse-per-retired-instruction model directly, since
   `commit_now` already has exactly that shape. First slice only: covers the
   base-ISA (`isa=rv64i`) check family, no CSR trace ports yet
-  (`rvfi_csr_<name>_*`), and `rvfi_insn` feeds the C-expanded 32-bit
-  `instruction` wire rather than a compressed instruction's raw 16-bit
-  encoding (fine for `isa=rv64i`, needs its own tap before Zca checks — see
-  "Resolved finding" below for why this specific gap mattered).
+  (`rvfi_csr_<name>_*`). `rvfi_insn` correctly reports the raw 16-bit
+  encoding for compressed instructions per the RVFI spec (see the `ill_ch0`
+  "Resolved finding" below — this was a real gap until 2026-08-12).
 - **Elaboration through Yosys fully resolved** (see "Two real Yosys-frontend
   gaps, both closed" below) — the design elaborates, optimizes, and produces
   an SMT2 model with zero errors.
@@ -270,30 +269,74 @@ which needed a longer solver budget than the other 10 (ordinary
 solver-time variance, not a different bug — same class of thing
 `insn_blt_ch0` hit earlier, see "Known open findings").
 
+## Resolved finding: `ill_ch0` PREUNSAT — a real `rvfi_insn` spec-compliance gap, plus a wrapper guard that (correctly, at the time) ruled out its own test vector
+
+`ill_ch0`'s stock `rvfi_ill_check.sv` template assumes `rvfi_insn == 0` is
+a reachable illegal-instruction test vector (riscv-formal's own canonical
+"obviously illegal" pattern — confirmed by reading the RVFI spec directly,
+`docs/source/procedure.rst`: "an all-zero `rvfi_insn` value" is the
+documented convention for a faulting/undecodable instruction). Before this
+fix, that value was doubly unreachable on this core:
+
+1. **`rvfi_insn` itself was wrong.** The official RVFI spec
+   (`docs/source/rvfi.rst`) is explicit: "For compressed instructions the
+   compressed instruction word must be output on this port" — the RAW
+   16-bit encoding (zero-extended), not an expanded equivalent. `core.sv`
+   was instead reporting the C-expanded 32-bit `instruction` wire
+   unconditionally, which for the canonical illegal-compressed pattern
+   (`16'h0000`, C.ILLEGAL) is the inert `32'h00000013` placeholder
+   substituted for safety (see `instruction`'s own assignment) — never 0.
+   This was a real, if previously low-impact, spec-compliance gap: harmless
+   for every isa=rv64i check *except* `ill_ch0`, since `wrapper.sv`'s
+   compressed-exclusion guard (below) kept `is_compressed=0` throughout
+   every other check's entire BMC trace, making the wrong-tap branch
+   unreachable everywhere else.
+2. **The wrapper guard added for `insn_add_ch0` (above) also excluded
+   `ill_ch0`'s own test vector.** That guard rules out compressed fetches
+   entirely by forcing every 16-bit-aligned slot's low 2 bits to `2'b11` —
+   but `16'h0000` (bits `00`) is exactly the pattern `ill_ch0` needs the
+   solver to be free to pick.
+
+**Fix, both parts**:
+- `core.sv`: `rvfi_insn` now reports `{16'b0, first_hw}` when
+  `is_compressed`, matching the spec. Zero regression risk to any other
+  check — proven, not assumed: the wrapper guard forces `is_compressed=0`
+  for their entire trace, so this branch was structurally unreachable for
+  all 44 other non-`ill` checks both before and after.
+- `checks.cfg`/`wrapper.sv`: added a per-check-instance macro
+  (`` -D RISCV_FORMAL_CHECK_@checkch@ `` in `[script-sources]`, where
+  `@checkch@` is genchecks.py's own full check-instance name, e.g.
+  `insn_add_ch0`, `ill_ch0` — confirmed via source read to be reliably set
+  on every check-generation code path, unlike `@check@`, which crashes
+  `genchecks.py` with a `KeyError` for `insn_*` checks specifically, since
+  those are generated through a different function that never sets it).
+  `wrapper.sv`'s compressed-exclusion guard is now also gated
+  `` `ifndef RISCV_FORMAL_CHECK_ill_ch0 ``, lifting it *only* for that one
+  check — every other check still gets `RISCV_FORMAL_CHECK_<its own
+  name>` defined instead, which doesn't match, so the guard stays active
+  for them exactly as before.
+
+Confirmed: `ill_ch0` flipped `PREUNSAT` → `PASS`. Spot-checked 5 other
+checks (`insn_add_ch0`, `insn_lb_ch0`, `insn_beq_ch0`, `cover`,
+`causal_ch0`, spanning every category touched by any change this session)
+against the new config — all still pass.
+
 ## Known open findings (not RTL bugs, not yet resolved)
 
-- **`ill_ch0`**: `PREUNSAT` — the stock `rvfi_ill_check.sv` template
-  assumes `rvfi_insn == 32'h00000000` is a reachable illegal-instruction
-  test vector. It structurally isn't, on this core: the non-compressed
-  path always has `instruction[1:0] == 2'b11` when `is_compressed==0`, and
-  the compressed path substitutes the fixed placeholder `32'h00000013` for
-  any illegal/reserved encoding (so RVFI never carries raw garbage) —
-  `rvfi_insn` can never be exactly 0. Not fixable via a `wrapper.sv`
-  `assume` (the solver has no freedom here; the contradiction is inside
-  `core.sv`'s own RVFI-tap logic). Needs either the raw-16-bit `rvfi_insn`
-  tap (see "Next steps") or a core-specific replacement check that reasons
-  about the raw fetched halfword instead of `rvfi_insn` directly. The real
-  illegal-instruction trap behavior is already covered elsewhere
-  (`testbench/core_c_illegal_trap_tb.sv`), so there's no evidence of an
-  actual hardware gap here.
 - **`reg_ch0`**: solver timeout (not a counterexample — no witness trace
   was ever produced). Its property (full 64-bit register-file consistency
   across the entire free-running BMC trace, symbolic over both register
-  index and retire order) is structurally heavier than every other
-  check that's passed so far. Worth retrying with a much larger wall-clock
-  budget and/or `boolector` (riscv-formal's own best-tested default for
-  this specific check across its reference cores) before assuming it's
-  genuinely intractable at this depth.
+  index and retire order) is structurally heavier than every other check
+  in this suite. Tried `bitwuzla` at up to 1800s (30 min) with zero
+  progress reported after reaching "Checking assertions"; `boolector`
+  (riscv-formal's own best-tested default for this specific check across
+  its reference cores) is not available as a built binary in this
+  environment (only nix package *recipes* exist, nothing pre-built,
+  unlike `bitwuzla`/`sby`/`yosys-slang`) and building it from source was
+  judged not worth the time cost this session. `z3` was also tried,
+  isolated and resource-capped given the earlier WSL-crash history (see
+  above) — see the commit history / re-run this check to check its
+  current status if picking this up again.
 
 ## Next steps, roughly in order
 
@@ -303,10 +346,13 @@ solver-time variance, not a different bug — same class of thing
    first, matching the CSRs this project's real MPRV/TSR bugs (see
    [[known-gap-mstatus-fs-warl]] in project memory) were found in, since
    that's exactly the class of bug formal verification is strongest against.
-3. Once Zca-specific check models exist: add a raw-16-bit `rvfi_insn` tap,
-   remove the `RISCV_FORMAL_ALLOW_COMPRESSED` guard in `wrapper.sv`, and
-   revisit `ill_ch0` with a core-specific check that no longer needs it.
-4. Retry `reg_ch0` with a larger timeout and/or `boolector`.
+3. Once Zca-specific (`c_*`) check models are generated (needs `isa` to
+   include `'c'`): remove the now-mostly-redundant
+   `RISCV_FORMAL_ALLOW_COMPRESSED` wrapper guard for the checks that no
+   longer need it, keeping only what's still required for base-ISA-only
+   scope.
+4. `reg_ch0`: build `boolector` from source and retry, or try an even
+   longer `bitwuzla`/`z3` budget on a less resource-constrained machine.
 
 ## Environment setup (WSL)
 
