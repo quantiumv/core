@@ -236,8 +236,28 @@ module core (
     logic is_amo_rmw;
     logic mem_load_misaligned, mem_store_misaligned;
     logic [(`WORD_SIZE - 1):0] amo_rdata_q;
-    logic [31:0] amo_addr_q;
+    /*
+     * amo_addr_q: WORD_SIZE-wide for the RVFI tap's rvfi_mem_addr (see its
+     * own assign's comment), but the real hardware only ever consumes its
+     * low 32 bits (wb_addr_o = amo_addr_q[31:0], this core's physical
+     * address space is deliberately 32-bit) -- bits[63:32] are dead outside
+     * `ifdef RISCV_FORMAL, same reasoning/precedent as mem_paddr above.
+     */
+    /* verilator lint_off UNUSEDSIGNAL */
+    logic [(`WORD_SIZE - 1):0] amo_addr_q;
+    /* verilator lint_on UNUSEDSIGNAL */
     logic [7:0]  amo_sel_q;
+    /*
+     * amo_byte_off_q: the TRUE (unrounded) low 3 address bits, captured
+     * separately from amo_addr_q -- amo_addr_q is deliberately rounded
+     * down to a dword boundary (needed for both the real bus address and
+     * the RVFI-tap address), which throws away exactly the information
+     * amo_wdata's byte-lane shift needs for a .W AMO sitting in the
+     * UPPER word of its containing dword (address bit 2 set -- legal:
+     * .W only needs 4-byte alignment, not 8-byte). See amo_wdata's own
+     * comment for the real bug this fixes.
+     */
+    logic [2:0]  amo_byte_off_q;
 
     /*
      * commit_now: the single edge, per instruction, where the
@@ -1430,13 +1450,41 @@ module core (
     always_ff @(posedge clk) begin
         if (state == S_MEM && wb_ack_i && is_amo_rmw) begin
             amo_rdata_q <= load_data;
-            amo_addr_q  <= mem_addr;
-            amo_sel_q   <= mem_sel;
+            /*
+             * Full WORD_SIZE-wide, aligned the same way the load/store RVFI
+             * tap's own rvfi_mem_addr is (see that assign's comment) --
+             * deliberately NOT mem_addr (only 32 bits, the bus-facing
+             * truncation): a real riscv-formal counterexample already
+             * caught the exact same 32-bit-truncation bug on the plain
+             * load/store tap (the spec model computes its own full 64-bit
+             * expected address from the solver's free rs1_rdata, which
+             * this core's real 32-bit physical address space doesn't
+             * bound). Truncated back to 32 bits at the one real-bus-use
+             * site below (wb_addr_o), same convention as mem_paddr/
+             * fetch_paddr elsewhere in this file.
+             */
+            amo_addr_q     <= {mem_paddr[63:3], 3'b0};
+            amo_sel_q      <= mem_sel;
+            amo_byte_off_q <= mem_paddr[2:0];
         end
     end
 
-    /* Shifted into byte-lane position, same idiom mem_wdata already uses. */
-    wire [(`WORD_SIZE - 1):0] amo_wdata = amo_new_value << (amo_addr_q[2:0] * 8);
+    /*
+     * Shifted into byte-lane position, same idiom mem_wdata already uses
+     * (mem_wdata = imm_2 << (mem_paddr[2:0] * 8), the TRUE unrounded low
+     * bits). MUST use amo_byte_off_q here, NOT amo_addr_q[2:0] -- a real
+     * riscv-formal counterexample (insn_amoswap_w_ch0, 2026-08-13) caught
+     * this: amo_addr_q is deliberately rounded to a dword boundary, so
+     * its low 3 bits are always zero, silently dropping the shift for
+     * any .W AMO at an upper-word address (addr[2]=1, legal -- .W only
+     * needs 4-byte alignment). This was a genuine, pre-existing hardware
+     * bug (predates this session's amo_addr_q widening entirely) that
+     * would have silently corrupted the write data on real silicon for
+     * exactly that address pattern -- amo_sel_q never had this problem
+     * (mem_sel is computed, using the true unrounded address, BEFORE
+     * being latched), only the wdata shift did.
+     */
+    wire [(`WORD_SIZE - 1):0] amo_wdata = amo_new_value << (amo_byte_off_q * 8);
 
     /* --------------------------------------------------------------- *
      * Wishbone master: bus driving
@@ -1528,7 +1576,7 @@ module core (
                     wb_cyc_o  = 1'b1;
                     wb_stb_o  = 1'b1;
                     wb_we_o   = 1'b1;      // always a write -- this state exists for exactly this
-                    wb_addr_o = amo_addr_q;
+                    wb_addr_o = amo_addr_q[31:0]; // real bus is 32-bit; amo_addr_q is WORD_SIZE-wide for RVFI
                     wb_sel_o  = amo_sel_q;
                     wb_dat_o  = amo_wdata;
                 end
@@ -1750,11 +1798,36 @@ module core (
      * exact while leaving the real, deliberately-32-bit bus address
      * (mem_addr) untouched.
      */
-    assign rvfi_mem_addr  = (is_load || is_store) ? {mem_paddr[63:3], 3'b0} : 64'b0;
-    assign rvfi_mem_rmask = is_load  ? mem_sel : 8'b0;
-    assign rvfi_mem_wmask = is_store ? mem_sel : 8'b0;
-    assign rvfi_mem_rdata = wb_dat_i;
-    assign rvfi_mem_wdata = mem_wdata;
+    /*
+     * A extension: is_amo_rmw MUST take priority over is_load/is_store here,
+     * same reason it must in mem_control's own read_write_data mux (see that
+     * comment) -- is_load stays high for an AMO's ENTIRE lifetime (decode-
+     * driven), including the S_AMO_WRITE cycle where rvfi_valid actually
+     * pulses, and by then mem_paddr/mem_sel are the REPURPOSED modify value,
+     * not the address (see the amo_addr_q/amo_sel_q capture comment above) --
+     * amo_addr_q/amo_sel_q (latched before repurposing begins) are the only
+     * correct source at that cycle. amo_rdata_q is deliberately used for
+     * rvfi_mem_rdata instead of wb_dat_i: S_AMO_WRITE issues a WRITE bus
+     * transaction, so the live wb_dat_i at that cycle is unrelated bus
+     * garbage, not the old memory value -- and riscv-formal's insn_amo.v
+     * spec model expects rvfi_mem_rdata pre-extracted to bit 0 (no
+     * addr-offset shift, unlike insn_l*.v's load convention, which DOES
+     * shift the raw bus word -- two different conventions sharing one port
+     * name, confirmed by reading both generators directly), which is
+     * exactly amo_rdata_q's shape (<= load_data, already shifted/extended).
+     * Both rmask and wmask report amo_sel_q per riscv-formal's own AMO
+     * modelling guidance (docs/source/rvfi.rst: "asserting bits in both
+     * rvfi_mem_rmask and rvfi_mem_wmask") -- insn_amo.v's generated
+     * spec_mem_rmask is never assigned so this isn't load-bearing for any
+     * assertion today, but it's the spec-correct choice and costs nothing.
+     */
+    assign rvfi_mem_addr  = is_amo_rmw ? amo_addr_q
+                           : (is_load || is_store) ? {mem_paddr[63:3], 3'b0}
+                                                    : 64'b0;
+    assign rvfi_mem_rmask = is_amo_rmw ? amo_sel_q : (is_load  ? mem_sel : 8'b0);
+    assign rvfi_mem_wmask = is_amo_rmw ? amo_sel_q : (is_store ? mem_sel : 8'b0);
+    assign rvfi_mem_rdata = is_amo_rmw ? amo_rdata_q : wb_dat_i;
+    assign rvfi_mem_wdata = is_amo_rmw ? amo_wdata   : mem_wdata;
 `endif
 
 endmodule

@@ -1,4 +1,4 @@
-# riscv-formal integration (started 2026-08-11, 56/56 isa=rv64i checks PASS)
+# riscv-formal integration (started 2026-08-11, 56/56 isa=rv64i checks PASS; AMO 18/18 and C-extension 30/30 now added, M-extension in progress)
 
 Formal verification via [riscv-formal](https://github.com/YosysHQ/riscv-formal)
 (Yosys + SymbiYosys + a SAT/BMC solver), proving ISA correctness exhaustively
@@ -439,19 +439,164 @@ of false timeouts, distinct from the earlier documented WSL-crash risk
 (concurrent z3) — don't mistake a contention-timeout for a regression
 without a clean, sequential re-run first.
 
+## Resolved finding: AMO (18/18 non-LR/SC atomics) now PASS — one real `core.sv` bug, one spec-model bug, both fixed
+
+Scaling toward `rv64imac` in stages (A: AMO, B: M, C: C-extension — each
+isolated via its own hand-built or upstream `isa` manifest, see "Staged
+verification" below) rather than attempting the combined string directly,
+since `genchecks.py` does a literal `insns/isa_{isa}.txt` filename lookup
+(no `isa_rv64imac.txt` exists upstream, and no LR/SC spec model exists at
+all — genuinely unimplemented upstream, `# FIXME: LR.W / SC.W` in
+`generate.py`, confirmed via `docs/source/rvfi.rst` that this is a
+check-generation gap, not an RVFI port gap). **Decision: verify the 18
+non-LR/SC AMO instructions (AMOSWAP/ADD/XOR/AND/OR/MIN/MAX/MINU/MAXU ×
+`.W`/`.D`), leave LR/SC out of scope** — `insn_amo()` in `generate.py` is a
+fully-written, ready generator for exactly these, just never wired up
+(commented out alongside the LR/SC FIXME). Patch mechanism matches this
+project's own "config lives in the repo, framework lives external"
+convention already used for `yosys-slang`: `riscv-formal-amo.patch`,
+applied via `patch -p1 -d ~/riscv-formal < .../riscv-formal-amo.patch`
+(see "Environment setup" below).
+
+Two `core.sv` changes were needed to make the RVFI tap AMO-aware, following
+the same idiom already established for plain loads/stores:
+- Widened `amo_addr_q` from 32 bits to full `WORD_SIZE` (mirrors
+  `mem_paddr`'s own precedent — real hardware only ever consumes the low 32
+  bits via `wb_addr_o = amo_addr_q[31:0]`, the extra width exists purely
+  for the RVFI tap, `` `ifdef ``-gated).
+- Added an `is_amo_rmw`-priority arm to the RVFI memory tap
+  (`rvfi_mem_addr`/`rmask`/`wmask`/`rdata`/`wdata`), since decode-driven
+  `is_load` stays true for an AMO's entire lifetime including the
+  `S_AMO_WRITE` commit cycle, where `mem_paddr`/`mem_sel` are repurposed
+  for the modify value, not the address.
+
+**Real bug found and fixed: `amo_wdata`'s byte-lane shift silently
+corrupted `.W` AMO writes at any legally word-aligned-but-not-dword-aligned
+address** (i.e. `addr[2]=1`, `addr & 7 == 4`) — a genuine, previously
+undiscovered hardware defect, predating this session's AMO work entirely.
+`amo_addr_q` is deliberately captured already-rounded to an 8-byte dword
+boundary (`{mem_paddr[63:3], 3'b0}`, needed for both the real 32-bit bus
+address and the RVFI tap), so its low 3 bits are *always* zero —
+`amo_wdata = amo_new_value << (amo_addr_q[2:0] * 8)` therefore never
+actually shifted. `insn_amoswap_w_ch0`/`amoadd_w`/`amoxor_w` failed with
+exactly this pattern: witness replay (native Yosys sim against the
+solver's own prepped model + a custom VCD parser — see "Debugging
+methodology" below) showed `rvfi_rs1_rdata` ending in `...ffc` (word-aligned,
+`addr[2:0]==100`), the spec correctly computing a shifted write value, and
+`core.sv` reporting the *unshifted* one. Never caught before because no
+formal check ever exercised AMO writes, and no simulation testbench
+happened to test this exact address pattern — exactly the class of bug
+this whole formal push exists to find (see
+[[known-gap-mstatus-fs-warl]] for the same principle applied to the
+earlier MPRV/TSR CSR bugs). **Fix**: added a new `amo_byte_off_q` register
+capturing the *true*, unrounded `mem_paddr[2:0]` at the same capture edge,
+used for `amo_wdata`'s shift instead of the always-zero
+`amo_addr_q[2:0]`. Verified via full 38-testbench regression (clean —
+confirms the untested corner) and verilator lint before re-running formal.
+
+**Spec-model bug found and fixed (in the patch, not `core.sv`):
+`amominu_w`/`amomaxu_w`'s unsigned comparison used the full, unsliced
+64-bit `rvfi_mem_rdata`**, which broke once the byte-lane bug above was
+fixed. `insn_amo()`'s generated `wire [31:0] mem_result = expr;` truncates
+correctly regardless, but the *comparison itself* (`rvfi_mem_rdata <
+rvfi_rs2_rdata[31:0]`) runs on the untruncated operand. This core's
+`amo_rdata_q` correctly *sign-extends* the `.W` old value into the upper
+bits (exactly what makes the `$signed()`-based `amomin_w`/`amomax_w`
+comparisons correct across every alignment) — but that same sign extension
+makes an *unsigned* `<`/`>` on the raw 64-bit value see a huge number for
+any old value with bit 31 set, picking the wrong winner even though the
+core's actual 32-bit result was ISA-correct. Confirmed by hand-computing
+the expected AMOMINU.W result from the failing witness and finding it
+matched the core's output exactly — the checker was wrong, not the RTL.
+**Fix**: sliced `rvfi_mem_rdata[31:0]` explicitly in the `amominu_w`/
+`amomaxu_w` comparisons (patch only, `.D` variants need no change since
+their `oprange` is the full register width already).
+
+**Gotcha worth flagging for any future `generate.py` re-run**: `header()`
+accumulates instruction names into `isa_database` per active `current_isa`
+value, and the script unconditionally writes `isa_<name>.txt` for every
+key at the end of its run — this silently clobbers a hand-built manifest
+of the same name (`isa_rv64ia.txt` went from 67 lines to 9 the first time
+this was hit). The repo's copy is the source of truth; re-copy it into
+`~/riscv-formal/insns/` after every `generate.py` run.
+
+**Result: all 18 AMO checks PASS** (verified via `isa=rv64ia`, a hand-built
+manifest — see `isa_rv64ia.txt`).
+
+## Resolved finding: C-extension (30/30) PASS cleanly — first real exercise of the `rvfi_insn` raw-encoding tap and `RISCV_FORMAL_ALIGNED_MEM` for compressed loads/stores
+
+Ran the full Zca instruction set (`isa=rv64ic`, upstream manifest, no
+patching needed) — 30 checks generated (`c_addi4spn` through `c_sdsp`).
+29/30 passed on the first sequential run; `insn_c_ld_ch0` needed a longer
+solver budget (30 min vs. the 10 min default) — the same ordinary
+solver-time variance already documented for `insn_lw_ch0` above, not a
+different bug. **All 30 now PASS.** This is the first time this session's
+`rvfi_insn` fix (reporting the raw 16-bit compressed encoding) and the
+`RISCV_FORMAL_ALIGNED_MEM` define (aligned-bus-address + misaligned-trap
+convention) have actually been exercised by compressed-instruction-specific
+spec models rather than just base-ISA models running alongside compressed
+instructions in the trace — clean pass across all of them (loads, stores,
+ALU-immediate, register-register, branches, jumps, stack-pointer forms)
+is a meaningfully stronger confirmation than the earlier "56/56 with
+compressed instructions incidentally in the trace" result.
+
+## Status: M-extension (mul/div/rem family) — in progress, hit real solver-hardness/scale limits distinct from anything above
+
+`isa=rv64im` (upstream manifest) generates 13 new checks. These split into
+two structurally different problems, neither a sign of an RTL bug:
+
+**Divide/remainder family (`div`/`divu`/`rem`/`remu`/`divw`/`divuw`/`remw`/
+`remuw`)** — this core's divider (`design/divider.sv`) is a deliberately
+simple 1-bit-per-cycle restoring divider: `WORD_SIZE` (64) cycles for
+*every* division, unconditionally, no early exit, no fast path for the `W`
+variants (see the module's own header comment — simplicity and
+per-cycle-checkability were the explicit design goals, not synthesis or
+speed). The blanket `insn 15` depth default is nowhere near enough cycles
+for one of these to ever retire — a structural `PREUNSAT`
+("Assumptions are unsatisfiable") at check-generation time, confirmed via
+each check's own `logfile.txt`, not a real correctness gap. **Fix so far**:
+per-instruction depth overrides in `checks.cfg`'s `[depth]` section
+(`insn_div 80`, etc. — `get_depth_cfg()` in `genchecks.py` matches
+`insn_<name>` patterns specifically, confirmed by reading the source),
+giving the full 64-cycle divide plus margin. This resolved the PREUNSAT —
+assumptions are now satisfiable at depth 80 — but exposed a second,
+separate problem: at that much deeper an unroll, `bitwuzla` exhausted an
+8GB `ulimit -v` safety cap mid-solve (`std::bad_alloc`, confirmed via
+logfile, not a hang) even though the check itself needs the depth. Bumped
+to 16GB then 20GB (this environment has ~21GB physically available); still
+timing out past 30 minutes on the assertion-proving phase itself even once
+the memory ceiling stopped being the blocker. Currently retrying with
+`boolector` and a much longer (up to 20h) budget per the project owner's
+explicit call — genuinely open whether it converges.
+
+**Multiply family (`mul`/`mulh`/`mulhsu`/`mulhu`/`mulw`)** — no depth or
+memory problem (`Checking assertions in step 15` is reached quickly, same
+as every other check), but the SAT problem itself is the well-known
+hard case for bit-blasting solvers on nonlinear 64×64 multiplication.
+Both `bitwuzla` (30 min, zero progress signal) and `boolector` (30 min,
+then a full 20-hour run, also zero progress signal) failed to converge on
+`insn_mul_ch0` specifically — unlike `reg_ch0` above, where `boolector`
+succeeded where `bitwuzla`/`z3` failed outright, solver choice alone isn't
+fixing this one. Continuing to work through the remaining checks with long
+`boolector` budgets per the project owner's explicit authorization; **this
+core's multiply implementation is already verified via simulation and the
+ACT4 riscv-arch-test compliance suite** (both predate this formal push —
+see [[project-overview]] in project memory), so this is exclusively about
+closing the *exhaustive proof* gap, not an open correctness question.
+
 ## Next steps, roughly in order
 
-1. Scale to `rv64im`, `rv64ima`, `rv64imac`.
-2. Add `` `RISCV_FORMAL_CSR_* `` trace ports to `core.sv` one CSR at a time
+1. Resolve or accept-as-documented-limitation the M-extension
+   solver-hardness issues above.
+2. Build the final combined `isa_rv64imac.txt` manifest (union of AMO + M +
+   C instruction names) and confirm the full set passes together once all
+   three stages are individually clean — catches anything stage-isolation
+   might have missed.
+3. Add `` `RISCV_FORMAL_CSR_* `` trace ports to `core.sv` one CSR at a time
    for privilege-mode checks — `mstatus`/`mepc`/`mcause`/`sepc`/`scause`
    first, matching the CSRs this project's real MPRV/TSR bugs (see
    [[known-gap-mstatus-fs-warl]] in project memory) were found in, since
    that's exactly the class of bug formal verification is strongest against.
-3. Once Zca-specific (`c_*`) check models are generated (needs `isa` to
-   include `'c'`): remove the now-mostly-redundant
-   `RISCV_FORMAL_ALLOW_COMPRESSED` wrapper guard for the checks that no
-   longer need it, keeping only what's still required for base-ISA-only
-   scope.
 
 ## Environment setup (WSL)
 
@@ -512,6 +657,21 @@ ulimit -v 8000000 && timeout 1800 sby -f reg_ch0_boolector.sby
 ```
 (`ulimit -v` + `timeout`: see the WSL-crash history above — always run this
 way, not bare.)
+
+**AMO checks** need the vendored `generate.py` patched first (see its own
+"Resolved finding" above):
+```
+patch -p1 -d ~/riscv-formal < <this-dir>/riscv-formal-amo.patch
+cd ~/riscv-formal/insns && python3 generate.py
+cp <this-dir>/isa_rv64ia.txt ~/riscv-formal/insns/isa_rv64ia.txt   # generate.py clobbers this, see its own gotcha note above
+```
+Div/rem-family checks (`insn_div_ch0` etc.) need both the `[depth]`
+override already in this dir's `checks.cfg` (regenerate checks after any
+`checks.cfg` change: `cd ~/riscv-formal/cores/quantiumv && python3
+~/riscv-formal/checks/genchecks.py`) and a raised memory ceiling —
+`ulimit -v 16000000` or higher, not the `8000000` used elsewhere in this
+doc, or `bitwuzla` crashes with `std::bad_alloc` partway through the
+deeper unroll.
 
 Links: [[act4-riscv-arch-test-setup]] (the project's OTHER external-tool
 integration, same "config lives in the repo, framework lives external"
