@@ -118,6 +118,26 @@ module csr_file (
     output logic [1:0]                    o_mstatus_mpp,
     output logic                          o_mstatus_spp,
     output logic                          o_mstatus_tsr
+`ifdef RISCV_FORMAL
+    /*
+     * mcause/scause: no real core.sv control logic needs these today (unlike
+     * mtvec/stvec/mepc/sepc, which feed fetch redirection) -- only exposed
+     * for the RVFI CSR trace ports below. The four *_next ports mirror each
+     * register's own always_ff priority-mux combinationally (reset -> trap-
+     * capture -> CSR-write -> unchanged) so core.sv can report both the
+     * pre-instruction (rdata) and post-instruction (wdata) value in the same
+     * cycle rvfi_valid pulses -- the always_ff itself only makes the new
+     * value visible the FOLLOWING cycle, too late for RVFI's same-cycle
+     * contract.
+     */
+    ,
+    output logic [(`WORD_SIZE - 1):0]     o_mcause,
+    output logic [(`WORD_SIZE - 1):0]     o_scause,
+    output logic [(`WORD_SIZE - 1):0]     o_mepc_next,
+    output logic [(`WORD_SIZE - 1):0]     o_sepc_next,
+    output logic [(`WORD_SIZE - 1):0]     o_mcause_next,
+    output logic [(`WORD_SIZE - 1):0]     o_scause_next
+`endif
 );
     /* ----------------------------------------------------------------- *
      * CSR address map (module-local constants, same register-map-
@@ -385,6 +405,30 @@ module csr_file (
         else if (i_trap_taken && i_trap_to_s) scause_q <= i_trap_cause;
         else if (i_csr_we && (i_csr_addr == CSR_ADDR_SCAUSE)) scause_q <= i_csr_wdata;
     end
+
+`ifdef RISCV_FORMAL
+    /*
+     * mepc_next/sepc_next/mcause_next/scause_next: read-only combinational
+     * transcriptions of the four always_ff bodies immediately above (reset
+     * arm dropped -- rvfi_valid can never be true during reset, so it's
+     * never sampled) -- see this port group's own comment on the module
+     * header for why RVFI needs both the pre- and post-instruction value
+     * in the same cycle.
+     */
+    assign o_mepc_next   = (i_trap_taken && !i_trap_to_s) ? i_trap_pc
+                          : (i_csr_we && (i_csr_addr == CSR_ADDR_MEPC)) ? {i_csr_wdata[(`WORD_SIZE - 1):1], 1'b0}
+                          : mepc_q;
+    assign o_sepc_next   = (i_trap_taken && i_trap_to_s) ? i_trap_pc
+                          : (i_csr_we && (i_csr_addr == CSR_ADDR_SEPC)) ? {i_csr_wdata[(`WORD_SIZE - 1):1], 1'b0}
+                          : sepc_q;
+    assign o_mcause_next = (i_trap_taken && !i_trap_to_s) ? i_trap_cause
+                          : (i_csr_we && (i_csr_addr == CSR_ADDR_MCAUSE)) ? i_csr_wdata
+                          : mcause_q;
+    assign o_scause_next = (i_trap_taken && i_trap_to_s) ? i_trap_cause
+                          : (i_csr_we && (i_csr_addr == CSR_ADDR_SCAUSE)) ? i_csr_wdata
+                          : scause_q;
+`endif
+
     always_ff @(posedge i_clk) begin
         if (i_rst) mtval_q <= '0;
         else if (i_trap_taken && !i_trap_to_s) mtval_q <= i_trap_val;
@@ -505,6 +549,10 @@ module csr_file (
     assign o_mstatus_mpp = mstatus_q[MSTATUS_MPP_MSB:MSTATUS_MPP_LSB];
     assign o_mstatus_spp = mstatus_q[MSTATUS_SPP_BIT];
     assign o_mstatus_tsr = mstatus_q[MSTATUS_TSR_BIT];
+`ifdef RISCV_FORMAL
+    assign o_mcause      = mcause_q;
+    assign o_scause      = scause_q;
+`endif
 
     /*
      * Combinational read mux. The default arm is both "unmapped

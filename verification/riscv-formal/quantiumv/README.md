@@ -1,4 +1,4 @@
-# riscv-formal integration (started 2026-08-11, 56/56 isa=rv64i checks PASS; AMO 18/18 and C-extension 30/30 now added, M-extension in progress)
+# riscv-formal integration (started 2026-08-11, 56/56 isa=rv64i checks PASS; AMO 18/18 and C-extension 30/30 now added, M-extension in progress, first CSR trace ports added)
 
 Formal verification via [riscv-formal](https://github.com/YosysHQ/riscv-formal)
 (Yosys + SymbiYosys + a SAT/BMC solver), proving ISA correctness exhaustively
@@ -584,6 +584,109 @@ ACT4 riscv-arch-test compliance suite** (both predate this formal push —
 see [[project-overview]] in project memory), so this is exclusively about
 closing the *exhaustive proof* gap, not an open correctness question.
 
+## Status: first CSR trace ports added (mepc/mcause/sepc/scause) — real RTL work lands clean, but the generic `any` checker can't cleanly verify trap-target CSRs on this core (upstream tooling gap, not an RTL issue)
+
+Added the first `rvfi_csr_<name>_*` ports: `mepc`, `mcause`, `sepc`, `scause`.
+`mstatus` deliberately deferred (12 real fields, 5 different write sources —
+its own round later, see `csr_file.sv`'s header comment on the new port
+group). `design/csr_file.sv` gained `o_mcause`/`o_scause` (mirroring the
+existing `o_mepc`/`o_sepc` pattern) plus four `` `ifdef RISCV_FORMAL ``-only
+`*_next` ports — combinational transcriptions of each register's own
+`always_ff` priority-mux, needed because RVFI wants both the
+pre-instruction (`rdata`) and post-instruction (`wdata`) value in the same
+cycle `rvfi_valid` pulses, but the real `always_ff` only makes the new
+value visible the *following* cycle. `design/core.sv` threads these through
+and adds the 16 new ports (4 CSRs × rmask/wmask/rdata/wdata). Full 39/40
+regression + verilator lint (both without and with `` -DRISCV_FORMAL ``)
+confirmed zero effect on normal builds — see "Environment setup" below for
+the exact commands, since the established `iverilog`/`verilator`
+invocations needed real reconstruction this round (file compile order,
+`-s <top>` pinning, per-testbench CWD requirements — none of it specific to
+this change, all pre-existing project quirks worth documenting once).
+
+**`checks.cfg` gotcha, same class as `generate.py`'s manifest-clobbering
+note above**: CSR checks go through `genchecks.py`'s `check_cons()` — the
+*same* code path as `reg`/`pc_fwd`/`pc_bwd`, needing a **two-number**
+`[depth]` entry (`start depth`), not the single value `insn`-family checks
+use. Missing this entirely causes `check_cons()`'s own `depth_cfg` lookup
+to silently return `None` and skip check generation — no error, no check
+files, nothing in the check count. Confirmed by reading `genchecks.py`
+directly after the checks came up missing on the first attempt. Also: a
+CSR listed in `[csrs]` with no test string generates a check referencing a
+checker file (`rvfi_csrc_check.sv`) that doesn't exist in this checkout —
+use an explicit test type (`any`, matching the built-in default for
+`mscratch`) for every `[csrs]` line.
+
+**Real finding: the generic `any` CSR-consistency checker
+(`rvfi_csrc_any_check.sv`) has no privilege-mode or trap-semantics
+awareness at all, making it structurally unable to cleanly verify
+trap-target CSRs on a multi-privilege core — confirmed via witness replay,
+not assumed.** Two distinct manifestations, both root-caused:
+1. **Privilege-gated access traps.** The checker assumes every CSRRW/RS/RC
+   targeting the CSR's address always completes as a literal write. On this
+   core, `core.sv`'s own access check (`csr_priv_violation`, `core.sv:1020`:
+   `is_csr && (imm_2[9:8] > current_priv)`) correctly traps
+   (illegal-instruction) when a CSR is targeted from below its required
+   privilege. `mepc`/`mcause` are M-mode-only; `sepc`/`scause` need S-or-M.
+   The solver, free to pick any privilege level, found exactly this —
+   confirmed via native witness replay on `csrc_any_mcause_ch0`: the
+   "failing" trace showed a `csrrw x12, mcause, x1` issued from S/U-mode
+   correctly trapping (`mcause` becomes `2`, the illegal-instruction
+   exception code) instead of writing `x1`'s value, and hand-computing the
+   expected result confirmed the core's behavior was ISA-correct — the
+   checker's assumption was wrong, not the RTL. **Partially mitigated**: a
+   `checks.cfg` `[assume !csrc_any_(mepc|mcause)_ch0]` /
+   `[assume !csrc_any_(sepc|scause)_ch0]` pair scopes each check's whole
+   trace to the privilege level where the access actually succeeds
+   (`rvfi_mode`, already an existing RVFI port, is directly visible at
+   `assume_stmts.vh`'s inclusion scope inside `rvfi_testbench` — confirmed
+   by reading that file directly, not assumed). **Non-obvious gotcha**:
+   `genchecks.py`'s `[assume <pattern>]` matching is inverted from the
+   intuitive reading — a *bare* pattern **excludes** matching checks; only
+   a `!`-prefixed pattern **includes only** matches. Confirmed by tracing
+   `check_cons`'s own matching loop by hand with concrete examples, not
+   assumed — an easy convention to get backwards.
+2. **Trap-driven writes the checker can't see at all — the harder,
+   unresolved half.** mepc/mcause/sepc/scause aren't *only* written by
+   explicit CSR instructions — they're the trap mechanism's own target
+   registers, written on every trap-to-that-level regardless of what
+   instruction is executing. `rvfi_csrc_any_check.sv` only tracks writes
+   via decoding `rvfi.insn` as a CSRRW/RS/RC opcode pattern; it has no path
+   to observe (or exclude) an *implicit* trap-driven write. Between a
+   captured explicit write and the checker's next expected read, the
+   solver can freely inject an unrelated trap that legitimately overwrites
+   the register again — breaking the checker's "last captured write
+   persists until the next write" assumption regardless of privilege
+   scoping. Confirmed via witness replay on `csrc_any_sepc_ch0`/
+   `csrc_any_scause_ch0` (fails at a *different* assertion than the
+   privilege case — the cross-instruction consistency check, not the
+   same-cycle self-consistency one). `mepc` also still fails even under the
+   privilege-scoped assume, most likely its own separate, narrower gap: the
+   WARL bit-0 masking (`design/csr_file.sv`'s `mepc_q`/`sepc_q`, this
+   session's own earlier fix) means the checker's "written value equals
+   read-back value" assumption is *also* false whenever the raw write value
+   was odd — riscv-formal supports a `_mask="..."` check-test suffix for
+   exactly this (confirmed present in `check_cons`'s parsing,
+   `genchecks.py:571-580`), not yet applied. **This is why upstream's own
+   `csr_spec 1.12` default config lists `mepc`/`mcause` with no test type
+   at all** (`"mepc": None` in `genchecks.py`'s `spec_csrs` dict) — riscv-
+   formal's own authors don't appear to have a working generic check for
+   trap-target CSRs either; this isn't a gap specific to this project's
+   configuration.
+
+**Not an open correctness question for this core**: `mepc`/`sepc`'s WARL
+masking and `mcause`/`scause`'s trap-capture writers are already covered by
+`design/csr_file_priv_random_tb.sv` (2000 randomized iterations, 14000
+checks, all passing — its own header describes it as "the sole standalone
+proof that csr_file.sv's own atomic-update logic... is correct") plus the
+ACT4 riscv-arch-test compliance suite and the directed
+`core_priv_tb`/`core_priv_toolchain_tb`/`core_csr_toolchain_tb` testbenches.
+What's blocked is specifically the *exhaustive proof* tier riscv-formal is
+meant to add on top — not a sign the RTL itself is unverified. Stopping
+here per the project owner's explicit direction rather than chasing a
+heavier trap-suppressing `[assume]` (which would meaningfully weaken what
+the check proves, not just scope it) or a from-scratch custom checker.
+
 ## Next steps, roughly in order
 
 1. Resolve or accept-as-documented-limitation the M-extension
@@ -592,16 +695,52 @@ closing the *exhaustive proof* gap, not an open correctness question.
    C instruction names) and confirm the full set passes together once all
    three stages are individually clean — catches anything stage-isolation
    might have missed.
-3. Add `` `RISCV_FORMAL_CSR_* `` trace ports to `core.sv` one CSR at a time
-   for privilege-mode checks — `mstatus`/`mepc`/`mcause`/`sepc`/`scause`
-   first, matching the CSRs this project's real MPRV/TSR bugs (see
-   [[known-gap-mstatus-fs-warl]] in project memory) were found in, since
-   that's exactly the class of bug formal verification is strongest against.
+3. `mstatus` RVFI trace port — deferred from this round, see its own note
+   above.
+4. If ever revisited: try the `_mask="..."` suffix for `mepc`/`sepc` (fixes
+   the WARL self-consistency failure specifically) — `mcause`/`scause`
+   would still need a fundamentally different check (or a custom one) to
+   handle trap-driven writes, which `_mask` alone doesn't address.
 
 ## Environment setup (WSL)
 
 ```
 git clone --depth 1 https://github.com/YosysHQ/riscv-formal.git ~/riscv-formal
+```
+
+**Full regression + verilator lint** (the project's own gate for every
+`core.sv`/`csr_file.sv` change, re-derived this round since it isn't a
+checked-in script — see the top-level `README.md`'s own documented lint
+command for the canonical single-file-set version this expands on):
+```sh
+# from the repo root -- decoder.sv MUST compile before core.sv (its own
+# `include chain defines the INSTR_CODE/etc macros core.sv consumes,
+# order-dependent since defines persist for the rest of the compile);
+# core_wb4_sram_harness.sv/pc_trigger_sample_monitor.sv are real
+# instantiated modules some testbenches need, NOT `include-only helpers
+# like check_lib.sv/wb_driver.sv/halt_wait.sv/riscv_encode.sv (those must
+# NOT also be passed as separate files, or they elaborate in $unit scope
+# and error) -- `-s <top>` pins the actual top module so stray uninstantiated
+# modules in the file set (e.g. wb4_sram.sv's own $readmemh initial block)
+# don't run as spurious extra top-level simulations. Some testbenches
+# (encode-crosscheck golden fixtures, firmware .hex loads) need CWD=testbench/
+# at RUN time specifically -- compile from repo root, run vvp from testbench/.
+iverilog -g2012 -I design -I testbench -s <tb_module_name> -o /tmp/<tb>.out \
+  design/decoder.sv design/alu.sv design/c_expand.sv design/csr_file.sv \
+  design/divider.sv design/register_file.sv design/uart_tx.sv \
+  design/wb4_sram.sv design/wb_addr_decoder.sv design/core.sv design/soc.sv \
+  testbench/core_wb4_sram_harness.sv testbench/pc_trigger_sample_monitor.sv \
+  <path/to/the_tb.sv>
+(cd testbench && vvp /tmp/<tb>.out)
+```
+Verilator lint needs the *glued* `-Idesign -Itestbench` form (a space after
+`-I` silently fails to resolve the `` `include `` chain, unlike `iverilog`
+which accepts either) and the same decoder-before-core file order:
+```sh
+verilator --lint-only -Wall -Idesign -Itestbench --top-module soc \
+  design/decoder.sv design/alu.sv design/c_expand.sv design/csr_file.sv \
+  design/divider.sv design/register_file.sv design/uart_tx.sv \
+  design/wb4_sram.sv design/wb_addr_decoder.sv design/core.sv design/soc.sv
 ```
 
 Yosys 0.61 and z3 were already present. **`sby`** (SymbiYosys) is a

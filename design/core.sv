@@ -134,9 +134,12 @@ module core (
      * at build time -- these widths are just RVFI_OUTPUTS's own
      * expansion for our fixed NRET=1/XLEN=64/ILEN=32, spelled out
      * directly. First slice covers base-ISA checks (isa=rv64i in
-     * checks.cfg) only -- no CSR trace ports yet (those need per-CSR
-     * rvfi_csr_<name>_* ports added deliberately, one extension's worth
-     * at a time, once base-ISA checks are green).
+     * checks.cfg) only. CSR trace ports added deliberately, one extension's
+     * worth at a time: mepc/mcause/sepc/scause first (simple 3-source
+     * always_ff registers, mirrored combinationally in csr_file.sv for the
+     * *_next/wdata side -- see that module's own header comment) --
+     * mstatus deliberately deferred (12 real fields written from 5
+     * different sources, a substantially bigger lift, its own round later).
      */
 `ifdef RISCV_FORMAL
     ,
@@ -160,7 +163,23 @@ module core (
     output logic [7:0]  rvfi_mem_rmask,
     output logic [7:0]  rvfi_mem_wmask,
     output logic [63:0] rvfi_mem_rdata,
-    output logic [63:0] rvfi_mem_wdata
+    output logic [63:0] rvfi_mem_wdata,
+    output logic [63:0] rvfi_csr_mepc_rmask,
+    output logic [63:0] rvfi_csr_mepc_wmask,
+    output logic [63:0] rvfi_csr_mepc_rdata,
+    output logic [63:0] rvfi_csr_mepc_wdata,
+    output logic [63:0] rvfi_csr_mcause_rmask,
+    output logic [63:0] rvfi_csr_mcause_wmask,
+    output logic [63:0] rvfi_csr_mcause_rdata,
+    output logic [63:0] rvfi_csr_mcause_wdata,
+    output logic [63:0] rvfi_csr_sepc_rmask,
+    output logic [63:0] rvfi_csr_sepc_wmask,
+    output logic [63:0] rvfi_csr_sepc_rdata,
+    output logic [63:0] rvfi_csr_sepc_wdata,
+    output logic [63:0] rvfi_csr_scause_rmask,
+    output logic [63:0] rvfi_csr_scause_wmask,
+    output logic [63:0] rvfi_csr_scause_rdata,
+    output logic [63:0] rvfi_csr_scause_wdata
 `endif
 );
 
@@ -1256,6 +1275,10 @@ module core (
     wire [(`WORD_SIZE - 1):0] mtvec_w, stvec_w, mepc_w, sepc_w;
     wire [1:0] mstatus_mpp_w;
     wire mstatus_spp_w;
+`ifdef RISCV_FORMAL
+    wire [(`WORD_SIZE - 1):0] mcause_w, scause_w;
+    wire [(`WORD_SIZE - 1):0] mepc_next_w, sepc_next_w, mcause_next_w, scause_next_w;
+`endif
 
     csr_file csr_file0 (
         .i_clk(clk),
@@ -1283,6 +1306,15 @@ module core (
         .o_mstatus_mpp(mstatus_mpp_w),
         .o_mstatus_spp(mstatus_spp_w),
         .o_mstatus_tsr(mstatus_tsr_w)
+`ifdef RISCV_FORMAL
+        ,
+        .o_mcause(mcause_w),
+        .o_scause(scause_w),
+        .o_mepc_next(mepc_next_w),
+        .o_sepc_next(sepc_next_w),
+        .o_mcause_next(mcause_next_w),
+        .o_scause_next(scause_next_w)
+`endif
     );
 
     /*
@@ -1828,6 +1860,33 @@ module core (
     assign rvfi_mem_wmask = is_amo_rmw ? amo_sel_q : (is_store ? mem_sel : 8'b0);
     assign rvfi_mem_rdata = is_amo_rmw ? amo_rdata_q : wb_dat_i;
     assign rvfi_mem_wdata = is_amo_rmw ? amo_wdata   : mem_wdata;
+
+    /*
+     * CSR trace ports: mepc/mcause/sepc/scause. All four are always fully-
+     * defined 64-bit values (no partial-validity concerns like a memory
+     * access might have), so rmask/wmask are simply all-ones. rdata is the
+     * pre-instruction value (mepc_w etc., already wired for the real fetch-
+     * redirect logic above); wdata is the post-instruction value (the
+     * *_next combinational mirrors from csr_file.sv -- see that module's
+     * header comment for why a plain registered value can't serve both
+     * roles in the same cycle).
+     */
+    assign rvfi_csr_mepc_rmask   = 64'hffff_ffff_ffff_ffff;
+    assign rvfi_csr_mepc_wmask   = 64'hffff_ffff_ffff_ffff;
+    assign rvfi_csr_mepc_rdata   = mepc_w;
+    assign rvfi_csr_mepc_wdata   = mepc_next_w;
+    assign rvfi_csr_mcause_rmask = 64'hffff_ffff_ffff_ffff;
+    assign rvfi_csr_mcause_wmask = 64'hffff_ffff_ffff_ffff;
+    assign rvfi_csr_mcause_rdata = mcause_w;
+    assign rvfi_csr_mcause_wdata = mcause_next_w;
+    assign rvfi_csr_sepc_rmask   = 64'hffff_ffff_ffff_ffff;
+    assign rvfi_csr_sepc_wmask   = 64'hffff_ffff_ffff_ffff;
+    assign rvfi_csr_sepc_rdata   = sepc_w;
+    assign rvfi_csr_sepc_wdata   = sepc_next_w;
+    assign rvfi_csr_scause_rmask = 64'hffff_ffff_ffff_ffff;
+    assign rvfi_csr_scause_wmask = 64'hffff_ffff_ffff_ffff;
+    assign rvfi_csr_scause_rdata = scause_w;
+    assign rvfi_csr_scause_wdata = scause_next_w;
 `endif
 
 endmodule
