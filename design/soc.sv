@@ -7,16 +7,46 @@
  * Module: soc
  *
  * Top-level integration: core (Wishbone master) <-> wb_addr_decoder <->
- * {wb4_sram, uart_tx}. Exactly the wiring already proven in
- * testbench/core_wb_tb.sv, promoted to a real module now that all four
- * pieces are independently verified -- this file adds no new logic of
- * its own, only the connections between them.
+ * {cache_complex -> wb4_sram, uart_tx}. Exactly the wiring already proven
+ * in testbench/core_wb_tb.sv (for core<->decoder<->{ram,uart}) and
+ * testbench/core_cache_harness.sv (for core<->cache_complex<->sram) --
+ * this file adds no new logic of its own, only the connections between
+ * already-independently-verified pieces.
+ *
+ * cache_complex sits AFTER wb_addr_decoder, between it and wb4_sram --
+ * not before the decoder. This is deliberate, not incidental ordering:
+ * uart_tx.sv is a real side-effecting MMIO peripheral (TX_DATA triggers a
+ * genuine $write on every store; TX_STATUS is a poll register explicitly
+ * structured to grow real serial timing later), and placing the cache
+ * downstream of the decoder makes UART traffic structurally uncacheable
+ * -- cache_complex's ports simply never see it -- rather than requiring
+ * the cache to duplicate the decoder's own addr_i[15] test internally,
+ * with the real risk of getting it wrong (e.g. a cached TX_STATUS poll
+ * silently breaking once real timing lands there). See the cache
+ * hierarchy's own design notes (project memory: cache-hierarchy-plan) for
+ * the full reasoning.
  *
  * wb4_sram is instantiated at its default num_words (4096, 32KB) --
  * unlike core_wb_tb.sv's deliberately small test instance, this is the
  * real memory map wb_addr_decoder.sv's address split (addr_i[15]) is
  * derived from; see that module's own header comment for why the two
- * aren't independent.
+ * aren't independent. cache_complex's own cache size defaults (64 lines x
+ * 4 words = 2KB per cache, 4KB combined) are likewise this module's
+ * choice to keep, not something wb_addr_decoder.sv or wb4_sram.sv need to
+ * know about -- the cache is fully transparent to both.
+ *
+ * KNOWN, DELIBERATE LIMITATION: no I$/D$ coherence for self-modifying
+ * code. This ISA has no Zifencei, so software has no instruction-level
+ * way to invalidate a stale I$ line after a D$ store to the same physical
+ * address -- a store that lands in an address I$ already has cached
+ * leaves that stale copy in place, with nothing to evict it, until it's
+ * naturally replaced by a later conflicting fetch. Accepted as a
+ * documented gap for this milestone (same treatment as this project's
+ * other deliberately-deferred items -- EBREAK's sim-only halt, FENCE
+ * under-implementation) rather than adding cross-cache snoop/invalidate
+ * wiring now. Today's firmware never self-modifies, so nothing currently
+ * exercises this, but it is a real, silent-corruption-class gap if that
+ * ever changes -- must stay visible here, not buried.
  *
  * No UART pin exists at this level (or anywhere in this design) -- see
  * uart_tx.sv's header for why: this milestone's UART "transmits" via
@@ -32,12 +62,13 @@ module soc (
     logic [63:0] wb_dat_m2s, wb_dat_s2m;
     logic [7:0]  wb_sel;
     logic        wb_we, wb_cyc, wb_stb, wb_ack, wb_err;
+    logic        wb_ifetch;
 
     core core0 (
         .clk(clk), .rst(rst),
         .wb_addr_o(wb_addr), .wb_dat_o(wb_dat_m2s), .wb_dat_i(wb_dat_s2m),
         .wb_sel_o(wb_sel), .wb_we_o(wb_we), .wb_cyc_o(wb_cyc), .wb_stb_o(wb_stb),
-        .wb_ack_i(wb_ack), .wb_err_i(wb_err)
+        .wb_ack_i(wb_ack), .wb_err_i(wb_err), .wb_ifetch_o(wb_ifetch)
     );
 
     logic [31:0] ram_addr, uart_addr;
@@ -58,10 +89,25 @@ module soc (
         .uart_stb_o(uart_stb), .uart_ack_i(uart_ack), .uart_err_i(uart_err)
     );
 
-    wb4_sram sram0 (
+    logic [31:0] mem_addr;
+    logic [63:0] mem_dat_m2s, mem_dat_s2m;
+    logic [7:0]  mem_sel;
+    logic        mem_we, mem_cyc, mem_stb, mem_ack, mem_err;
+
+    cache_complex cache0 (
         .clk(clk), .rst(rst),
         .addr_i(ram_addr), .dat_i(ram_dat_o), .dat_o(ram_dat_i), .sel_i(ram_sel),
-        .ack_o(ram_ack), .err_o(ram_err), .cyc_i(ram_cyc), .stb_i(ram_stb), .we_i(ram_we)
+        .we_i(ram_we), .ifetch_i(wb_ifetch), .cyc_i(ram_cyc), .stb_i(ram_stb),
+        .ack_o(ram_ack), .err_o(ram_err),
+        .mem_addr_o(mem_addr), .mem_dat_o(mem_dat_m2s), .mem_dat_i(mem_dat_s2m),
+        .mem_sel_o(mem_sel), .mem_we_o(mem_we), .mem_cyc_o(mem_cyc), .mem_stb_o(mem_stb),
+        .mem_ack_i(mem_ack), .mem_err_i(mem_err)
+    );
+
+    wb4_sram sram0 (
+        .clk(clk), .rst(rst),
+        .addr_i(mem_addr), .dat_i(mem_dat_m2s), .dat_o(mem_dat_s2m), .sel_i(mem_sel),
+        .ack_o(mem_ack), .err_o(mem_err), .cyc_i(mem_cyc), .stb_i(mem_stb), .we_i(mem_we)
     );
 
     uart_tx uart0 (

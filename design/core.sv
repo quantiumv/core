@@ -108,6 +108,19 @@
  * bus, `_i` reads it. Connects to design/wb_addr_decoder.sv's CPU-facing
  * port one-for-one (that module's `_i`/`_o` are the mirror image of
  * these, as expected for a master/slave pair).
+ *
+ * wb_ifetch_o: side-band, not part of the Wishbone protocol itself --
+ * high while the CURRENT bus transaction is an instruction fetch
+ * (S_FETCH/S_FETCH_HI), low for load/store/AMO (S_MEM/S_AMO_WRITE). This
+ * core still exposes only ONE time-multiplexed Wishbone master port
+ * (fetch and mem/AMO never overlap -- single-issue, non-pipelined), so a
+ * downstream cache layer has no other way to tell which logical stream
+ * (I$ vs D$) a given transaction belongs to. Defined off `state` directly
+ * (see wb_master_drive below), not gated by !wb_ack_i the way
+ * wb_addr_o/wb_cyc_o are -- `state` only updates on the following clock
+ * edge, so this stays stable through the exact cycle a downstream router
+ * needs it on, unlike wb_addr_o/wb_cyc_o which combinationally collapse
+ * to idle the instant wb_ack_i arrives.
  */
 module core (
     input logic clk,
@@ -122,8 +135,9 @@ module core (
     output logic        wb_stb_o,
     input  logic        wb_ack_i,
     /* verilator lint_off UNUSEDSIGNAL */
-    input  logic        wb_err_i
+    input  logic        wb_err_i,
     /* verilator lint_on UNUSEDSIGNAL */
+    output logic        wb_ifetch_o
 
     /*
      * RVFI (RISC-V Formal Interface) -- only present when compiled for
@@ -1551,6 +1565,12 @@ module core (
      * testbench's own master-role loop) as the wb_cycle ack-timing bug
      * in wb4_sram_tb.sv/uart_tx_tb.sv.
      */
+
+    // See this port's own header comment (module port list, above) for
+    // why this is a plain wire off `state`, not folded into
+    // wb_master_drive's !wb_ack_i-gated combinational block below.
+    assign wb_ifetch_o = (state == S_FETCH) || (state == S_FETCH_HI);
+
     always_comb begin: wb_master_drive
         wb_cyc_o  = 1'b0;
         wb_stb_o  = 1'b0;
