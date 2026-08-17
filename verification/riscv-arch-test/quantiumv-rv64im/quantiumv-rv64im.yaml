@@ -9,9 +9,10 @@ description: >
   the `dev` branch, 2026-08-10). No A/F/D/V (A is implemented on `dev` too --
   atomics -- but not yet declared here; see memory/c-extension-milestone.md).
   No PMP. No Sv39/Sv48/Sv57 (satp storage exists for a future MMU handoff but
-  only Bare mode is functional today). No misaligned-access exception
-  (misaligned loads/stores are neither guaranteed-correct nor faulted -- a
-  known gap, not a config omission). No interrupts (mie/mip/mideleg are real,
+  only Bare mode is functional today). Misaligned loads/stores are not
+  performed directly -- they always raise a misaligned-address exception
+  (mem_load_misaligned/mem_store_misaligned, causes 4/6); see MISALIGNED_LDST
+  below. No interrupts (mie/mip/mideleg are real,
   inert storage; no interrupt source exists). EBREAK is a permanent sim-only
   halt, not a real breakpoint trap -- a known, tracked pre-tapeout gap (see
   memory/known-gap-ebreak-sim-halt.md).
@@ -35,8 +36,17 @@ params:
   MIMPID_IMPLEMENTED: false # csr_file.sv: mimpid hardwired to 0, same reasoning
   VENDOR_ID_BANK: 0x0
   VENDOR_ID_OFFSET: 0x0
-  MISALIGNED_LDST: false # no misaligned-access exception exists in this core; declaring false generates
-                          # tests expecting a trap, which will fail -- surfaces the real gap rather than hiding it
+  MISALIGNED_LDST: false # per the UDB param definition (params/MISALIGNED_LDST.yaml): "Does the
+                          # implementation perform non-atomic misaligned loads/stores to main memory?
+                          # If not, the implementation always throws a misaligned exception." false is
+                          # correct here -- core.sv's mem_load_misaligned/mem_store_misaligned (causes
+                          # 4/6) always trap rather than performing the access. (Earlier revisions of
+                          # this comment had the polarity backwards -- false does NOT mean "no exception
+                          # exists"; it means the opposite, "always excepts." The value was already
+                          # correct even before that RTL fix landed, since the old silent mem_sel-shift
+                          # truncation neither performed a correct misaligned access NOR trapped one --
+                          # ACT4's ExceptionsZc-00 genuinely failed under this same flag back then,
+                          # exactly as this flag's semantics predict, and is expected to pass now.)
   MISALIGNED_LDST_EXCEPTION_PRIORITY: low
   TRAP_ON_ILLEGAL_WLRL: false
   TRAP_ON_UNIMPLEMENTED_INSTRUCTION: true

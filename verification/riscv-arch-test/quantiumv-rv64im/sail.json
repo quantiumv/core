@@ -47,7 +47,10 @@
       "napot_supported": false
     },
     "misaligned": {
-      "supported": false, // no misaligned-access exception exists in this core (known gap, see UDB config note)
+      // false = hardware does not perform misaligned loads/stores directly -- they always fault.
+      // Matches core.sv's mem_load_misaligned/mem_store_misaligned (causes 4/6); kept in sync with
+      // quantiumv-rv64im.yaml's MISALIGNED_LDST, see that file's comment for the full polarity note.
+      "supported": false,
       "byte_by_byte": false,
       "order_decreasing": false,
       "allowed_within_exp": 0

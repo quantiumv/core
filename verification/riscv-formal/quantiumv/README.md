@@ -782,10 +782,17 @@ CLI) — worth trying first since it'd be faster than a source build.
 
 To (re-)generate checks and try running one, from `~/riscv-formal/cores/`:
 ```
-mkdir -p quantiumv && cp <this-dir>/wrapper.sv <this-dir>/checks.cfg quantiumv/
+mkdir -p quantiumv/design && cp <this-dir>/wrapper.sv <this-dir>/checks.cfg quantiumv/
+cp /mnt/c/Users/Potato/Desktop/core/design/{alu,decoder,register_file,csr_file,divider,c_expand,core}.sv quantiumv/design/
 cd quantiumv && python3 ../../checks/genchecks.py
 cd checks && ulimit -v 8000000 && timeout 300 sby -f insn_add_ch0.sby
 ```
+`checks.cfg`'s `[script-sources]` references the design files as
+`@basedir@/cores/@core@/design/*.sv` (genchecks.py-substituted, relative to
+the riscv-formal checkout) rather than this repo's own absolute path — the
+`cp` line above is what makes that resolve; re-run it after editing any of
+the 7 listed design files, same as the existing `wrapper.sv`/`checks.cfg`
+copy step.
 `reg_ch0` specifically needs `boolector`, not the `bitwuzla` every other
 check uses (see its own "Resolved finding" above for why this isn't just
 a `checks.cfg` setting) — swap solvers on its own generated `.sby` file:
