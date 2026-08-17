@@ -56,11 +56,11 @@ module core_bus_fault_cache_tb;
      * into S_AMO_WRITE. Latched globally -- no AMO op in this program
      * ever legitimately reaches S_AMO_WRITE either.
      */
-    logic amo_write_entered = 1'b0;
-    always @(posedge clk) begin
-        if (dut.core0.state == dut.core0.S_AMO_WRITE)
-            amo_write_entered <= 1'b1;
-    end
+    logic amo_write_entered;
+    state_reached_monitor amo_write_monitor (
+        .clk(clk), .i_state(dut.core0.state),
+        .i_state_target(dut.core0.S_AMO_WRITE), .o_reached(amo_write_entered)
+    );
 
     localparam int unsigned HANDLER_I = 32'h40;
     /*

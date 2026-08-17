@@ -72,11 +72,11 @@ module core_bus_fault_trap_tb;
      * the one real AMOADD here is the one under test) -- a true positive
      * anywhere in the whole run is equally damning.
      */
-    logic amo_write_entered = 1'b0;
-    always @(posedge clk) begin
-        if (dut.core0.state == dut.core0.S_AMO_WRITE)
-            amo_write_entered <= 1'b1;
-    end
+    logic amo_write_entered;
+    state_reached_monitor amo_write_monitor (
+        .clk(clk), .i_state(dut.core0.state),
+        .i_state_target(dut.core0.S_AMO_WRITE), .o_reached(amo_write_entered)
+    );
 
     /* Register allocation (all distinct, checked independently at the end):
      *   x2-x7:   resume markers, one per test (A-F), prove clean resume.

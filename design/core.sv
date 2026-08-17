@@ -268,6 +268,13 @@ module core (
     logic is_amo_rmw;
     logic mem_load_misaligned, mem_store_misaligned;
     logic mem_load_access_fault, mem_store_access_fault;
+    /*
+     * trap_taken: forward-declared here (assigned near exc_code far
+     * below) purely so the reservation register block above its own
+     * declaration site can gate on it -- same forward-reference pattern
+     * mem_load_misaligned/mem_store_misaligned already establish.
+     */
+    logic trap_taken;
     logic [(`WORD_SIZE - 1):0] amo_rdata_q;
     /*
      * amo_addr_q: WORD_SIZE-wide for the RVFI tap's rvfi_mem_addr (see its
@@ -784,18 +791,33 @@ module core (
      * Reservation register (LR/SC). Set unconditionally on LR's own
      * retirement (a fresh LR always creates a new reservation,
      * superseding any prior one -- a plain overwrite, not a conditional
-     * set). Cleared on ANY store-class instruction's retirement: ordinary
-     * SB/SH/SW/SD (is_store), SC either way (is_sc, since is_store alone
-     * only catches SC's MATCHED case), or an AMO's write (is_amo_rmw) --
-     * matching the spec requirement that a used reservation can't be
-     * reused.
+     * set) -- but ONLY when LR actually retires cleanly (`!trap_taken`),
+     * same gate reg_write/csr_we already use. Without it, a faulted LR
+     * (misaligned, or -- since is_lr is purely combinational/decode-based
+     * and doesn't care about the bus outcome -- a real access-fault via
+     * mem_store_access_fault, newly reachable once wb_err_i started
+     * feeding commit_now) would still set a "valid" reservation for a
+     * load that never happened, letting a later SC to that address
+     * spuriously report success. Found via code review, not a test
+     * failure -- see testbench/core_reservation_fault_tb.sv for the
+     * proof (a faulted LR immediately followed by an SC to the same
+     * address must NOT report success). Cleared on ANY store-class
+     * instruction's retirement: ordinary SB/SH/SW/SD (is_store), SC
+     * either way (is_sc, since is_store alone only catches SC's MATCHED
+     * case), or an AMO's write (is_amo_rmw) -- matching the spec
+     * requirement that a used reservation can't be reused. The clear
+     * arm doesn't need the same `!trap_taken` guard: a faulted store/SC/
+     * AMO-write never actually wrote anything either, but invalidating
+     * the reservation anyway is still spec-conformant (a reservation
+     * surviving a faulted store attempt is not architecturally
+     * guaranteed) and strictly safer than leaving it valid.
      */
     logic reservation_valid_q;
     logic [(`WORD_SIZE - 1):0] reservation_addr_q;
     always_ff @(posedge clk) begin
         if (rst) begin
             reservation_valid_q <= 1'b0;
-        end else if (commit_now && is_lr) begin
+        end else if (commit_now && is_lr && !trap_taken) begin
             reservation_valid_q <= 1'b1;
             reservation_addr_q  <= amo_target_addr;
         end else if (commit_now && (is_store || is_sc || is_amo_rmw)) begin
@@ -1142,7 +1164,7 @@ module core (
                            mem_store_access_fault               ? 4'd7  :
                                                                    4'd0; // don't-care, gated by trap_taken
 
-    wire trap_taken = commit_now && (fetch_fault_q || is_illegal_instr || is_ecall
+    assign trap_taken = commit_now && (fetch_fault_q || is_illegal_instr || is_ecall
                                    || mem_load_misaligned || mem_store_misaligned
                                    || mem_load_access_fault || mem_store_access_fault);
     /* An M-mode trap never delegates, regardless of medeleg -- falls out
@@ -1537,32 +1559,32 @@ module core (
     assign mem_store_access_fault = ((state == S_MEM) && wb_err_i && (is_store || is_sc || is_lr || is_amo_rmw))
                                   || ((state == S_AMO_WRITE) && wb_err_i);
 
+    /*
+     * mem_access_fault_addr: the one place mem_paddr vs. amo_addr_q
+     * genuinely matters for trap_val below. mem_paddr is live/correct
+     * during S_MEM, but gets REPURPOSED to the AMO modify value the
+     * instant S_AMO_WRITE begins (the same hazard the AMO RVFI tap
+     * already works around) -- an AMO write-phase fault must use
+     * amo_addr_q instead, or mtval reports garbage. Named separately so
+     * trap_val's own chain stays a flat, single-level ternary matching
+     * every sibling arm, rather than growing a nested one just for this
+     * case.
+     */
+    wire [(`WORD_SIZE - 1):0] mem_access_fault_addr = (state == S_AMO_WRITE) ? amo_addr_q : mem_paddr;
+
     /* trap_val, continued from its forward declaration above: the
      * misaligned-access and access-fault causes report the faulting
      * address, per spec's mtval/stval convention. fetch_fault_q (cause 1)
      * uses pc directly -- csr_file0.i_trap_pc already receives pc
      * unconditionally for every trap, so mepc == mtval here, which is
      * both spec-correct and sidesteps needing to know whether S_FETCH or
-     * S_FETCH_HI was the one that actually faulted. The one place
-     * mem_paddr vs. amo_addr_q genuinely matters: mem_paddr is
-     * live/correct during S_MEM, but gets REPURPOSED to the AMO modify
-     * value the instant S_AMO_WRITE begins (the same hazard the AMO RVFI
-     * tap already works around) -- an AMO write-phase fault must use
-     * amo_addr_q instead, or mtval reports garbage. Safe to fold
-     * mem_load_access_fault into the same ternary as mem_store_access_fault:
-     * whenever state == S_AMO_WRITE, mem_load_access_fault is
-     * definitionally 0 (gated on state == S_MEM), so the state check
-     * unambiguously selects amo_addr_q only for the genuinely-AMO-write
-     * case. */
-    assign trap_val = fetch_fault_q
-        ? pc
-        : is_illegal_instr
-            ? (is_compressed ? {48'b0, first_hw}
-                              : {{(`WORD_SIZE - `INSTR_SIZE){1'b0}}, instruction})
-            : (mem_load_misaligned || mem_store_misaligned) ? mem_paddr
-            : (mem_load_access_fault || mem_store_access_fault)
-                ? ((state == S_AMO_WRITE) ? amo_addr_q : mem_paddr)
-            : `WORD_SIZE'(0);
+     * S_FETCH_HI was the one that actually faulted. */
+    assign trap_val = fetch_fault_q ? pc
+        : is_illegal_instr ? (is_compressed ? {48'b0, first_hw}
+                                             : {{(`WORD_SIZE - `INSTR_SIZE){1'b0}}, instruction})
+        : (mem_load_misaligned || mem_store_misaligned) ? mem_paddr
+        : (mem_load_access_fault || mem_store_access_fault) ? mem_access_fault_addr
+        : `WORD_SIZE'(0);
 
     /* Store data, pre-shifted into the byte lane(s) it'll land in. */
     wire [(`WORD_SIZE - 1):0] mem_wdata = imm_2 << (mem_paddr[2:0] * 8);
