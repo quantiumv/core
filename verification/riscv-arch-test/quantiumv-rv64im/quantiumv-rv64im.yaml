@@ -64,9 +64,14 @@ params:
   REPORT_VA_IN_MTVAL_ON_LOAD_MISALIGNED: true
   REPORT_VA_IN_MTVAL_ON_STORE_AMO_MISALIGNED: true
   REPORT_VA_IN_MTVAL_ON_INSTRUCTION_MISALIGNED: false
-  REPORT_VA_IN_MTVAL_ON_LOAD_ACCESS_FAULT: false
-  REPORT_VA_IN_MTVAL_ON_STORE_AMO_ACCESS_FAULT: false
-  REPORT_VA_IN_MTVAL_ON_INSTRUCTION_ACCESS_FAULT: false
+  # Bus-error trapping (2026-08-17): core.sv's mem_load_access_fault/mem_store_access_fault/
+  # fetch_fault_q all report the real faulting address in trap_val (mem_paddr/amo_addr_q/pc,
+  # same convention as the misaligned-access causes above) -- these three flags flip to true
+  # for the same reason those did, so the declared config matches actual RTL behavior from the
+  # start rather than needing a second, separate root-cause pass later.
+  REPORT_VA_IN_MTVAL_ON_LOAD_ACCESS_FAULT: true
+  REPORT_VA_IN_MTVAL_ON_STORE_AMO_ACCESS_FAULT: true
+  REPORT_VA_IN_MTVAL_ON_INSTRUCTION_ACCESS_FAULT: true
   REPORT_VA_IN_MTVAL_ON_LOAD_PAGE_FAULT: false
   REPORT_VA_IN_MTVAL_ON_STORE_AMO_PAGE_FAULT: false
   REPORT_VA_IN_MTVAL_ON_INSTRUCTION_PAGE_FAULT: false
@@ -131,9 +136,10 @@ params:
   REPORT_VA_IN_STVAL_ON_LOAD_MISALIGNED: true
   REPORT_VA_IN_STVAL_ON_STORE_AMO_MISALIGNED: true
   REPORT_VA_IN_STVAL_ON_INSTRUCTION_MISALIGNED: false
-  REPORT_VA_IN_STVAL_ON_LOAD_ACCESS_FAULT: false
-  REPORT_VA_IN_STVAL_ON_STORE_AMO_ACCESS_FAULT: false
-  REPORT_VA_IN_STVAL_ON_INSTRUCTION_ACCESS_FAULT: false
+  # Same fix as REPORT_VA_IN_MTVAL_ON_*_ACCESS_FAULT above -- same shared i_trap_val wire.
+  REPORT_VA_IN_STVAL_ON_LOAD_ACCESS_FAULT: true
+  REPORT_VA_IN_STVAL_ON_STORE_AMO_ACCESS_FAULT: true
+  REPORT_VA_IN_STVAL_ON_INSTRUCTION_ACCESS_FAULT: true
   REPORT_VA_IN_STVAL_ON_LOAD_PAGE_FAULT: false
   REPORT_VA_IN_STVAL_ON_STORE_AMO_PAGE_FAULT: false
   REPORT_VA_IN_STVAL_ON_INSTRUCTION_PAGE_FAULT: false

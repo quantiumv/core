@@ -25,13 +25,18 @@
       // quantiumv-rv64im.yaml's matching REPORT_VA_IN_MTVAL_ON_LOAD/STORE_AMO_MISALIGNED
       // comment for the full trace evidence.
       "load_address_misaligned": true,
-      "load_access_fault": false,
+      // true: bus-error trapping (2026-08-17) -- core.sv's mem_load_access_fault/
+      // mem_store_access_fault/fetch_fault_q all set trap_val to the real faulting address
+      // (mem_paddr, or amo_addr_q for an AMO write-phase fault, or pc for a fetch fault) --
+      // same convention as the misaligned causes just above, flipped at the same time to
+      // avoid repeating the exact ExceptionsZc-00 class of config/RTL mismatch a second time.
+      "load_access_fault": true,
       "load_page_fault": false,
       "samo_address_misaligned": true,
-      "samo_access_fault": false,
+      "samo_access_fault": true,
       "samo_page_fault": false,
       "fetch_address_misaligned": false,
-      "fetch_access_fault": false,
+      "fetch_access_fault": true,
       "fetch_page_fault": false,
       "software_check": false,
       "reserved_exceptions": false
