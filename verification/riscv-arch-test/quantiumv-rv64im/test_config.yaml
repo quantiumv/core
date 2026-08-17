@@ -1,0 +1,15 @@
+name: quantiumv-rv64im
+# compiler_exe must be an absolute path (or a bare name on $PATH) -- NOT a repo-relative path.
+# Confirmed via framework/src/act/config.py: compiler_exe/ref_model_exe/objdump_exe are resolved
+# with shutil.which(), which for any string containing a path separator checks that literal path
+# relative to the CURRENT WORKING DIRECTORY, not relative to this config file (unlike udb_config/
+# linker_script/dut_include_dir, which DO get config-relative resolution via a separate validator).
+# Since this suite is documented (see run_act_tests.sh's header) to be invoked from a riscv-arch-test
+# checkout, not from this repo, a path relative to this repo would silently break. Forces -mno-relax;
+# see gcc-norelax-wrapper.sh's own header comment for why.
+compiler_exe: /mnt/c/Users/Potato/Desktop/core/verification/riscv-arch-test/quantiumv-rv64im/gcc-norelax-wrapper.sh
+objdump_exe: riscv64-unknown-elf-objdump # executable name on $PATH or full path to executable, optional
+ref_model_exe: sail_riscv_sim # executable name on $PATH or full path to executable
+udb_config: quantiumv-rv64im.yaml
+linker_script: link.ld
+dut_include_dir: . # Directory containing DUT specific rvmodel_macros.h header

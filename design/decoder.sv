@@ -746,6 +746,224 @@ module decoder (
         /* --------------------------------------------------------- */
 
 
+        /*
+         * M extension (integer multiply/divide). All 13 are R-type, same
+         * as the base ALU reg-reg ops and the *W family above -- OUTPUT_R_
+         * TYPE_INSTR is fully generic across opcode/funct7 (it only routes
+         * rs1/rs2/rd, none of which are opcode-specific), so it's reused
+         * here unchanged, exactly like it already is for ADDW/SUBW/etc.
+         * DIV/DIVU/REM/REMU (and their W variants) execute via
+         * design/divider.sv, not the ALU -- but decode doesn't care where
+         * an instruction executes, only what it is, so they get ordinary
+         * decode arms here like everything else.
+         */
+
+
+        else if (`IS_INSTR(i_instruction, MUL)) begin: mul_instr
+            `OUTPUT_R_TYPE_INSTR(MUL);
+        end: mul_instr
+
+
+        else if (`IS_INSTR(i_instruction, MULH)) begin: mulh_instr
+            `OUTPUT_R_TYPE_INSTR(MULH);
+        end: mulh_instr
+
+
+        else if (`IS_INSTR(i_instruction, MULHSU)) begin: mulhsu_instr
+            `OUTPUT_R_TYPE_INSTR(MULHSU);
+        end: mulhsu_instr
+
+
+        else if (`IS_INSTR(i_instruction, MULHU)) begin: mulhu_instr
+            `OUTPUT_R_TYPE_INSTR(MULHU);
+        end: mulhu_instr
+
+
+        else if (`IS_INSTR(i_instruction, DIV)) begin: div_instr
+            `OUTPUT_R_TYPE_INSTR(DIV);
+        end: div_instr
+
+
+        else if (`IS_INSTR(i_instruction, DIVU)) begin: divu_instr
+            `OUTPUT_R_TYPE_INSTR(DIVU);
+        end: divu_instr
+
+
+        else if (`IS_INSTR(i_instruction, REM)) begin: rem_instr
+            `OUTPUT_R_TYPE_INSTR(REM);
+        end: rem_instr
+
+
+        else if (`IS_INSTR(i_instruction, REMU)) begin: remu_instr
+            `OUTPUT_R_TYPE_INSTR(REMU);
+        end: remu_instr
+
+
+        else if (`IS_INSTR(i_instruction, MULW)) begin: mulw_instr
+            `OUTPUT_R_TYPE_INSTR(MULW);
+        end: mulw_instr
+
+
+        else if (`IS_INSTR(i_instruction, DIVW)) begin: divw_instr
+            `OUTPUT_R_TYPE_INSTR(DIVW);
+        end: divw_instr
+
+
+        else if (`IS_INSTR(i_instruction, DIVUW)) begin: divuw_instr
+            `OUTPUT_R_TYPE_INSTR(DIVUW);
+        end: divuw_instr
+
+
+        else if (`IS_INSTR(i_instruction, REMW)) begin: remw_instr
+            `OUTPUT_R_TYPE_INSTR(REMW);
+        end: remw_instr
+
+
+        else if (`IS_INSTR(i_instruction, REMUW)) begin: remuw_instr
+            `OUTPUT_R_TYPE_INSTR(REMUW);
+        end: remuw_instr
+
+
+        /* --------------------------------------------------------- */
+
+
+        /*
+         * Privilege-mode instructions (M/S/U). MRET/SRET/WFI take no
+         * operands at all -- same zero-operand shape as ECALL/EBREAK, so
+         * they reuse OUTPUT_NONE_TYPE_INSTR unchanged. SFENCE.VMA takes
+         * real rs1/rs2 operands, so it reuses OUTPUT_R_TYPE_INSTR
+         * mechanically (already proven for the base ALU ops, the *W
+         * family, and all 13 M-extension instructions) -- rd decodes to
+         * 0 harmlessly, since INSTR_MASK_SFENCE_VMA already forces it to
+         * 0 for any encoding that reaches this arm at all.
+         */
+
+        else if (`IS_INSTR(i_instruction, MRET)) begin: mret_instr
+            `OUTPUT_NONE_TYPE_INSTR(MRET);
+        end: mret_instr
+
+
+        else if (`IS_INSTR(i_instruction, SRET)) begin: sret_instr
+            `OUTPUT_NONE_TYPE_INSTR(SRET);
+        end: sret_instr
+
+
+        else if (`IS_INSTR(i_instruction, WFI)) begin: wfi_instr
+            `OUTPUT_NONE_TYPE_INSTR(WFI);
+        end: wfi_instr
+
+
+        else if (`IS_INSTR(i_instruction, SFENCE_VMA)) begin: sfence_vma_instr
+            `OUTPUT_R_TYPE_INSTR(SFENCE_VMA);
+        end: sfence_vma_instr
+
+
+        /* --------------------------------------------------------- */
+
+        /*
+         * A extension (atomics). Every one of the 22 is R-type-shaped for
+         * decode purposes (rs1/rs2/rd extraction) -- OUTPUT_R_TYPE_INSTR
+         * already does this mechanically with no opcode awareness, the
+         * same macro already reused for the base ALU ops, the *W family,
+         * all 13 M-extension instructions, and SFENCE.VMA. LR's rs2 field
+         * decodes to source_2/imm_2 like any other R-type -- harmless,
+         * since core.sv never consumes imm_2 for is_lr, same "decodes but
+         * unused, and that's fine" reasoning already applied to
+         * SFENCE.VMA's always-0 rd.
+         */
+
+        else if (`IS_INSTR(i_instruction, LR_W)) begin: lr_w_instr
+            `OUTPUT_R_TYPE_INSTR(LR_W);
+        end: lr_w_instr
+
+        else if (`IS_INSTR(i_instruction, LR_D)) begin: lr_d_instr
+            `OUTPUT_R_TYPE_INSTR(LR_D);
+        end: lr_d_instr
+
+        else if (`IS_INSTR(i_instruction, SC_W)) begin: sc_w_instr
+            `OUTPUT_R_TYPE_INSTR(SC_W);
+        end: sc_w_instr
+
+        else if (`IS_INSTR(i_instruction, SC_D)) begin: sc_d_instr
+            `OUTPUT_R_TYPE_INSTR(SC_D);
+        end: sc_d_instr
+
+        else if (`IS_INSTR(i_instruction, AMOSWAP_W)) begin: amoswap_w_instr
+            `OUTPUT_R_TYPE_INSTR(AMOSWAP_W);
+        end: amoswap_w_instr
+
+        else if (`IS_INSTR(i_instruction, AMOSWAP_D)) begin: amoswap_d_instr
+            `OUTPUT_R_TYPE_INSTR(AMOSWAP_D);
+        end: amoswap_d_instr
+
+        else if (`IS_INSTR(i_instruction, AMOADD_W)) begin: amoadd_w_instr
+            `OUTPUT_R_TYPE_INSTR(AMOADD_W);
+        end: amoadd_w_instr
+
+        else if (`IS_INSTR(i_instruction, AMOADD_D)) begin: amoadd_d_instr
+            `OUTPUT_R_TYPE_INSTR(AMOADD_D);
+        end: amoadd_d_instr
+
+        else if (`IS_INSTR(i_instruction, AMOXOR_W)) begin: amoxor_w_instr
+            `OUTPUT_R_TYPE_INSTR(AMOXOR_W);
+        end: amoxor_w_instr
+
+        else if (`IS_INSTR(i_instruction, AMOXOR_D)) begin: amoxor_d_instr
+            `OUTPUT_R_TYPE_INSTR(AMOXOR_D);
+        end: amoxor_d_instr
+
+        else if (`IS_INSTR(i_instruction, AMOOR_W)) begin: amoor_w_instr
+            `OUTPUT_R_TYPE_INSTR(AMOOR_W);
+        end: amoor_w_instr
+
+        else if (`IS_INSTR(i_instruction, AMOOR_D)) begin: amoor_d_instr
+            `OUTPUT_R_TYPE_INSTR(AMOOR_D);
+        end: amoor_d_instr
+
+        else if (`IS_INSTR(i_instruction, AMOAND_W)) begin: amoand_w_instr
+            `OUTPUT_R_TYPE_INSTR(AMOAND_W);
+        end: amoand_w_instr
+
+        else if (`IS_INSTR(i_instruction, AMOAND_D)) begin: amoand_d_instr
+            `OUTPUT_R_TYPE_INSTR(AMOAND_D);
+        end: amoand_d_instr
+
+        else if (`IS_INSTR(i_instruction, AMOMIN_W)) begin: amomin_w_instr
+            `OUTPUT_R_TYPE_INSTR(AMOMIN_W);
+        end: amomin_w_instr
+
+        else if (`IS_INSTR(i_instruction, AMOMIN_D)) begin: amomin_d_instr
+            `OUTPUT_R_TYPE_INSTR(AMOMIN_D);
+        end: amomin_d_instr
+
+        else if (`IS_INSTR(i_instruction, AMOMAX_W)) begin: amomax_w_instr
+            `OUTPUT_R_TYPE_INSTR(AMOMAX_W);
+        end: amomax_w_instr
+
+        else if (`IS_INSTR(i_instruction, AMOMAX_D)) begin: amomax_d_instr
+            `OUTPUT_R_TYPE_INSTR(AMOMAX_D);
+        end: amomax_d_instr
+
+        else if (`IS_INSTR(i_instruction, AMOMINU_W)) begin: amominu_w_instr
+            `OUTPUT_R_TYPE_INSTR(AMOMINU_W);
+        end: amominu_w_instr
+
+        else if (`IS_INSTR(i_instruction, AMOMINU_D)) begin: amominu_d_instr
+            `OUTPUT_R_TYPE_INSTR(AMOMINU_D);
+        end: amominu_d_instr
+
+        else if (`IS_INSTR(i_instruction, AMOMAXU_W)) begin: amomaxu_w_instr
+            `OUTPUT_R_TYPE_INSTR(AMOMAXU_W);
+        end: amomaxu_w_instr
+
+        else if (`IS_INSTR(i_instruction, AMOMAXU_D)) begin: amomaxu_d_instr
+            `OUTPUT_R_TYPE_INSTR(AMOMAXU_D);
+        end: amomaxu_d_instr
+
+
+        /* --------------------------------------------------------- */
+
+
         /* No instruction matched. */
 
         else begin: invalid_instr

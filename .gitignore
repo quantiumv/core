@@ -1,6 +1,10 @@
 # Prerequisites
 *.d
 
+# riscv-arch-test ACT4 build output (regenerated via verification/riscv-arch-test/run_act_tests.sh;
+# only the config/ and driver script under verification/riscv-arch-test/ are checked in)
+verification/riscv-arch-test/work/
+
 # Object files
 *.o
 *.ko

@@ -128,6 +128,77 @@ module alu_tb;
         operation = `SRAW;
         check("SRAW: 0xFFFFFFFF>>>4=0xFFFFFFFF, result sign-extends negative", 64'hFFFFFFFFFFFFFFFF);
 
+        /*
+         * M extension: MUL. -1 * 2 in full precision is -2, but MUL only
+         * keeps the low WORD_SIZE bits -- this is a genuine wraparound
+         * case (0xFFFF...FFFE), not just a small in-range product, so a
+         * bug that only computes a narrow/saturating product would show up.
+         */
+        operand_A = 64'hFFFFFFFFFFFFFFFF; operand_B = 64'd2;
+        operation = `MUL;
+        check("MUL: -1 * 2, low 64 bits wrap to 0xFFFF...FFFE", 64'hFFFFFFFFFFFFFFFE);
+
+        /*
+         * MULH: INT64_MIN * 2 = -2^64 exactly -- upper 64 bits of that
+         * 128-bit signed value are all 1s (-1), lower 64 are all 0. Picked
+         * specifically because MUL's own result here (the low half) is 0,
+         * so a bug that accidentally read MUL's output instead of MULH's
+         * own upper-half product would be caught immediately (0 vs -1).
+         */
+        operand_A = 64'h8000000000000000; operand_B = 64'd2;
+        operation = `MULH;
+        check("MULH: INT64_MIN * 2, upper 64 bits", 64'hFFFFFFFFFFFFFFFF);
+
+        /*
+         * MULHSU: A=-1 (signed), B=0xFFFF...FFFF treated as UNSIGNED (the
+         * max u64 value, not -1). The decisive case: if B were wrongly
+         * treated as signed too, -1*-1=1 would give upper=0x0 -- wildly
+         * different from the correct unsigned-B answer (upper=0xFFFF...FFFF,
+         * since -1 * (2^64-1) is a huge-magnitude negative number).
+         */
+        operand_A = 64'hFFFFFFFFFFFFFFFF; operand_B = 64'hFFFFFFFFFFFFFFFF;
+        operation = `MULHSU;
+        check("MULHSU: -1 (signed) * max-u64 (unsigned), upper 64 bits", 64'hFFFFFFFFFFFFFFFF);
+
+        /*
+         * MULHU: both operands unsigned max (2^64-1). If this were wrongly
+         * computed as signed*signed instead (both read as -1), the product
+         * would be +1 (upper=0) -- unmistakably different from the correct
+         * unsigned answer.
+         */
+        operand_A = 64'hFFFFFFFFFFFFFFFF; operand_B = 64'hFFFFFFFFFFFFFFFF;
+        operation = `MULHU;
+        check("MULHU: max-u64 * max-u64 (both unsigned), upper 64 bits", 64'hFFFFFFFFFFFFFFFE);
+
+        /*
+         * A extension: MIN/MAX/MINU/MAXU. The decisive case for all four:
+         * A=0xFFFF...FFFF (-1 signed / max u64) vs B=1. Signed: -1 < 1, so
+         * MIN picks A, MAX picks B. Unsigned: max-u64 > 1, so MINU picks B,
+         * MAXU picks A -- the exact opposite choice on the exact same bit
+         * patterns, so a signed/unsigned mixup produces a visibly wrong
+         * (not just subtly wrong) answer either way.
+         */
+        operand_A = 64'hFFFFFFFFFFFFFFFF; operand_B = 64'd1;
+        operation = `MIN;
+        check("MIN: signed -1 vs 1 -> -1 (A)", 64'hFFFFFFFFFFFFFFFF);
+        operation = `MAX;
+        check("MAX: signed -1 vs 1 -> 1 (B)", 64'd1);
+        operation = `MINU;
+        check("MINU: unsigned max-u64 vs 1 -> 1 (B)", 64'd1);
+        operation = `MAXU;
+        check("MAXU: unsigned max-u64 vs 1 -> max-u64 (A)", 64'hFFFFFFFFFFFFFFFF);
+
+        /*
+         * MIN/MAX at INT64_MIN, same rigor as SLT's own INT_MIN case above:
+         * a negate-based comparison would break here, $signed() cast
+         * comparison doesn't.
+         */
+        operand_A = 64'h8000000000000000; operand_B = 64'd0;
+        operation = `MIN;
+        check("MIN: INT64_MIN vs 0 -> INT64_MIN (A)", 64'h8000000000000000);
+        operation = `MAX;
+        check("MAX: INT64_MIN vs 0 -> 0 (B)", 64'd0);
+
         $display("");
         $display("alu_tb: %0d passed, %0d failed", pass_count, fail_count);
         if (fail_count > 0) $display("alu_tb: FAILURES PRESENT");

@@ -15,6 +15,13 @@
 `define INSTR_SIZE      32
 `define L2_INSTR_SIZE   5
 
+/*
+ * C extension (compressed instructions): a genuinely distinct, second fixed
+ * width, not a subset/typo of INSTR_SIZE above. Every RVC instruction is
+ * exactly 16 bits; design/c_expand.sv is the only consumer.
+ */
+`define C_INSTR_SIZE    16
+
 `define FUNCT_H_SIZE    7   /* H stands for high. */
 `define FUNCT_H_MSB     31
 `define FUNCT_H_LSB     25

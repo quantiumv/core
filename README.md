@@ -98,7 +98,14 @@ verilator --lint-only -Wall -Idesign -Itestbench --top-module soc \
 
 RV64**IMAC** + Zicsr + U/S/M privilege + Sv39, non-pipelined and in-order,
 before any pipelining/OoO work starts -- deliberately, so out-of-order
-correctness has a trusted in-order reference to debug against. M (multiply/
-divide) is next: no privilege or trap prerequisites, unlike A or C eventually
-will need. Bus protocol stays Wishbone at the core; AXI4 is a future fabric
+correctness has a trusted in-order reference to debug against.
+
+RV64IMAC + Zicsr + full U/S/M privilege modes are done, each verified via a
+4-pillar pattern (unit test, hand-assembled end-to-end core testbench,
+real-toolchain encoder cross-check, real-toolchain end-to-end firmware test)
+and cross-checked against the official riscv-arch-test (ACT4) compliance
+suite. Sv39 virtual memory is next -- a different teammate's work, built on
+top of the U/S/M privilege seams (`fetch_paddr`/`mem_paddr`, `satp`,
+`mstatus.MPRV/SUM/MXR`) this core already carries specifically for that
+handoff. Bus protocol stays Wishbone at the core; AXI4 is a future fabric
 concern at the edge, not a core-level one.

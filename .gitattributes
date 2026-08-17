@@ -1,0 +1,4 @@
+# Shell scripts must stay LF-only regardless of checkout platform -- CRLF line
+# endings silently break them under WSL/Linux (a bug hit and fixed directly
+# during the ACT4 riscv-arch-test setup, see memory/act4-riscv-arch-test-setup.md).
+*.sh text eol=lf

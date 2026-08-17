@@ -340,4 +340,180 @@
 /* ------------------------------------------------------------------------- */
 
 
+/*
+ * M extension (integer multiply/divide). Same opcodes as the base ALU
+ * reg-reg ops (0110011) and the RV64I word-width family (0111011) above,
+ * disambiguated by funct7 = 0000001 -- ALU_INSTRS_MASK/ALU32_INSTRS_MASK
+ * already assert all 7 funct7 bits (their leading 7'b1111111 covers bits
+ * [31:25], the whole field), so they're reused verbatim here; only a new
+ * *_INSTR_CREATE is needed, since ALU_INSTR_CREATE/ALU32_INSTR_CREATE only
+ * parameterize funct7 bit 30 and hardcode the rest to values that can only
+ * ever produce 0000000 or 0100000 -- structurally incapable of 0000001.
+ */
+
+`define MUL_INSTR_CREATE(funct3)     {7'b0000001, 10'b0, funct3, 5'b0, 7'b0110011}
+`define MUL32_INSTR_CREATE(funct3)   {7'b0000001, 10'b0, funct3, 5'b0, 7'b0111011}
+
+`define INSTR_MUL         `MUL_INSTR_CREATE(3'b000)
+`define INSTR_MASK_MUL    `ALU_INSTRS_MASK
+
+`define INSTR_MULH        `MUL_INSTR_CREATE(3'b001)
+`define INSTR_MASK_MULH   `ALU_INSTRS_MASK
+
+`define INSTR_MULHSU      `MUL_INSTR_CREATE(3'b010)
+`define INSTR_MASK_MULHSU `ALU_INSTRS_MASK
+
+`define INSTR_MULHU       `MUL_INSTR_CREATE(3'b011)
+`define INSTR_MASK_MULHU  `ALU_INSTRS_MASK
+
+`define INSTR_DIV         `MUL_INSTR_CREATE(3'b100)
+`define INSTR_MASK_DIV    `ALU_INSTRS_MASK
+
+`define INSTR_DIVU        `MUL_INSTR_CREATE(3'b101)
+`define INSTR_MASK_DIVU   `ALU_INSTRS_MASK
+
+`define INSTR_REM         `MUL_INSTR_CREATE(3'b110)
+`define INSTR_MASK_REM    `ALU_INSTRS_MASK
+
+`define INSTR_REMU        `MUL_INSTR_CREATE(3'b111)
+`define INSTR_MASK_REMU   `ALU_INSTRS_MASK
+
+`define INSTR_MULW        `MUL32_INSTR_CREATE(3'b000)
+`define INSTR_MASK_MULW   `ALU32_INSTRS_MASK
+
+`define INSTR_DIVW        `MUL32_INSTR_CREATE(3'b100)
+`define INSTR_MASK_DIVW   `ALU32_INSTRS_MASK
+
+`define INSTR_DIVUW       `MUL32_INSTR_CREATE(3'b101)
+`define INSTR_MASK_DIVUW  `ALU32_INSTRS_MASK
+
+`define INSTR_REMW        `MUL32_INSTR_CREATE(3'b110)
+`define INSTR_MASK_REMW   `ALU32_INSTRS_MASK
+
+`define INSTR_REMUW       `MUL32_INSTR_CREATE(3'b111)
+`define INSTR_MASK_REMUW  `ALU32_INSTRS_MASK
+
+
+/* ------------------------------------------------------------------------- */
+
+
+/*
+ * Privilege-mode instructions (M/S/U). Same opcode (SYSTEM, 7'b1110011)
+ * and same funct3=000 as ECALL/EBREAK above, disambiguated by the rest of
+ * the 32-bit encoding instead -- MRET/SRET/WFI take no operands at all
+ * (fixed rs2/rs1/rd, only funct7 varies), so each is just one exact
+ * 32-bit pattern, same shape as ENV_INSTR_CREATE's own family but with no
+ * varying bit left to parameterize; no collision with ECALL/EBREAK
+ * (whose own funct7 field is always 0000000/0000001) since MRET/SRET/
+ * WFI's funct7 fields (0011000/0001000/0001000) never match either.
+ */
+
+`define INSTR_MRET         32'h30200073
+`define INSTR_MASK_MRET    32'hFFFFFFFF
+
+`define INSTR_SRET         32'h10200073
+`define INSTR_MASK_SRET    32'hFFFFFFFF
+
+`define INSTR_WFI          32'h10500073
+`define INSTR_MASK_WFI     32'hFFFFFFFF
+
+/*
+ * SFENCE.VMA: funct7=0001001 fixed, rs2/rs1 real variable operands
+ * (unlike MRET/SRET/WFI above), funct3=000 fixed, and rd MUST be exactly
+ * 00000 -- unlike MUL_INSTR_CREATE's own rd field, which is deliberately
+ * don't-care there since rd is a real destination register for MUL. No
+ * existing *_INSTR_CREATE family fits this shape, so this is a genuinely
+ * new one-off mask/pattern pair rather than a macro (SFENCE.VMA is the
+ * only instruction that needs it). Confirmed collision-free with
+ * ECALL/EBREAK/MRET/SRET/WFI above (all funct3=000 too): their funct7
+ * fields are fixed at 0000000/0011000/0001000, differing from
+ * SFENCE.VMA's 0001001 in the low bit either way.
+ */
+`define INSTR_SFENCE_VMA       {7'b0001001, 10'b0, 3'b000, 5'b0, 7'b1110011}
+`define INSTR_MASK_SFENCE_VMA  {7'b1111111, 10'b0, 3'b111, 5'b11111, 7'b1111111}
+
+
+/* ------------------------------------------------------------------------- */
+
+
+/*
+ * A extension (atomics). funct5 selects the operation; funct3 selects
+ * width (010 = .W, 011 = .D). aq/rl (bits 26/25) and rs2 (bits 24/20) are
+ * ALWAYS don't-care in the mask below -- not just rs2 for LR -- since
+ * none of the 22 variants has any fixed value in either field (aq/rl are
+ * real, independently-settable ordering hints on every one of them; rs2
+ * is a real operand for SC/AMO* and simply unused-but-unenforced for LR,
+ * same "don't over-constrain a variable field" principle every existing
+ * *_INSTRS_MASK in this file already follows for rs1/rs2/rd). This
+ * single mask is reused verbatim by all 22 defines below, the same way
+ * ALU_INSTRS_MASK is reused across all 8 base ALU reg-reg ops.
+ *
+ * aq/rl themselves are decoded only in the sense that the mask accepts
+ * any value for those 2 bits -- there is no dedicated decoder output
+ * port for them, since this core is single-hart/non-pipelined/single-
+ * bus-master/cacheless and has nothing to order against (same "spec-
+ * legal no-op absent something to constrain" reasoning as FENCE).
+ */
+`define AMO_INSTR_CREATE(funct5, funct3) {funct5, 12'b0, funct3, 5'b0, 7'b0101111}
+`define AMO_INSTRS_MASK                  {5'b11111, 12'b0, 3'b111, 5'b0, 7'b1111111}
+
+`define INSTR_LR_W        `AMO_INSTR_CREATE(5'b00010, 3'b010)
+`define INSTR_MASK_LR_W   `AMO_INSTRS_MASK
+`define INSTR_LR_D        `AMO_INSTR_CREATE(5'b00010, 3'b011)
+`define INSTR_MASK_LR_D   `AMO_INSTRS_MASK
+
+`define INSTR_SC_W        `AMO_INSTR_CREATE(5'b00011, 3'b010)
+`define INSTR_MASK_SC_W   `AMO_INSTRS_MASK
+`define INSTR_SC_D        `AMO_INSTR_CREATE(5'b00011, 3'b011)
+`define INSTR_MASK_SC_D   `AMO_INSTRS_MASK
+
+`define INSTR_AMOSWAP_W      `AMO_INSTR_CREATE(5'b00001, 3'b010)
+`define INSTR_MASK_AMOSWAP_W `AMO_INSTRS_MASK
+`define INSTR_AMOSWAP_D      `AMO_INSTR_CREATE(5'b00001, 3'b011)
+`define INSTR_MASK_AMOSWAP_D `AMO_INSTRS_MASK
+
+`define INSTR_AMOADD_W       `AMO_INSTR_CREATE(5'b00000, 3'b010)
+`define INSTR_MASK_AMOADD_W  `AMO_INSTRS_MASK
+`define INSTR_AMOADD_D       `AMO_INSTR_CREATE(5'b00000, 3'b011)
+`define INSTR_MASK_AMOADD_D  `AMO_INSTRS_MASK
+
+`define INSTR_AMOXOR_W       `AMO_INSTR_CREATE(5'b00100, 3'b010)
+`define INSTR_MASK_AMOXOR_W  `AMO_INSTRS_MASK
+`define INSTR_AMOXOR_D       `AMO_INSTR_CREATE(5'b00100, 3'b011)
+`define INSTR_MASK_AMOXOR_D  `AMO_INSTRS_MASK
+
+`define INSTR_AMOOR_W        `AMO_INSTR_CREATE(5'b01000, 3'b010)
+`define INSTR_MASK_AMOOR_W   `AMO_INSTRS_MASK
+`define INSTR_AMOOR_D        `AMO_INSTR_CREATE(5'b01000, 3'b011)
+`define INSTR_MASK_AMOOR_D   `AMO_INSTRS_MASK
+
+`define INSTR_AMOAND_W       `AMO_INSTR_CREATE(5'b01100, 3'b010)
+`define INSTR_MASK_AMOAND_W  `AMO_INSTRS_MASK
+`define INSTR_AMOAND_D       `AMO_INSTR_CREATE(5'b01100, 3'b011)
+`define INSTR_MASK_AMOAND_D  `AMO_INSTRS_MASK
+
+`define INSTR_AMOMIN_W       `AMO_INSTR_CREATE(5'b10000, 3'b010)
+`define INSTR_MASK_AMOMIN_W  `AMO_INSTRS_MASK
+`define INSTR_AMOMIN_D       `AMO_INSTR_CREATE(5'b10000, 3'b011)
+`define INSTR_MASK_AMOMIN_D  `AMO_INSTRS_MASK
+
+`define INSTR_AMOMAX_W       `AMO_INSTR_CREATE(5'b10100, 3'b010)
+`define INSTR_MASK_AMOMAX_W  `AMO_INSTRS_MASK
+`define INSTR_AMOMAX_D       `AMO_INSTR_CREATE(5'b10100, 3'b011)
+`define INSTR_MASK_AMOMAX_D  `AMO_INSTRS_MASK
+
+`define INSTR_AMOMINU_W      `AMO_INSTR_CREATE(5'b11000, 3'b010)
+`define INSTR_MASK_AMOMINU_W `AMO_INSTRS_MASK
+`define INSTR_AMOMINU_D      `AMO_INSTR_CREATE(5'b11000, 3'b011)
+`define INSTR_MASK_AMOMINU_D `AMO_INSTRS_MASK
+
+`define INSTR_AMOMAXU_W      `AMO_INSTR_CREATE(5'b11100, 3'b010)
+`define INSTR_MASK_AMOMAXU_W `AMO_INSTRS_MASK
+`define INSTR_AMOMAXU_D      `AMO_INSTR_CREATE(5'b11100, 3'b011)
+`define INSTR_MASK_AMOMAXU_D `AMO_INSTRS_MASK
+
+
+/* ------------------------------------------------------------------------- */
+
+
 /* End of file. */

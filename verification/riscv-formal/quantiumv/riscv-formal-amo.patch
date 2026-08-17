@@ -1,0 +1,79 @@
+diff --git a/insns/generate.py b/insns/generate.py
+index 52ff352..0beb750 100644
+--- a/insns/generate.py
++++ b/insns/generate.py
+@@ -1536,32 +1536,52 @@ insn_alu("remuw",   "0000001", "111", """rvfi_rs2_rdata == 32'b0 ? rvfi_rs1_rdat
+                        rvfi_rs1_rdata[31:0] % rvfi_rs2_rdata[31:0]""", alt_sub=0xbc4402413138d0e1, wmode=True, misa=MISA_M)
+
+ ## Atomics ISA (A)
+-
+-# current_isa = ["rv32ia"]
++##
++## quantiumv/core patch: enabled the non-LR/SC AMO instructions (this core's
++## own project, see verification/riscv-formal/quantiumv/riscv-formal-amo.patch
++## for the full rationale). LR.W/SC.W/LR.D/SC.D stay commented -- genuinely
++## unimplemented upstream (no reservation-tracking spec model exists), not
++## something this patch attempts. Every rvfi_mem_extamo ternary was dropped:
++## that escape hatch is for cores that can't determine the AMO's old/new
++## value when rd=x0; this core's own RVFI tap always captures the real value
++## regardless of rd, so the extamo branch would just be dead code -- and
++## leaving it in would fail to elaborate anyway, since rvfi_insn_check.sv's
++## fixed port list never connects an rvfi_mem_extamo signal at all.
++
++current_isa = ["rv32ia"]
+
+ # FIXME: LR.W / SC.W
+-# insn_amo("amoswap_w", "00001", "010", "rvfi_rs2_rdata[31:0]")
+-# insn_amo("amoadd_w",  "00000", "010", "rvfi_mem_extamo ? rvfi_rs2_rdata[31:0] : rvfi_mem_rdata + rvfi_rs2_rdata[31:0]")
+-# insn_amo("amoxor_w",  "00100", "010", "rvfi_mem_extamo ? rvfi_rs2_rdata[31:0] : rvfi_mem_rdata ^ rvfi_rs2_rdata[31:0]")
+-# insn_amo("amoand_w",  "01100", "010", "rvfi_mem_extamo ? rvfi_rs2_rdata[31:0] : rvfi_mem_rdata & rvfi_rs2_rdata[31:0]")
+-# insn_amo("amoor_w",   "01000", "010", "rvfi_mem_extamo ? rvfi_rs2_rdata[31:0] : rvfi_mem_rdata | rvfi_rs2_rdata[31:0]")
+-# insn_amo("amomin_w",  "10000", "010", "rvfi_mem_extamo ? rvfi_rs2_rdata[31:0] : ($signed(rvfi_mem_rdata) < $signed(rvfi_rs2_rdata[31:0]) ? rvfi_mem_rdata : rvfi_rs2_rdata[31:0])")
+-# insn_amo("amomax_w",  "10100", "010", "rvfi_mem_extamo ? rvfi_rs2_rdata[31:0] : ($signed(rvfi_mem_rdata) > $signed(rvfi_rs2_rdata[31:0]) ? rvfi_mem_rdata : rvfi_rs2_rdata[31:0])")
+-# insn_amo("amominu_w", "11000", "010", "rvfi_mem_extamo ? rvfi_rs2_rdata[31:0] : (rvfi_mem_rdata < rvfi_rs2_rdata[31:0] ? rvfi_mem_rdata : rvfi_rs2_rdata[31:0])")
+-# insn_amo("amomaxu_w", "11100", "010", "rvfi_mem_extamo ? rvfi_rs2_rdata[31:0] : (rvfi_mem_rdata > rvfi_rs2_rdata[31:0] ? rvfi_mem_rdata : rvfi_rs2_rdata[31:0])")
+-
+-# current_isa = ["rv64ia"]
++insn_amo("amoswap_w", "00001", "010", "rvfi_rs2_rdata[31:0]")
++insn_amo("amoadd_w",  "00000", "010", "rvfi_mem_rdata + rvfi_rs2_rdata[31:0]")
++insn_amo("amoxor_w",  "00100", "010", "rvfi_mem_rdata ^ rvfi_rs2_rdata[31:0]")
++insn_amo("amoand_w",  "01100", "010", "rvfi_mem_rdata & rvfi_rs2_rdata[31:0]")
++insn_amo("amoor_w",   "01000", "010", "rvfi_mem_rdata | rvfi_rs2_rdata[31:0]")
++insn_amo("amomin_w",  "10000", "010", "$signed(rvfi_mem_rdata) < $signed(rvfi_rs2_rdata[31:0]) ? rvfi_mem_rdata : rvfi_rs2_rdata[31:0]")
++insn_amo("amomax_w",  "10100", "010", "$signed(rvfi_mem_rdata) > $signed(rvfi_rs2_rdata[31:0]) ? rvfi_mem_rdata : rvfi_rs2_rdata[31:0]")
++# quantiumv/core patch: rvfi_mem_rdata sliced to [31:0] here (stock upstream
++# compares it unsliced). This core sign-extends the .W old value into
++# rvfi_mem_rdata (correctly -- that is what makes the $signed() compares
++# above work across every alignment). But an unsliced *unsigned* < / >
++# against that same sign-extended 64-bit value is wrong: a sign-extended
++# negative-as-32-bit old value reads as a huge unsigned 64-bit number, so
++# the comparison picks the wrong winner even though the core is correct.
++# Slicing to [31:0] matches the true 32-bit unsigned semantics of
++# AMOMINU.W/AMOMAXU.W regardless of what sits in the upper bits.
++insn_amo("amominu_w", "11000", "010", "rvfi_mem_rdata[31:0] < rvfi_rs2_rdata[31:0] ? rvfi_mem_rdata : rvfi_rs2_rdata[31:0]")
++insn_amo("amomaxu_w", "11100", "010", "rvfi_mem_rdata[31:0] > rvfi_rs2_rdata[31:0] ? rvfi_mem_rdata : rvfi_rs2_rdata[31:0]")
++
++current_isa = ["rv64ia"]
+
+ # FIXME: LR.D / SC.D
+-# insn_amo("amoswap_d", "00001", "011", "rvfi_rs2_rdata[63:0]")
+-# insn_amo("amoadd_d",  "00000", "011", "rvfi_mem_extamo ? rvfi_rs2_rdata[63:0] : rvfi_mem_rdata + rvfi_rs2_rdata[63:0]")
+-# insn_amo("amoxor_d",  "00100", "011", "rvfi_mem_extamo ? rvfi_rs2_rdata[63:0] : rvfi_mem_rdata ^ rvfi_rs2_rdata[63:0]")
+-# insn_amo("amoand_d",  "01100", "011", "rvfi_mem_extamo ? rvfi_rs2_rdata[63:0] : rvfi_mem_rdata & rvfi_rs2_rdata[63:0]")
+-# insn_amo("amoor_d",   "01000", "011", "rvfi_mem_extamo ? rvfi_rs2_rdata[63:0] : rvfi_mem_rdata | rvfi_rs2_rdata[63:0]")
+-# insn_amo("amomin_d",  "10000", "011", "rvfi_mem_extamo ? rvfi_rs2_rdata[63:0] : ($signed(rvfi_mem_rdata) < $signed(rvfi_rs2_rdata[63:0]) ? rvfi_mem_rdata : rvfi_rs2_rdata[63:0])")
+-# insn_amo("amomax_d",  "10100", "011", "rvfi_mem_extamo ? rvfi_rs2_rdata[63:0] : ($signed(rvfi_mem_rdata) > $signed(rvfi_rs2_rdata[63:0]) ? rvfi_mem_rdata : rvfi_rs2_rdata[63:0])")
+-# insn_amo("amominu_d", "11000", "011", "rvfi_mem_extamo ? rvfi_rs2_rdata[63:0] : (rvfi_mem_rdata < rvfi_rs2_rdata[63:0] ? rvfi_mem_rdata : rvfi_rs2_rdata[63:0])")
+-# insn_amo("amomaxu_d", "11100", "011", "rvfi_mem_extamo ? rvfi_rs2_rdata[63:0] : (rvfi_mem_rdata > rvfi_rs2_rdata[63:0] ? rvfi_mem_rdata : rvfi_rs2_rdata[63:0])")
++insn_amo("amoswap_d", "00001", "011", "rvfi_rs2_rdata[63:0]")
++insn_amo("amoadd_d",  "00000", "011", "rvfi_mem_rdata + rvfi_rs2_rdata[63:0]")
++insn_amo("amoxor_d",  "00100", "011", "rvfi_mem_rdata ^ rvfi_rs2_rdata[63:0]")
++insn_amo("amoand_d",  "01100", "011", "rvfi_mem_rdata & rvfi_rs2_rdata[63:0]")
++insn_amo("amoor_d",   "01000", "011", "rvfi_mem_rdata | rvfi_rs2_rdata[63:0]")
++insn_amo("amomin_d",  "10000", "011", "$signed(rvfi_mem_rdata) < $signed(rvfi_rs2_rdata[63:0]) ? rvfi_mem_rdata : rvfi_rs2_rdata[63:0]")
++insn_amo("amomax_d",  "10100", "011", "$signed(rvfi_mem_rdata) > $signed(rvfi_rs2_rdata[63:0]) ? rvfi_mem_rdata : rvfi_rs2_rdata[63:0]")
++insn_amo("amominu_d", "11000", "011", "rvfi_mem_rdata < rvfi_rs2_rdata[63:0] ? rvfi_mem_rdata : rvfi_rs2_rdata[63:0]")
++insn_amo("amomaxu_d", "11100", "011", "rvfi_mem_rdata > rvfi_rs2_rdata[63:0] ? rvfi_mem_rdata : rvfi_rs2_rdata[63:0]")
+
+ ## Bit Manipulation ISA (B)
+
