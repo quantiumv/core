@@ -17,10 +17,17 @@
       "illegal_instruction": true, // core.sv: trap_val = raw instruction on illegal-instr
       "software_breakpoint": false,
       "hardware_breakpoint": false,
-      "load_address_misaligned": false,
+      // true: core.sv's mem_load_misaligned/mem_store_misaligned trap arm always sets
+      // trap_val = mem_paddr (the faulting address), routed to mtval or stval depending on
+      // trap target. Confirmed root cause of ACT4's ExceptionsZc-00 failure (2026-08-17):
+      // with this false, sail_riscv_sim computed mtval=0 for every misaligned load/store,
+      // mismatching our core's real address on every single self-check comparison -- see
+      // quantiumv-rv64im.yaml's matching REPORT_VA_IN_MTVAL_ON_LOAD/STORE_AMO_MISALIGNED
+      // comment for the full trace evidence.
+      "load_address_misaligned": true,
       "load_access_fault": false,
       "load_page_fault": false,
-      "samo_address_misaligned": false,
+      "samo_address_misaligned": true,
       "samo_access_fault": false,
       "samo_page_fault": false,
       "fetch_address_misaligned": false,

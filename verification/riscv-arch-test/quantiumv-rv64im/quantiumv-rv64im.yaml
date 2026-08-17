@@ -53,8 +53,16 @@ params:
   TRAP_ON_RESERVED_INSTRUCTION: true
   TRAP_ON_UNIMPLEMENTED_CSR: false # csr_file.sv: unmapped CSR reads 0, writes silently ignored, no trap (deliberate, Zicsr-milestone decision)
   REPORT_VA_IN_MTVAL_ON_BREAKPOINT: false
-  REPORT_VA_IN_MTVAL_ON_LOAD_MISALIGNED: false
-  REPORT_VA_IN_MTVAL_ON_STORE_AMO_MISALIGNED: false
+  # Confirmed true via direct trace comparison against sail_riscv_sim (2026-08-17, root-causing
+  # ACT4's ExceptionsZc-00 failure): core.sv's mem_load_misaligned/mem_store_misaligned trap arm
+  # unconditionally sets trap_val = mem_paddr (the faulting address) -- this was already true
+  # before this fix, just never reflected here. With this left `false`, the Sail reference model
+  # (driven by sail.json's matching xtval_nonzero fields) computed mtval=0 for every misaligned
+  # load/store, while every ACT4 self-check comparison against our core's real (nonzero) mtval
+  # failed -- confirmed via `--trace-reg` showing `CSR mtval (0x343) -> 0x0000000000000000` on
+  # Sail's side at the exact instruction where core.sv would report the real address instead.
+  REPORT_VA_IN_MTVAL_ON_LOAD_MISALIGNED: true
+  REPORT_VA_IN_MTVAL_ON_STORE_AMO_MISALIGNED: true
   REPORT_VA_IN_MTVAL_ON_INSTRUCTION_MISALIGNED: false
   REPORT_VA_IN_MTVAL_ON_LOAD_ACCESS_FAULT: false
   REPORT_VA_IN_MTVAL_ON_STORE_AMO_ACCESS_FAULT: false
@@ -116,8 +124,12 @@ params:
   SXLEN: [64]
   TRAP_ON_ECALL_FROM_S: true
   REPORT_VA_IN_STVAL_ON_BREAKPOINT: false
-  REPORT_VA_IN_STVAL_ON_LOAD_MISALIGNED: false
-  REPORT_VA_IN_STVAL_ON_STORE_AMO_MISALIGNED: false
+  # Same fix as REPORT_VA_IN_MTVAL_ON_LOAD/STORE_AMO_MISALIGNED above -- csr_file.sv routes the
+  # SAME i_trap_val wire to stval_q whenever i_trap_to_s is set (core.sv computes trap_val once,
+  # unconditional on trap target), so an S-mode-targeted misaligned load/store reports the real
+  # faulting address exactly like an M-mode one does.
+  REPORT_VA_IN_STVAL_ON_LOAD_MISALIGNED: true
+  REPORT_VA_IN_STVAL_ON_STORE_AMO_MISALIGNED: true
   REPORT_VA_IN_STVAL_ON_INSTRUCTION_MISALIGNED: false
   REPORT_VA_IN_STVAL_ON_LOAD_ACCESS_FAULT: false
   REPORT_VA_IN_STVAL_ON_STORE_AMO_ACCESS_FAULT: false
