@@ -35,18 +35,16 @@
  * choice to keep, not something wb_addr_decoder.sv or wb4_sram.sv need to
  * know about -- the cache is fully transparent to both.
  *
- * KNOWN, DELIBERATE LIMITATION: no I$/D$ coherence for self-modifying
- * code. This ISA has no Zifencei, so software has no instruction-level
- * way to invalidate a stale I$ line after a D$ store to the same physical
- * address -- a store that lands in an address I$ already has cached
- * leaves that stale copy in place, with nothing to evict it, until it's
- * naturally replaced by a later conflicting fetch. Accepted as a
- * documented gap for this milestone (same treatment as this project's
- * other deliberately-deferred items -- EBREAK's sim-only halt, FENCE
- * under-implementation) rather than adding cross-cache snoop/invalidate
- * wiring now. Today's firmware never self-modifies, so nothing currently
- * exercises this, but it is a real, silent-corruption-class gap if that
- * ever changes -- must stay visible here, not buried.
+ * I$/D$ coherence for self-modifying code (Zifencei, FENCE.I): closed
+ * 2026-08-17, no longer a gap. core0.icache_flush_o (pulses one cycle on
+ * FENCE.I's own retirement) wires straight to cache0.flush_i, which
+ * cache_complex.sv passes through unconditionally to icache0 -- software
+ * that stores new instruction bytes then executes FENCE.I before jumping
+ * to them gets a correctly-invalidated I$, matching the RISC-V spec's
+ * own Zifencei contract. D$ never needed an equivalent flush path --
+ * write-through already keeps a store hit's cached copy and SRAM in
+ * lockstep. See design/core.sv's icache_flush_o port comment and
+ * design/icache.sv's flush_i port comment for the full timing proof.
  *
  * No UART pin exists at this level (or anywhere in this design) -- see
  * uart_tx.sv's header for why: this milestone's UART "transmits" via
@@ -63,12 +61,14 @@ module soc (
     logic [7:0]  wb_sel;
     logic        wb_we, wb_cyc, wb_stb, wb_ack, wb_err;
     logic        wb_ifetch;
+    logic        icache_flush;
 
     core core0 (
         .clk(clk), .rst(rst),
         .wb_addr_o(wb_addr), .wb_dat_o(wb_dat_m2s), .wb_dat_i(wb_dat_s2m),
         .wb_sel_o(wb_sel), .wb_we_o(wb_we), .wb_cyc_o(wb_cyc), .wb_stb_o(wb_stb),
-        .wb_ack_i(wb_ack), .wb_err_i(wb_err), .wb_ifetch_o(wb_ifetch)
+        .wb_ack_i(wb_ack), .wb_err_i(wb_err), .wb_ifetch_o(wb_ifetch),
+        .icache_flush_o(icache_flush)
     );
 
     logic [31:0] ram_addr, uart_addr;
@@ -98,7 +98,7 @@ module soc (
         .clk(clk), .rst(rst),
         .addr_i(ram_addr), .dat_i(ram_dat_o), .dat_o(ram_dat_i), .sel_i(ram_sel),
         .we_i(ram_we), .ifetch_i(wb_ifetch), .cyc_i(ram_cyc), .stb_i(ram_stb),
-        .ack_o(ram_ack), .err_o(ram_err),
+        .ack_o(ram_ack), .err_o(ram_err), .flush_i(icache_flush),
         .mem_addr_o(mem_addr), .mem_dat_o(mem_dat_m2s), .mem_dat_i(mem_dat_s2m),
         .mem_sel_o(mem_sel), .mem_we_o(mem_we), .mem_cyc_o(mem_cyc), .mem_stb_o(mem_stb),
         .mem_ack_i(mem_ack), .mem_err_i(mem_err)

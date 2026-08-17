@@ -287,6 +287,16 @@
 `define INSTR_FENCE         {17'b0, 3'b000, 5'b0, 7'b0001111}
 `define INSTR_MASK_FENCE    {17'b0, 3'b111, 5'b0, 7'b0001111}
 
+/*
+ * Zifencei: FENCE.I -- same don't-care shape as plain FENCE above,
+ * differing only in funct3 (001 vs 000). Collision-free: the only two
+ * defined encodings at opcode 0001111 are FENCE/FENCE.I; funct3=010-111
+ * remain correctly unmatched, falling through to illegal-instruction,
+ * no change needed there.
+ */
+`define INSTR_FENCE_I       {17'b0, 3'b001, 5'b0, 7'b0001111}
+`define INSTR_MASK_FENCE_I  {17'b0, 3'b111, 5'b0, 7'b0001111}
+
 
 /* ------------------------------------------------------------------------- */
 

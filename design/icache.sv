@@ -67,6 +67,17 @@ module icache #(
     output logic         ack_o,
     output logic         err_o,
 
+    /*
+     * Zifencei: FENCE.I pulses this for one cycle on its own retirement.
+     * Invalidates every line -- a bare valid_q<='0, mirroring the reset
+     * arm exactly, since state_q/ack_o/dat_o never have anything in
+     * flight at the cycle this can pulse (see cache_complex.sv's own
+     * comment on why the flush is unconditional, and core.sv's
+     * icache_flush_o port comment for the FSM-timing proof that this
+     * module is always CACHE_IDLE when it fires).
+     */
+    input  logic         flush_i,
+
     // Memory-facing port -- this module is a Wishbone MASTER from
     // wb4_sram.sv's side.
     output logic [31:0] mem_addr_o,
@@ -169,9 +180,19 @@ module icache #(
              * hardware has no defined memory power-up state, which is
              * true of data_q/tag_q here too, but valid_q isn't memory
              * contents, it's the cache's own correctness invariant.
+             *
+             * flush_i (Zifencei) shares this same valid_q<='0 effect but
+             * is handled as a separate condition just below, inside the
+             * else branch -- deliberately NOT folded into this rst arm,
+             * since flush_i must NOT also reset ack_o/err_o/dat_o/state_q
+             * (nothing is ever in flight to unwind when it pulses; see
+             * this module's flush_i port comment for the proof) the way
+             * a real reset correctly does.
              */
             valid_q <= '0;
         end else begin
+            if (flush_i)
+                valid_q <= '0;
             case (state_q)
                 CACHE_IDLE: begin
                     ack_o <= 1'b0;

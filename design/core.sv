@@ -122,6 +122,17 @@
  * edge, so this stays stable through the exact cycle a downstream router
  * needs it on, unlike wb_addr_o/wb_cyc_o which combinationally collapse
  * to idle the instant the bus cycle terminates (ack or err).
+ *
+ * icache_flush_o: Zifencei's FENCE.I, side-band like wb_ifetch_o above --
+ * pulses one cycle on FENCE.I's own retirement (assign icache_flush_o =
+ * commit_now && is_fence_i;), telling a downstream I$ to invalidate its
+ * contents. Timing is provably clean, not just probably fine: FENCE.I
+ * retires purely within S_EXEC (bus-idle for this single-issue,
+ * non-pipelined core -- it issues zero bus traffic during S_EXEC), so
+ * the I$ is provably CACHE_IDLE at the exact cycle this pulses -- no
+ * mid-refill-flush case exists to reason about. D$ never needed a
+ * flush path to begin with (write-through already keeps a store hit's
+ * cached copy and SRAM in lockstep).
  */
 module core (
     input logic clk,
@@ -136,7 +147,8 @@ module core (
     output logic        wb_stb_o,
     input  logic        wb_ack_i,
     input  logic        wb_err_i,
-    output logic        wb_ifetch_o
+    output logic        wb_ifetch_o,
+    output logic        icache_flush_o
 
     /*
      * RVFI (RISC-V Formal Interface) -- only present when compiled for
@@ -1027,7 +1039,7 @@ module core (
             `INSTR_CODE(SB), `INSTR_CODE(SH), `INSTR_CODE(SW), `INSTR_CODE(SD),
             `INSTR_CODE(BEQ), `INSTR_CODE(BNE), `INSTR_CODE(BLT),
             `INSTR_CODE(BGE), `INSTR_CODE(BLTU), `INSTR_CODE(BGEU),
-            `INSTR_CODE(FENCE), `INSTR_CODE(ECALL), `INSTR_CODE(EBREAK),
+            `INSTR_CODE(FENCE), `INSTR_CODE(FENCE_I), `INSTR_CODE(ECALL), `INSTR_CODE(EBREAK),
             `INSTR_CODE(MRET), `INSTR_CODE(SRET), `INSTR_CODE(WFI), `INSTR_CODE(SFENCE_VMA),
             `INSTR_CODE(INVALID):
                 reg_write_ctrl = 1'b0;
@@ -1138,6 +1150,15 @@ module core (
                           || mret_priv_violation || sret_priv_violation
                           || (is_compressed && c_expand_illegal);
     wire is_ecall = (decoded_instruction == `INSTR_CODE(ECALL));
+    /*
+     * Zifencei: is_fence_i drives icache_flush_o below (see that port's
+     * own header comment for why the timing is provably clean). Declared
+     * here rather than next to is_illegal_instr/is_ecall's own forward
+     * reference needs -- FENCE.I isn't consumed by exc_code/trap_taken at
+     * all, so it doesn't need the same forward-declaration treatment
+     * those wires do.
+     */
+    wire is_fence_i = (decoded_instruction == `INSTR_CODE(FENCE_I));
 
     /* Exception codes, per spec's machine-cause table (synchronous only
      * -- bit 63/Interrupt is always 0, no interrupt source exists yet).
@@ -1722,6 +1743,10 @@ module core (
     // why this is a plain wire off `state`, not folded into
     // wb_master_drive's !wb_done-gated combinational block below.
     assign wb_ifetch_o = (state == S_FETCH) || (state == S_FETCH_HI);
+
+    // See this port's own header comment (module port list, above) for
+    // the timing argument.
+    assign icache_flush_o = commit_now && is_fence_i;
 
     always_comb begin: wb_master_drive
         wb_cyc_o  = 1'b0;

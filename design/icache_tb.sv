@@ -48,6 +48,7 @@ module icache_tb;
     logic [31:0] ic_addr;
     logic [63:0] ic_dat_o;
     logic        ic_cyc, ic_stb, ic_ack, ic_err;
+    logic        ic_flush = 1'b0;
 
     // icache <-> wb4_sram, memory-facing
     logic [31:0] mem_addr;
@@ -58,7 +59,7 @@ module icache_tb;
     icache #(.num_lines(NUM_LINES), .line_words(LINE_WORDS)) dut (
         .clk(clk), .rst(rst),
         .addr_i(ic_addr), .dat_o(ic_dat_o), .cyc_i(ic_cyc), .stb_i(ic_stb),
-        .ack_o(ic_ack), .err_o(ic_err),
+        .ack_o(ic_ack), .err_o(ic_err), .flush_i(ic_flush),
         .mem_addr_o(mem_addr), .mem_dat_i(mem_dat_o), .mem_sel_o(mem_sel),
         .mem_we_o(mem_we), .mem_cyc_o(mem_cyc), .mem_stb_o(mem_stb),
         .mem_ack_i(mem_ack), .mem_err_i(mem_err)
@@ -176,6 +177,34 @@ module icache_tb;
         mem_cyc_pulses = 0;
         ic_read(32'h1000);
         check("errored line not installed: re-misses", 64'(mem_cyc_pulses), 64'd1);
+
+        /*
+         * Zifencei: flush_i. Index 0's line (address 0x00) is still
+         * validly cached at this point -- the errored refill just above
+         * targeted the SAME index (0x1000 aliases index 0 too, per this
+         * file's own address-breakdown comments) but aborted without
+         * installing anything, per icache.sv's own "leaves valid_q
+         * exactly as it was" guarantee, so 0x00's earlier real content is
+         * untouched. Confirm that first (a genuine hit, zero downstream
+         * traffic), THEN pulse flush_i and confirm the exact same address
+         * now re-misses -- the direct, white-box proof flush_i actually
+         * invalidates valid_q, not just that the signal toggles.
+         */
+        mem_cyc_pulses = 0;
+        ic_read(32'h00);
+        check("pre-flush: index 0 still cached", ic_dat_o, 64'hAAAA_0000_0000_0000);
+        check("pre-flush: zero downstream traffic (genuine hit)", 64'(mem_cyc_pulses), 64'd0);
+
+        @(negedge clk);
+        ic_flush = 1'b1;
+        @(posedge clk); #1;
+        ic_flush = 1'b0;
+
+        mem_cyc_pulses = 0;
+        ic_read(32'h00);
+        check("post-flush: same address now re-misses", ic_dat_o, 64'hAAAA_0000_0000_0000);
+        check("post-flush: LINE_WORDS downstream beats (genuine miss, not a false hit)",
+            64'(mem_cyc_pulses), 64'(LINE_WORDS));
 
         $display("");
         $display("icache_tb: %0d passed, %0d failed", pass_count, fail_count);
