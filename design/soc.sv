@@ -7,11 +7,21 @@
  * Module: soc
  *
  * Top-level integration: core (Wishbone master) <-> wb_addr_decoder <->
- * {cache_complex -> wb4_sram, uart_tx}. Exactly the wiring already proven
- * in testbench/core_wb_tb.sv (for core<->decoder<->{ram,uart}) and
- * testbench/core_cache_harness.sv (for core<->cache_complex<->sram) --
- * this file adds no new logic of its own, only the connections between
- * already-independently-verified pieces.
+ * {cache_complex -> wb4_sram, uart_tx, clint0}. Exactly the wiring already
+ * proven in testbench/core_wb_tb.sv (for core<->decoder<->{ram,uart}),
+ * testbench/core_cache_harness.sv (for core<->cache_complex<->sram), and
+ * testbench/decoder_clint_harness.sv (for decoder<->{ram,uart,clint} at
+ * the bus level, see that harness's own header for exactly what it does
+ * and doesn't cover) -- this file adds no new logic of its own, only the
+ * connections between already-independently-verified pieces.
+ *
+ * clint0 (design/clint.sv, Milestone 3, already independently verified)
+ * hangs off the decoder's third slave port exactly like uart0 hangs off
+ * its second -- see wb_addr_decoder.sv's own header for the 3-way
+ * address map this now routes. clint0's mtip_o has NO consumer yet in
+ * this milestone: core.sv gains no CLINT-facing input port until
+ * Milestone 6 of this same plan, so clint_mtip below is genuinely
+ * unconsumed for now (deliberate, not an oversight).
  *
  * cache_complex sits AFTER wb_addr_decoder, between it and wb4_sram --
  * not before the decoder. This is deliberate, not incidental ordering:
@@ -25,6 +35,16 @@
  * silently breaking once real timing lands there). See the cache
  * hierarchy's own design notes (project memory: cache-hierarchy-plan) for
  * the full reasoning.
+ *
+ * clint0 sits outside cache_complex for the SAME structural reason, not
+ * a separate one worth re-deriving: mtime free-runs every cycle and the
+ * CPU never writes it, so a cached read would freeze at whatever value
+ * it first saw, with nothing to ever invalidate it -- permanently
+ * breaking any `while (mtime < deadline);` poll loop. Placing clint0
+ * downstream of the decoder, alongside uart0, makes it structurally
+ * uncacheable the same way -- not an incidental side effect of where it
+ * happened to get wired, and NOT something a future refactor should
+ * "simplify" by routing it through cache_complex alongside RAM.
  *
  * wb4_sram is instantiated at its default num_words (4096, 32KB) --
  * unlike core_wb_tb.sv's deliberately small test instance, this is the
@@ -71,11 +91,12 @@ module soc (
         .icache_flush_o(icache_flush)
     );
 
-    logic [31:0] ram_addr, uart_addr;
-    logic [63:0] ram_dat_o, ram_dat_i, uart_dat_o, uart_dat_i;
-    logic [7:0]  ram_sel, uart_sel;
+    logic [31:0] ram_addr, uart_addr, clint_addr;
+    logic [63:0] ram_dat_o, ram_dat_i, uart_dat_o, uart_dat_i, clint_dat_o, clint_dat_i;
+    logic [7:0]  ram_sel, uart_sel, clint_sel;
     logic        ram_we, ram_cyc, ram_stb, ram_ack, ram_err;
     logic        uart_we, uart_cyc, uart_stb, uart_ack, uart_err;
+    logic        clint_we, clint_cyc, clint_stb, clint_ack, clint_err;
 
     wb_addr_decoder decoder0 (
         .clk(clk), .rst(rst),
@@ -86,7 +107,10 @@ module soc (
         .ram_stb_o(ram_stb), .ram_ack_i(ram_ack), .ram_err_i(ram_err),
         .uart_addr_o(uart_addr), .uart_dat_o(uart_dat_o), .uart_dat_i(uart_dat_i),
         .uart_sel_o(uart_sel), .uart_we_o(uart_we), .uart_cyc_o(uart_cyc),
-        .uart_stb_o(uart_stb), .uart_ack_i(uart_ack), .uart_err_i(uart_err)
+        .uart_stb_o(uart_stb), .uart_ack_i(uart_ack), .uart_err_i(uart_err),
+        .clint_addr_o(clint_addr), .clint_dat_o(clint_dat_o), .clint_dat_i(clint_dat_i),
+        .clint_sel_o(clint_sel), .clint_we_o(clint_we), .clint_cyc_o(clint_cyc),
+        .clint_stb_o(clint_stb), .clint_ack_i(clint_ack), .clint_err_i(clint_err)
     );
 
     logic [31:0] mem_addr;
@@ -114,6 +138,18 @@ module soc (
         .clk(clk), .rst(rst),
         .addr_i(uart_addr), .dat_i(uart_dat_o), .dat_o(uart_dat_i), .sel_i(uart_sel),
         .ack_o(uart_ack), .err_o(uart_err), .cyc_i(uart_cyc), .stb_i(uart_stb), .we_i(uart_we)
+    );
+
+    // mtip_o has no consumer yet -- Milestone 6 wires this to core0.i_mtip.
+    /* verilator lint_off UNUSEDSIGNAL */
+    logic clint_mtip;
+    /* verilator lint_on UNUSEDSIGNAL */
+
+    clint clint0 (
+        .clk(clk), .rst(rst),
+        .addr_i(clint_addr), .dat_i(clint_dat_o), .dat_o(clint_dat_i), .sel_i(clint_sel),
+        .ack_o(clint_ack), .err_o(clint_err), .cyc_i(clint_cyc), .stb_i(clint_stb), .we_i(clint_we),
+        .mtip_o(clint_mtip)
     );
 
 endmodule
