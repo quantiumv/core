@@ -80,10 +80,11 @@
  * adds (the fetched instruction line, plus -- only for a dword-crossing
  * C instruction -- the second dword's low halfword).
  *
- * Scope: full RV64IMAC base ISA + Zicsr + full U/S/M privilege modes.
- * No Sv39, no interrupts/exceptions beyond the synchronous traps already
- * implemented -- later milestones (a different teammate's work for
- * Sv39). Misaligned DATA access (loads/stores) traps cleanly (see
+ * Scope: full RV64IMAC base ISA + Zicsr + full U/S/M privilege modes,
+ * plus machine-timer interrupts (CLINT mtime/mtimecmp, see i_mtip below
+ * and the Interrupts section near csr_file0's instantiation). No Sv39,
+ * no external/PLIC interrupts, no IPI/msip -- later milestones (a
+ * different teammate's work for Sv39). Misaligned DATA access (loads/stores) traps cleanly (see
  * mem_load_misaligned/mem_store_misaligned below) rather than being
  * handled in hardware -- actual misaligned load/store SUPPORT stays
  * deferred to a later milestone alongside Sv39, but silently truncating
@@ -133,6 +134,15 @@
  * mid-refill-flush case exists to reason about. D$ never needed a
  * flush path to begin with (write-through already keeps a store hit's
  * cached copy and SRAM in lockstep).
+ *
+ * i_mtip: machine-timer-interrupt-pending level from an external CLINT
+ * (design/clint.sv's mtip_o, see soc.sv). Continuously-valid status
+ * level, not a pulse -- spliced into mip's bit 7 inside csr_file0 and
+ * consumed combinationally by this module's own Interrupts section
+ * (near csr_file0's instantiation, below) to decide interrupt_taken.
+ * ANSI default (= 1'b0) so the 16+ testbenches/harnesses that
+ * instantiate core directly without driving this port stay compile-
+ * and lint-clean (same precedent as csr_file.sv's own i_mtip default).
  */
 module core (
     input logic clk,
@@ -148,7 +158,8 @@ module core (
     input  logic        wb_ack_i,
     input  logic        wb_err_i,
     output logic        wb_ifetch_o,
-    output logic        icache_flush_o
+    output logic        icache_flush_o,
+    input  logic         i_mtip = 1'b0
 
     /*
      * RVFI (RISC-V Formal Interface) -- only present when compiled for
@@ -287,6 +298,22 @@ module core (
      * mem_load_misaligned/mem_store_misaligned already establish.
      */
     logic trap_taken;
+    /*
+     * interrupt_taken/interrupt_to_s: forward-declared here for the same
+     * reason as trap_taken -- csr_file0's own i_trap_taken/i_trap_to_s
+     * connections need them, but their real assign lives in the new
+     * Interrupts section after csr_file0's instantiation (it needs
+     * csr_file0's own mip_w/mie_w/etc. outputs first).
+     *
+     * trap_vector: forward-declared (was previously declared+driven
+     * together as `wire trap_vector = ...`) because wb_master_drive's
+     * S_FETCH arm now needs to read it, but wb_master_drive is textually
+     * BEFORE trap_vector's own real assign (down near Next PC) -- same
+     * "declare early, drive late" split trap_val/amo_rdata_q already use.
+     */
+    logic interrupt_taken;
+    logic interrupt_to_s;
+    logic [(`WORD_SIZE - 1):0] trap_vector;
     logic [(`WORD_SIZE - 1):0] amo_rdata_q;
     /*
      * amo_addr_q: WORD_SIZE-wide for the RVFI tap's rvfi_mem_addr (see its
@@ -1413,6 +1440,20 @@ module core (
     wire [(`WORD_SIZE - 1):0] mtvec_w, stvec_w, mepc_w, sepc_w;
     wire [1:0] mstatus_mpp_w;
     wire mstatus_spp_w;
+    /*
+     * mip_w/mie_w/mideleg_w: WORD_SIZE-wide (matching csr_file0's real
+     * architectural CSR width), but the Interrupts section below only
+     * ever reads bit 7 (MTIE/MTIP/the MTI delegation bit) off each --
+     * every other bit is genuinely unused by this milestone's logic
+     * (they exist for a real, spec-shaped mip/mie/mideleg, not padding),
+     * same "wrap the genuinely-partial-usage bits" precedent
+     * trap_vector_base already establishes below for mtvec/stvec's own
+     * MODE field.
+     */
+    /* verilator lint_off UNUSEDSIGNAL */
+    wire [(`WORD_SIZE - 1):0] mip_w, mie_w, mideleg_w;
+    /* verilator lint_on UNUSEDSIGNAL */
+    wire mstatus_mie_w, mstatus_sie_w;
 `ifdef RISCV_FORMAL
     wire [(`WORD_SIZE - 1):0] mcause_w, scause_w;
     wire [(`WORD_SIZE - 1):0] mepc_next_w, sepc_next_w, mcause_next_w, scause_next_w;
@@ -1428,11 +1469,12 @@ module core (
         .i_instr_retired(commit_now),
 
         .i_current_priv(current_priv),
-        .i_trap_taken(trap_taken),
-        .i_trap_cause(trap_cause),
-        .i_trap_val(trap_val),
+        .i_mtip(i_mtip),
+        .i_trap_taken(trap_taken || interrupt_taken),
+        .i_trap_cause(trap_taken ? trap_cause : {1'b1, 63'd7}),
+        .i_trap_val(trap_taken ? trap_val : `WORD_SIZE'(0)),
         .i_trap_pc(pc),
-        .i_trap_to_s(trap_to_s),
+        .i_trap_to_s(trap_taken ? trap_to_s : interrupt_to_s),
         .i_mret_taken(mret_taken),
         .i_sret_taken(sret_taken),
 
@@ -1447,26 +1489,17 @@ module core (
 
         /*
          * Milestone 5 (csr_file.sv CSR-side CLINT/interrupt plumbing) added
-         * these 5 outputs for Milestone 6's interrupt-taking logic to
-         * consume -- explicitly left unconnected here, not omitted, so
-         * verilator's PINMISSING check doesn't flag them as an oversight.
-         * Explicitly-empty connections trade PINMISSING for
-         * PINCONNECTEMPTY instead (same "genuinely unconsumed until
-         * Milestone 6" fact, different warning name) -- wrapped below,
-         * same precedent as this file's other genuinely-deferred-consumer
-         * signals (see soc.sv's clint_mtip). i_mtip needs no equivalent
-         * entry: its ANSI port default (= 1'b0) already makes an omitted
-         * connection well-defined and silences PINMISSING for that one on
-         * its own, with no PINCONNECTEMPTY risk since it's never connected
-         * empty in the first place.
+         * these 5 outputs; Milestone 6 (this section) is their real
+         * consumer -- see the Interrupts section immediately following
+         * this instantiation, which drives mti_pending/mti_to_s/
+         * mti_enabled/interrupt_taken/interrupt_to_s off exactly these
+         * five wires.
          */
-        /* verilator lint_off PINCONNECTEMPTY */
-        .o_mip(),
-        .o_mie(),
-        .o_mideleg(),
-        .o_mstatus_mie(),
-        .o_mstatus_sie()
-        /* verilator lint_on PINCONNECTEMPTY */
+        .o_mip(mip_w),
+        .o_mie(mie_w),
+        .o_mideleg(mideleg_w),
+        .o_mstatus_mie(mstatus_mie_w),
+        .o_mstatus_sie(mstatus_sie_w)
 `ifdef RISCV_FORMAL
         ,
         .o_mcause(mcause_w),
@@ -1477,6 +1510,40 @@ module core (
         .o_scause_next(scause_next_w)
 `endif
     );
+
+    /* --------------------------------------------------------------- *
+     * Interrupts (CLINT machine-timer, Milestone 6)
+     * --------------------------------------------------------------- */
+
+    // MTIE & MTIP (bit 7). mti_to_s reads mideleg_w[7] -- real, unmasked,
+    // software-writable storage, not hardwired 0; reads 0 in practice
+    // only because nothing this milestone writes it.
+    wire mti_pending = mie_w[7] & mip_w[7];
+    wire mti_to_s    = mideleg_w[7];
+    wire mti_enabled = mti_to_s
+        ? ((current_priv == PRIV_U) ? 1'b1 : (current_priv == PRIV_S) ? mstatus_sie_w : 1'b0)
+        : ((current_priv != PRIV_M) ? 1'b1 : mstatus_mie_w);
+    wire int_pending_and_enabled = mti_pending && mti_enabled;
+
+    logic commit_now_q;
+    always_ff @(posedge clk) begin
+        if (rst) commit_now_q <= 1'b0;
+        else     commit_now_q <= commit_now;
+    end
+
+    // interrupt_taken/interrupt_to_s: forward-declared above -- csr_file0's
+    // own i_trap_taken/i_trap_to_s need them before this section (which
+    // itself needs csr_file0's own outputs) can exist.
+    assign interrupt_taken = !halted && commit_now_q && int_pending_and_enabled;
+    assign interrupt_to_s  = interrupt_taken && mti_to_s;
+
+    logic fetch_redirect_q;
+    always_ff @(posedge clk) begin
+        if (rst) fetch_redirect_q <= 1'b0;
+        else if (interrupt_taken)             fetch_redirect_q <= 1'b1;
+        else if (state == S_FETCH && wb_done) fetch_redirect_q <= 1'b0;
+    end
+    wire fetch_from_trap_vector = interrupt_taken || fetch_redirect_q;
 
     /*
      * Branch comparator: NOT routed through alu0. alu_ops.sv has no
@@ -1789,7 +1856,7 @@ module core (
                 if (!halted && !wb_done) begin
                     wb_cyc_o  = 1'b1;
                     wb_stb_o  = 1'b1;
-                    wb_addr_o = fetch_addr;
+                    wb_addr_o = fetch_from_trap_vector ? {trap_vector[31:3], 3'b0} : fetch_addr;
                     wb_sel_o  = 8'hFF; // don't-care for a read; full line for clarity
                 end
             end
@@ -1900,10 +1967,11 @@ module core (
      * bits (the MODE field) are structurally never read below -- masked
      * off, not an oversight.
      */
+    wire route_to_s = trap_taken ? trap_to_s : interrupt_to_s;
     /* verilator lint_off UNUSEDSIGNAL */
-    wire [(`WORD_SIZE - 1):0] trap_vector_base = trap_to_s ? stvec_w : mtvec_w;
+    wire [(`WORD_SIZE - 1):0] trap_vector_base = route_to_s ? stvec_w : mtvec_w;
     /* verilator lint_on UNUSEDSIGNAL */
-    wire [(`WORD_SIZE - 1):0] trap_vector = {trap_vector_base[63:2], 2'b00};
+    assign trap_vector = {trap_vector_base[63:2], 2'b00};   // was `wire trap_vector =` -- now forward-declared
 
     assign next_pc = trap_taken              ? trap_vector   :
                       mret_taken              ? mepc_w        :
@@ -1944,6 +2012,8 @@ module core (
             pc <= '0;
         else if (commit_now && !is_ebreak)
             pc <= next_pc;
+        else if (interrupt_taken)
+            pc <= trap_vector;
     end
 
     /*
@@ -1964,6 +2034,8 @@ module core (
             current_priv <= priv_t'(mstatus_mpp_w);
         else if (sret_taken)
             current_priv <= priv_t'(mstatus_spp_w ? PRIV_S : PRIV_U);
+        else if (interrupt_taken)
+            current_priv <= priv_t'(interrupt_to_s ? PRIV_S : PRIV_M);
     end
 
 `ifdef RISCV_FORMAL
@@ -2019,8 +2091,10 @@ module core (
      */
     assign rvfi_insn      = is_compressed ? {16'b0, first_hw} : instruction;
     assign rvfi_trap      = trap_taken;
-    assign rvfi_halt      = 1'b0; // no graceful-halt/interrupt model exists yet
-    assign rvfi_intr      = 1'b0; // no interrupt controller exists yet (known gap)
+    assign rvfi_halt      = 1'b0; // no graceful-halt model exists yet
+    assign rvfi_intr      = 1'b0; // interrupt controller now exists (see interrupt_taken
+                                   // above), but wiring real formal interrupt-checking is
+                                   // out of scope this milestone -- stays hardwired 0
     assign rvfi_mode      = current_priv; // PRIV_U/S/M already match RVFI's 0/1/3 encoding
     assign rvfi_ixl       = 2'd2; // always 64-bit -- this core never runs 32-bit mode
     assign rvfi_rs1_addr  = read_gpr_A_sel;

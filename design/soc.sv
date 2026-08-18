@@ -18,10 +18,10 @@
  * clint0 (design/clint.sv, Milestone 3, already independently verified)
  * hangs off the decoder's third slave port exactly like uart0 hangs off
  * its second -- see wb_addr_decoder.sv's own header for the 3-way
- * address map this now routes. clint0's mtip_o has NO consumer yet in
- * this milestone: core.sv gains no CLINT-facing input port until
- * Milestone 6 of this same plan, so clint_mtip below is genuinely
- * unconsumed for now (deliberate, not an oversight).
+ * address map this now routes. clint0's mtip_o (this milestone) wires
+ * directly to core0.i_mtip -- see clint_mtip below -- feeding core.sv's
+ * machine-timer-interrupt-taking logic (design/core.sv's own Interrupts
+ * section, near csr_file0's instantiation).
  *
  * cache_complex sits AFTER wb_addr_decoder, between it and wb4_sram --
  * not before the decoder. This is deliberate, not incidental ordering:
@@ -82,13 +82,14 @@ module soc (
     logic        wb_we, wb_cyc, wb_stb, wb_ack, wb_err;
     logic        wb_ifetch;
     logic        icache_flush;
+    logic        clint_mtip;
 
     core core0 (
         .clk(clk), .rst(rst),
         .wb_addr_o(wb_addr), .wb_dat_o(wb_dat_m2s), .wb_dat_i(wb_dat_s2m),
         .wb_sel_o(wb_sel), .wb_we_o(wb_we), .wb_cyc_o(wb_cyc), .wb_stb_o(wb_stb),
         .wb_ack_i(wb_ack), .wb_err_i(wb_err), .wb_ifetch_o(wb_ifetch),
-        .icache_flush_o(icache_flush)
+        .icache_flush_o(icache_flush), .i_mtip(clint_mtip)
     );
 
     logic [31:0] ram_addr, uart_addr, clint_addr;
@@ -139,11 +140,6 @@ module soc (
         .addr_i(uart_addr), .dat_i(uart_dat_o), .dat_o(uart_dat_i), .sel_i(uart_sel),
         .ack_o(uart_ack), .err_o(uart_err), .cyc_i(uart_cyc), .stb_i(uart_stb), .we_i(uart_we)
     );
-
-    // mtip_o has no consumer yet -- Milestone 6 wires this to core0.i_mtip.
-    /* verilator lint_off UNUSEDSIGNAL */
-    logic clint_mtip;
-    /* verilator lint_on UNUSEDSIGNAL */
 
     clint clint0 (
         .clk(clk), .rst(rst),

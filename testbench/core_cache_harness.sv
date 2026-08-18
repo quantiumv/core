@@ -27,7 +27,8 @@ module core_cache_harness #(
     parameter LINE_WORDS = 4
 ) (
     input logic clk,
-    input logic rst
+    input logic rst,
+    input logic i_mtip = 1'b0
 );
 
     logic [31:0] wb_addr;
@@ -42,7 +43,7 @@ module core_cache_harness #(
         .wb_addr_o(wb_addr), .wb_dat_o(wb_dat_m2s), .wb_dat_i(wb_dat_s2m),
         .wb_sel_o(wb_sel), .wb_we_o(wb_we), .wb_cyc_o(wb_cyc), .wb_stb_o(wb_stb),
         .wb_ack_i(wb_ack), .wb_err_i(wb_err), .wb_ifetch_o(wb_ifetch),
-        .icache_flush_o(icache_flush)
+        .icache_flush_o(icache_flush), .i_mtip(i_mtip)
     );
 
     logic [31:0] mem_addr;
