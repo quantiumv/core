@@ -1,0 +1,4 @@
+[submodule "third_party/taxi"]
+	path = third_party/taxi
+	url = https://github.com/fpganinja/taxi.git
+	shallow = true
