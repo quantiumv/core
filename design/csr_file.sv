@@ -67,6 +67,15 @@
  *  i_current_priv: core.sv's current privilege level (2'b00/01/11 =
  *    U/S/M) -- consumed only by trap-entry below, to know which of
  *    mstatus's MPP/SPP fields records the pre-trap privilege.
+ *  i_mtip: a continuously-valid external status level (same shape as
+ *    i_current_priv -- not a one-shot pulse like the trap/mret/sret
+ *    side channel below), sourced from the CLINT's mtip_o once core.sv
+ *    wires it up (Milestone 6). Spliced combinationally into mip's bit
+ *    7 (see mip_effective below); defaults to 1'b0 so core.sv's
+ *    not-yet-updated instantiation (and csr_file_random_tb.sv/
+ *    csr_file_priv_random_tb.sv, which don't drive it either) sees
+ *    inert behavior -- an unconnected port floating to X would
+ *    otherwise contaminate every mip/sip read on bit 7.
  *  i_trap_taken/i_trap_cause/i_trap_val/i_trap_pc/i_trap_to_s: the
  *    trap-entry side channel -- independent of i_csr_we/i_csr_addr,
  *    same "core.sv computes WHY, this module just honors it" division
@@ -90,6 +99,14 @@
  *    mux. o_mstatus_tsr feeds core.sv's SRET-from-S-mode illegal-instruction
  *    check (TSR itself is still just inert storage here, same as TVM/TW --
  *    core.sv is what turns the bit into an actual trap).
+ *  o_mip/o_mie/o_mideleg/o_mstatus_mie/o_mstatus_sie: control-plane exports
+ *    for Milestone 6's interrupt-taking logic in core.sv (unused/
+ *    unconnected until then). o_mip drives from the derived mip_effective
+ *    below, never raw mip_q -- same requirement as the mip/sip read-mux
+ *    arms, so core.sv never sees a stale bit 7. o_mie/o_mideleg drive from
+ *    plain mie_q/mideleg_q storage. o_mstatus_mie/o_mstatus_sie are
+ *    single-bit mstatus taps, same precedent as o_mstatus_spp/o_mstatus_tsr
+ *    above.
  */
 module csr_file (
     input  logic i_clk,
@@ -101,6 +118,7 @@ module csr_file (
     input  logic                          i_instr_retired,  // drives minstret; independent of i_csr_we/addr
 
     input  logic [1:0]                    i_current_priv,
+    input  logic                          i_mtip = 1'b0,
 
     input  logic                          i_trap_taken,
     input  logic [(`WORD_SIZE - 1):0]     i_trap_cause,
@@ -117,7 +135,13 @@ module csr_file (
     output logic [(`WORD_SIZE - 1):0]     o_medeleg,
     output logic [1:0]                    o_mstatus_mpp,
     output logic                          o_mstatus_spp,
-    output logic                          o_mstatus_tsr
+    output logic                          o_mstatus_tsr,
+
+    output logic [(`WORD_SIZE - 1):0]     o_mip,
+    output logic [(`WORD_SIZE - 1):0]     o_mie,
+    output logic [(`WORD_SIZE - 1):0]     o_mideleg,
+    output logic                          o_mstatus_mie,
+    output logic                          o_mstatus_sie
 `ifdef RISCV_FORMAL
     /*
      * mcause/scause: no real core.sv control logic needs these today (unlike
@@ -351,9 +375,9 @@ module csr_file (
         if (i_rst) begin
             mip_q <= '0;
         end else if (i_csr_we && (i_csr_addr == CSR_ADDR_MIP)) begin
-            mip_q <= i_csr_wdata;
+            mip_q <= i_csr_wdata & ~64'h80;
         end else if (i_csr_we && (i_csr_addr == CSR_ADDR_SIP)) begin
-            mip_q <= (mip_q & ~mideleg_q) | (i_csr_wdata & mideleg_q);
+            mip_q <= ((mip_q & ~mideleg_q) | (i_csr_wdata & mideleg_q)) & ~64'h80;
         end
     end
 
@@ -540,6 +564,12 @@ module csr_file (
         end
     end
 
+    /* mip_effective: MTIP (bit 7) is a live combinational function of
+     * i_mtip, not stored state like every other mip bit. Every mip/sip
+     * read arm and o_mip below must go through this wire -- raw mip_q
+     * must never leak into a read path again. */
+    wire [(`WORD_SIZE - 1):0] mip_effective = {mip_q[63:8], i_mtip, mip_q[6:0]};
+
     /* Control-plane outputs -- see the port-list comment above for why these exist. */
     assign o_mtvec       = mtvec_q;
     assign o_stvec       = stvec_q;
@@ -549,6 +579,11 @@ module csr_file (
     assign o_mstatus_mpp = mstatus_q[MSTATUS_MPP_MSB:MSTATUS_MPP_LSB];
     assign o_mstatus_spp = mstatus_q[MSTATUS_SPP_BIT];
     assign o_mstatus_tsr = mstatus_q[MSTATUS_TSR_BIT];
+    assign o_mip         = mip_effective;
+    assign o_mie         = mie_q;
+    assign o_mideleg     = mideleg_q;
+    assign o_mstatus_mie = mstatus_q[MSTATUS_MIE_BIT];
+    assign o_mstatus_sie = mstatus_q[MSTATUS_SIE_BIT];
 `ifdef RISCV_FORMAL
     assign o_mcause      = mcause_q;
     assign o_scause      = scause_q;
@@ -581,7 +616,7 @@ module csr_file (
             CSR_ADDR_SEPC:       o_csr_rdata = sepc_q;
             CSR_ADDR_SCAUSE:     o_csr_rdata = scause_q;
             CSR_ADDR_STVAL:      o_csr_rdata = stval_q;
-            CSR_ADDR_SIP:        o_csr_rdata = mip_q & mideleg_q;
+            CSR_ADDR_SIP:        o_csr_rdata = mip_effective & mideleg_q;
             CSR_ADDR_SATP:       o_csr_rdata = satp_q;
 
             /* M-mode trap-control CSRs. */
@@ -594,7 +629,7 @@ module csr_file (
             CSR_ADDR_MEPC:       o_csr_rdata = mepc_q;
             CSR_ADDR_MCAUSE:     o_csr_rdata = mcause_q;
             CSR_ADDR_MTVAL:      o_csr_rdata = mtval_q;
-            CSR_ADDR_MIP:        o_csr_rdata = mip_q;
+            CSR_ADDR_MIP:        o_csr_rdata = mip_effective;
 
             default:            o_csr_rdata = `WORD_SIZE'(0);
         endcase

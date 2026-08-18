@@ -1443,7 +1443,30 @@ module core (
         .o_medeleg(medeleg_w),
         .o_mstatus_mpp(mstatus_mpp_w),
         .o_mstatus_spp(mstatus_spp_w),
-        .o_mstatus_tsr(mstatus_tsr_w)
+        .o_mstatus_tsr(mstatus_tsr_w),
+
+        /*
+         * Milestone 5 (csr_file.sv CSR-side CLINT/interrupt plumbing) added
+         * these 5 outputs for Milestone 6's interrupt-taking logic to
+         * consume -- explicitly left unconnected here, not omitted, so
+         * verilator's PINMISSING check doesn't flag them as an oversight.
+         * Explicitly-empty connections trade PINMISSING for
+         * PINCONNECTEMPTY instead (same "genuinely unconsumed until
+         * Milestone 6" fact, different warning name) -- wrapped below,
+         * same precedent as this file's other genuinely-deferred-consumer
+         * signals (see soc.sv's clint_mtip). i_mtip needs no equivalent
+         * entry: its ANSI port default (= 1'b0) already makes an omitted
+         * connection well-defined and silences PINMISSING for that one on
+         * its own, with no PINCONNECTEMPTY risk since it's never connected
+         * empty in the first place.
+         */
+        /* verilator lint_off PINCONNECTEMPTY */
+        .o_mip(),
+        .o_mie(),
+        .o_mideleg(),
+        .o_mstatus_mie(),
+        .o_mstatus_sie()
+        /* verilator lint_on PINCONNECTEMPTY */
 `ifdef RISCV_FORMAL
         ,
         .o_mcause(mcause_w),
