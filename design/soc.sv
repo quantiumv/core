@@ -111,7 +111,36 @@ module soc (
         .uart_stb_o(uart_stb), .uart_ack_i(uart_ack), .uart_err_i(uart_err),
         .clint_addr_o(clint_addr), .clint_dat_o(clint_dat_o), .clint_dat_i(clint_dat_i),
         .clint_sel_o(clint_sel), .clint_we_o(clint_we), .clint_cyc_o(clint_cyc),
-        .clint_stb_o(clint_stb), .clint_ack_i(clint_ack), .clint_err_i(clint_err)
+        .clint_stb_o(clint_stb), .clint_ack_i(clint_ack), .clint_err_i(clint_err),
+
+        /*
+         * dram_* left explicitly, deliberately unconnected -- design/
+         * wb_addr_decoder.sv's DRAM slave (verification/taxi/rtl/
+         * dram_model.sv) instantiates a SystemVerilog `interface`
+         * internally, so it can only be built via Verilator, never
+         * iverilog (see verification/taxi/README.md). This file must stay
+         * 100% iverilog-compatible -- it's compiled by
+         * testbench/soc_tb.sv, testbench/soc_interrupt_tb.sv,
+         * testbench/soc_c_regression_tb.sv, and others -- so it can never
+         * instantiate dram_model.sv directly. Empty parens rather than
+         * omitting the lines, so lint tools see this as deliberate, not a
+         * forgotten connection -- same precedent core0's own
+         * .o_instruction_address() already uses in design/core.sv.
+         * Known, accepted gap: any address in 0x0001_8000-0x0001_FFFF
+         * routed through THIS soc.sv today gets an undefined response
+         * (dram_ack_i/dram_err_i float) -- acceptable only because no
+         * existing design/testbench firmware or testbench ever generates
+         * such an address (confirmed by inspection). A real consumer
+         * exists only under verification/taxi/rtl/decoder_dram_harness.sv;
+         * wiring dram_model.sv into THIS file for real would need a
+         * separate Verilator-only top-level, not a change here -- see
+         * verification/taxi/README.md's Status section.
+         */
+        /* verilator lint_off PINCONNECTEMPTY */
+        .dram_addr_o(), .dram_dat_o(), .dram_dat_i(),
+        .dram_sel_o(), .dram_we_o(), .dram_cyc_o(),
+        .dram_stb_o(), .dram_ack_i(), .dram_err_i()
+        /* verilator lint_on PINCONNECTEMPTY */
     );
 
     logic [31:0] mem_addr;

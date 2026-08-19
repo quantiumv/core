@@ -69,7 +69,21 @@ module decoder_clint_harness (
         .uart_stb_o(uart_stb), .uart_ack_i(uart_ack), .uart_err_i(uart_err),
         .clint_addr_o(clint_addr), .clint_dat_o(clint_dat_o), .clint_dat_i(clint_dat_i),
         .clint_sel_o(clint_sel), .clint_we_o(clint_we), .clint_cyc_o(clint_cyc),
-        .clint_stb_o(clint_stb), .clint_ack_i(clint_ack), .clint_err_i(clint_err)
+        .clint_stb_o(clint_stb), .clint_ack_i(clint_ack), .clint_err_i(clint_err),
+
+        /*
+         * dram_* left explicitly unconnected -- same situation as
+         * design/soc.sv's own decoder0 instantiation: the DRAM slave
+         * (verification/taxi/rtl/dram_model.sv) is Verilator-only, and
+         * this harness is compiled via iverilog (through design/
+         * wb_addr_decoder_clint_tb.sv). See design/soc.sv's own comment
+         * for the full explanation.
+         */
+        /* verilator lint_off PINCONNECTEMPTY */
+        .dram_addr_o(), .dram_dat_o(), .dram_dat_i(),
+        .dram_sel_o(), .dram_we_o(), .dram_cyc_o(),
+        .dram_stb_o(), .dram_ack_i(), .dram_err_i()
+        /* verilator lint_on PINCONNECTEMPTY */
     );
 
     wb4_sram #(.num_words(4096)) sram0 (

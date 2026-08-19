@@ -109,14 +109,30 @@ request to a real, single-beat AXI4 transaction against a genuine
 on top: a configurable `ACCESS_LATENCY_CYCLES` extra-wait parameter and a
 configurable `REFRESH_INTERVAL_CYCLES`/`REFRESH_BUSY_CYCLES` pair that
 periodically blocks starting a new transaction (never interrupts one already
-in flight), matching real DRAM's periodic refresh unavailability. Deliberately
-NOT wired into `design/wb_addr_decoder.sv`/`design/soc.sv` -- standalone
-module + testbench only, the same staging this project's `design/clint.sv`
-took before its own bus-wiring became a separate step. Latency/refresh timing
-is proven via cycle-count deltas against a zero-latency/refresh-disabled
-baseline instance, not a hardcoded absolute cycle count (hand-tracing
-`taxi_axi_ram`'s exact registered timing by inspection is error-prone; the
-delta approach is immune to any error in the absolute base number).
+in flight), matching real DRAM's periodic refresh unavailability. Latency/
+refresh timing is proven via cycle-count deltas against a zero-latency/
+refresh-disabled baseline instance, not a hardcoded absolute cycle count
+(hand-tracing `taxi_axi_ram`'s exact registered timing by inspection is
+error-prone; the delta approach is immune to any error in the absolute base
+number).
+
+`rtl/decoder_dram_harness.sv` + `tb/decoder_dram_tb.sv` -- `dram_model.sv`
+**is** now wired into a real `design/wb_addr_decoder.sv` (a real 4-way
+decode: RAM/UART/CLINT/DRAM, CLINT narrowed from 64KB to 32KB to free the
+window DRAM now uses), proven end-to-end at the bus level through this
+harness (real decoder + real wb4_sram/uart_tx/clint/dram_model, no
+`core.sv`) -- mirrors `testbench/decoder_clint_harness.sv`'s own precedent
+for CLINT's bus-wiring. Still **not** wired into `design/soc.sv` directly,
+though -- and unlike CLINT, that isn't just a staging choice deferred to a
+later step. `design/soc.sv` is compiled by many existing iverilog
+testbenches and must stay iverilog-parseable forever; `dram_model.sv` is
+Verilator-only *by construction* (the `interface`-based AXI bridge is
+fundamental to its design, not incidental), so `soc.sv` can never
+instantiate it directly. A future "real firmware through DRAM" step would
+need either a separate Verilator-only `soc`-shaped top-level under
+`verification/taxi/`, or a synthesizable/swappable DRAM-slave abstraction
+in `design/` with the real backing store substituted only for the taxi
+build -- not the same playbook CLINT's own later firmware milestone used.
 
 Links: project memory `bus-protocol-decision` (the original taxi-vs-iverilog
 decision history), `verification/riscv-arch-test/`, `verification/riscv-formal/`
