@@ -39,6 +39,16 @@ module rvfi_wrapper (
     (* keep *) wire        wb_stb;
     (* keep *) `rvformal_rand_reg wb_ack;
     (* keep *) `rvformal_rand_reg wb_err;
+    // Free/unconstrained -- lets the solver assert the timer-interrupt-pending
+    // input on any cycle, same convention as wb_ack/wb_err above and matching
+    // riscv-formal's own cores/nerv/wrapper.sv precedent for a free interrupt-
+    // pending input (irq, wired the identical way). Without this, i_mtip
+    // floats to core.sv's own ANSI default (1'b0) since core uut's own
+    // instantiation would otherwise omit it entirely -- meaning
+    // interrupt_taken could never fire in ANY generated check, and the
+    // real rvfi_intr logic in core.sv would be permanently dead code from
+    // this formal model's perspective.
+    (* keep *) `rvformal_rand_reg i_mtip;
 
     core uut (
         .clk(clock),
@@ -53,6 +63,7 @@ module rvfi_wrapper (
         .wb_stb_o(wb_stb),
         .wb_ack_i(wb_ack),
         .wb_err_i(wb_err),
+        .i_mtip(i_mtip),
 
         `RVFI_CONN
     );

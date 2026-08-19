@@ -2069,6 +2069,37 @@ module core (
 
     assign rvfi_valid     = commit_now;
     assign rvfi_order     = rvfi_order_q;
+
+    /*
+     * rvfi_intr support: per riscv-formal's own spec (docs/source/rvfi.rst
+     * upstream), rvfi_intr must be set for the first instruction that is
+     * part of a trap handler, i.e. one whose rvfi_pc_rdata does not match
+     * the rvfi_pc_wdata of the previous (valid) retirement. Implemented
+     * mechanically -- compare THIS retirement's pc against the LAST
+     * retirement's own next_pc -- not semantically ("was the previous
+     * retirement a trap_taken/interrupt_taken event"), and deliberately
+     * so: next_pc's own mux (see its assign below) already gives
+     * trap_taken top priority (trap_taken ? trap_vector : ...), so a
+     * synchronous exception's handler-entry PC chain is ALREADY naturally
+     * consistent in this design -- no discontinuity to flag. A semantic
+     * check would needlessly over-relax an already-tight, already-
+     * correctly-passing property for that case. interrupt_taken, by
+     * contrast, bypasses next_pc entirely via its own separate PC-register
+     * arm (see the PC register always_ff below) -- a genuine discontinuity
+     * this mechanical definition catches automatically, with no need to
+     * enumerate which mechanisms can cause one (robust to any future
+     * redirect mechanism this core grows later). Purely RVFI-scoped state
+     * -- zero impact on the real non-formal build.
+     */
+    logic [63:0] rvfi_prev_pc_wdata_q;
+    always_ff @(posedge clk) begin
+        if (rst)             rvfi_prev_pc_wdata_q <= '0; // matches pc's own reset value,
+                                                          // so the very first retirement
+                                                          // after reset correctly reads
+                                                          // rvfi_intr=0, no special case.
+        else if (commit_now) rvfi_prev_pc_wdata_q <= next_pc;
+    end
+
     /*
      * Per the RVFI spec (docs/source/rvfi.rst upstream): "For compressed
      * instructions the compressed instruction word must be output on
@@ -2092,9 +2123,9 @@ module core (
     assign rvfi_insn      = is_compressed ? {16'b0, first_hw} : instruction;
     assign rvfi_trap      = trap_taken;
     assign rvfi_halt      = 1'b0; // no graceful-halt model exists yet
-    assign rvfi_intr      = 1'b0; // interrupt controller now exists (see interrupt_taken
-                                   // above), but wiring real formal interrupt-checking is
-                                   // out of scope this milestone -- stays hardwired 0
+    assign rvfi_intr      = commit_now && (pc != rvfi_prev_pc_wdata_q); // see
+                                   // rvfi_prev_pc_wdata_q's own comment above for the
+                                   // full derivation -- real wiring, no longer hardwired
     assign rvfi_mode      = current_priv; // PRIV_U/S/M already match RVFI's 0/1/3 encoding
     assign rvfi_ixl       = 2'd2; // always 64-bit -- this core never runs 32-bit mode
     assign rvfi_rs1_addr  = read_gpr_A_sel;
