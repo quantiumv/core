@@ -75,11 +75,15 @@ repo uses `#N` delays pervasively (`always #5 clk = ~clk;`, settle-waits like
 `#1;`), and Verilator's default cycle-based mode can't compile that style at
 all without it.
 
-A testbench may have a companion `<name>.f` file (see
-`tb/taxi_axi_ram_smoke_tb.f` for the pattern) listing exactly which taxi AXI
-source files it needs, one filename per line, relative to
-`third_party/taxi/src/axi/rtl/` -- the same flat-filename convention taxi's
-own upstream `.f` files already use for their own internal dependencies.
+A testbench may have a companion `<name>.f` file (see `tb/dram_model_tb.f`
+for the pattern) listing exactly which source files it needs, one per line,
+as **repo-root-relative paths** (e.g. `third_party/taxi/src/axi/rtl/taxi_axi_if.sv`,
+`verification/taxi/rtl/dram_model.sv`) -- not taxi-rtl-relative flat
+filenames. That was the original convention (matching taxi's own upstream
+`.f` files' internal-dependency style) until `dram_model_tb.f` needed to
+reference a project-owned RTL file living outside
+`third_party/taxi/src/axi/rtl/` -- repo-root-relative paths handle both
+cases uniformly.
 
 ## Gotcha worth remembering
 
@@ -97,8 +101,22 @@ is settable.
 
 `taxi_axi_ram_smoke_tb.sv` -- confirms the toolchain itself works end-to-end
 against real taxi functional IP (single write + read-back round trip).
-**No WB->AXI4 bridge or DRAM model exists yet** -- this vendoring + toolchain
-setup is the prerequisite step, not the DRAM-testing work itself.
+
+`rtl/dram_model.sv` + `tb/dram_model_tb.sv` -- a Wishbone-slave-shaped
+peripheral (same port contract as `design/wb4_sram.sv`) that bridges each WB
+request to a real, single-beat AXI4 transaction against a genuine
+`taxi_axi_ram` backing store, with hand-written DRAM-realism timing layered
+on top: a configurable `ACCESS_LATENCY_CYCLES` extra-wait parameter and a
+configurable `REFRESH_INTERVAL_CYCLES`/`REFRESH_BUSY_CYCLES` pair that
+periodically blocks starting a new transaction (never interrupts one already
+in flight), matching real DRAM's periodic refresh unavailability. Deliberately
+NOT wired into `design/wb_addr_decoder.sv`/`design/soc.sv` -- standalone
+module + testbench only, the same staging this project's `design/clint.sv`
+took before its own bus-wiring became a separate step. Latency/refresh timing
+is proven via cycle-count deltas against a zero-latency/refresh-disabled
+baseline instance, not a hardcoded absolute cycle count (hand-tracing
+`taxi_axi_ram`'s exact registered timing by inspection is error-prone; the
+delta approach is immune to any error in the absolute base number).
 
 Links: project memory `bus-protocol-decision` (the original taxi-vs-iverilog
 decision history), `verification/riscv-arch-test/`, `verification/riscv-formal/`

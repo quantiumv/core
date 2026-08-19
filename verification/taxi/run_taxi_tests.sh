@@ -8,11 +8,13 @@
 # taxi-touching testbench to the iverilog-based design/testbench regression
 # file lists; it will not compile there.
 #
-# Each testbench may have a companion <name>.f file listing the taxi AXI
-# source files it needs, one per line, paths relative to
-# third_party/taxi/src/axi/rtl/ (same flat-filename convention taxi's own
-# upstream .f files already use). A testbench with no .f file is assumed to
-# need no taxi sources of its own (e.g. a pure toolchain smoke test).
+# Each testbench may have a companion <name>.f file listing the source files
+# it needs, one per line, as REPO-ROOT-RELATIVE paths (not taxi-rtl-relative
+# flat filenames -- that was the original convention, changed once a .f file
+# needed to reference a project-owned RTL file living outside
+# third_party/taxi/src/axi/rtl/, e.g. verification/taxi/rtl/dram_model.sv).
+# A testbench with no .f file is assumed to need no extra sources of its own
+# (e.g. a pure toolchain smoke test).
 #
 # Usage (from WSL): verification/taxi/run_taxi_tests.sh
 set -u
@@ -53,7 +55,7 @@ for tb in "${tbs[@]}"; do
     if [ -f "$flist" ]; then
         while IFS= read -r f; do
             [ -z "$f" ] && continue
-            sources+=("$TAXI_AXI_RTL/$f")
+            sources+=("$REPO_ROOT/$f")
         done < "$flist"
     fi
 
