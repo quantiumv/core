@@ -63,6 +63,9 @@ module core_rv64_word_ops_tb;
         end
     endtask
 
+    logic halted = 1'b0;
+    always @(posedge clk) if (dut.trap_taken && dut.is_ebreak) halted <= 1'b1;
+
     initial begin
         #1; // run after wb4_sram's own time-0 init (zero-fill + $readmemh) -- see core_wb_tb.sv
 
@@ -102,10 +105,10 @@ module core_rv64_word_ops_tb;
         rst = 0;
 
         fork
-            wait (dut.halted === 1'b1);
+            wait (halted === 1'b1);
             begin
                 repeat (150) @(posedge clk);
-                $display("TIMEOUT: dut.halted never went high");
+                $display("TIMEOUT: EBREAK trap never fired");
                 $finish;
             end
         join_any

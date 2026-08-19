@@ -100,10 +100,10 @@
  *
  * Input ports:
  *  clk: Clock.
- *  rst: Synchronous reset (active high) -- resets pc, FSM state, and
- *       `halted`. Does NOT reset register/memory contents; the ISA
- *       doesn't require it, and real hardware doesn't guarantee it
- *       either (only the reset vector is architecturally defined).
+ *  rst: Synchronous reset (active high) -- resets pc and FSM state.
+ *       Does NOT reset register/memory contents; the ISA doesn't
+ *       require it, and real hardware doesn't guarantee it either
+ *       (only the reset vector is architecturally defined).
  *
  * Wishbone master port: standard CLASSIC-cycle signal names, written
  * from this module's (the master's) point of view -- `_o` drives the
@@ -286,7 +286,6 @@ module core (
      * csr_rdata/medeleg_w already use.
      */
     logic is_load, is_store;
-    logic halted;
     logic div_stall;
     logic is_amo_rmw;
     logic mem_load_misaligned, mem_store_misaligned;
@@ -413,25 +412,22 @@ module core (
      * near mem_load_misaligned/mem_store_misaligned below) turn these
      * error-commits into the correct trap via exc_code/trap_val.
      *
-     * `!halted` (2026-08-12): the PC-register comment below claims
-     * "state parks in S_FETCH forever [after halt]... so commit_now can
-     * never become true again" -- true on real hardware (wb_master_drive
-     * stops asserting wb_cyc_o/wb_stb_o once halted, so a well-behaved
-     * slave has no reason to ever ack again), but NOT actually enforced
-     * by this expression: wb_ack_i is just a bus input, and nothing here
-     * stops state from reaching S_EXEC again if something (a formal
-     * solver's free wb_ack_i, exploring exactly this "what if the bus
-     * violates protocol" case; a genuine hardware fault) asserts an
-     * unrequested ack post-halt. Explicit `!halted` here makes that
-     * comment's claim actually true rather than merely usually-true,
-     * closing a real (if narrow) gap a riscv-formal pc_fwd_ch0
-     * counterexample found: without it, a spurious post-halt ack could
+     * `!halted` (2026-08-12, removed 2026-08-20): a prior milestone added
+     * an explicit `!halted` term here to close a riscv-formal pc_fwd_ch0
+     * counterexample -- a spurious post-halt wb_ack_i could otherwise
      * produce a bogus extra rvfi_valid pulse with pc frozen but state
-     * still oscillating.
+     * still oscillating, since nothing structurally prevented state from
+     * reaching S_EXEC again once parked in S_FETCH forever. That whole
+     * scenario no longer exists as a concept now that EBREAK is a real
+     * trap (see is_ebreak's own arm in exc_code/trap_taken below): the
+     * core never parks in S_FETCH permanently anymore, so there is no
+     * "post-halt" state left to guard against. Confirmed, not assumed:
+     * pc_fwd_ch0 and pc_bwd_ch0 (the two checks that originally caught
+     * this counterexample) both re-run clean against this exact removal.
      */
-    wire commit_now = !halted && ((state == S_EXEC && !mem_phase_needed && !div_stall)
+    wire commit_now = (state == S_EXEC && !mem_phase_needed && !div_stall)
                     || (state == S_MEM && ((wb_ok && !is_amo_rmw) || wb_err_i))
-                    || (state == S_AMO_WRITE && wb_done));
+                    || (state == S_AMO_WRITE && wb_done);
 
     /*
      * C extension: fetch_hi_needed decides, on the SAME edge S_FETCH's
@@ -1108,7 +1104,7 @@ module core (
                                                            1'b0;
 
     /*
-     * Forward-declared here, same reason is_load/is_store/halted are
+     * Forward-declared here, same reason is_load/is_store are
      * (see the comment near the top of this file): csr_rdata is
      * referenced below in the operand muxes, textually before csr_file0
      * -- the instance that actually drives it -- is declared (csr_file0
@@ -1203,6 +1199,7 @@ module core (
      * arm would let the fault be silently swallowed as a harmless ADDI. */
     wire [3:0] exc_code = fetch_fault_q                         ? 4'd1  :
                            is_illegal_instr                     ? 4'd2  :
+                           is_ebreak                            ? 4'd3  :
                            (is_ecall && current_priv == PRIV_U) ? 4'd8  :
                            (is_ecall && current_priv == PRIV_S) ? 4'd9  :
                            (is_ecall && current_priv == PRIV_M) ? 4'd11 :
@@ -1212,7 +1209,7 @@ module core (
                            mem_store_access_fault               ? 4'd7  :
                                                                    4'd0; // don't-care, gated by trap_taken
 
-    assign trap_taken = commit_now && (fetch_fault_q || is_illegal_instr || is_ecall
+    assign trap_taken = commit_now && (fetch_fault_q || is_illegal_instr || is_ebreak || is_ecall
                                    || mem_load_misaligned || mem_store_misaligned
                                    || mem_load_access_fault || mem_store_access_fault);
     /* An M-mode trap never delegates, regardless of medeleg -- falls out
@@ -1534,7 +1531,12 @@ module core (
     // interrupt_taken/interrupt_to_s: forward-declared above -- csr_file0's
     // own i_trap_taken/i_trap_to_s need them before this section (which
     // itself needs csr_file0's own outputs) can exist.
-    assign interrupt_taken = !halted && commit_now_q && int_pending_and_enabled;
+    //
+    // No `!halted` guard here anymore (removed alongside halted's own
+    // removal below) -- there is no longer a permanent-freeze state to
+    // guard against post-EBREAK; a future Debug Module halt/resume
+    // milestone will reintroduce an analogous guard with real semantics.
+    assign interrupt_taken = commit_now_q && int_pending_and_enabled;
     assign interrupt_to_s  = interrupt_taken && mti_to_s;
 
     logic fetch_redirect_q;
@@ -1847,13 +1849,7 @@ module core (
         wb_sel_o  = 8'b0;
         case (state)
             S_FETCH: begin
-                /*
-                 * Once halted, never issue another fetch -- see the
-                 * halt-latch comment below for why parking here (rather
-                 * than, say, forcing state to hold) is sufficient to
-                 * freeze the whole core.
-                 */
-                if (!halted && !wb_done) begin
+                if (!wb_done) begin
                     wb_cyc_o  = 1'b1;
                     wb_stb_o  = 1'b1;
                     wb_addr_o = fetch_from_trap_vector ? {trap_vector[31:3], 3'b0} : fetch_addr;
@@ -1863,12 +1859,10 @@ module core (
             /*
              * C extension: the second dword of a crossing fetch --
              * reuses the exact same !wb_done gating discipline as
-             * every other arm here. Never halts mid-crossing (the
-             * !halted check mirrors S_FETCH's own, for the same reason:
-             * once halted, issue no further bus traffic at all).
+             * every other arm here.
              */
             S_FETCH_HI: begin
-                if (!halted && !wb_done) begin
+                if (!wb_done) begin
                     wb_cyc_o  = 1'b1;
                     wb_stb_o  = 1'b1;
                     wb_addr_o = fetch_addr_hi;
@@ -1981,36 +1975,31 @@ module core (
                                                  pc_plus_len;
 
     /* --------------------------------------------------------------- *
-     * PC register / halt latch
+     * PC register
      * --------------------------------------------------------------- */
 
     /*
-     * EBREAK latches `halted` and freezes pc -- the only piece of
-     * "extra" state in this design, beyond pc/state/instr_line_q. Both
-     * commit only on commit_now (EBREAK is never a load/store, so it
-     * always retires at the end of S_EXEC). pc is deliberately excluded
-     * from advancing on the SAME edge halted is set (`!is_ebreak` below)
-     * -- otherwise pc would jump past EBREAK on the very edge that's
-     * supposed to freeze it. After that edge, state parks in S_FETCH
-     * forever (the bus-driving block above stops issuing fetches once
-     * halted), so commit_now can never become true again and both
-     * registers stay frozen with no further gating needed.
+     * EBREAK is a real synchronous trap now (cause 3, Breakpoint -- see
+     * is_ebreak's own arm in exc_code/trap_taken above), so it commits
+     * exactly like any other trap: pc jumps to trap_vector via next_pc's
+     * own top-priority arm, mepc/mcause/mstatus update for real, and
+     * execution resumes from whatever mtvec points at. There is no
+     * freeze/halt special-case here anymore.
      *
-     * Testbenches watch `halted` via a hierarchical reference (e.g.
-     * dut.halted) to know when a test program has finished running,
-     * without guessing a cycle count.
+     * The `halted` register (a permanent one-way EBREAK freeze latch,
+     * removed here 2026-08-20) used to be what every testbench polled
+     * hierarchically (e.g. dut.halted) to know a test program had
+     * finished. Since EBREAK no longer parks the core, testbenches now
+     * detect completion by observing the one-shot `trap_taken &&
+     * is_ebreak` pulse directly and latching it locally (see
+     * testbench/halt_wait.sv's updated contract). A future Debug Module
+     * milestone will reintroduce real, resumable halt/resume state under
+     * a new name -- this is a clean removal, not a placeholder.
      */
     always_ff @(posedge clk) begin
         if (rst)
-            halted <= 1'b0;
-        else if (commit_now && is_ebreak)
-            halted <= 1'b1;
-    end
-
-    always_ff @(posedge clk) begin
-        if (rst)
             pc <= '0;
-        else if (commit_now && !is_ebreak)
+        else if (commit_now)
             pc <= next_pc;
         else if (interrupt_taken)
             pc <= trap_vector;

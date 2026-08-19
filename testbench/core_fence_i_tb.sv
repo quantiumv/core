@@ -50,7 +50,8 @@ module core_fence_i_tb;
     logic quiet_on_pass = 1'b0;
     `include "check_lib.sv"
 
-    wire halted = dut.core0.halted;
+    logic halted = 1'b0;
+    always @(posedge clk) if (dut.core0.trap_taken && dut.core0.is_ebreak) halted <= 1'b1;
     `include "halt_wait.sv"
 
     localparam int unsigned TARGET_ADDR = 32'h100; // line-aligned (default line size 32B)
@@ -138,7 +139,7 @@ module core_fence_i_tb;
         @(posedge clk); #1;
         rst = 0;
 
-        wait_halted_or_timeout(`TIMEOUT_CYCLES_SMALL, "dut.core0.halted never went high");
+        wait_halted_or_timeout(`TIMEOUT_CYCLES_SMALL, "EBREAK trap never fired");
 
         check("FENCE.I: sentinel untouched", dut.core0.regfile0.gp_registers[3], 64'd999);
         check("FENCE.I: resumed cleanly (no trap, no hang)", dut.core0.regfile0.gp_registers[4], 64'd111);
@@ -149,7 +150,7 @@ module core_fence_i_tb;
             "not a stale I$ hit serving the OLD one (111) -- the actual proof FENCE.I closes the gap"},
             dut.core0.regfile0.gp_registers[5], 64'd222);
 
-        check("core halted (ebreak reached)", {63'b0, dut.core0.halted}, 64'd1);
+        check("EBREAK trap fired", {63'b0, halted}, 64'd1);
 
         $display("");
         $display("core_fence_i_tb: %0d passed, %0d failed", pass_count, fail_count);

@@ -39,8 +39,28 @@ module soc_interrupt_tb;
     logic quiet_on_pass = 1'b0;
     `include "check_lib.sv"
 
-    wire halted = dut.core0.halted;
+    logic halted = 1'b0;
+    always @(posedge clk) if (dut.core0.trap_taken && dut.core0.is_ebreak) halted <= 1'b1;
     `include "halt_wait.sv"
+
+    /*
+     * mcause_q snapshot, taken on the SAME edge the terminal ebreak's own
+     * trap_taken first fires -- NOT read live at check() time. mtvec
+     * stays armed at interrupt_test.s's own m_trap_handler through
+     * crt0.s's trailing ebreak, which now really traps and bounces right
+     * back into it, corrupting mcause_q afterward (same class of bug as
+     * core_priv_tb.sv/core_priv_toolchain_tb.sv/core_priv_u_ecall_tb.sv --
+     * see their own comments). mcause_q's own always_ff writes
+     * non-blocking on i_trap_taken, so reading it on this identical edge
+     * sees the PRE-edge value -- the real interrupt's own cause, before
+     * this ebreak's own entry overwrites it.
+     */
+    logic [63:0] final_mcause_snap;
+    logic final_state_captured = 1'b0;
+    always @(posedge clk) if (!final_state_captured && dut.core0.trap_taken && dut.core0.is_ebreak) begin
+        final_state_captured <= 1'b1;
+        final_mcause_snap <= dut.core0.csr_file0.mcause_q;
+    end
 
     localparam int TIMEOUT_CYCLES_INTERRUPT = 5000;
 
@@ -51,7 +71,7 @@ module soc_interrupt_tb;
         @(posedge clk); #1;
         rst = 0;
 
-        wait_halted_or_timeout(TIMEOUT_CYCLES_INTERRUPT, "dut.core0.halted never went high -- is firmware/interrupt_test.hex built?");
+        wait_halted_or_timeout(TIMEOUT_CYCLES_INTERRUPT, "EBREAK trap never fired -- is firmware/interrupt_test.hex built?");
 
         /*
          * s1 (x9): marker set inside m_trap_handler -- proves the real
@@ -70,7 +90,8 @@ module soc_interrupt_tb;
          * cause value 7) -- confirms the real interrupt_taken path (not
          * some other trap) is what actually redirected control.
          */
-        check("mcause == standard machine-timer-interrupt encoding", dut.core0.csr_file0.mcause_q, 64'h8000_0000_0000_0007);
+        check("final-state sample was captured (sanity on the monitor itself)", {63'b0, final_state_captured}, 64'd1);
+        check("mcause == standard machine-timer-interrupt encoding", final_mcause_snap, 64'h8000_0000_0000_0007);
 
         /*
          * Execution genuinely resumed after the handler: interrupt_test.s
@@ -81,7 +102,7 @@ module soc_interrupt_tb;
          * (whether the loop needed 0 more iterations or several before
          * its own exit condition/bound was met).
          */
-        check("core halted (ebreak reached, real forward progress after the handler)", {63'b0, dut.core0.halted}, 64'd1);
+        check("EBREAK trap fired (real forward progress after the handler)", {63'b0, halted}, 64'd1);
 
         /* Never bootstrapped away from M -- interrupt_test.s runs entirely in M-mode. */
         check("final current_priv == M", {62'b0, dut.core0.current_priv}, 64'(2'b11));

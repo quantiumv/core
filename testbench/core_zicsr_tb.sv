@@ -90,7 +90,8 @@ module core_zicsr_tb;
     logic quiet_on_pass = 1'b0;
     `include "check_lib.sv"
 
-    wire halted = dut.core0.halted;
+    logic halted = 1'b0;
+    always @(posedge clk) if (dut.core0.trap_taken && dut.core0.is_ebreak) halted <= 1'b1;
     `include "halt_wait.sv"
 
     /*
@@ -176,7 +177,7 @@ module core_zicsr_tb;
         @(posedge clk); #1;
         rst = 0;
 
-        wait_halted_or_timeout(`TIMEOUT_CYCLES_SMALL, "dut.halted never went high");
+        wait_halted_or_timeout(`TIMEOUT_CYCLES_SMALL, "EBREAK trap never fired");
 
         check("x1 (csrrwi rd, old mhartid before write-attempt)", dut.core0.regfile0.gp_registers[1], 64'd0);
         check("x2 (csrrw rd, mhartid after write-attempt -- confirms it didn't land)",
@@ -219,7 +220,7 @@ module core_zicsr_tb;
         check("minstret final storage -- full program length, including ebreak's own retirement",
               dut.core0.csr_file0.minstret_q, 64'd18);
 
-        check("core halted (ebreak reached)", {63'b0, dut.core0.halted}, 64'd1);
+        check("EBREAK trap fired", {63'b0, halted}, 64'd1);
 
         $display("");
         $display("core_zicsr_tb: %0d passed, %0d failed", pass_count, fail_count);

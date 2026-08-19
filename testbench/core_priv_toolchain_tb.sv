@@ -76,8 +76,38 @@ module core_priv_toolchain_tb;
     logic quiet_on_pass = 1'b0;
     `include "check_lib.sv"
 
-    wire halted = dut.halted;
+    logic halted = 1'b0;
+    always @(posedge clk) if (dut.trap_taken && dut.is_ebreak) halted <= 1'b1;
     `include "halt_wait.sv"
+
+    /*
+     * mcause_q/current_priv snapshot, taken on the SAME edge the
+     * terminal ebreak's own trap_taken first fires -- NOT read live at
+     * check() time. mtvec is never repointed away from M_TRAP_HANDLER by
+     * priv_test.s, so crt0.s's own trailing ebreak (a real trap now)
+     * bounces right back into it, corrupting mcause_q/current_priv long
+     * after this test's own real assertions already happened (same class
+     * of bug found and fixed in core_priv_tb.sv/core_c_illegal_trap_tb.sv
+     * -- see their own comments for the full story).
+     *
+     * This capture technique needs no known instruction address (unlike
+     * those hand-encoded testbenches): mcause_q's own always_ff writes
+     * `mcause_q <= i_trap_cause` on i_trap_taken, non-blocking -- so a
+     * SEPARATE always block reading mcause_q on that identical edge
+     * (trap_taken && is_ebreak, this ebreak's own commit) sees the
+     * PRE-edge value, i.e. whatever mcause_q held from the last real
+     * event BEFORE this ebreak's own trap-entry overwrites it -- exactly
+     * the value this test wants, for free, regardless of where in the
+     * program that terminal ebreak lives.
+     */
+    logic [63:0] final_mcause_snap;
+    logic [1:0]  final_priv_snap;
+    logic final_state_captured = 1'b0;
+    always @(posedge clk) if (!final_state_captured && dut.trap_taken && dut.is_ebreak) begin
+        final_state_captured <= 1'b1;
+        final_mcause_snap <= dut.csr_file0.mcause_q;
+        final_priv_snap   <= dut.current_priv;
+    end
 
     initial begin
         #1; // see header comment: run after wb4_sram's own time-0 init of crt0.hex
@@ -86,7 +116,7 @@ module core_priv_toolchain_tb;
         @(posedge clk); #1;
         rst = 0;
 
-        wait_halted_or_timeout(`TIMEOUT_CYCLES_SMALL, "dut.halted never went high -- is firmware/priv_test.hex built?");
+        wait_halted_or_timeout(`TIMEOUT_CYCLES_SMALL, "EBREAK trap never fired -- is firmware/priv_test.hex built?");
 
         /*
          * Expected values, mechanically identical to the derivation
@@ -114,13 +144,14 @@ module core_priv_toolchain_tb;
          * trap_to_s correctly routed phase 3's cause into scause_q
          * (already checked above as s4) and nowhere near mcause_q.
          */
-        check("mcause_q still 11 post-halt (untouched by the later S-target trap)", dut.csr_file0.mcause_q, 64'd11);
+        check("final-state sample was captured (sanity on the monitor itself)", {63'b0, final_state_captured}, 64'd1);
+        check("mcause_q still 11 post-halt (untouched by the later S-target trap)", final_mcause_snap, 64'd11);
         check("scause_q final value (register-independent confirmation)", dut.csr_file0.scause_q, 64'd9);
 
         /* Final privilege level: phase 3's delegated ECALL trapped from S and sret'd back to S (SPP captured S at entry) -- never left S after phase 2's bootstrap. */
-        check("final current_priv == S", {62'b0, dut.current_priv}, 64'(2'b01));
+        check("final current_priv == S", {62'b0, final_priv_snap}, 64'(2'b01));
 
-        check("core halted (ebreak reached)", {63'b0, dut.halted}, 64'd1);
+        check("EBREAK trap fired", {63'b0, halted}, 64'd1);
 
         $display("");
         $display("core_priv_toolchain_tb: %0d passed, %0d failed", pass_count, fail_count);

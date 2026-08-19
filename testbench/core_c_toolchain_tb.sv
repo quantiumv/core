@@ -85,7 +85,8 @@ module core_c_toolchain_tb;
     logic quiet_on_pass = 1'b0;
     `include "check_lib.sv"
 
-    wire halted = dut.halted;
+    logic halted = 1'b0;
+    always @(posedge clk) if (dut.trap_taken && dut.is_ebreak) halted <= 1'b1;
     `include "halt_wait.sv"
 
     initial begin
@@ -95,7 +96,7 @@ module core_c_toolchain_tb;
         @(posedge clk); #1;
         rst = 0;
 
-        wait_halted_or_timeout(`TIMEOUT_CYCLES_LARGE, "dut.halted never went high -- is firmware/c_test.hex built?");
+        wait_halted_or_timeout(`TIMEOUT_CYCLES_LARGE, "EBREAK trap never fired -- is firmware/c_test.hex built?");
 
         /*
          * Expected values -- see firmware/c_test.s's inline comments for
@@ -109,7 +110,7 @@ module core_c_toolchain_tb;
         check("loop iteration count (s4)",         dut.regfile0.gp_registers[20], 64'd5);
         check("post-return arithmetic (s5)",       dut.regfile0.gp_registers[21], 64'd93); // -7 + 100
 
-        check("core halted (ebreak reached)", {63'b0, dut.halted}, 64'd1);
+        check("EBREAK trap fired", {63'b0, halted}, 64'd1);
 
         $display("");
         $display("core_c_toolchain_tb: %0d passed, %0d failed", pass_count, fail_count);

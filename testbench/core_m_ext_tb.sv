@@ -52,7 +52,8 @@ module core_m_ext_tb;
     logic quiet_on_pass = 1'b0;
     `include "check_lib.sv"
 
-    wire halted = dut.core0.halted;
+    logic halted = 1'b0;
+    always @(posedge clk) if (dut.core0.trap_taken && dut.core0.is_ebreak) halted <= 1'b1;
     `include "halt_wait.sv"
 
     /*
@@ -183,7 +184,7 @@ module core_m_ext_tb;
         @(posedge clk); #1;
         rst = 0;
 
-        wait_halted_or_timeout(`TIMEOUT_CYCLES_LARGE, "dut.core0.halted never went high");
+        wait_halted_or_timeout(`TIMEOUT_CYCLES_LARGE, "EBREAK trap never fired");
 
         check("MUL",    dut.core0.regfile0.gp_registers[1],  64'hFFFFFFFFFFFFFFFE);
         check("MULH",   dut.core0.regfile0.gp_registers[2],  64'hFFFFFFFFFFFFFFFF);
@@ -198,7 +199,7 @@ module core_m_ext_tb;
         check("DIVUW",  dut.core0.regfile0.gp_registers[11], 64'h0000000055555555);
         check("REMW",   dut.core0.regfile0.gp_registers[12], 64'hFFFFFFFFFFFFFFFF);
         check("REMUW",  dut.core0.regfile0.gp_registers[13], 64'd2);
-        check("core halted (ebreak reached)", {63'b0, dut.core0.halted}, 64'd1);
+        check("EBREAK trap fired", {63'b0, halted}, 64'd1);
 
         check("DIV genuinely held S_EXEC for many cycles (real multi-cycle divide, not combinational)",
               {56'b0, (div_exec_cycle_count_final > 8'd8) ? 8'd1 : 8'd0}, 64'd1);

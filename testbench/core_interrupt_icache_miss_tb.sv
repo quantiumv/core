@@ -80,6 +80,9 @@ module core_interrupt_icache_miss_tb;
         if (dut.core0.fetch_redirect_q) fetch_redirect_high_cycles <= fetch_redirect_high_cycles + 1;
     end
 
+    logic halted = 1'b0;
+    always @(posedge clk) if (dut.core0.trap_taken && dut.core0.is_ebreak) halted <= 1'b1;
+
     initial begin
         #1; // run after wb4_sram's own time-0 crt0.hex init
 
@@ -104,10 +107,10 @@ module core_interrupt_icache_miss_tb;
         rst = 0;
 
         fork
-            wait (dut.core0.halted === 1'b1);
+            wait (halted === 1'b1);
             begin
                 repeat (TIMEOUT_CYCLES) @(posedge clk);
-                $display("TIMEOUT: dut.core0.halted never went high");
+                $display("TIMEOUT: EBREAK trap never fired");
                 $finish;
             end
         join_any
@@ -122,7 +125,7 @@ module core_interrupt_icache_miss_tb;
         // its own behavior (stays high the whole refill) is correct, not that removing
         // it would break anything today.
         check("fetch_redirect_q held across a genuine multi-cycle I$ refill (>2 cycles)", {63'b0, (fetch_redirect_high_cycles > 2)}, 64'd1);
-        check("halted", {63'b0, dut.core0.halted}, 64'd1);
+        check("EBREAK trap fired", {63'b0, halted}, 64'd1);
 
         $display("");
         $display("core_interrupt_icache_miss_tb: %0d passed, %0d failed", pass_count, fail_count);

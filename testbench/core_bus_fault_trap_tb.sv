@@ -60,7 +60,8 @@ module core_bus_fault_trap_tb;
     logic quiet_on_pass = 1'b0;
     `include "check_lib.sv"
 
-    wire halted = dut.core0.halted;
+    logic halted = 1'b0;
+    always @(posedge clk) if (dut.core0.trap_taken && dut.core0.is_ebreak) halted <= 1'b1;
     `include "halt_wait.sv"
 
     /*
@@ -276,7 +277,7 @@ module core_bus_fault_trap_tb;
         @(posedge clk); #1;
         rst = 0;
 
-        wait_halted_or_timeout(`TIMEOUT_CYCLES_SMALL, "dut.core0.halted never went high");
+        wait_halted_or_timeout(`TIMEOUT_CYCLES_SMALL, "EBREAK trap never fired");
 
         // ---- Test A: instruction fetch fault ----
         check("A: mcause == 1 (instruction access fault)", dut.core0.regfile0.gp_registers[8], 64'd1);
@@ -316,7 +317,7 @@ module core_bus_fault_trap_tb;
         check("F: S_AMO_WRITE never entered (read-phase fault must not chase a bogus write)",
             {63'b0, amo_write_entered}, 64'd0);
 
-        check("core halted (ebreak reached)", {63'b0, dut.core0.halted}, 64'd1);
+        check("EBREAK trap fired", {63'b0, halted}, 64'd1);
 
         $display("");
         $display("core_bus_fault_trap_tb: %0d passed, %0d failed", pass_count, fail_count);
