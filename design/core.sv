@@ -1173,6 +1173,25 @@ module core (
     // captures exactly that set) -- csrrw/csrrwi always attempt a write
     // regardless of rd, per spec. bits[11:10]=='11' marks a read-only CSR.
     wire csr_readonly_violation = is_csr && !csr_write_suppress && (imm_2[11:10] == 2'b11);
+    /*
+     * Debug-mode CSRs (dcsr/dpc/dscratch0/dscratch1, 0x7B0-0x7B3) are a
+     * genuinely separate check from csr_priv_violation above, not an
+     * extension of it: that check is a magnitude comparison against
+     * current_priv (imm_2[9:8] > current_priv), and these four addresses
+     * encode imm_2[9:8]==2'b11 -- the same encoding as an ordinary
+     * M-mode-only CSR -- so M-mode code would sail straight through
+     * csr_priv_violation untouched. Per the RISC-V Debug spec, Debug
+     * CSRs must only be accessible from Debug Mode itself, never merely
+     * M-mode, hence a dedicated in_debug_mode gate instead of a
+     * privilege-level comparison. in_debug_mode is a forward reference --
+     * tied 0 here until Milestone 4 builds the real halt/resume FSM this
+     * state belongs to; until then every access from anywhere traps,
+     * which is spec-correct (this core has no Debug Mode to legally be
+     * in yet).
+     */
+    wire in_debug_mode = 1'b0;
+    wire is_debug_csr_addr = is_csr && (imm_2[11:2] == 10'h1EC);
+    wire debug_csr_violation = is_debug_csr_addr && !in_debug_mode;
     wire mret_priv_violation = is_mret && (current_priv != PRIV_M);
     wire sret_priv_violation = is_sret && ((current_priv == PRIV_U)
                               || (current_priv == PRIV_S && mstatus_tsr_w));
@@ -1186,6 +1205,7 @@ module core (
      * alone.
      */
     wire is_illegal_instr = is_invalid_instr || csr_priv_violation || csr_readonly_violation
+                          || debug_csr_violation
                           || mret_priv_violation || sret_priv_violation
                           || (is_compressed && c_expand_illegal);
     wire is_ecall = (decoded_instruction == `INSTR_CODE(ECALL));
@@ -1512,7 +1532,21 @@ module core (
         .o_mie(mie_w),
         .o_mideleg(mideleg_w),
         .o_mstatus_mie(mstatus_mie_w),
-        .o_mstatus_sie(mstatus_sie_w)
+        .o_mstatus_sie(mstatus_sie_w),
+
+        /*
+         * Milestone 3 (Debug CSRs) added dcsr/dpc storage in csr_file.sv,
+         * but this milestone's own core.sv work stops at trapping illegal
+         * access to them (see debug_csr_violation above) -- no halt/
+         * resume FSM exists yet to actually consume a live dpc/dcsr
+         * value. Explicitly, deliberately unconnected (not omitted) so
+         * lint tools see this as intentional, not a forgotten
+         * connection -- same precedent soc.sv's own dram_* ports use;
+         * Milestone 4's halt/resume FSM is the real consumer.
+         */
+        /* verilator lint_off PINCONNECTEMPTY */
+        .o_dcsr(), .o_dpc()
+        /* verilator lint_on PINCONNECTEMPTY */
 `ifdef RISCV_FORMAL
         ,
         .o_mcause(mcause_w),

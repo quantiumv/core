@@ -47,6 +47,10 @@ module csr_file_tb;
     logic                          mret_taken;
     logic                          sret_taken;
 
+    /* Milestone 3: Debug-mode CSR entry side channel. */
+    logic                          debug_entry;
+    logic [2:0]                    debug_cause;
+
     logic [(`WORD_SIZE - 1):0]     mtvec_w, stvec_w, mepc_w, sepc_w, medeleg_w;
     logic [1:0]                    mstatus_mpp_w;
     logic                          mstatus_spp_w;
@@ -57,6 +61,9 @@ module csr_file_tb;
      * and interrupt delegation are different CSRs, not aliases. */
     logic [(`WORD_SIZE - 1):0]     mip_w, mie_w, mideleg_w;
     logic                          mstatus_mie_w, mstatus_sie_w;
+
+    /* Milestone 3: Debug CSR control-plane exports. */
+    logic [(`WORD_SIZE - 1):0]     dcsr_w, dpc_w;
 
     csr_file dut (
         .i_clk(clk),
@@ -77,6 +84,9 @@ module csr_file_tb;
         .i_mret_taken(mret_taken),
         .i_sret_taken(sret_taken),
 
+        .i_debug_entry(debug_entry),
+        .i_debug_cause(debug_cause),
+
         .o_mtvec(mtvec_w),
         .o_stvec(stvec_w),
         .o_mepc(mepc_w),
@@ -90,7 +100,10 @@ module csr_file_tb;
         .o_mie(mie_w),
         .o_mideleg(mideleg_w),
         .o_mstatus_mie(mstatus_mie_w),
-        .o_mstatus_sie(mstatus_sie_w)
+        .o_mstatus_sie(mstatus_sie_w),
+
+        .o_dcsr(dcsr_w),
+        .o_dpc(dpc_w)
     );
 
     /* Local mirrors of csr_file.sv's address map -- this testbench drives
@@ -132,6 +145,15 @@ module csr_file_tb;
     localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_MCAUSE     = 12'h342;
     localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_MTVAL      = 12'h343;
     localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_MIP        = 12'h344;
+
+    /* Milestone 3: Debug-mode CSR addresses, independently transcribed. */
+    localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_DCSR      = 12'h7B0;
+    localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_DPC       = 12'h7B1;
+    localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_DSCRATCH0 = 12'h7B2;
+    localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_DSCRATCH1 = 12'h7B3;
+    localparam int DCSR_PRV_LSB=0, DCSR_PRV_MSB=1, DCSR_CAUSE_LSB=6, DCSR_CAUSE_MSB=8;
+    localparam int DCSR_EBREAKM_BIT=15, DCSR_STEPIE_BIT=11;
+    localparam logic [(`WORD_SIZE-1):0] DCSR_XDEBUGVER_FIXED = (`WORD_SIZE'(4) << 28);
 
     /* mstatus bit positions, independently transcribed from the spec. */
     localparam int SIE_BIT=1, MIE_BIT=3, SPIE_BIT=5, MPIE_BIT=7, SPP_BIT=8;
@@ -189,6 +211,7 @@ module csr_file_tb;
         csr_addr = 0; csr_we = 0; csr_wdata = 0; instr_retired = 0;
         current_priv = 0; mtip = 0; trap_taken = 0; trap_cause = 0; trap_val = 0; trap_pc = 0; trap_to_s = 0;
         mret_taken = 0; sret_taken = 0;
+        debug_entry = 0; debug_cause = 0;
 
         @(posedge clk); #1;
         @(posedge clk); #1;
@@ -648,6 +671,119 @@ module csr_file_tb;
         check("sip-derived write-arm masks bit 7 out of mip_q storage itself",
               dut.mip_q[7], 1'b0);
         write_csr(CSR_ADDR_MIDELEG, `WORD_SIZE'(0));  // clean up
+
+        /*
+         * 21. Debug-mode CSR entry (Milestone 3): drive the side channel
+         * directly (no core.sv involved, i_debug_entry/i_debug_cause are
+         * unconnected from core.sv's own instantiation this milestone --
+         * this file is the sole standalone proof this logic is correct
+         * at all). Confirms dcsr's cause/prv fields update atomically on
+         * entry while every other software-set field (ebreakm/stepie
+         * here, standing in for the whole "everything else" class)
+         * persists untouched -- and that dpc captures i_trap_pc, same
+         * reuse-not-a-new-port precedent mepc/sepc already established
+         * for trap-entry.
+         */
+        write_csr(CSR_ADDR_DCSR, (`WORD_SIZE'(1) << DCSR_EBREAKM_BIT) | (`WORD_SIZE'(1) << DCSR_STEPIE_BIT));
+        read_csr(CSR_ADDR_DCSR, rdata);
+        check("dcsr pre-entry: ebreakm/stepie stick, xdebugver reads 4, cause/prv still 0",
+              rdata,
+              (`WORD_SIZE'(1) << DCSR_EBREAKM_BIT) | (`WORD_SIZE'(1) << DCSR_STEPIE_BIT) | DCSR_XDEBUGVER_FIXED);
+
+        @(negedge clk);
+        current_priv = 2'b01;  // S -- the mode debug entry is taken FROM
+        debug_entry = 1'b1; debug_cause = 3'd1;  // 1 = ebreak, per spec
+        trap_pc = 64'h0000_0000_0000_2000;
+        @(posedge clk); #1;
+        debug_entry = 1'b0;
+
+        read_csr(CSR_ADDR_DCSR, rdata);
+        check("dcsr post-entry: cause<-1, prv<-S(01), ebreakm/stepie/xdebugver untouched",
+              rdata,
+              (`WORD_SIZE'(1) << DCSR_EBREAKM_BIT) | (`WORD_SIZE'(1) << DCSR_STEPIE_BIT) | DCSR_XDEBUGVER_FIXED
+              | (`WORD_SIZE'(1) << DCSR_CAUSE_LSB) | (`WORD_SIZE'(2'b01) << DCSR_PRV_LSB));
+        check("o_dcsr output agrees with the CSR readback", dcsr_w, rdata);
+
+        read_csr(CSR_ADDR_DPC, rdata);
+        check("dpc captured i_trap_pc on debug entry", rdata, 64'h0000_0000_0000_2000);
+        check("o_dpc output agrees with the CSR readback", dpc_w, rdata);
+
+        /*
+         * A second entry, with DIFFERENT cause/prv values, distinguishes
+         * a correct overwrite from an accidental accumulate/OR bug in
+         * the hardware-entry arm -- the first entry above went 0->1
+         * for both fields, which an OR-accumulate bug can't be told
+         * apart from a plain assign. Picked so overwrite and OR-
+         * accumulate produce DIFFERENT results in both fields: cause
+         * 3'd1 (001) then 3'd2 (010) -- OR gives 011(3), assign gives
+         * 010(2); prv 2'b01 (S) then 2'b00 (U) -- OR leaves it stuck at
+         * 01(S), assign correctly drops to 00(U).
+         */
+        @(negedge clk);
+        current_priv = 2'b00;  // U
+        debug_entry = 1'b1; debug_cause = 3'd2;
+        trap_pc = 64'h0000_0000_0000_3000;
+        @(posedge clk); #1;
+        debug_entry = 1'b0;
+
+        read_csr(CSR_ADDR_DCSR, rdata);
+        check("dcsr second entry: cause freshly overwritten to 2 (not OR-accumulated to 3)",
+              rdata[DCSR_CAUSE_MSB:DCSR_CAUSE_LSB], 3'd2);
+        check("dcsr second entry: prv freshly overwritten to U(00) (not OR-stuck at S(01))",
+              {62'b0, rdata[DCSR_PRV_MSB:DCSR_PRV_LSB]}, 64'd0);
+        check("dcsr second entry: ebreakm still set", {63'b0, rdata[DCSR_EBREAKM_BIT]}, 64'd1);
+        check("dcsr second entry: stepie still set", {63'b0, rdata[DCSR_STEPIE_BIT]}, 64'd1);
+        check("dcsr second entry: xdebugver still reads 4",
+              rdata & (`WORD_SIZE'(4'hF) << 28), DCSR_XDEBUGVER_FIXED);
+        read_csr(CSR_ADDR_DPC, rdata);
+        check("dpc re-captured i_trap_pc on the second entry too", rdata, 64'h0000_0000_0000_3000);
+
+        /*
+         * Simultaneous i_debug_entry and a same-cycle software write to
+         * DCSR: the if/else-if priority chain in csr_file.sv means
+         * debug_entry must win outright, not merge with the write.
+         * Driven manually (not via write_csr(), which runs its own
+         * separate negedge/posedge cycle) so both land on the exact
+         * same clock edge.
+         */
+        @(negedge clk);
+        current_priv = 2'b01;  // S
+        debug_entry = 1'b1; debug_cause = 3'd5;
+        trap_pc = 64'h0000_0000_0000_4000;
+        csr_addr = CSR_ADDR_DCSR; csr_wdata = {`WORD_SIZE{1'b1}}; csr_we = 1'b1;
+        @(posedge clk); #1;
+        debug_entry = 1'b0; csr_we = 1'b0;
+
+        read_csr(CSR_ADDR_DCSR, rdata);
+        check("simultaneous i_debug_entry + software write: debug_entry wins outright (cause<-5)",
+              rdata[DCSR_CAUSE_MSB:DCSR_CAUSE_LSB], 3'd5);
+        check("simultaneous i_debug_entry + software write: debug_entry wins outright (prv<-S(01))",
+              {62'b0, rdata[DCSR_PRV_MSB:DCSR_PRV_LSB]}, 64'd1);
+
+        /* xdebugver is WARL-fixed: an all-1s software write must not stick. */
+        write_csr(CSR_ADDR_DCSR, {`WORD_SIZE{1'b1}});
+        read_csr(CSR_ADDR_DCSR, rdata);
+        check("dcsr xdebugver field ignores an all-1s software write, still reads 4",
+              rdata & (`WORD_SIZE'(4'hF) << 28), DCSR_XDEBUGVER_FIXED);
+        check("dcsr bit 27 (just below xdebugver) keeps the all-1s write -- mask isn't too wide",
+              {63'b0, dut.dcsr_q[27]}, 64'd1);
+        check("dcsr bit 32 (just above xdebugver) keeps the all-1s write -- mask isn't too wide",
+              {63'b0, dut.dcsr_q[32]}, 64'd1);
+
+        /* dpc is WARL like mepc/sepc: bit 0 always reads 0. */
+        write_csr(CSR_ADDR_DPC, 64'h0000_0000_0000_1001);
+        read_csr(CSR_ADDR_DPC, rdata);
+        check("dpc write is bit-0 masked (WARL), same as mepc/sepc", rdata, 64'h0000_0000_0000_1000);
+
+        /* dscratch0/dscratch1: plain full read/write round trip. */
+        write_csr(CSR_ADDR_DSCRATCH0, 64'hCAFE_F00D_0000_0001);
+        read_csr(CSR_ADDR_DSCRATCH0, rdata);
+        check("dscratch0 read/write round trip", rdata, 64'hCAFE_F00D_0000_0001);
+        write_csr(CSR_ADDR_DSCRATCH1, 64'hCAFE_F00D_0000_0002);
+        read_csr(CSR_ADDR_DSCRATCH1, rdata);
+        check("dscratch1 read/write round trip", rdata, 64'hCAFE_F00D_0000_0002);
+        read_csr(CSR_ADDR_DSCRATCH0, rdata);
+        check("dscratch0 unaffected by dscratch1's write", rdata, 64'hCAFE_F00D_0000_0001);
 
         $display("");
         $display("csr_file_tb: %0d passed, %0d failed", pass_count, fail_count);

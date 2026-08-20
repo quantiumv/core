@@ -89,6 +89,12 @@
  *  i_mret_taken/i_sret_taken: same side-channel shape, for the trap-
  *    RETURN half of mstatus_q's four possible writers (see its own
  *    always_ff below).
+ *  i_debug_entry/i_debug_cause: Milestone 3's own event pulse + data,
+ *    same shape as the trap-entry side channel above but for Debug-Mode
+ *    entry (dcsr.cause/dcsr.prv, dpc). Defaults to 1'b0/3'b0 -- no
+ *    Debug-Mode halt/resume FSM exists in core.sv yet (Milestone 4), so
+ *    core.sv's own instantiation leaves these unconnected for now,
+ *    mirroring i_mtip's identical default-and-defer precedent above.
  *
  * Output ports:
  *  o_csr_rdata: Data read from the CSR at i_csr_addr, combinationally.
@@ -107,6 +113,11 @@
  *    plain mie_q/mideleg_q storage. o_mstatus_mie/o_mstatus_sie are
  *    single-bit mstatus taps, same precedent as o_mstatus_spp/o_mstatus_tsr
  *    above.
+ *  o_dcsr/o_dpc: control-plane exports for Milestone 4's halt/resume FSM
+ *    (unused/unconnected until then, same deferred-consumer precedent
+ *    o_mip/etc. above established for Milestone 6). o_dcsr already
+ *    overlays the WARL-fixed xdebugver field, same "never let the raw
+ *    register leak into a read path" requirement o_mip has for mip_q.
  */
 module csr_file (
     input  logic i_clk,
@@ -128,6 +139,9 @@ module csr_file (
     input  logic                          i_mret_taken,
     input  logic                          i_sret_taken,
 
+    input  logic                          i_debug_entry = 1'b0,
+    input  logic [2:0]                    i_debug_cause = 3'b0,
+
     output logic [(`WORD_SIZE - 1):0]     o_mtvec,
     output logic [(`WORD_SIZE - 1):0]     o_stvec,
     output logic [(`WORD_SIZE - 1):0]     o_mepc,
@@ -141,7 +155,10 @@ module csr_file (
     output logic [(`WORD_SIZE - 1):0]     o_mie,
     output logic [(`WORD_SIZE - 1):0]     o_mideleg,
     output logic                          o_mstatus_mie,
-    output logic                          o_mstatus_sie
+    output logic                          o_mstatus_sie,
+
+    output logic [(`WORD_SIZE - 1):0]     o_dcsr,
+    output logic [(`WORD_SIZE - 1):0]     o_dpc
 `ifdef RISCV_FORMAL
     /*
      * mcause/scause: no real core.sv control logic needs these today (unlike
@@ -206,6 +223,24 @@ module csr_file (
     localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_MCAUSE     = 12'h342;
     localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_MTVAL      = 12'h343;
     localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_MIP        = 12'h344;
+
+    /*
+     * Debug-mode CSRs (Milestone 3 of the EBREAK/JTAG staged plan). Real
+     * spec addresses -- confirmed free of collision with anything above.
+     * Only meaningfully accessible from Debug Mode; core.sv is
+     * responsible for trapping any access attempted outside it (see
+     * design/core.sv's debug_csr_violation, a check separate from
+     * csr_priv_violation above -- these four addresses encode
+     * imm_2[9:8]==2'b11, the same bit pattern as an ordinary M-mode-only
+     * CSR, so the existing magnitude-comparison privilege check would
+     * let M-mode straight through). This module itself still does no
+     * address-based access control, same division of responsibility
+     * described in the module header.
+     */
+    localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_DCSR      = 12'h7B0;
+    localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_DPC       = 12'h7B1;
+    localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_DSCRATCH0 = 12'h7B2;
+    localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_DSCRATCH1 = 12'h7B3;
 
     /*
      * Read-only CSRs with no backing storage at all -- fixed values
@@ -564,6 +599,68 @@ module csr_file (
         end
     end
 
+    /*
+     * Debug-mode CSRs (Milestone 3 of the EBREAK/JTAG staged plan). No
+     * Debug-Mode halt/resume FSM exists in core.sv yet (Milestone 4) --
+     * i_debug_entry stays permanently 0 from core.sv's own instantiation
+     * until then, so dcsr_q/dpc_q never actually capture anything outside
+     * a testbench driving the side channel directly. Real storage is
+     * built now anyway, same "prove the shape before the real consumer
+     * exists" precedent satp_q already established for Sv39.
+     *
+     * dpc_q mirrors mepc_q's own reset -> hardware-event -> ordinary-
+     * write priority chain and its bit-0 WARL mask exactly (same
+     * instruction-alignment reasoning; i_trap_pc is reused as-is, not a
+     * new port -- core.sv already drives it unconditionally every
+     * cycle).
+     */
+    logic [(`WORD_SIZE - 1):0] dpc_q;
+    always_ff @(posedge i_clk) begin
+        if (i_rst) dpc_q <= '0;
+        else if (i_debug_entry) dpc_q <= i_trap_pc;
+        else if (i_csr_we && (i_csr_addr == CSR_ADDR_DPC)) dpc_q <= {i_csr_wdata[(`WORD_SIZE - 1):1], 1'b0};
+    end
+
+    /*
+     * dcsr_q: hardware entry only ever touches cause[8:6]/prv[1:0] (per
+     * spec) -- everything else (ebreakm/s/u/stepie/step/etc.) persists
+     * across entry, ordinary-CSR-writable only, same partial-bit-range
+     * nonblocking-assignment idiom mstatus_q's own trap-entry arm already
+     * uses above for MPP/SPP. xdebugver[31:28] is WARL-fixed at 4, same
+     * "no storage bit, OR'd in at read-mux time" treatment as
+     * MSTATUS_UXL_FIXED -- the FULL field is masked out of storage on
+     * every software write (not just the bits set in the fixed value
+     * itself), so the OR at read time is always correct regardless of
+     * what software attempts to write there.
+     */
+    localparam logic [(`WORD_SIZE - 1):0] DCSR_XDEBUGVER_MASK  = (`WORD_SIZE'(4'hF) << 28);
+    localparam logic [(`WORD_SIZE - 1):0] DCSR_XDEBUGVER_FIXED = (`WORD_SIZE'(4)    << 28);
+
+    logic [(`WORD_SIZE - 1):0] dcsr_q;
+    always_ff @(posedge i_clk) begin
+        if (i_rst) begin
+            dcsr_q <= '0;
+        end else if (i_debug_entry) begin
+            dcsr_q[8:6] <= i_debug_cause;
+            dcsr_q[1:0] <= i_current_priv;
+        end else if (i_csr_we && (i_csr_addr == CSR_ADDR_DCSR)) begin
+            dcsr_q <= i_csr_wdata & ~DCSR_XDEBUGVER_MASK;
+        end
+    end
+
+    /* dscratch0/dscratch1: plain full read/write, zero side effects --
+     * same "vanilla CSR" shape as mscratch_q above, Debug-Mode program-
+     * buffer code's own scratch space once one exists. */
+    logic [(`WORD_SIZE - 1):0] dscratch0_q, dscratch1_q;
+    always_ff @(posedge i_clk) begin
+        if (i_rst) dscratch0_q <= '0;
+        else if (i_csr_we && (i_csr_addr == CSR_ADDR_DSCRATCH0)) dscratch0_q <= i_csr_wdata;
+    end
+    always_ff @(posedge i_clk) begin
+        if (i_rst) dscratch1_q <= '0;
+        else if (i_csr_we && (i_csr_addr == CSR_ADDR_DSCRATCH1)) dscratch1_q <= i_csr_wdata;
+    end
+
     /* mip_effective: MTIP (bit 7) is a live combinational function of
      * i_mtip, not stored state like every other mip bit. Every mip/sip
      * read arm and o_mip below must go through this wire -- raw mip_q
@@ -584,6 +681,8 @@ module csr_file (
     assign o_mideleg     = mideleg_q;
     assign o_mstatus_mie = mstatus_q[MSTATUS_MIE_BIT];
     assign o_mstatus_sie = mstatus_q[MSTATUS_SIE_BIT];
+    assign o_dcsr        = dcsr_q | DCSR_XDEBUGVER_FIXED;
+    assign o_dpc         = dpc_q;
 `ifdef RISCV_FORMAL
     assign o_mcause      = mcause_q;
     assign o_scause      = scause_q;
@@ -630,6 +729,12 @@ module csr_file (
             CSR_ADDR_MCAUSE:     o_csr_rdata = mcause_q;
             CSR_ADDR_MTVAL:      o_csr_rdata = mtval_q;
             CSR_ADDR_MIP:        o_csr_rdata = mip_effective;
+
+            /* Debug-mode CSRs (Milestone 3). */
+            CSR_ADDR_DCSR:       o_csr_rdata = dcsr_q | DCSR_XDEBUGVER_FIXED;
+            CSR_ADDR_DPC:        o_csr_rdata = dpc_q;
+            CSR_ADDR_DSCRATCH0:  o_csr_rdata = dscratch0_q;
+            CSR_ADDR_DSCRATCH1:  o_csr_rdata = dscratch1_q;
 
             default:            o_csr_rdata = `WORD_SIZE'(0);
         endcase
