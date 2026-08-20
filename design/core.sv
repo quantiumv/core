@@ -1137,17 +1137,28 @@ module core (
      * subtest that expects exactly this trap and got a normal return
      * instead, since TSR was until now inert storage only).
      *
-     * Deliberately NOT covered: read-only-CSR-write attempts
-     * (bits[11:10]) -- csr_file.sv already silently ignores these
-     * (Zicsr milestone's own decision; core_zicsr_tb.sv's csrrwi-to-
-     * mhartid case depends on that silent-ignore) -- SFENCE.VMA from
-     * U-mode (spec-should-trap, but decoded as an unconditional NOP
-     * this milestone -- see its own comment in
-     * instructions_and_masks.sv) -- and TVM/TW (mstatus's other two
-     * "trap on privileged op" bits, same "real storage, not enforced"
-     * status as TSR was -- SFENCE.VMA-under-TVM and WFI-under-TW are a
-     * separate gap, not exercised by the S-00 failure that motivated
-     * this fix, and left as-is rather than speculatively fixed here).
+     * Read-only-CSR-write attempts (bits[11:10]=='11', a real write
+     * genuinely attempted -- see csr_readonly_violation below) also
+     * trap as illegal-instruction, per spec ("Attempts to write a
+     * read-only CSR... raise illegal instruction exceptions"). Found
+     * 2026-08-20 via a real ACT4 U-00 failure (newly exercised once
+     * EBREAK became a real, resumable trap -- U-00's own boot sequence
+     * attempts csrrw x0, cycle(0xC00), x10, a write to a genuinely
+     * read-only CSR): traced via sail_riscv_sim --trace-instr/--trace-reg
+     * against the real ELF, diffed against this core's own RVFI
+     * retirement trace, confirming the exact first divergence is this
+     * core silently no-op'ing the write instead of trapping. Previously
+     * csr_file.sv silently ignored these writes (a Zicsr-milestone
+     * decision core_zicsr_tb.sv's own csrrwi-to-mhartid case used to
+     * depend on -- that subtest is retired now that the real trap
+     * exists; see core_csr_readonly_trap_tb.sv for its replacement).
+     *
+     * Still NOT covered: SFENCE.VMA from U-mode (spec-should-trap, but
+     * decoded as an unconditional NOP this milestone -- see its own
+     * comment in instructions_and_masks.sv) and TVM/TW (mstatus's other
+     * two "trap on privileged op" bits, same "real storage, not
+     * enforced" status TSR had before its own fix -- SFENCE.VMA-under-
+     * TVM and WFI-under-TW remain a separate, not-yet-exercised gap).
      */
     // Declared here (ahead of csr_file0's instantiation further down)
     // purely because Icarus's single-pass elaborator wants a net's
@@ -1157,6 +1168,11 @@ module core (
     wire mstatus_tsr_w;
     wire is_invalid_instr    = (decoded_instruction == `INSTR_CODE(INVALID));
     wire csr_priv_violation  = is_csr  && (imm_2[9:8] > 2'(current_priv));
+    // A real write is attempted by every CSR instruction except the
+    // csrr{s,c}{,i} forms with a zero source (csr_write_suppress already
+    // captures exactly that set) -- csrrw/csrrwi always attempt a write
+    // regardless of rd, per spec. bits[11:10]=='11' marks a read-only CSR.
+    wire csr_readonly_violation = is_csr && !csr_write_suppress && (imm_2[11:10] == 2'b11);
     wire mret_priv_violation = is_mret && (current_priv != PRIV_M);
     wire sret_priv_violation = is_sret && ((current_priv == PRIV_U)
                               || (current_priv == PRIV_S && mstatus_tsr_w));
@@ -1169,7 +1185,7 @@ module core (
      * is_compressed guard here rather than trusting c_expand_illegal
      * alone.
      */
-    wire is_illegal_instr = is_invalid_instr || csr_priv_violation
+    wire is_illegal_instr = is_invalid_instr || csr_priv_violation || csr_readonly_violation
                           || mret_priv_violation || sret_priv_violation
                           || (is_compressed && c_expand_illegal);
     wire is_ecall = (decoded_instruction == `INSTR_CODE(ECALL));

@@ -6,7 +6,7 @@ sv_mstatus_tvm_test: ACT_RESULT: FAIL
 Svbare_Smode: ACT_RESULT: PASS
 Svbare_Umode: ACT_RESULT: PASS
 Svbare_mstatus_mprv: ACT_RESULT: PASS
-U-00: ACT_RESULT: FAIL
+U-00: ACT_RESULT: PASS
 I-add-00: ACT_RESULT: PASS
 I-addi-00: ACT_RESULT: PASS
 I-addiw-00: ACT_RESULT: PASS
