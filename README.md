@@ -4,6 +4,10 @@ A RISC-V SoC, built collaboratively from scratch in SystemVerilog.
 
 Join on [Discord](https://discord.gg/sQjhBvWXjF) if you're interested in the project!
 
+**Contents:** [Current state](#current-state) · [Architecture](#architecture) ·
+[Verification](#verification) · [Building and simulating](#building-and-simulating) ·
+[Roadmap](#roadmap) · [Contributing](#contributing) · [License](#license)
+
 ---
 
 ## Current state
@@ -172,3 +176,26 @@ still ahead.
 Bus protocol stays Wishbone at the core; AXI4 is a fabric-edge concern (see
 the standalone bridge/DRAM model under `verification/taxi/`), not a
 core-level one.
+
+---
+
+## Contributing
+
+This is a collaborative, from-scratch build -- [Discord](https://discord.gg/sQjhBvWXjF)
+is where design decisions get discussed and work gets coordinated before a PR
+shows up, not an afterthought support channel. Come say what you're
+interested in; the *Roadmap* section above and the per-module header
+comments throughout `design/` are the best starting map of what's settled,
+what's in flight, and what's still open.
+
+A few conventions worth knowing before sending a change: every new RTL
+feature ships with real tests, not just a claim it works (see
+*Verification* above) -- a full local regression plus a Verilator lint
+pass, both clean, is the bar every prior milestone has held itself to, and
+new privilege/CSR/interrupt logic additionally gets cross-checked against
+riscv-arch-test and, where practical, riscv-formal. Module header comments
+explain *why*, not just *what* -- keep that up when you add or change one.
+
+## License
+
+[MIT](LICENSE).
