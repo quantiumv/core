@@ -7,7 +7,7 @@
  * Module: soc
  *
  * Top-level integration: core (Wishbone master) <-> wb_addr_decoder <->
- * {cache_complex -> wb4_sram, uart_tx, clint0}. Exactly the wiring already
+ * {cache_complex -> wb4_sram, uart_tx, uart_rx, clint0}. Exactly the wiring already
  * proven in testbench/core_wb_tb.sv (for core<->decoder<->{ram,uart}),
  * testbench/core_cache_harness.sv (for core<->cache_complex<->sram), and
  * testbench/decoder_clint_harness.sv (for decoder<->{ram,uart,clint} at
@@ -65,6 +65,18 @@
  * write-through already keeps a store hit's cached copy and SRAM in
  * lockstep. See design/core.sv's icache_flush_o port comment and
  * design/icache.sv's flush_i port comment for the full timing proof.
+ *
+ * uart_rx0 (design/uart_rx.sv, Milestone 2 of the EBREAK/JTAG staged
+ * plan) is a new sibling to uart0, NOT a new decoder port -- the two
+ * share the decoder's existing single uart_* port group, split by a new
+ * addr_i[4] sub-decode introduced in THIS file (0 routes to uart0/TX, 1
+ * routes to uart_rx0/RX). This is the first address-decode logic soc.sv
+ * itself has ever contained -- every other split (RAM/UART/CLINT/DRAM)
+ * lives one level down in wb_addr_decoder.sv, which still only ever
+ * sees one opaque "uart" target and has no reason to know it's now
+ * backed by two physical instances. See the detailed rationale right
+ * where that split is wired, next to the uart0/uart_rx0 instantiations
+ * below.
  *
  * No UART pin exists at this level (or anywhere in this design) -- see
  * uart_tx.sv's header for why: this milestone's UART "transmits" via
@@ -164,10 +176,54 @@ module soc (
         .ack_o(mem_ack), .err_o(mem_err), .cyc_i(mem_cyc), .stb_i(mem_stb), .we_i(mem_we)
     );
 
+    /*
+     * uart_addr[4] sub-decode: soc.sv's own addr_i[4] split of the
+     * decoder's single uart_* port group between uart0 (TX, addr_i[4]=0)
+     * and uart_rx0 (RX, addr_i[4]=1) -- see design/uart_rx.sv's own
+     * header for the register map this produces (0x8000/0x8008 TX,
+     * 0x8010/0x8018 RX).
+     *
+     * uart_cyc/uart_stb are gated combinationally by uart_sel_rx (itself
+     * a plain combinational read of uart_addr[4], which the decoder
+     * holds stable for the full duration of a transaction) BEFORE they
+     * ever reach either instance, so exactly one of the two ever sees a
+     * live request on a given cycle -- the other's own `cyc_i && stb_i`
+     * reads false and it correctly holds its own ack_o/err_o low that
+     * cycle (see uart_tx.sv/uart_rx.sv's own always block: the else
+     * branch drives both low). Since at most one instance is ever
+     * asserting ack_o on any given cycle, the two local ack/err/dat_o
+     * triples can simply be OR'd/muxed back together below with no
+     * arbitration needed -- not a coincidence, a direct consequence of
+     * the mutually-exclusive gating above. A future refactor must not
+     * "simplify" this by feeding both instances the same ungated
+     * uart_cyc/uart_stb -- that would make both instances respond to
+     * every UART access, corrupting whichever one wasn't the real
+     * target.
+     */
+    wire uart_sel_rx = uart_addr[4];
+
+    wire uart_tx_cyc = uart_cyc && !uart_sel_rx;
+    wire uart_tx_stb = uart_stb && !uart_sel_rx;
+    wire uart_rx_cyc = uart_cyc && uart_sel_rx;
+    wire uart_rx_stb = uart_stb && uart_sel_rx;
+
+    logic [63:0] uart_tx_dat_o, uart_rx_dat_o;
+    logic        uart_tx_ack, uart_tx_err, uart_rx_ack, uart_rx_err;
+
+    assign uart_ack   = uart_tx_ack | uart_rx_ack;
+    assign uart_err   = uart_tx_err | uart_rx_err;
+    assign uart_dat_i = uart_tx_ack ? uart_tx_dat_o : uart_rx_dat_o;
+
     uart_tx uart0 (
         .clk(clk), .rst(rst),
-        .addr_i(uart_addr), .dat_i(uart_dat_o), .dat_o(uart_dat_i), .sel_i(uart_sel),
-        .ack_o(uart_ack), .err_o(uart_err), .cyc_i(uart_cyc), .stb_i(uart_stb), .we_i(uart_we)
+        .addr_i(uart_addr), .dat_i(uart_dat_o), .dat_o(uart_tx_dat_o), .sel_i(uart_sel),
+        .ack_o(uart_tx_ack), .err_o(uart_tx_err), .cyc_i(uart_tx_cyc), .stb_i(uart_tx_stb), .we_i(uart_we)
+    );
+
+    uart_rx uart_rx0 (
+        .clk(clk), .rst(rst),
+        .addr_i(uart_addr), .dat_i(uart_dat_o), .dat_o(uart_rx_dat_o), .sel_i(uart_sel),
+        .ack_o(uart_rx_ack), .err_o(uart_rx_err), .cyc_i(uart_rx_cyc), .stb_i(uart_rx_stb), .we_i(uart_we)
     );
 
     clint clint0 (
