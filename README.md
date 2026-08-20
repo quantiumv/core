@@ -23,12 +23,15 @@ a real memory-mapped peripheral set.
   word-width family plus RV64M multiply/divide), a 32-entry general-purpose
   register file, a standalone multi-cycle divider, and the RV64C
   compressed-instruction decompressor.
-- `design/csr_file.sv` -- every CSR the current privilege/interrupt/cache
-  feature set needs: the M-mode base set (`misa`, `mvendorid`/`marchid`/
-  `mimpid`/`mhartid`, `mscratch`, `mcycle`, `minstret`), the full M/S trap
-  stack (`mstatus`/`sstatus`, `mtvec`/`stvec`, `mepc`/`sepc`, `mcause`/
-  `scause`, `mtval`/`stval`, `medeleg`/`mideleg`), and the real interrupt
-  CSRs (`mie`/`mip`, spliced live against the CLINT's timer-pending signal).
+- `design/csr_file.sv` -- every CSR the current privilege/interrupt/cache/
+  debug feature set needs: the M-mode base set (`misa`, `mvendorid`/
+  `marchid`/`mimpid`/`mhartid`, `mscratch`, `mcycle`, `minstret`), the full
+  M/S trap stack (`mstatus`/`sstatus`, `mtvec`/`stvec`, `mepc`/`sepc`,
+  `mcause`/`scause`, `mtval`/`stval`, `medeleg`/`mideleg`), the real
+  interrupt CSRs (`mie`/`mip`, spliced live against the CLINT's
+  timer-pending signal), and the Debug-mode CSRs (`dcsr`/`dpc`/
+  `dscratch0`/`dscratch1`) -- storage and access-control exist, but
+  nothing can legally enter Debug Mode yet (see below).
 - `design/core.sv` -- ties the above together as a Wishbone bus master,
   including real synchronous-trap and timer-interrupt-taking logic, atomic
   memory operations (LR/SC/AMO), bus-error-to-access-fault trapping, and
@@ -53,10 +56,12 @@ a real memory-mapped peripheral set.
 Sv39 virtual memory doesn't exist yet -- every address currently runs
 untranslated. A hardware Debug Module (JTAG/DMI, in the spirit of the
 RISC-V External Debug Support spec) is in progress: `EBREAK` is already a
-real, resumable synchronous trap and UART RX is wired up as its planned
-transport; the Debug CSRs, halt/resume FSM, and the DM/JTAG stack itself
-are not built yet. See `design/csr_file.sv`'s and `design/core.sv`'s own
-header comments for the exact current scope.
+real, resumable synchronous trap, UART RX is wired up as its planned
+transport, and the Debug-mode CSRs (`dcsr`/`dpc`/`dscratch0`/`dscratch1`)
+exist with real access control -- any access from anywhere currently
+traps, since there's no Debug Mode to legally be in yet. The halt/resume
+FSM and the DM/JTAG stack itself are still ahead. See `design/csr_file.sv`'s
+and `design/core.sv`'s own header comments for the exact current scope.
 
 `verification/taxi/` also carries a standalone Wishbone-to-AXI4 bridge and
 behavioral DRAM timing model, built on a vendored `taxi` AXI4 IP submodule
@@ -158,9 +163,11 @@ a different teammate's work, built on top of the U/S/M privilege seams
 already carries specifically for that handoff.
 
 In parallel, a hardware Debug Module (JTAG/DMI) is being built out in
-staged milestones: `EBREAK` is now a real, resumable synchronous trap and
-UART RX exists as its planned transport; Debug CSRs, the halt/resume FSM,
-and the JTAG TAP/DMI/Program-Buffer stack itself are still ahead.
+staged milestones: `EBREAK` is now a real, resumable synchronous trap,
+UART RX exists as its planned transport, and the Debug-mode CSRs
+(`dcsr`/`dpc`/`dscratch0`/`dscratch1`) exist with real access control;
+the halt/resume FSM and the JTAG TAP/DMI/Program-Buffer stack itself are
+still ahead.
 
 Bus protocol stays Wishbone at the core; AXI4 is a fabric-edge concern (see
 the standalone bridge/DRAM model under `verification/taxi/`), not a
