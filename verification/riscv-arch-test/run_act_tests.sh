@@ -69,7 +69,16 @@ for elf in "${elfs[@]}"; do
         continue
     fi
 
-    out=$(vvp "$VVP_BIN" "+HEXFILE=$hexfile" "+TOHOST_ADDR=$tohost_addr" "+TIMEOUT=1000000" 2>&1)
+    # 5000000 (up from 1000000): sized for the old EBREAK-freezes-forever
+    # behavior, when every test hit its own first ebreak (if any) near-
+    # instantly. Now that EBREAK is a real, resumable trap, tests that
+    # deliberately exercise it mid-test (e.g. priv/U/U-00's own
+    # uprivinst_ebreak subcase) run to their genuine, much later
+    # completion instead -- confirmed U-00 itself needs ~1.28M cycles for
+    # real completion (thousands of subcases, not just the first one) --
+    # 5x that gives real headroom, not just margin, matching this
+    # project's own "generous, not tightest-fit" timeout convention.
+    out=$(vvp "$VVP_BIN" "+HEXFILE=$hexfile" "+TOHOST_ADDR=$tohost_addr" "+TIMEOUT=5000000" 2>&1)
     result_line=$(printf '%s\n' "$out" | grep -E "^ACT_RESULT:|^TIMEOUT:" | head -1)
 
     if [ -z "$result_line" ]; then

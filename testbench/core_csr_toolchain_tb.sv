@@ -75,6 +75,9 @@ module core_csr_toolchain_tb;
         end
     endtask
 
+    logic halted = 1'b0;
+    always @(posedge clk) if (dut.trap_taken && dut.is_ebreak) halted <= 1'b1;
+
     initial begin
         #1; // see header comment: run after wb4_sram's own time-0 init of crt0.hex
         $readmemh("../firmware/csr_test.hex", sram0.memory);
@@ -83,10 +86,10 @@ module core_csr_toolchain_tb;
         rst = 0;
 
         fork
-            wait (dut.halted === 1'b1);
+            wait (halted === 1'b1);
             begin
                 repeat (300) @(posedge clk);
-                $display("TIMEOUT: dut.halted never went high -- is firmware/csr_test.hex built?");
+                $display("TIMEOUT: EBREAK trap never fired -- is firmware/csr_test.hex built?");
                 $finish;
             end
         join_any
@@ -117,7 +120,7 @@ module core_csr_toolchain_tb;
         check("mscratch_q final value (register-independent confirmation)",
               dut.csr_file0.mscratch_q, 64'h0000_0000_0bad_beef);
 
-        check("core halted (ebreak reached)", {63'b0, dut.halted}, 64'd1);
+        check("EBREAK trap fired", {63'b0, halted}, 64'd1);
 
         $display("");
         $display("core_csr_toolchain_tb: %0d passed, %0d failed", pass_count, fail_count);

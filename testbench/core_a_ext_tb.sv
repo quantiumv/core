@@ -68,7 +68,8 @@ module core_a_ext_tb;
     logic quiet_on_pass = 1'b0;
     `include "check_lib.sv"
 
-    wire halted = dut.core0.halted;
+    logic halted = 1'b0;
+    always @(posedge clk) if (dut.core0.trap_taken && dut.core0.is_ebreak) halted <= 1'b1;
     `include "halt_wait.sv"
 
     /*
@@ -353,7 +354,7 @@ module core_a_ext_tb;
         @(posedge clk); #1;
         rst = 0;
 
-        wait_halted_or_timeout(`TIMEOUT_CYCLES_LARGE, "dut.core0.halted never went high");
+        wait_halted_or_timeout(`TIMEOUT_CYCLES_LARGE, "EBREAK trap never fired");
 
         check("LR.W (sign-extends a 32-bit value with bit31 set)", dut.core0.regfile0.gp_registers[1], 64'hFFFFFFFF80000001);
         check("LR.D", dut.core0.regfile0.gp_registers[2], -64'sd16);
@@ -411,7 +412,7 @@ module core_a_ext_tb;
         check("AMOMAXU.W: rd = old (3)", dut.core0.regfile0.gp_registers[3], 64'd3);
         check("AMOMAXU.D: rd = old", dut.core0.regfile0.gp_registers[8], 64'd30);
 
-        check("core halted (ebreak reached)", {63'b0, dut.core0.halted}, 64'd1);
+        check("EBREAK trap fired", {63'b0, halted}, 64'd1);
 
         check("AMOSWAP.W genuinely visited S_AMO_WRITE as a distinct state (not skipped)",
               {56'b0, (amo_write_cycle_count > 8'd0) ? 8'd1 : 8'd0}, 64'd1);

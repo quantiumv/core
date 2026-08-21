@@ -1,11 +1,12 @@
-ExceptionsZc-00: ACT_RESULT: FAIL
+ExceptionsZc-00: ACT_RESULT: PASS
 ExceptionsZicboS-00: ACT_RESULT: PASS
 ExceptionsZicboU-00: ACT_RESULT: PASS
 S-00: ACT_RESULT: FAIL
+sv_mstatus_tvm_test: ACT_RESULT: FAIL
 Svbare_Smode: ACT_RESULT: PASS
 Svbare_Umode: ACT_RESULT: PASS
 Svbare_mstatus_mprv: ACT_RESULT: PASS
-U-00: ACT_RESULT: UNKNOWN (tohost=0x0000000000000000)
+U-00: ACT_RESULT: PASS
 I-add-00: ACT_RESULT: PASS
 I-addi-00: ACT_RESULT: PASS
 I-addiw-00: ACT_RESULT: PASS

@@ -58,3 +58,6 @@ dkms.conf
 #Iverilog Simulation Files
 *.vcd
 *a.out
+
+# Internal-only reference documentation (not for the public repo)
+docs/internal/

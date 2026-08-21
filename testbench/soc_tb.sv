@@ -43,12 +43,15 @@ module soc_tb;
         end
     endtask
 
+    logic halted = 1'b0;
+    always @(posedge clk) if (dut.core0.trap_taken && dut.core0.is_ebreak) halted <= 1'b1;
+
     initial begin
         @(posedge clk); #1;
         rst = 0;
 
         fork
-            wait (dut.core0.halted === 1'b1);
+            wait (halted === 1'b1);
             begin
                 /*
                  * Generous on purpose: unlike the earlier hand-written
@@ -59,7 +62,7 @@ module soc_tb;
                  * just margin.
                  */
                 repeat (3000) @(posedge clk);
-                $display("TIMEOUT: dut.core0.halted never went high -- is firmware/crt0.hex built?");
+                $display("TIMEOUT: EBREAK trap never fired -- is firmware/crt0.hex built?");
                 $finish;
             end
         join_any

@@ -88,8 +88,34 @@ module core_priv_tb;
     logic quiet_on_pass = 1'b0;
     `include "check_lib.sv"
 
-    wire halted = dut.core0.halted;
+    logic halted = 1'b0;
+    always @(posedge clk) if (dut.core0.trap_taken && dut.core0.is_ebreak) halted <= 1'b1;
     `include "halt_wait.sv"
+
+    /*
+     * "Final" state snapshot (current_priv/mcause_q/mtval_q), taken at
+     * pc==0x88 (idx34, the x11 marker -- the last real instruction before
+     * this program's own terminal ebreak at 0x8C). NOT read live at
+     * check() time: mtvec stays armed at M_TRAP_HANDLER for the rest of
+     * this program, including the terminal ebreak itself -- since EBREAK
+     * is a real trap now, that ebreak bounces right back into
+     * M_TRAP_HANDLER (mepc happens to land exactly on the handler's own
+     * first instruction, 0x8C+4=0x90), which then walks forward through
+     * memory as ordinary code (each mret jumping to whatever mepc was
+     * just advanced to), eventually corrupting mcause_q/mtval_q/
+     * current_priv long after this test's own real assertions already
+     * happened. A point-in-time snapshot before the terminal ebreak
+     * sidesteps all of that.
+     */
+    logic [63:0] final_mcause_snap, final_mtval_snap;
+    logic [1:0]  final_priv_snap;
+    logic final_state_captured = 1'b0;
+    always @(posedge clk) if (!final_state_captured && dut.core0.commit_now && dut.core0.pc == 64'h88) begin
+        final_state_captured <= 1'b1;
+        final_mcause_snap <= dut.core0.csr_file0.mcause_q;
+        final_mtval_snap  <= dut.core0.csr_file0.mtval_q;
+        final_priv_snap   <= dut.core0.current_priv;
+    end
 
     /*
      * White-box monitors. state_t's declared order in core.sv is
@@ -262,7 +288,7 @@ module core_priv_tb;
         @(posedge clk); #1;
         rst = 0;
 
-        wait_halted_or_timeout(`TIMEOUT_CYCLES_SMALL, "dut.halted never went high");
+        wait_halted_or_timeout(`TIMEOUT_CYCLES_SMALL, "EBREAK trap never fired");
 
         /* Marker registers -- structural proof control flow visited every phase, in order, and returned correctly each time. */
         check("x1 (phase 1 marker -- returned from M-mode ECALL)", dut.core0.regfile0.gp_registers[1], 64'd111);
@@ -307,7 +333,8 @@ module core_priv_tb;
         check("phase 6b: trap_taken reads 1 (illegal-instruction correctly raised instead)", {63'b0, trap_taken_sampled_phase6b}, 64'd1);
 
         /* Final state: current_priv ends at U (phase 6b's illegal SRET's own M-routed trap restored MPP=U, per current_priv at that trap's entry). */
-        check("final current_priv == U", {62'b0, dut.core0.current_priv}, `WORD_SIZE'(2'b00));
+        check("final state sample was captured (sanity on the monitor itself)", {63'b0, final_state_captured}, 64'd1);
+        check("final current_priv == U", {62'b0, final_priv_snap}, `WORD_SIZE'(2'b00));
         /*
          * Final mcause/mtval: the LAST M-target trap overall is phase 6b's
          * illegal SRET-from-U (also cause 2, also undelegated since
@@ -315,10 +342,10 @@ module core_priv_tb;
          * program order) -- confirms its own raw encoding was captured,
          * not phase 6a's.
          */
-        check("final mcause == 2 (illegal instruction, from phase 6b's own M-routed trap)", dut.core0.csr_file0.mcause_q, `WORD_SIZE'(2));
-        check("final mtval == the illegal SRET's own raw encoding (phase 6b)", dut.core0.csr_file0.mtval_q, `WORD_SIZE'(`INSTR_HEX_SRET));
+        check("final mcause == 2 (illegal instruction, from phase 6b's own M-routed trap)", final_mcause_snap, `WORD_SIZE'(2));
+        check("final mtval == the illegal SRET's own raw encoding (phase 6b)", final_mtval_snap, `WORD_SIZE'(`INSTR_HEX_SRET));
 
-        check("core halted (ebreak reached)", {63'b0, dut.core0.halted}, 64'd1);
+        check("EBREAK trap fired", {63'b0, halted}, 64'd1);
 
         $display("");
         $display("core_priv_tb: %0d passed, %0d failed", pass_count, fail_count);

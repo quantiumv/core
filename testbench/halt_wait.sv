@@ -28,12 +28,29 @@
  * Required signal contract -- the including module must declare both of
  * these, with these exact names, before the `include line:
  *   clk     -- the free-running clock this testbench drives.
- *   halted  -- a wire tied to the DUT's halt signal, at whatever
- *     hierarchy depth that particular wiring puts it at, e.g.:
- *       wire halted = dut.halted;         // core instantiated directly
- *       wire halted = dut.core0.halted;   // core reached through a
- *                                         // wrapper (soc.sv,
- *                                         // core_wb4_sram_harness.sv)
+ *   halted  -- a LOCAL STICKY LATCH (not a plain alias -- see below) that
+ *     goes high the cycle the DUT's EBREAK trap fires and then stays high.
+ *
+ * `halted` used to alias a real, permanently-latching register inside
+ * core.sv (`dut.halted` / `dut.core0.halted`). That register was removed
+ * once EBREAK became a real spec-compliant trap (jumps to mtvec, resumes
+ * execution -- see design/core.sv's own PC-register comment) instead of a
+ * permanent freeze, so there is no longer anything to alias. Testbenches
+ * now detect completion by observing the one-shot `trap_taken && is_ebreak`
+ * pulse directly (both already-existing core.sv signals, exposed the same
+ * hierarchical way `halted` used to be) and latching it locally, at
+ * whatever hierarchy depth the DUT wiring puts it at:
+ *   logic halted = 1'b0;
+ *   always @(posedge clk)
+ *       if (dut.trap_taken && dut.is_ebreak) halted <= 1'b1;
+ *       // or dut.core0.trap_taken && dut.core0.is_ebreak through a wrapper
+ *       // (soc.sv, core_wb4_sram_harness.sv)
+ *
+ * A local latch is required (not just `wire halted = dut.trap_taken &&
+ * dut.is_ebreak;`) because trap_taken is a ONE-CYCLE PULSE on the exact
+ * retiring edge, not a sticky level -- this task's own `wait(halted===1)`
+ * needs a signal that STAYS high once the trap has fired, the same way the
+ * old register did.
  *
  * Three tiered timeout budgets are provided instead of one global
  * constant -- one constant would be either too tight for real firmware or
@@ -55,7 +72,7 @@
  *   ...
  *   initial begin
  *       ...
- *       wait_halted_or_timeout(`TIMEOUT_CYCLES_TINY, "dut.halted never went high");
+ *       wait_halted_or_timeout(`TIMEOUT_CYCLES_TINY, "EBREAK trap never fired");
  *       // the task already applies the post-join_any #1 settle delay
  *       // every original call site used -- no need to repeat it here
  *       ...

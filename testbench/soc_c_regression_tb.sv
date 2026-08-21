@@ -54,6 +54,9 @@ module soc_c_regression_tb;
         end
     endtask
 
+    logic halted = 1'b0;
+    always @(posedge clk) if (dut.core0.trap_taken && dut.core0.is_ebreak) halted <= 1'b1;
+
     initial begin
         #1; // run after wb4_sram's own time-0 init of crt0.hex
         $readmemh("../firmware/hello_c.hex", dut.sram0.memory);
@@ -62,12 +65,12 @@ module soc_c_regression_tb;
         rst = 0;
 
         fork
-            wait (dut.core0.halted === 1'b1);
+            wait (halted === 1'b1);
             begin
                 /* Same generous -O0-C-build budget as soc_tb.sv's own --
                  * see that file's comment on why. */
                 repeat (3000) @(posedge clk);
-                $display("TIMEOUT: dut.core0.halted never went high -- is firmware/hello_c.hex built?");
+                $display("TIMEOUT: EBREAK trap never fired -- is firmware/hello_c.hex built?");
                 $finish;
             end
         join_any

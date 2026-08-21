@@ -40,17 +40,15 @@
  * hand-wired version.
  *
  * Exercises, in program order:
- *  1. csrrwi write-attempt to the read-only mhartid, then a csrrw read
- *     to confirm the write never landed.
- *  2. csrrs read of misa, checked against the exact hardwired bit
+ *  1. csrrs read of misa, checked against the exact hardwired bit
  *     pattern.
- *  3. csrrw write + csrrs read-back on mscratch (the "vanilla CSR" round
+ *  2. csrrw write + csrrs read-back on mscratch (the "vanilla CSR" round
  *     trip).
- *  4. csrrs-set then csrrc-clear on mscratch, with a read-back check
+ *  3. csrrs-set then csrrc-clear on mscratch, with a read-back check
  *     after each.
- *  5. The rd=x0 case (csrrwi x0, mscratch, ...) still performs its write
+ *  4. The rd=x0 case (csrrwi x0, mscratch, ...) still performs its write
  *     -- confirmed by a subsequent read.
- *  6. That same subsequent read doubles as the rs1=x0 case: a pure read
+ *  5. That same subsequent read doubles as the rs1=x0 case: a pure read
  *     with zero mutation. Register-value-only checks can't distinguish
  *     "correctly suppressed" from "coincidentally value-preserving"
  *     here (mscratch | 0 == mscratch either way) -- see the plan's
@@ -59,23 +57,33 @@
  *     reads 0 during that specific instruction's S_EXEC cycle, for
  *     genuine confidence rather than a check that would pass even if
  *     suppression were silently broken.
- *  7. The immediate-form analogue of item 6: csrrsi x15, mscratch, 0
+ *  6. The immediate-form analogue of item 5: csrrsi x15, mscratch, 0
  *     and csrrci x16, mscratch, 0, both with uimm=0. core.sv's
  *     write-suppress condition for these is a genuinely different
  *     branch (imm_1 == 0, not read_gpr_A_sel == 0 -- see core.sv's
  *     csr_write_suppress mux) than the rs1=x0 register-form case in
- *     item 6 exercises, so each gets its own white-box dut.core0.csr_we
- *     monitor at its own PC, same reasoning as item 6.
- *  8. A final minstret read matching the exact known instruction count
+ *     item 5 exercises, so each gets its own white-box dut.core0.csr_we
+ *     monitor at its own PC, same reasoning as item 5.
+ *  7. A final minstret read matching the exact known instruction count
  *     retired so far, plus a post-halt hierarchical check that
  *     minstret's storage ends at the full program length -- including
  *     ebreak itself, which retires (and so still increments minstret)
  *     even though it doesn't write a register.
- *  9. ebreak.
+ *  8. ebreak.
  *
  * Deliberately NOT re-proven here (already covered by core_wb_tb.sv):
  * ordinary ALU/load/store/branch datapath behavior. This test's only
  * job is Zicsr.
+ *
+ * A csrrwi-write-attempt-to-the-read-only-mhartid subtest used to open
+ * this program, expecting the write to be silently ignored -- retired
+ * 2026-08-20 once that became a real illegal-instruction trap (see
+ * design/core.sv's csr_readonly_violation and its own comment for the
+ * full story). Its replacement lives in its own dedicated file,
+ * core_csr_readonly_trap_tb.sv, matching this project's "one file per
+ * concern" convention for a trap/exception scenario rather than folding
+ * a trap-and-resume sequence into this file's otherwise straight-line
+ * "vanilla CSR round trip" program.
  */
 module core_zicsr_tb;
 
@@ -90,7 +98,8 @@ module core_zicsr_tb;
     logic quiet_on_pass = 1'b0;
     `include "check_lib.sv"
 
-    wire halted = dut.core0.halted;
+    logic halted = 1'b0;
+    always @(posedge clk) if (dut.core0.trap_taken && dut.core0.is_ebreak) halted <= 1'b1;
     `include "halt_wait.sv"
 
     /*
@@ -102,9 +111,9 @@ module core_zicsr_tb;
      * declared order in core.sv is {S_FETCH, S_EXEC, S_MEM} = {0, 1, 2}
      * for its 2-bit enum, hence the literal 2'd1 below.
      */
-    localparam logic [63:0] PC_RS1_X0_CHECK       = 64'h34;
-    localparam logic [63:0] PC_CSRRSI_UIMM0_CHECK = 64'h38;
-    localparam logic [63:0] PC_CSRRCI_UIMM0_CHECK = 64'h3C;
+    localparam logic [63:0] PC_RS1_X0_CHECK       = 64'h2C;
+    localparam logic [63:0] PC_CSRRSI_UIMM0_CHECK = 64'h30;
+    localparam logic [63:0] PC_CSRRCI_UIMM0_CHECK = 64'h34;
 
     logic csr_we_sampled;
     logic csr_we_sample_captured;
@@ -135,52 +144,45 @@ module core_zicsr_tb;
 
         /*
          * addr  idx  instruction                              notes
-         *  0x00   0  csrrwi x1, mhartid, 7                     write-attempt to read-only CSR; x1 = old mhartid = 0
-         *  0x04   1  csrrw  x2, mhartid, x0                    re-read mhartid; x2 must still be 0 (write from idx0 didn't land)
-         *  0x08   2  csrrs  x3, misa, x0                       pure read; x3 = exact hardwired misa pattern
-         *  0x0C   3  addi   x4, x0, 240                        x4 = 0xF0, seed value for mscratch
-         *  0x10   4  csrrw  x5, mscratch, x4                   write x4 into mscratch; x5 = old mscratch = 0
-         *  0x14   5  csrrs  x6, mscratch, x0                   read back; x6 = 0xF0
-         *  0x18   6  addi   x7, x0, 15                         x7 = 0x0F, set-mask
-         *  0x1C   7  csrrs  x8, mscratch, x7                   OR mask in; x8 = old mscratch = 0xF0, mscratch becomes 0xFF
-         *  0x20   8  csrrs  x9, mscratch, x0                   read back; x9 = 0xFF
-         *  0x24   9  addi   x10, x0, 240                       x10 = 0xF0, clear-mask
-         *  0x28  10  csrrc  x11, mscratch, x10                 AND ~mask in; x11 = old mscratch = 0xFF, mscratch becomes 0x0F
-         *  0x2C  11  csrrs  x12, mscratch, x0                  read back; x12 = 0x0F
-         *  0x30  12  csrrwi x0, mscratch, 27                   rd=x0 case: mscratch write must still land (mscratch becomes 27)
-         *  0x34  13  csrrs  x13, mscratch, x0                  rd=x0 confirm (x13 = 27) AND the rs1=x0 white-box check instruction
-         *  0x38  14  csrrsi x15, mscratch, 0                   uimm=0 case: pure read, no mutation (x15 = 27) AND the CSRRSI white-box check instruction
-         *  0x3C  15  csrrci x16, mscratch, 0                   uimm=0 case: pure read, no mutation (x16 = 27) AND the CSRRCI white-box check instruction
-         *  0x40  16  csrrs  x14, minstret, x0                  minstret read; x14 = count of instructions retired strictly before this one = 16
-         *  0x44  17  ebreak                                    halts; also retires, so minstret's final storage = 18
+         *  0x00   0  csrrs  x3, misa, x0                       pure read; x3 = exact hardwired misa pattern
+         *  0x04   1  addi   x4, x0, 240                        x4 = 0xF0, seed value for mscratch
+         *  0x08   2  csrrw  x5, mscratch, x4                   write x4 into mscratch; x5 = old mscratch = 0
+         *  0x0C   3  csrrs  x6, mscratch, x0                   read back; x6 = 0xF0
+         *  0x10   4  addi   x7, x0, 15                         x7 = 0x0F, set-mask
+         *  0x14   5  csrrs  x8, mscratch, x7                   OR mask in; x8 = old mscratch = 0xF0, mscratch becomes 0xFF
+         *  0x18   6  csrrs  x9, mscratch, x0                   read back; x9 = 0xFF
+         *  0x1C   7  addi   x10, x0, 240                       x10 = 0xF0, clear-mask
+         *  0x20   8  csrrc  x11, mscratch, x10                 AND ~mask in; x11 = old mscratch = 0xFF, mscratch becomes 0x0F
+         *  0x24   9  csrrs  x12, mscratch, x0                  read back; x12 = 0x0F
+         *  0x28  10  csrrwi x0, mscratch, 27                   rd=x0 case: mscratch write must still land (mscratch becomes 27)
+         *  0x2C  11  csrrs  x13, mscratch, x0                  rd=x0 confirm (x13 = 27) AND the rs1=x0 white-box check instruction
+         *  0x30  12  csrrsi x15, mscratch, 0                   uimm=0 case: pure read, no mutation (x15 = 27) AND the CSRRSI white-box check instruction
+         *  0x34  13  csrrci x16, mscratch, 0                   uimm=0 case: pure read, no mutation (x16 = 27) AND the CSRRCI white-box check instruction
+         *  0x38  14  csrrs  x14, minstret, x0                  minstret read; x14 = count of instructions retired strictly before this one = 14
+         *  0x3C  15  ebreak                                    halts; also retires, so minstret's final storage = 16
          */
-        dut.sram0.memory[0] = {encode_csr(`CSR_MHARTID, 5'd0, `FUNCT3_CSRRW,  5'd2, `OPC_SYSTEM),
-                            encode_csr(`CSR_MHARTID, 5'd7, `FUNCT3_CSRRWI, 5'd1, `OPC_SYSTEM)};
-        dut.sram0.memory[1] = {encode_i(32'sd240, 5'd0, 3'b000, 5'd4, `OPC_OP_IMM),
+        dut.sram0.memory[0] = {encode_i(32'sd240, 5'd0, 3'b000, 5'd4, `OPC_OP_IMM),
                             encode_csr(`CSR_MISA, 5'd0, `FUNCT3_CSRRS, 5'd3, `OPC_SYSTEM)};
-        dut.sram0.memory[2] = {encode_csr(`CSR_MSCRATCH, 5'd0, `FUNCT3_CSRRS, 5'd6, `OPC_SYSTEM),
+        dut.sram0.memory[1] = {encode_csr(`CSR_MSCRATCH, 5'd0, `FUNCT3_CSRRS, 5'd6, `OPC_SYSTEM),
                             encode_csr(`CSR_MSCRATCH, 5'd4, `FUNCT3_CSRRW, 5'd5, `OPC_SYSTEM)};
-        dut.sram0.memory[3] = {encode_csr(`CSR_MSCRATCH, 5'd7, `FUNCT3_CSRRS, 5'd8, `OPC_SYSTEM),
+        dut.sram0.memory[2] = {encode_csr(`CSR_MSCRATCH, 5'd7, `FUNCT3_CSRRS, 5'd8, `OPC_SYSTEM),
                             encode_i(32'sd15, 5'd0, 3'b000, 5'd7, `OPC_OP_IMM)};
-        dut.sram0.memory[4] = {encode_i(32'sd240, 5'd0, 3'b000, 5'd10, `OPC_OP_IMM),
+        dut.sram0.memory[3] = {encode_i(32'sd240, 5'd0, 3'b000, 5'd10, `OPC_OP_IMM),
                             encode_csr(`CSR_MSCRATCH, 5'd0, `FUNCT3_CSRRS, 5'd9, `OPC_SYSTEM)};
-        dut.sram0.memory[5] = {encode_csr(`CSR_MSCRATCH, 5'd0,  `FUNCT3_CSRRS, 5'd12, `OPC_SYSTEM),
+        dut.sram0.memory[4] = {encode_csr(`CSR_MSCRATCH, 5'd0,  `FUNCT3_CSRRS, 5'd12, `OPC_SYSTEM),
                             encode_csr(`CSR_MSCRATCH, 5'd10, `FUNCT3_CSRRC, 5'd11, `OPC_SYSTEM)};
-        dut.sram0.memory[6] = {encode_csr(`CSR_MSCRATCH, 5'd0,  `FUNCT3_CSRRS,  5'd13, `OPC_SYSTEM),
+        dut.sram0.memory[5] = {encode_csr(`CSR_MSCRATCH, 5'd0,  `FUNCT3_CSRRS,  5'd13, `OPC_SYSTEM),
                             encode_csr(`CSR_MSCRATCH, 5'd27, `FUNCT3_CSRRWI, 5'd0,  `OPC_SYSTEM)};
-        dut.sram0.memory[7] = {encode_csr(`CSR_MSCRATCH, 5'd0, `FUNCT3_CSRRCI, 5'd16, `OPC_SYSTEM),
+        dut.sram0.memory[6] = {encode_csr(`CSR_MSCRATCH, 5'd0, `FUNCT3_CSRRCI, 5'd16, `OPC_SYSTEM),
                             encode_csr(`CSR_MSCRATCH, 5'd0, `FUNCT3_CSRRSI, 5'd15, `OPC_SYSTEM)};
-        dut.sram0.memory[8] = {{11'b0, 1'b1, 13'b0, `OPC_SYSTEM},                                     // idx17: ebreak (0x44)
-                            encode_csr(`CSR_MINSTRET, 5'd0, `FUNCT3_CSRRS, 5'd14, `OPC_SYSTEM)};   // idx16: csrrs x14, minstret, x0 (0x40)
+        dut.sram0.memory[7] = {{11'b0, 1'b1, 13'b0, `OPC_SYSTEM},                                     // idx15: ebreak (0x3C)
+                            encode_csr(`CSR_MINSTRET, 5'd0, `FUNCT3_CSRRS, 5'd14, `OPC_SYSTEM)};   // idx14: csrrs x14, minstret, x0 (0x38)
 
         @(posedge clk); #1;
         rst = 0;
 
-        wait_halted_or_timeout(`TIMEOUT_CYCLES_SMALL, "dut.halted never went high");
+        wait_halted_or_timeout(`TIMEOUT_CYCLES_SMALL, "EBREAK trap never fired");
 
-        check("x1 (csrrwi rd, old mhartid before write-attempt)", dut.core0.regfile0.gp_registers[1], 64'd0);
-        check("x2 (csrrw rd, mhartid after write-attempt -- confirms it didn't land)",
-              dut.core0.regfile0.gp_registers[2], 64'd0);
         check("x3 (csrrs rd, misa exact bit pattern)", dut.core0.regfile0.gp_registers[3], 64'h8000_0000_0000_0100);
 
         check("x5 (csrrw rd, old mscratch before first write)", dut.core0.regfile0.gp_registers[5], 64'd0);
@@ -215,11 +217,11 @@ module core_zicsr_tb;
               {63'b0, csrrci_we_sampled}, 64'd0);
 
         check("x14 (minstret read -- count of instructions retired strictly before this one)",
-              dut.core0.regfile0.gp_registers[14], 64'd16);
+              dut.core0.regfile0.gp_registers[14], 64'd14);
         check("minstret final storage -- full program length, including ebreak's own retirement",
-              dut.core0.csr_file0.minstret_q, 64'd18);
+              dut.core0.csr_file0.minstret_q, 64'd16);
 
-        check("core halted (ebreak reached)", {63'b0, dut.core0.halted}, 64'd1);
+        check("EBREAK trap fired", {63'b0, halted}, 64'd1);
 
         $display("");
         $display("core_zicsr_tb: %0d passed, %0d failed", pass_count, fail_count);

@@ -65,7 +65,8 @@ module core_wb_tb;
     logic quiet_on_pass = 1'b0;
     `include "check_lib.sv"
 
-    wire halted = dut.core0.halted;
+    logic halted = 1'b0;
+    always @(posedge clk) if (dut.core0.trap_taken && dut.core0.is_ebreak) halted <= 1'b1;
     `include "halt_wait.sv"
 
     initial begin
@@ -102,7 +103,7 @@ module core_wb_tb;
         @(posedge clk); #1;
         rst = 0;
 
-        wait_halted_or_timeout(`TIMEOUT_CYCLES_TINY, "dut.core0.halted never went high");
+        wait_halted_or_timeout(`TIMEOUT_CYCLES_TINY, "EBREAK trap never fired");
 
         check("x1 (addi)",                     dut.core0.regfile0.gp_registers[1], 64'd5);
         check("x2 (addi)",                     dut.core0.regfile0.gp_registers[2], 64'd10);
@@ -115,7 +116,7 @@ module core_wb_tb;
         check("RAM contents at 0x100",         {32'b0, dut.sram0.memory[32][31:0]}, 64'd15);
         check("UART received exactly one byte", {55'b0, dut.uart0.tx_history_count}, 64'd1);
         check("UART byte is 'H'",              {56'b0, dut.uart0.tx_history[0]}, 64'h48);
-        check("core halted (ebreak reached)",  {63'b0, dut.core0.halted}, 64'd1);
+        check("EBREAK trap fired", {63'b0, halted}, 64'd1);
 
         $display("");
         $display("core_wb_tb: %0d passed, %0d failed", pass_count, fail_count);

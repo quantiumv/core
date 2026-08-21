@@ -697,6 +697,18 @@ module decoder (
         end: fence_instr
 
 
+        /*
+         * Zifencei: FENCE.I takes no operands (unlike plain FENCE's I-type
+         * pred/succ/fm fields, which core.sv doesn't even consult) -- same
+         * zero-operand shape as ECALL/EBREAK/MRET/SRET/WFI, a closer
+         * semantic fit than reusing FENCE's I-type shape for a field set
+         * that would just decode to unused bits.
+         */
+        else if (`IS_INSTR(i_instruction, FENCE_I)) begin: fence_i_instr
+            `OUTPUT_NONE_TYPE_INSTR(FENCE_I);
+        end: fence_i_instr
+
+
         else if (`IS_INSTR(i_instruction, ECALL)) begin: ecall_instr
             `OUTPUT_NONE_TYPE_INSTR(ECALL);
         end: ecall_instr

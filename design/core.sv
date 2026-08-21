@@ -80,10 +80,11 @@
  * adds (the fetched instruction line, plus -- only for a dword-crossing
  * C instruction -- the second dword's low halfword).
  *
- * Scope: full RV64IMAC base ISA + Zicsr + full U/S/M privilege modes.
- * No Sv39, no interrupts/exceptions beyond the synchronous traps already
- * implemented -- later milestones (a different teammate's work for
- * Sv39). Misaligned DATA access (loads/stores) traps cleanly (see
+ * Scope: full RV64IMAC base ISA + Zicsr + full U/S/M privilege modes,
+ * plus machine-timer interrupts (CLINT mtime/mtimecmp, see i_mtip below
+ * and the Interrupts section near csr_file0's instantiation). No Sv39,
+ * no external/PLIC interrupts, no IPI/msip -- later milestones (a
+ * different teammate's work for Sv39). Misaligned DATA access (loads/stores) traps cleanly (see
  * mem_load_misaligned/mem_store_misaligned below) rather than being
  * handled in hardware -- actual misaligned load/store SUPPORT stays
  * deferred to a later milestone alongside Sv39, but silently truncating
@@ -93,15 +94,16 @@
  * below). Misaligned INSTRUCTION fetch, by contrast, is a real,
  * exercised case as of the C extension (any compressed instruction can
  * leave pc 2-byte- rather than 4-byte-aligned) and IS correctly
- * handled, not a gap. wb_err_i is likewise not acted on -- no trap
- * mechanism exists yet for it to feed into.
+ * handled, not a gap. wb_err_i now feeds instruction/load/store
+ * access-fault traps (causes 1/5/7 -- see wb_done/wb_ok, fetch_fault_q,
+ * mem_load_access_fault/mem_store_access_fault below).
  *
  * Input ports:
  *  clk: Clock.
- *  rst: Synchronous reset (active high) -- resets pc, FSM state, and
- *       `halted`. Does NOT reset register/memory contents; the ISA
- *       doesn't require it, and real hardware doesn't guarantee it
- *       either (only the reset vector is architecturally defined).
+ *  rst: Synchronous reset (active high) -- resets pc and FSM state.
+ *       Does NOT reset register/memory contents; the ISA doesn't
+ *       require it, and real hardware doesn't guarantee it either
+ *       (only the reset vector is architecturally defined).
  *
  * Wishbone master port: standard CLASSIC-cycle signal names, written
  * from this module's (the master's) point of view -- `_o` drives the
@@ -116,11 +118,31 @@
  * (fetch and mem/AMO never overlap -- single-issue, non-pipelined), so a
  * downstream cache layer has no other way to tell which logical stream
  * (I$ vs D$) a given transaction belongs to. Defined off `state` directly
- * (see wb_master_drive below), not gated by !wb_ack_i the way
+ * (see wb_master_drive below), not gated by !wb_done the way
  * wb_addr_o/wb_cyc_o are -- `state` only updates on the following clock
  * edge, so this stays stable through the exact cycle a downstream router
  * needs it on, unlike wb_addr_o/wb_cyc_o which combinationally collapse
- * to idle the instant wb_ack_i arrives.
+ * to idle the instant the bus cycle terminates (ack or err).
+ *
+ * icache_flush_o: Zifencei's FENCE.I, side-band like wb_ifetch_o above --
+ * pulses one cycle on FENCE.I's own retirement (assign icache_flush_o =
+ * commit_now && is_fence_i;), telling a downstream I$ to invalidate its
+ * contents. Timing is provably clean, not just probably fine: FENCE.I
+ * retires purely within S_EXEC (bus-idle for this single-issue,
+ * non-pipelined core -- it issues zero bus traffic during S_EXEC), so
+ * the I$ is provably CACHE_IDLE at the exact cycle this pulses -- no
+ * mid-refill-flush case exists to reason about. D$ never needed a
+ * flush path to begin with (write-through already keeps a store hit's
+ * cached copy and SRAM in lockstep).
+ *
+ * i_mtip: machine-timer-interrupt-pending level from an external CLINT
+ * (design/clint.sv's mtip_o, see soc.sv). Continuously-valid status
+ * level, not a pulse -- spliced into mip's bit 7 inside csr_file0 and
+ * consumed combinationally by this module's own Interrupts section
+ * (near csr_file0's instantiation, below) to decide interrupt_taken.
+ * ANSI default (= 1'b0) so the 16+ testbenches/harnesses that
+ * instantiate core directly without driving this port stay compile-
+ * and lint-clean (same precedent as csr_file.sv's own i_mtip default).
  */
 module core (
     input logic clk,
@@ -134,10 +156,10 @@ module core (
     output logic        wb_cyc_o,
     output logic        wb_stb_o,
     input  logic        wb_ack_i,
-    /* verilator lint_off UNUSEDSIGNAL */
     input  logic        wb_err_i,
-    /* verilator lint_on UNUSEDSIGNAL */
-    output logic        wb_ifetch_o
+    output logic        wb_ifetch_o,
+    output logic        icache_flush_o,
+    input  logic         i_mtip = 1'b0
 
     /*
      * RVFI (RISC-V Formal Interface) -- only present when compiled for
@@ -264,21 +286,47 @@ module core (
      * csr_rdata/medeleg_w already use.
      */
     logic is_load, is_store;
-    logic halted;
     logic div_stall;
     logic is_amo_rmw;
     logic mem_load_misaligned, mem_store_misaligned;
+    logic mem_load_access_fault, mem_store_access_fault;
+    /*
+     * trap_taken: forward-declared here (assigned near exc_code far
+     * below) purely so the reservation register block above its own
+     * declaration site can gate on it -- same forward-reference pattern
+     * mem_load_misaligned/mem_store_misaligned already establish.
+     */
+    logic trap_taken;
+    /*
+     * interrupt_taken/interrupt_to_s: forward-declared here for the same
+     * reason as trap_taken -- csr_file0's own i_trap_taken/i_trap_to_s
+     * connections need them, but their real assign lives in the new
+     * Interrupts section after csr_file0's instantiation (it needs
+     * csr_file0's own mip_w/mie_w/etc. outputs first).
+     *
+     * trap_vector: forward-declared (was previously declared+driven
+     * together as `wire trap_vector = ...`) because wb_master_drive's
+     * S_FETCH arm now needs to read it, but wb_master_drive is textually
+     * BEFORE trap_vector's own real assign (down near Next PC) -- same
+     * "declare early, drive late" split trap_val/amo_rdata_q already use.
+     */
+    logic interrupt_taken;
+    logic interrupt_to_s;
+    logic [(`WORD_SIZE - 1):0] trap_vector;
     logic [(`WORD_SIZE - 1):0] amo_rdata_q;
     /*
      * amo_addr_q: WORD_SIZE-wide for the RVFI tap's rvfi_mem_addr (see its
-     * own assign's comment), but the real hardware only ever consumes its
-     * low 32 bits (wb_addr_o = amo_addr_q[31:0], this core's physical
-     * address space is deliberately 32-bit) -- bits[63:32] are dead outside
-     * `ifdef RISCV_FORMAL, same reasoning/precedent as mem_paddr above.
+     * own assign's comment) -- real hardware only ever consumes its low 32
+     * bits for the actual bus address (wb_addr_o = amo_addr_q[31:0], this
+     * core's physical address space is deliberately 32-bit), same
+     * reasoning/precedent as mem_paddr above. Bits[63:32] are no longer
+     * dead outside `ifdef RISCV_FORMAL, though: trap_val's access-fault
+     * arm (see mem_load_access_fault/mem_store_access_fault below) reads
+     * this register unconditionally, since it's the only stable address
+     * during S_AMO_WRITE (mem_paddr is repurposed for the modify value by
+     * then) -- genuinely fully used in every build now.
      */
-    /* verilator lint_off UNUSEDSIGNAL */
     logic [(`WORD_SIZE - 1):0] amo_addr_q;
-    /* verilator lint_on UNUSEDSIGNAL */
     logic [7:0]  amo_sel_q;
     /*
      * amo_byte_off_q: the TRUE (unrounded) low 3 address bits, captured
@@ -324,6 +372,27 @@ module core (
      * without ever touching the bus.
      */
     wire mem_phase_needed = (is_load || is_store) && !(mem_load_misaligned || mem_store_misaligned);
+
+    /*
+     * wb_done/wb_ok: wb4_sram.sv (the real leaf memory) keeps ack/err
+     * mutually exclusive per the Wishbone B4 convention -- an out-of-range
+     * access sets err_o with ack_o held 0. But icache.sv/dcache.sv (fixed
+     * for an earlier hang bug, see their own CACHE_REFILL comments) assert
+     * ack_o TOGETHER WITH err_o on a downstream error -- a deliberate
+     * compromise made back when this file had nothing consuming wb_err_i
+     * at all. Through the real soc.sv topology, that means wb_ack_i can go
+     * high even on an errored cache response, so bare wb_ack_i is
+     * ambiguous: it no longer means "this succeeded". wb_done means "this
+     * bus cycle has terminated, one way or another" (safe for anything
+     * that just needs to stop waiting -- state-transition/re-issue-guard
+     * triggers); wb_ok means "terminated CLEANLY, no error" (needed
+     * wherever a decision about proceeding to the NEXT NORMAL phase is
+     * made -- fetch_hi_taken below, and S_MEM's AMO-read-succeeded
+     * decision). Never use bare wb_ack_i below this point.
+     */
+    wire wb_done = wb_ack_i || wb_err_i;
+    wire wb_ok   = wb_ack_i && !wb_err_i;
+
     /*
      * commit_now, extended for the A extension: an AMO op's
      * mem_phase_needed=1 now spans TWO sequential bus transactions
@@ -333,25 +402,32 @@ module core (
      * is_amo_rmw is false for all of them, so the new `&& !is_amo_rmw`
      * term is a no-op and they still commit at S_MEM exactly as before.
      *
-     * `!halted` (2026-08-12): the PC-register comment below claims
-     * "state parks in S_FETCH forever [after halt]... so commit_now can
-     * never become true again" -- true on real hardware (wb_master_drive
-     * stops asserting wb_cyc_o/wb_stb_o once halted, so a well-behaved
-     * slave has no reason to ever ack again), but NOT actually enforced
-     * by this expression: wb_ack_i is just a bus input, and nothing here
-     * stops state from reaching S_EXEC again if something (a formal
-     * solver's free wb_ack_i, exploring exactly this "what if the bus
-     * violates protocol" case; a genuine hardware fault) asserts an
-     * unrequested ack post-halt. Explicit `!halted` here makes that
-     * comment's claim actually true rather than merely usually-true,
-     * closing a real (if narrow) gap a riscv-formal pc_fwd_ch0
-     * counterexample found: without it, a spurious post-halt ack could
+     * Bus-error trapping: an S_MEM response that errors commits
+     * IMMEDIATELY (the `|| wb_err_i` term) regardless of is_amo_rmw --
+     * an AMO whose read phase faults must trap right there, not proceed
+     * into S_AMO_WRITE and issue a bogus second write (see the FSM below).
+     * S_AMO_WRITE now commits on wb_done (ack OR err), not just wb_ack_i,
+     * since a faulted write phase must still retire (as a trap) rather
+     * than hang. mem_load_access_fault/mem_store_access_fault (declared
+     * near mem_load_misaligned/mem_store_misaligned below) turn these
+     * error-commits into the correct trap via exc_code/trap_val.
+     *
+     * `!halted` (2026-08-12, removed 2026-08-20): a prior milestone added
+     * an explicit `!halted` term here to close a riscv-formal pc_fwd_ch0
+     * counterexample -- a spurious post-halt wb_ack_i could otherwise
      * produce a bogus extra rvfi_valid pulse with pc frozen but state
-     * still oscillating.
+     * still oscillating, since nothing structurally prevented state from
+     * reaching S_EXEC again once parked in S_FETCH forever. That whole
+     * scenario no longer exists as a concept now that EBREAK is a real
+     * trap (see is_ebreak's own arm in exc_code/trap_taken below): the
+     * core never parks in S_FETCH permanently anymore, so there is no
+     * "post-halt" state left to guard against. Confirmed, not assumed:
+     * pc_fwd_ch0 and pc_bwd_ch0 (the two checks that originally caught
+     * this counterexample) both re-run clean against this exact removal.
      */
-    wire commit_now = !halted && ((state == S_EXEC && !mem_phase_needed && !div_stall)
-                    || (state == S_MEM && wb_ack_i && !is_amo_rmw)
-                    || (state == S_AMO_WRITE && wb_ack_i));
+    wire commit_now = (state == S_EXEC && !mem_phase_needed && !div_stall)
+                    || (state == S_MEM && ((wb_ok && !is_amo_rmw) || wb_err_i))
+                    || (state == S_AMO_WRITE && wb_done);
 
     /*
      * C extension: fetch_hi_needed decides, on the SAME edge S_FETCH's
@@ -370,19 +446,25 @@ module core (
      * aligned halfword is always fully inside its own 8-byte dword, so
      * a quadrant field (the halfword's own low 2 bits) of anything
      * other than 2'b11 rules out crossing regardless of pc[2:1].
+     *
+     * fetch_hi_taken adds wb_ok on top of fetch_hi_needed: on a fetch
+     * error, wb_dat_i's bits are meaningless, so a faulted fetch must
+     * never chase a second, bogus fetch based on garbage -- it needs to
+     * fall straight through to S_EXEC and trap via fetch_fault_q instead.
      */
     wire fetch_hi_needed = (pc[2:1] == 2'b11) && (wb_dat_i[49:48] == 2'b11);
+    wire fetch_hi_taken  = wb_ok && fetch_hi_needed;
 
     always_ff @(posedge clk) begin
         if (rst) begin
             state <= S_FETCH;
         end else begin
             case (state)
-                S_FETCH:     if (wb_ack_i) state <= state_t'(fetch_hi_needed ? S_FETCH_HI : S_EXEC);
-                S_FETCH_HI:  if (wb_ack_i) state <= S_EXEC;
+                S_FETCH:     if (wb_done) state <= state_t'(fetch_hi_taken ? S_FETCH_HI : S_EXEC);
+                S_FETCH_HI:  if (wb_done) state <= S_EXEC;
                 S_EXEC:      state <= state_t'(mem_phase_needed ? S_MEM : (div_stall ? S_EXEC : S_FETCH));
-                S_MEM:       if (wb_ack_i) state <= state_t'(is_amo_rmw ? S_AMO_WRITE : S_FETCH);
-                S_AMO_WRITE: if (wb_ack_i) state <= S_FETCH;
+                S_MEM:       if (wb_done) state <= state_t'((wb_ok && is_amo_rmw) ? S_AMO_WRITE : S_FETCH);
+                S_AMO_WRITE: if (wb_done) state <= S_FETCH;
                 default:     state <= S_FETCH;
             endcase
         end
@@ -407,13 +489,30 @@ module core (
     logic [63:0] instr_line_q;
     logic [15:0] instr_hi_q;
     logic        crossed_q;
+    /*
+     * fetch_fault_q: captures whether THIS fetch (S_FETCH or S_FETCH_HI)
+     * came back as a bus error, at the exact same edge instr_line_q/
+     * instr_hi_q get latched. No explicit reset needed -- mirrors those
+     * two registers' own established convention: always freshly written
+     * on the edge S_EXEC is first reached, so nothing ever consults it
+     * uninitialized. Consumed by `instruction` below (substitutes an
+     * inert placeholder so decode never runs on garbage fetched bits) and
+     * by exc_code/trap_val (instruction access fault, cause 1).
+     */
+    logic        fetch_fault_q;
     always_ff @(posedge clk) begin
-        if (state == S_FETCH && wb_ack_i) begin
-            instr_line_q <= wb_dat_i;
-            crossed_q    <= fetch_hi_needed;
+        if (state == S_FETCH && wb_done) begin
+            instr_line_q  <= wb_dat_i;
+            crossed_q     <= fetch_hi_taken;
+            fetch_fault_q <= wb_err_i;
         end
-        if (state == S_FETCH_HI && wb_ack_i)
-            instr_hi_q <= wb_dat_i[15:0];
+        if (state == S_FETCH_HI && wb_done) begin
+            instr_hi_q    <= wb_dat_i[15:0];
+            fetch_fault_q <= wb_err_i;  // plain overwrite, not an OR-latch: S_FETCH_HI is
+                                         // only ever reached when S_FETCH's own crossed_q
+                                         // (== wb_ok) was set, so fetch_fault_q is
+                                         // guaranteed 0 walking into S_FETCH_HI.
+        end
     end
 
     /*
@@ -468,15 +567,26 @@ module core (
     wire [31:0] raw32_noncompressed = crossed_q ? {instr_hi_q, hw3} : {second_hw, first_hw};
 
     logic [(`INSTR_SIZE - 1):0] instruction;
-    assign instruction = is_compressed
-        ? (c_expand_illegal ? 32'h00000013 /* addi x0,x0,0 -- inert placeholder
-                                               value only, never the real trap
-                                               mechanism: is_illegal_instr below
-                                               (fed by c_expand_illegal
-                                               directly) is what actually traps
-                                               a reserved compressed encoding. */
-                             : c_expand_out)
-        : raw32_noncompressed;
+    assign instruction = fetch_fault_q
+        ? 32'h00000013 /* addi x0,x0,0 -- inert placeholder for a FAULTED fetch
+                           (instr_line_q/instr_hi_q are garbage on wb_err_i).
+                           Same trick as the compressed-illegal placeholder
+                           below, one more reason it's safe to reuse: this
+                           makes every downstream classification (is_load,
+                           is_store, is_ebreak, is_illegal_instr, ...)
+                           harmless ADDI-shaped no-ops, so nothing can act on
+                           the garbage bits before the real trap mechanism
+                           (fetch_fault_q feeding exc_code/trap_taken/trap_val
+                           directly, see below) takes over. */
+        : is_compressed
+            ? (c_expand_illegal ? 32'h00000013 /* addi x0,x0,0 -- inert placeholder
+                                                   value only, never the real trap
+                                                   mechanism: is_illegal_instr below
+                                                   (fed by c_expand_illegal
+                                                   directly) is what actually traps
+                                                   a reserved compressed encoding. */
+                                 : c_expand_out)
+            : raw32_noncompressed;
 
     /*
      * pc_plus_len: C extension's generalization of the old fixed pc+4
@@ -716,18 +826,33 @@ module core (
      * Reservation register (LR/SC). Set unconditionally on LR's own
      * retirement (a fresh LR always creates a new reservation,
      * superseding any prior one -- a plain overwrite, not a conditional
-     * set). Cleared on ANY store-class instruction's retirement: ordinary
-     * SB/SH/SW/SD (is_store), SC either way (is_sc, since is_store alone
-     * only catches SC's MATCHED case), or an AMO's write (is_amo_rmw) --
-     * matching the spec requirement that a used reservation can't be
-     * reused.
+     * set) -- but ONLY when LR actually retires cleanly (`!trap_taken`),
+     * same gate reg_write/csr_we already use. Without it, a faulted LR
+     * (misaligned, or -- since is_lr is purely combinational/decode-based
+     * and doesn't care about the bus outcome -- a real access-fault via
+     * mem_store_access_fault, newly reachable once wb_err_i started
+     * feeding commit_now) would still set a "valid" reservation for a
+     * load that never happened, letting a later SC to that address
+     * spuriously report success. Found via code review, not a test
+     * failure -- see testbench/core_reservation_fault_tb.sv for the
+     * proof (a faulted LR immediately followed by an SC to the same
+     * address must NOT report success). Cleared on ANY store-class
+     * instruction's retirement: ordinary SB/SH/SW/SD (is_store), SC
+     * either way (is_sc, since is_store alone only catches SC's MATCHED
+     * case), or an AMO's write (is_amo_rmw) -- matching the spec
+     * requirement that a used reservation can't be reused. The clear
+     * arm doesn't need the same `!trap_taken` guard: a faulted store/SC/
+     * AMO-write never actually wrote anything either, but invalidating
+     * the reservation anyway is still spec-conformant (a reservation
+     * surviving a faulted store attempt is not architecturally
+     * guaranteed) and strictly safer than leaving it valid.
      */
     logic reservation_valid_q;
     logic [(`WORD_SIZE - 1):0] reservation_addr_q;
     always_ff @(posedge clk) begin
         if (rst) begin
             reservation_valid_q <= 1'b0;
-        end else if (commit_now && is_lr) begin
+        end else if (commit_now && is_lr && !trap_taken) begin
             reservation_valid_q <= 1'b1;
             reservation_addr_q  <= amo_target_addr;
         end else if (commit_now && (is_store || is_sc || is_amo_rmw)) begin
@@ -937,7 +1062,7 @@ module core (
             `INSTR_CODE(SB), `INSTR_CODE(SH), `INSTR_CODE(SW), `INSTR_CODE(SD),
             `INSTR_CODE(BEQ), `INSTR_CODE(BNE), `INSTR_CODE(BLT),
             `INSTR_CODE(BGE), `INSTR_CODE(BLTU), `INSTR_CODE(BGEU),
-            `INSTR_CODE(FENCE), `INSTR_CODE(ECALL), `INSTR_CODE(EBREAK),
+            `INSTR_CODE(FENCE), `INSTR_CODE(FENCE_I), `INSTR_CODE(ECALL), `INSTR_CODE(EBREAK),
             `INSTR_CODE(MRET), `INSTR_CODE(SRET), `INSTR_CODE(WFI), `INSTR_CODE(SFENCE_VMA),
             `INSTR_CODE(INVALID):
                 reg_write_ctrl = 1'b0;
@@ -979,7 +1104,7 @@ module core (
                                                            1'b0;
 
     /*
-     * Forward-declared here, same reason is_load/is_store/halted are
+     * Forward-declared here, same reason is_load/is_store are
      * (see the comment near the top of this file): csr_rdata is
      * referenced below in the operand muxes, textually before csr_file0
      * -- the instance that actually drives it -- is declared (csr_file0
@@ -1012,17 +1137,28 @@ module core (
      * subtest that expects exactly this trap and got a normal return
      * instead, since TSR was until now inert storage only).
      *
-     * Deliberately NOT covered: read-only-CSR-write attempts
-     * (bits[11:10]) -- csr_file.sv already silently ignores these
-     * (Zicsr milestone's own decision; core_zicsr_tb.sv's csrrwi-to-
-     * mhartid case depends on that silent-ignore) -- SFENCE.VMA from
-     * U-mode (spec-should-trap, but decoded as an unconditional NOP
-     * this milestone -- see its own comment in
-     * instructions_and_masks.sv) -- and TVM/TW (mstatus's other two
-     * "trap on privileged op" bits, same "real storage, not enforced"
-     * status as TSR was -- SFENCE.VMA-under-TVM and WFI-under-TW are a
-     * separate gap, not exercised by the S-00 failure that motivated
-     * this fix, and left as-is rather than speculatively fixed here).
+     * Read-only-CSR-write attempts (bits[11:10]=='11', a real write
+     * genuinely attempted -- see csr_readonly_violation below) also
+     * trap as illegal-instruction, per spec ("Attempts to write a
+     * read-only CSR... raise illegal instruction exceptions"). Found
+     * 2026-08-20 via a real ACT4 U-00 failure (newly exercised once
+     * EBREAK became a real, resumable trap -- U-00's own boot sequence
+     * attempts csrrw x0, cycle(0xC00), x10, a write to a genuinely
+     * read-only CSR): traced via sail_riscv_sim --trace-instr/--trace-reg
+     * against the real ELF, diffed against this core's own RVFI
+     * retirement trace, confirming the exact first divergence is this
+     * core silently no-op'ing the write instead of trapping. Previously
+     * csr_file.sv silently ignored these writes (a Zicsr-milestone
+     * decision core_zicsr_tb.sv's own csrrwi-to-mhartid case used to
+     * depend on -- that subtest is retired now that the real trap
+     * exists; see core_csr_readonly_trap_tb.sv for its replacement).
+     *
+     * Still NOT covered: SFENCE.VMA from U-mode (spec-should-trap, but
+     * decoded as an unconditional NOP this milestone -- see its own
+     * comment in instructions_and_masks.sv) and TVM/TW (mstatus's other
+     * two "trap on privileged op" bits, same "real storage, not
+     * enforced" status TSR had before its own fix -- SFENCE.VMA-under-
+     * TVM and WFI-under-TW remain a separate, not-yet-exercised gap).
      */
     // Declared here (ahead of csr_file0's instantiation further down)
     // purely because Icarus's single-pass elaborator wants a net's
@@ -1032,6 +1168,30 @@ module core (
     wire mstatus_tsr_w;
     wire is_invalid_instr    = (decoded_instruction == `INSTR_CODE(INVALID));
     wire csr_priv_violation  = is_csr  && (imm_2[9:8] > 2'(current_priv));
+    // A real write is attempted by every CSR instruction except the
+    // csrr{s,c}{,i} forms with a zero source (csr_write_suppress already
+    // captures exactly that set) -- csrrw/csrrwi always attempt a write
+    // regardless of rd, per spec. bits[11:10]=='11' marks a read-only CSR.
+    wire csr_readonly_violation = is_csr && !csr_write_suppress && (imm_2[11:10] == 2'b11);
+    /*
+     * Debug-mode CSRs (dcsr/dpc/dscratch0/dscratch1, 0x7B0-0x7B3) are a
+     * genuinely separate check from csr_priv_violation above, not an
+     * extension of it: that check is a magnitude comparison against
+     * current_priv (imm_2[9:8] > current_priv), and these four addresses
+     * encode imm_2[9:8]==2'b11 -- the same encoding as an ordinary
+     * M-mode-only CSR -- so M-mode code would sail straight through
+     * csr_priv_violation untouched. Per the RISC-V Debug spec, Debug
+     * CSRs must only be accessible from Debug Mode itself, never merely
+     * M-mode, hence a dedicated in_debug_mode gate instead of a
+     * privilege-level comparison. in_debug_mode is a forward reference --
+     * tied 0 here until Milestone 4 builds the real halt/resume FSM this
+     * state belongs to; until then every access from anywhere traps,
+     * which is spec-correct (this core has no Debug Mode to legally be
+     * in yet).
+     */
+    wire in_debug_mode = 1'b0;
+    wire is_debug_csr_addr = is_csr && (imm_2[11:2] == 10'h1EC);
+    wire debug_csr_violation = is_debug_csr_addr && !in_debug_mode;
     wire mret_priv_violation = is_mret && (current_priv != PRIV_M);
     wire sret_priv_violation = is_sret && ((current_priv == PRIV_U)
                               || (current_priv == PRIV_S && mstatus_tsr_w));
@@ -1044,26 +1204,50 @@ module core (
      * is_compressed guard here rather than trusting c_expand_illegal
      * alone.
      */
-    wire is_illegal_instr = is_invalid_instr || csr_priv_violation
+    wire is_illegal_instr = is_invalid_instr || csr_priv_violation || csr_readonly_violation
+                          || debug_csr_violation
                           || mret_priv_violation || sret_priv_violation
                           || (is_compressed && c_expand_illegal);
     wire is_ecall = (decoded_instruction == `INSTR_CODE(ECALL));
+    /*
+     * Zifencei: is_fence_i drives icache_flush_o below (see that port's
+     * own header comment for why the timing is provably clean). Declared
+     * here rather than next to is_illegal_instr/is_ecall's own forward
+     * reference needs -- FENCE.I isn't consumed by exc_code/trap_taken at
+     * all, so it doesn't need the same forward-declaration treatment
+     * those wires do.
+     */
+    wire is_fence_i = (decoded_instruction == `INSTR_CODE(FENCE_I));
 
     /* Exception codes, per spec's machine-cause table (synchronous only
      * -- bit 63/Interrupt is always 0, no interrupt source exists yet).
      * 4/6 (load/store-AMO address misaligned) are standard RISC-V causes;
      * mem_load_misaligned/mem_store_misaligned are driven in the Memory
-     * section below, once mem_paddr exists. */
-    wire [3:0] exc_code = is_illegal_instr                     ? 4'd2  :
+     * section below, once mem_paddr exists. 1/5/7 (instruction/load/
+     * store-AMO access fault) are likewise standard causes, driven by a
+     * real wb_err_i response -- fetch_fault_q (instruction, cause 1) and
+     * mem_load_access_fault/mem_store_access_fault (cause 5/7, also
+     * driven in the Memory section below) are this file's classification
+     * of WHICH access faulted, mirroring the misaligned pair exactly.
+     * fetch_fault_q is checked first -- defensive, not strictly required
+     * (the `instruction` substitution above already makes is_illegal_instr
+     * etc. structurally false whenever it's set), but omitting its own
+     * arm would let the fault be silently swallowed as a harmless ADDI. */
+    wire [3:0] exc_code = fetch_fault_q                         ? 4'd1  :
+                           is_illegal_instr                     ? 4'd2  :
+                           is_ebreak                            ? 4'd3  :
                            (is_ecall && current_priv == PRIV_U) ? 4'd8  :
                            (is_ecall && current_priv == PRIV_S) ? 4'd9  :
                            (is_ecall && current_priv == PRIV_M) ? 4'd11 :
                            mem_load_misaligned                  ? 4'd4  :
                            mem_store_misaligned                 ? 4'd6  :
+                           mem_load_access_fault                ? 4'd5  :
+                           mem_store_access_fault               ? 4'd7  :
                                                                    4'd0; // don't-care, gated by trap_taken
 
-    wire trap_taken = commit_now && (is_illegal_instr || is_ecall
-                                   || mem_load_misaligned || mem_store_misaligned);
+    assign trap_taken = commit_now && (fetch_fault_q || is_illegal_instr || is_ebreak || is_ecall
+                                   || mem_load_misaligned || mem_store_misaligned
+                                   || mem_load_access_fault || mem_store_access_fault);
     /* An M-mode trap never delegates, regardless of medeleg -- falls out
      * naturally here since current_priv==M forces this wire to 0. */
     wire trap_to_s  = trap_taken && (current_priv != PRIV_M) && medeleg_w[6'(exc_code)];
@@ -1289,6 +1473,20 @@ module core (
     wire [(`WORD_SIZE - 1):0] mtvec_w, stvec_w, mepc_w, sepc_w;
     wire [1:0] mstatus_mpp_w;
     wire mstatus_spp_w;
+    /*
+     * mip_w/mie_w/mideleg_w: WORD_SIZE-wide (matching csr_file0's real
+     * architectural CSR width), but the Interrupts section below only
+     * ever reads bit 7 (MTIE/MTIP/the MTI delegation bit) off each --
+     * every other bit is genuinely unused by this milestone's logic
+     * (they exist for a real, spec-shaped mip/mie/mideleg, not padding),
+     * same "wrap the genuinely-partial-usage bits" precedent
+     * trap_vector_base already establishes below for mtvec/stvec's own
+     * MODE field.
+     */
+    /* verilator lint_off UNUSEDSIGNAL */
+    wire [(`WORD_SIZE - 1):0] mip_w, mie_w, mideleg_w;
+    /* verilator lint_on UNUSEDSIGNAL */
+    wire mstatus_mie_w, mstatus_sie_w;
 `ifdef RISCV_FORMAL
     wire [(`WORD_SIZE - 1):0] mcause_w, scause_w;
     wire [(`WORD_SIZE - 1):0] mepc_next_w, sepc_next_w, mcause_next_w, scause_next_w;
@@ -1304,11 +1502,12 @@ module core (
         .i_instr_retired(commit_now),
 
         .i_current_priv(current_priv),
-        .i_trap_taken(trap_taken),
-        .i_trap_cause(trap_cause),
-        .i_trap_val(trap_val),
+        .i_mtip(i_mtip),
+        .i_trap_taken(trap_taken || interrupt_taken),
+        .i_trap_cause(trap_taken ? trap_cause : {1'b1, 63'd7}),
+        .i_trap_val(trap_taken ? trap_val : `WORD_SIZE'(0)),
         .i_trap_pc(pc),
-        .i_trap_to_s(trap_to_s),
+        .i_trap_to_s(trap_taken ? trap_to_s : interrupt_to_s),
         .i_mret_taken(mret_taken),
         .i_sret_taken(sret_taken),
 
@@ -1319,7 +1518,35 @@ module core (
         .o_medeleg(medeleg_w),
         .o_mstatus_mpp(mstatus_mpp_w),
         .o_mstatus_spp(mstatus_spp_w),
-        .o_mstatus_tsr(mstatus_tsr_w)
+        .o_mstatus_tsr(mstatus_tsr_w),
+
+        /*
+         * Milestone 5 (csr_file.sv CSR-side CLINT/interrupt plumbing) added
+         * these 5 outputs; Milestone 6 (this section) is their real
+         * consumer -- see the Interrupts section immediately following
+         * this instantiation, which drives mti_pending/mti_to_s/
+         * mti_enabled/interrupt_taken/interrupt_to_s off exactly these
+         * five wires.
+         */
+        .o_mip(mip_w),
+        .o_mie(mie_w),
+        .o_mideleg(mideleg_w),
+        .o_mstatus_mie(mstatus_mie_w),
+        .o_mstatus_sie(mstatus_sie_w),
+
+        /*
+         * Milestone 3 (Debug CSRs) added dcsr/dpc storage in csr_file.sv,
+         * but this milestone's own core.sv work stops at trapping illegal
+         * access to them (see debug_csr_violation above) -- no halt/
+         * resume FSM exists yet to actually consume a live dpc/dcsr
+         * value. Explicitly, deliberately unconnected (not omitted) so
+         * lint tools see this as intentional, not a forgotten
+         * connection -- same precedent soc.sv's own dram_* ports use;
+         * Milestone 4's halt/resume FSM is the real consumer.
+         */
+        /* verilator lint_off PINCONNECTEMPTY */
+        .o_dcsr(), .o_dpc()
+        /* verilator lint_on PINCONNECTEMPTY */
 `ifdef RISCV_FORMAL
         ,
         .o_mcause(mcause_w),
@@ -1330,6 +1557,45 @@ module core (
         .o_scause_next(scause_next_w)
 `endif
     );
+
+    /* --------------------------------------------------------------- *
+     * Interrupts (CLINT machine-timer, Milestone 6)
+     * --------------------------------------------------------------- */
+
+    // MTIE & MTIP (bit 7). mti_to_s reads mideleg_w[7] -- real, unmasked,
+    // software-writable storage, not hardwired 0; reads 0 in practice
+    // only because nothing this milestone writes it.
+    wire mti_pending = mie_w[7] & mip_w[7];
+    wire mti_to_s    = mideleg_w[7];
+    wire mti_enabled = mti_to_s
+        ? ((current_priv == PRIV_U) ? 1'b1 : (current_priv == PRIV_S) ? mstatus_sie_w : 1'b0)
+        : ((current_priv != PRIV_M) ? 1'b1 : mstatus_mie_w);
+    wire int_pending_and_enabled = mti_pending && mti_enabled;
+
+    logic commit_now_q;
+    always_ff @(posedge clk) begin
+        if (rst) commit_now_q <= 1'b0;
+        else     commit_now_q <= commit_now;
+    end
+
+    // interrupt_taken/interrupt_to_s: forward-declared above -- csr_file0's
+    // own i_trap_taken/i_trap_to_s need them before this section (which
+    // itself needs csr_file0's own outputs) can exist.
+    //
+    // No `!halted` guard here anymore (removed alongside halted's own
+    // removal below) -- there is no longer a permanent-freeze state to
+    // guard against post-EBREAK; a future Debug Module halt/resume
+    // milestone will reintroduce an analogous guard with real semantics.
+    assign interrupt_taken = commit_now_q && int_pending_and_enabled;
+    assign interrupt_to_s  = interrupt_taken && mti_to_s;
+
+    logic fetch_redirect_q;
+    always_ff @(posedge clk) begin
+        if (rst) fetch_redirect_q <= 1'b0;
+        else if (interrupt_taken)             fetch_redirect_q <= 1'b1;
+        else if (state == S_FETCH && wb_done) fetch_redirect_q <= 1'b0;
+    end
+    wire fetch_from_trap_vector = interrupt_taken || fetch_redirect_q;
 
     /*
      * Branch comparator: NOT routed through alu0. alu_ops.sv has no
@@ -1438,13 +1704,49 @@ module core (
     assign mem_load_misaligned  = (state == S_EXEC) && mem_misaligned && is_load && !is_lr && !is_amo_rmw;
     assign mem_store_misaligned = (state == S_EXEC) && mem_misaligned && (is_store || is_sc || is_lr || is_amo_rmw);
 
+    /*
+     * mem_load_access_fault/mem_store_access_fault: same is_load/is_lr/
+     * is_amo_rmw split as mem_load_misaligned/mem_store_misaligned above
+     * (LR is spec-classified under store/AMO, cause 7, not load, cause 5
+     * -- same reasoning, not just convention-matching), but keyed off a
+     * real wb_err_i response during S_MEM/S_AMO_WRITE instead of a
+     * combinational address check during S_EXEC -- a bus error can only
+     * be discovered once a real bus cycle actually returns. An AMO's
+     * read-phase fault (S_MEM, wb_err_i, is_amo_rmw) falls into the
+     * store/AMO term below, same as LR -- it never reaches S_AMO_WRITE
+     * (see commit_now/the FSM above). An AMO's write-phase fault
+     * (S_AMO_WRITE, wb_err_i) is its own explicit term, since is_load/
+     * is_store don't apply there.
+     */
+    assign mem_load_access_fault  = (state == S_MEM) && wb_err_i && is_load && !is_lr && !is_amo_rmw;
+    assign mem_store_access_fault = ((state == S_MEM) && wb_err_i && (is_store || is_sc || is_lr || is_amo_rmw))
+                                  || ((state == S_AMO_WRITE) && wb_err_i);
+
+    /*
+     * mem_access_fault_addr: the one place mem_paddr vs. amo_addr_q
+     * genuinely matters for trap_val below. mem_paddr is live/correct
+     * during S_MEM, but gets REPURPOSED to the AMO modify value the
+     * instant S_AMO_WRITE begins (the same hazard the AMO RVFI tap
+     * already works around) -- an AMO write-phase fault must use
+     * amo_addr_q instead, or mtval reports garbage. Named separately so
+     * trap_val's own chain stays a flat, single-level ternary matching
+     * every sibling arm, rather than growing a nested one just for this
+     * case.
+     */
+    wire [(`WORD_SIZE - 1):0] mem_access_fault_addr = (state == S_AMO_WRITE) ? amo_addr_q : mem_paddr;
+
     /* trap_val, continued from its forward declaration above: the
-     * misaligned-access causes report the faulting address (mem_paddr),
-     * per spec's mtval/stval convention. */
-    assign trap_val = is_illegal_instr
-        ? (is_compressed ? {48'b0, first_hw}
-                          : {{(`WORD_SIZE - `INSTR_SIZE){1'b0}}, instruction})
+     * misaligned-access and access-fault causes report the faulting
+     * address, per spec's mtval/stval convention. fetch_fault_q (cause 1)
+     * uses pc directly -- csr_file0.i_trap_pc already receives pc
+     * unconditionally for every trap, so mepc == mtval here, which is
+     * both spec-correct and sidesteps needing to know whether S_FETCH or
+     * S_FETCH_HI was the one that actually faulted. */
+    assign trap_val = fetch_fault_q ? pc
+        : is_illegal_instr ? (is_compressed ? {48'b0, first_hw}
+                                             : {{(`WORD_SIZE - `INSTR_SIZE){1'b0}}, instruction})
         : (mem_load_misaligned || mem_store_misaligned) ? mem_paddr
+        : (mem_load_access_fault || mem_store_access_fault) ? mem_access_fault_addr
         : `WORD_SIZE'(0);
 
     /* Store data, pre-shifted into the byte lane(s) it'll land in. */
@@ -1494,7 +1796,14 @@ module core (
      * sidesteps that entirely.
      */
     always_ff @(posedge clk) begin
-        if (state == S_MEM && wb_ack_i && is_amo_rmw) begin
+        if (state == S_MEM && wb_ok && is_amo_rmw) begin
+            // wb_ok, not bare wb_ack_i -- belt-and-suspenders: the FSM fix
+            // above (commit_now/state transitions) already guarantees
+            // S_AMO_WRITE is never entered on an errored read, so this
+            // capture's value is never consumed either way on a fault, but
+            // keying it on wb_ack_i alone would still populate it with
+            // garbage on a paired-error read (icache/dcache's ack+err
+            // coupling) for no reason.
             amo_rdata_q <= load_data;
             /*
              * Full WORD_SIZE-wide, aligned the same way the load/store RVFI
@@ -1545,31 +1854,41 @@ module core (
      * during the settle-and-decode cycle in between.
      *
      * Both S_FETCH and S_MEM additionally gate cyc_o/stb_o with
-     * !wb_ack_i, NOT just `state == S_*` -- this is load-bearing, not
+     * !wb_done, NOT just `state == S_*` -- this is load-bearing, not
      * decoration. `state` only updates on the NEXT clock edge after
-     * wb_ack_i is observed (see the state always_ff below), so for the
-     * entire cycle in between -- from the moment the slave's registered
-     * ack_o first becomes 1 to the edge core.sv's FSM actually reacts to
-     * it -- cyc_o/stb_o would otherwise still read as asserted. A slave
-     * that simply does `if (cyc_i && stb_i) <act once, ack>` (both
-     * wb4_sram.sv and uart_tx.sv do exactly this, and correctly so --
-     * nothing about the spec obligates a slave to guess whether a
-     * still-asserted cyc/stb is a new request or the master being slow
-     * to notice the old one) would then see cyc/stb still high on that
-     * extra cycle and serve the SAME request a second time. Found via
-     * this exact symptom: the UART printed "HH" for a single-byte write.
-     * Gating with !wb_ack_i drops cyc_o/stb_o combinationally the moment
-     * ack_i is observed, so the slave sees the request deasserted before
-     * it would ever re-fire -- standard Wishbone master practice, and
-     * the same root cause (not the same fix -- that one patched a
-     * testbench's own master-role loop) as the wb_cycle ack-timing bug
-     * in wb4_sram_tb.sv/uart_tx_tb.sv.
+     * wb_ack_i/wb_err_i is observed (see the state always_ff above), so
+     * for the entire cycle in between -- from the moment the slave's
+     * registered ack_o/err_o first becomes 1 to the edge core.sv's FSM
+     * actually reacts to it -- cyc_o/stb_o would otherwise still read as
+     * asserted. A slave that simply does `if (cyc_i && stb_i) <act once,
+     * ack>` (both wb4_sram.sv and uart_tx.sv do exactly this, and
+     * correctly so -- nothing about the spec obligates a slave to guess
+     * whether a still-asserted cyc/stb is a new request or the master
+     * being slow to notice the old one) would then see cyc/stb still
+     * high on that extra cycle and serve the SAME request a second time.
+     * Found via this exact symptom: the UART printed "HH" for a
+     * single-byte write. Gating with !wb_done drops cyc_o/stb_o
+     * combinationally the moment the cycle terminates, one way or
+     * another -- standard Wishbone master practice, and the same root
+     * cause (not the same fix -- that one patched a testbench's own
+     * master-role loop) as the wb_cycle ack-timing bug in
+     * wb4_sram_tb.sv/uart_tx_tb.sv. Using wb_done rather than bare
+     * wb_ack_i also matters for a genuinely unpaired error response
+     * (wb4_sram.sv's own convention: err_o without ack_o) -- keyed on
+     * ack alone, this guard would keep re-driving cyc_o/stb_o forever
+     * after an error the slave already terminated, the exact bug class
+     * bus-error trapping (see wb_done/wb_ok's own comment above) exists
+     * to close everywhere.
      */
 
     // See this port's own header comment (module port list, above) for
     // why this is a plain wire off `state`, not folded into
-    // wb_master_drive's !wb_ack_i-gated combinational block below.
+    // wb_master_drive's !wb_done-gated combinational block below.
     assign wb_ifetch_o = (state == S_FETCH) || (state == S_FETCH_HI);
+
+    // See this port's own header comment (module port list, above) for
+    // the timing argument.
+    assign icache_flush_o = commit_now && is_fence_i;
 
     always_comb begin: wb_master_drive
         wb_cyc_o  = 1'b0;
@@ -1580,28 +1899,20 @@ module core (
         wb_sel_o  = 8'b0;
         case (state)
             S_FETCH: begin
-                /*
-                 * Once halted, never issue another fetch -- see the
-                 * halt-latch comment below for why parking here (rather
-                 * than, say, forcing state to hold) is sufficient to
-                 * freeze the whole core.
-                 */
-                if (!halted && !wb_ack_i) begin
+                if (!wb_done) begin
                     wb_cyc_o  = 1'b1;
                     wb_stb_o  = 1'b1;
-                    wb_addr_o = fetch_addr;
+                    wb_addr_o = fetch_from_trap_vector ? {trap_vector[31:3], 3'b0} : fetch_addr;
                     wb_sel_o  = 8'hFF; // don't-care for a read; full line for clarity
                 end
             end
             /*
              * C extension: the second dword of a crossing fetch --
-             * reuses the exact same !wb_ack_i gating discipline as
-             * every other arm here. Never halts mid-crossing (the
-             * !halted check mirrors S_FETCH's own, for the same reason:
-             * once halted, issue no further bus traffic at all).
+             * reuses the exact same !wb_done gating discipline as
+             * every other arm here.
              */
             S_FETCH_HI: begin
-                if (!halted && !wb_ack_i) begin
+                if (!wb_done) begin
                     wb_cyc_o  = 1'b1;
                     wb_stb_o  = 1'b1;
                     wb_addr_o = fetch_addr_hi;
@@ -1609,7 +1920,7 @@ module core (
                 end
             end
             S_MEM: begin
-                if (!wb_ack_i) begin
+                if (!wb_done) begin
                     wb_cyc_o  = 1'b1;
                     wb_stb_o  = 1'b1;
                     wb_we_o   = is_store;
@@ -1620,11 +1931,11 @@ module core (
             end
             /*
              * A extension: the write half of a read-modify-write AMO.
-             * Reuses the exact same !wb_ack_i gating discipline as
+             * Reuses the exact same !wb_done gating discipline as
              * S_FETCH/S_MEM above -- load-bearing here too, same reason.
              */
             S_AMO_WRITE: begin
-                if (!wb_ack_i) begin
+                if (!wb_done) begin
                     wb_cyc_o  = 1'b1;
                     wb_stb_o  = 1'b1;
                     wb_we_o   = 1'b1;      // always a write -- this state exists for exactly this
@@ -1700,10 +2011,11 @@ module core (
      * bits (the MODE field) are structurally never read below -- masked
      * off, not an oversight.
      */
+    wire route_to_s = trap_taken ? trap_to_s : interrupt_to_s;
     /* verilator lint_off UNUSEDSIGNAL */
-    wire [(`WORD_SIZE - 1):0] trap_vector_base = trap_to_s ? stvec_w : mtvec_w;
+    wire [(`WORD_SIZE - 1):0] trap_vector_base = route_to_s ? stvec_w : mtvec_w;
     /* verilator lint_on UNUSEDSIGNAL */
-    wire [(`WORD_SIZE - 1):0] trap_vector = {trap_vector_base[63:2], 2'b00};
+    assign trap_vector = {trap_vector_base[63:2], 2'b00};   // was `wire trap_vector =` -- now forward-declared
 
     assign next_pc = trap_taken              ? trap_vector   :
                       mret_taken              ? mepc_w        :
@@ -1713,37 +2025,34 @@ module core (
                                                  pc_plus_len;
 
     /* --------------------------------------------------------------- *
-     * PC register / halt latch
+     * PC register
      * --------------------------------------------------------------- */
 
     /*
-     * EBREAK latches `halted` and freezes pc -- the only piece of
-     * "extra" state in this design, beyond pc/state/instr_line_q. Both
-     * commit only on commit_now (EBREAK is never a load/store, so it
-     * always retires at the end of S_EXEC). pc is deliberately excluded
-     * from advancing on the SAME edge halted is set (`!is_ebreak` below)
-     * -- otherwise pc would jump past EBREAK on the very edge that's
-     * supposed to freeze it. After that edge, state parks in S_FETCH
-     * forever (the bus-driving block above stops issuing fetches once
-     * halted), so commit_now can never become true again and both
-     * registers stay frozen with no further gating needed.
+     * EBREAK is a real synchronous trap now (cause 3, Breakpoint -- see
+     * is_ebreak's own arm in exc_code/trap_taken above), so it commits
+     * exactly like any other trap: pc jumps to trap_vector via next_pc's
+     * own top-priority arm, mepc/mcause/mstatus update for real, and
+     * execution resumes from whatever mtvec points at. There is no
+     * freeze/halt special-case here anymore.
      *
-     * Testbenches watch `halted` via a hierarchical reference (e.g.
-     * dut.halted) to know when a test program has finished running,
-     * without guessing a cycle count.
+     * The `halted` register (a permanent one-way EBREAK freeze latch,
+     * removed here 2026-08-20) used to be what every testbench polled
+     * hierarchically (e.g. dut.halted) to know a test program had
+     * finished. Since EBREAK no longer parks the core, testbenches now
+     * detect completion by observing the one-shot `trap_taken &&
+     * is_ebreak` pulse directly and latching it locally (see
+     * testbench/halt_wait.sv's updated contract). A future Debug Module
+     * milestone will reintroduce real, resumable halt/resume state under
+     * a new name -- this is a clean removal, not a placeholder.
      */
     always_ff @(posedge clk) begin
         if (rst)
-            halted <= 1'b0;
-        else if (commit_now && is_ebreak)
-            halted <= 1'b1;
-    end
-
-    always_ff @(posedge clk) begin
-        if (rst)
             pc <= '0;
-        else if (commit_now && !is_ebreak)
+        else if (commit_now)
             pc <= next_pc;
+        else if (interrupt_taken)
+            pc <= trap_vector;
     end
 
     /*
@@ -1764,6 +2073,8 @@ module core (
             current_priv <= priv_t'(mstatus_mpp_w);
         else if (sret_taken)
             current_priv <= priv_t'(mstatus_spp_w ? PRIV_S : PRIV_U);
+        else if (interrupt_taken)
+            current_priv <= priv_t'(interrupt_to_s ? PRIV_S : PRIV_M);
     end
 
 `ifdef RISCV_FORMAL
@@ -1797,6 +2108,37 @@ module core (
 
     assign rvfi_valid     = commit_now;
     assign rvfi_order     = rvfi_order_q;
+
+    /*
+     * rvfi_intr support: per riscv-formal's own spec (docs/source/rvfi.rst
+     * upstream), rvfi_intr must be set for the first instruction that is
+     * part of a trap handler, i.e. one whose rvfi_pc_rdata does not match
+     * the rvfi_pc_wdata of the previous (valid) retirement. Implemented
+     * mechanically -- compare THIS retirement's pc against the LAST
+     * retirement's own next_pc -- not semantically ("was the previous
+     * retirement a trap_taken/interrupt_taken event"), and deliberately
+     * so: next_pc's own mux (see its assign below) already gives
+     * trap_taken top priority (trap_taken ? trap_vector : ...), so a
+     * synchronous exception's handler-entry PC chain is ALREADY naturally
+     * consistent in this design -- no discontinuity to flag. A semantic
+     * check would needlessly over-relax an already-tight, already-
+     * correctly-passing property for that case. interrupt_taken, by
+     * contrast, bypasses next_pc entirely via its own separate PC-register
+     * arm (see the PC register always_ff below) -- a genuine discontinuity
+     * this mechanical definition catches automatically, with no need to
+     * enumerate which mechanisms can cause one (robust to any future
+     * redirect mechanism this core grows later). Purely RVFI-scoped state
+     * -- zero impact on the real non-formal build.
+     */
+    logic [63:0] rvfi_prev_pc_wdata_q;
+    always_ff @(posedge clk) begin
+        if (rst)             rvfi_prev_pc_wdata_q <= '0; // matches pc's own reset value,
+                                                          // so the very first retirement
+                                                          // after reset correctly reads
+                                                          // rvfi_intr=0, no special case.
+        else if (commit_now) rvfi_prev_pc_wdata_q <= next_pc;
+    end
+
     /*
      * Per the RVFI spec (docs/source/rvfi.rst upstream): "For compressed
      * instructions the compressed instruction word must be output on
@@ -1819,8 +2161,10 @@ module core (
      */
     assign rvfi_insn      = is_compressed ? {16'b0, first_hw} : instruction;
     assign rvfi_trap      = trap_taken;
-    assign rvfi_halt      = 1'b0; // no graceful-halt/interrupt model exists yet
-    assign rvfi_intr      = 1'b0; // no interrupt controller exists yet (known gap)
+    assign rvfi_halt      = 1'b0; // no graceful-halt model exists yet
+    assign rvfi_intr      = commit_now && (pc != rvfi_prev_pc_wdata_q); // see
+                                   // rvfi_prev_pc_wdata_q's own comment above for the
+                                   // full derivation -- real wiring, no longer hardwired
     assign rvfi_mode      = current_priv; // PRIV_U/S/M already match RVFI's 0/1/3 encoding
     assign rvfi_ixl       = 2'd2; // always 64-bit -- this core never runs 32-bit mode
     assign rvfi_rs1_addr  = read_gpr_A_sel;
