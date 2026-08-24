@@ -64,7 +64,8 @@ module core_c_ext_tb;
     logic quiet_on_pass = 1'b0;
     `include "check_lib.sv"
 
-    wire halted = dut.core0.halted;
+    logic halted = 1'b0;
+    always @(posedge clk) if (dut.core0.trap_taken && dut.core0.is_ebreak) halted <= 1'b1;
     `include "halt_wait.sv"
 
     /*
@@ -164,7 +165,7 @@ module core_c_ext_tb;
         @(posedge clk); #1;
         rst = 0;
 
-        wait_halted_or_timeout(`TIMEOUT_CYCLES_LARGE, "dut.core0.halted never went high");
+        wait_halted_or_timeout(`TIMEOUT_CYCLES_LARGE, "EBREAK trap never fired");
 
         check("C.ADDI16SP (x2)",  dut.core0.regfile0.gp_registers[2],  64'd272);
         check("C.LI negative (x5)", dut.core0.regfile0.gp_registers[5], -64'sd5);
@@ -178,7 +179,7 @@ module core_c_ext_tb;
         check("C.AND source unchanged (x11)", dut.core0.regfile0.gp_registers[11], 64'd222);
         check("C.SW/C.LW round trip (x15)", dut.core0.regfile0.gp_registers[15], 64'd78);
         check("C.BEQZ not taken -- fell through (x16)", dut.core0.regfile0.gp_registers[16], 64'd1);
-        check("core halted (c.ebreak reached)", {63'b0, dut.core0.halted}, 64'd1);
+        check("EBREAK trap fired (c.ebreak)", {63'b0, halted}, 64'd1);
         check("S_FETCH_HI genuinely visited for the crossing instruction",
             {63'b0, (fetch_hi_visit_count > 0)}, 64'd1);
 

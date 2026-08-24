@@ -27,14 +27,17 @@
  * FAIL macros write a marker word (1=pass, 3=fail) to a `tohost` symbol
  * -- the classic riscv-tests/HTIF convention, present purely so the Sail
  * reference model's OWN signature-computation run terminates the same way
- * it always does -- and then execute `ebreak`, this core's one real
- * simulation-halt mechanism (design/core.sv: permanent `halted` latch).
- * This harness waits on `halted` (same convention every other testbench
- * uses) and then reads the marker word straight out of SRAM. `tohost`'s
- * address moves per-test (its `.text.rvmodel` section's size varies with
- * how much test code preceded it), so it's supplied via +TOHOST_ADDR
- * rather than assumed -- the driver script extracts it per-ELF via
- * `riscv64-unknown-elf-nm`.
+ * it always does -- and then execute `ebreak`. This harness polls `tohost`
+ * directly for a real pass/fail marker rather than waiting for an
+ * ebreak-based halt signal: EBREAK is a real, resumable trap now (see
+ * design/core.sv), and several ACT4 tests deliberately execute ebreak
+ * MID-TEST as part of what they're testing (verifying it traps correctly,
+ * then resuming) well before their own real completion -- an
+ * ebreak-based "first occurrence" latch would stop watching too early for
+ * those. `tohost`'s address moves per-test (its `.text.rvmodel` section's
+ * size varies with how much test code preceded it), so it's supplied via
+ * +TOHOST_ADDR rather than assumed -- the driver script extracts it
+ * per-ELF via `riscv64-unknown-elf-nm`.
  *
  * Required plusargs (all consumed via $value$plusargs, see initial block):
  *   +HEXFILE=<path>       -- $readmemh-format hex image (objcopy -O verilog
@@ -56,14 +59,17 @@
  * one of these on its own line, before $finish:
  *   ACT_RESULT: PASS
  *   ACT_RESULT: FAIL
- *   ACT_RESULT: UNKNOWN (tohost=0x...)   -- halted without a recognized
- *                                           pass(1)/fail(3) marker; a real
- *                                           anomaly (bad tohost address, a
- *                                           DUT bug that reaches ebreak by
- *                                           some other path) worth looking
- *                                           at by hand, never a silent pass.
- *   TIMEOUT: ...                          -- emitted by halt_wait.sv itself
- *                                            if `halted` never asserts.
+ *   TIMEOUT: ...                          -- tohost never became a real
+ *                                            pass(1)/fail(3) marker within
+ *                                            the cycle budget; a real
+ *                                            anomaly (bad tohost address, a
+ *                                            genuine hang) worth looking
+ *                                            at by hand, never a silent
+ *                                            pass. (No separate UNKNOWN
+ *                                            result anymore: the polling
+ *                                            loop below only ever exits
+ *                                            on a real 1/3 marker or this
+ *                                            timeout.)
  *
  * NUM_WORDS is sized for the largest self-checking ELF actually observed
  * from `make` against quantiumv-rv64im.yaml (see that generation's log) --
@@ -105,9 +111,6 @@ module act_runner_tb;
         .ack_o(wb_ack), .err_o(wb_err), .cyc_i(wb_cyc), .stb_i(wb_stb), .we_i(wb_we)
     );
 
-    wire halted = dut.halted;
-    `include "halt_wait.sv"
-
     initial begin
         string hex_path;
         logic [31:0] tohost_addr;
@@ -132,15 +135,46 @@ module act_runner_tb;
         @(posedge clk); #1;
         rst = 0;
 
-        wait_halted_or_timeout(timeout_cycles, "core never halted -- missing ebreak in the generated ELF, or a real hang");
+        /*
+         * Poll tohost directly rather than waiting for an ebreak-based
+         * "halted" latch. ACT4/HTIF's real completion convention is
+         * "write tohost, then ebreak" -- but many ACT4 tests (e.g. U-00's
+         * own deliberate U_uprivinst_cg_cp_uprivinst_ebreak subcase)
+         * execute ebreak MID-TEST, as part of what they're testing (it
+         * genuinely traps now -- see design/core.sv's own EBREAK-is-a-
+         * real-trap milestone -- and the test's own handler verifies that
+         * and resumes), long before the test's real completion. A
+         * first-occurrence ebreak latch stops watching right there,
+         * before tohost is ever written -- exactly the class of bug this
+         * milestone's whole testbench sweep found and fixed elsewhere
+         * (see e.g. core_priv_tb.sv's own comment). Polling tohost
+         * directly for a real pass(1)/fail(3) marker sidesteps the
+         * question of how many ebreaks a given test deliberately takes
+         * entirely, and is closer to how real ACT4/Spike/HTIF harnesses
+         * detect completion in the first place.
+         */
+        fork
+            begin
+                tohost_word = 64'b0;
+                while (tohost_word !== 64'd1 && tohost_word !== 64'd3) begin
+                    @(posedge clk); #1;
+                    tohost_word = sram0.memory[tohost_addr[31:3]];
+                end
+            end
+            begin
+                repeat (timeout_cycles) @(posedge clk);
+                $display("TIMEOUT: core never wrote a real tohost pass/fail marker");
+                $finish;
+            end
+        join_any
+        #1;
 
-        tohost_word = sram0.memory[tohost_addr[31:3]];
+        // No `else` (UNKNOWN) branch -- the polling loop above only ever
+        // exits on tohost_word === 1 or === 3, so this is exhaustive.
         if (tohost_word == 64'd1)
             $display("ACT_RESULT: PASS");
-        else if (tohost_word == 64'd3)
-            $display("ACT_RESULT: FAIL");
         else
-            $display("ACT_RESULT: UNKNOWN (tohost=0x%016h)", tohost_word);
+            $display("ACT_RESULT: FAIL");
 
         $finish;
     end

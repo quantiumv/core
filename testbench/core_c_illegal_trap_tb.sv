@@ -54,8 +54,32 @@ module core_c_illegal_trap_tb;
     logic quiet_on_pass = 1'b0;
     `include "check_lib.sv"
 
-    wire halted = dut.core0.halted;
+    logic halted = 1'b0;
+    always @(posedge clk) if (dut.core0.trap_taken && dut.core0.is_ebreak) halted <= 1'b1;
     `include "halt_wait.sv"
+
+    /*
+     * mcause_q/mtval_q snapshot, taken at the resume point (pc==0x0A,
+     * `addi x5,x0,999`, the instruction right after the fixed-up mepc
+     * returns) -- NOT read live at check() time. mtvec stays armed at
+     * M_TRAP_HANDLER for the rest of this program, including this file's
+     * own terminating ebreak at 0x0E: since EBREAK is a real trap now,
+     * that ebreak bounces right back into M_TRAP_HANDLER (mtvec still
+     * points there), which advances mepc by 2 and mrets into whatever
+     * follows -- genuinely unwritten memory, causing a cascade of further
+     * illegal-instruction traps that keep overwriting mcause_q/mtval_q
+     * long after this test's own real assertion already happened. A
+     * point-in-time snapshot at the resume point sidesteps all of that,
+     * capturing state before the terminating ebreak (and its bounce-back)
+     * ever fires.
+     */
+    logic [63:0] mcause_snap, mtval_snap;
+    logic resumed = 1'b0;
+    always @(posedge clk) if (!resumed && dut.core0.commit_now && dut.core0.pc == 64'h0A) begin
+        resumed    <= 1'b1;
+        mcause_snap <= dut.core0.csr_file0.mcause_q;
+        mtval_snap  <= dut.core0.csr_file0.mtval_q;
+    end
 
     initial begin
         #1; // run after wb4_sram's own time-0 init
@@ -90,14 +114,14 @@ module core_c_illegal_trap_tb;
         @(posedge clk); #1;
         rst = 0;
 
-        wait_halted_or_timeout(`TIMEOUT_CYCLES_SMALL, "dut.core0.halted never went high");
+        wait_halted_or_timeout(`TIMEOUT_CYCLES_SMALL, "EBREAK trap never fired");
 
-        check("mcause == 2 (illegal instruction)", dut.core0.csr_file0.mcause_q, 64'd2);
+        check("mcause == 2 (illegal instruction)", mcause_snap, 64'd2);
         check("mtval == the raw 16-bit C.ILLEGAL halfword, zero-extended",
-            dut.core0.csr_file0.mtval_q, 64'h0000);
+            mtval_snap, 64'h0000);
         check("resumed exactly past the 2-byte illegal instruction (x5)",
             dut.core0.regfile0.gp_registers[5], 64'd999);
-        check("core halted (ebreak reached)", {63'b0, dut.core0.halted}, 64'd1);
+        check("EBREAK trap fired", {63'b0, halted}, 64'd1);
 
         $display("");
         $display("core_c_illegal_trap_tb: %0d passed, %0d failed", pass_count, fail_count);

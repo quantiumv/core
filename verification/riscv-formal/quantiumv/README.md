@@ -1,4 +1,4 @@
-# riscv-formal integration (started 2026-08-11, 56/56 isa=rv64i checks PASS; AMO 18/18 and C-extension 30/30 now added, M-extension in progress, first CSR trace ports added)
+# riscv-formal integration (started 2026-08-11, 56/56 isa=rv64i checks PASS; AMO 18/18 and C-extension 30/30 now added, M-extension in progress, first CSR trace ports added, rvfi_intr wired for real 2026-08-19)
 
 Formal verification via [riscv-formal](https://github.com/YosysHQ/riscv-formal)
 (Yosys + SymbiYosys + a SAT/BMC solver), proving ISA correctness exhaustively
@@ -687,6 +687,134 @@ here per the project owner's explicit direction rather than chasing a
 heavier trap-suppressing `[assume]` (which would meaningfully weaken what
 the check proves, not just scope it) or a from-scratch custom checker.
 
+## Resolved: `rvfi_intr` wired for real (2026-08-19) — mechanical PC-discontinuity detection, not semantic trap-tracking
+
+`rvfi_intr` had been hardwired to `1'b0` since the interrupt-taking milestone
+(CLINT/timer interrupts, see [[interrupt-taking-milestone]]), deferred as
+"out of scope" at the time. Per upstream riscv-formal's own spec
+(`docs/source/rvfi.rst`): it "must be set for the first instruction that is
+part of a trap handler, i.e. an instruction that has a `rvfi_pc_rdata` that
+does not match the `rvfi_pc_wdata` of the previous instruction." Confirmed
+via direct grep of every check-family template in `~/riscv-formal/checks/`
+that exactly two families consume it — `pc_fwd`/`pc_bwd` — both already
+enabled in this project's `checks.cfg`; every other family (insn, reg,
+unique, causal, cover, csrc_any, ill) has zero dependency on it.
+
+**Implemented mechanically, not semantically** — compare each retirement's
+own `pc` against the immediately-preceding valid retirement's own `next_pc`,
+not "was this preceded by `trap_taken`/`interrupt_taken`":
+```systemverilog
+logic [63:0] rvfi_prev_pc_wdata_q;
+always_ff @(posedge clk) begin
+    if (rst)              rvfi_prev_pc_wdata_q <= '0;
+    else if (commit_now)  rvfi_prev_pc_wdata_q <= next_pc;
+end
+assign rvfi_intr = commit_now && (pc != rvfi_prev_pc_wdata_q);
+```
+Why mechanical: tracing `next_pc`'s own mux shows `trap_taken` already has
+top priority (`trap_taken ? trap_vector : ...`), so a synchronous
+exception's handler-entry PC chain is *already* naturally consistent in
+this design — no discontinuity, correctly `rvfi_intr=0`. A semantic "was I
+preceded by any redirect" check would needlessly over-relax an
+already-tight, already-correctly-passing property for that case.
+`interrupt_taken`, by contrast, bypasses `next_pc` entirely via a separate
+PC-register arm (`else if (interrupt_taken) pc <= trap_vector;`) — a
+genuine discontinuity the mechanical definition catches automatically, with
+no need to enumerate which mechanisms can cause one (robust to any future
+redirect mechanism, e.g. whatever Sv39 eventually adds).
+
+**A second, non-obvious gap found during research**: `wrapper.sv`'s `core
+uut (...)` instantiation never connected `i_mtip` at all — it floated to
+its own ANSI default (`1'b0`), meaning `interrupt_taken` could never fire
+in any generated check. Wiring `rvfi_intr` correctly in `core.sv` alone
+would have been dead code from the formal model's perspective. Fixed by
+adding a free, unconstrained `` `rvformal_rand_reg i_mtip `` (same
+convention this file already uses for `wb_ack`/`wb_err`, matching
+riscv-formal's own `cores/nerv/wrapper.sv` precedent for a free interrupt
+input).
+
+**Verified directly, not just lint-clean**: `pc_fwd_ch0` and `pc_bwd_ch0`
+(the only two families that consume `rvfi_intr`) both `Status: passed` /
+`DONE (PASS, rc=0)` against the real, modified `core.sv`/`wrapper.sv`, at
+the configured depth (15), via `bitwuzla`. Spot-checked `insn_add_ch0` (the
+toolchain smoke test) and `ill_ch0` — both still PASS, confirming the
+newly-reachable interrupt path (via the now-free `i_mtip`) doesn't
+introduce spurious counterexamples in families that never touched
+interrupts before. `reg_ch0` (the one check in this suite that already
+needed `boolector` over `bitwuzla`, see its own "Resolved finding" above)
+also still `Status: passed` with the free `i_mtip` in play — 613s (10m13s),
+actually faster than the previously-documented ~18-minute (1090s) baseline
+despite the larger state space, ordinary solver-time variance rather than
+a sign the extra freedom made this particular check easier or harder in
+any structural way.
+
+**Scope boundary, deliberately not attempted**: no other currently-
+hardwired RVFI signal touched (`rvfi_halt` stays 0, no graceful-halt model
+exists), no new check families added to `checks.cfg`, no special modeling
+of `mideleg`-delegated S-mode interrupt scenarios (the free `i_mtip` input
+already lets the solver explore both M- and S-target routing without extra
+wiring, since `interrupt_to_s` is a pure function of already-free/derived
+state).
+
+## WSL toolchain fully rebuilt from source (2026-08-19) — the nix-store artifacts this doc's own "Environment setup" section originally pointed at were garbage-collected
+
+Returning to this integration to wire `rvfi_intr` found `sby`, `bitwuzla`,
+and the `yosys-slang` plugin all broken — each referenced a `/nix/store`
+path that no longer existed in this WSL environment (garbage-collected
+since the 56/56-PASS milestone). `yosys`, `z3`, and `boolector` (the latter
+already built from source in a prior session, see its own "Resolved
+finding" above) still worked. Build tools were available (git/cmake/g++/
+python3, GitHub network access) — rebuilt all three from source, entirely
+in user-space (no root/sudo in this environment):
+
+- **`sby`**: `git clone https://github.com/YosysHQ/sby ~/sby-src && cd
+  ~/sby-src && make install PREFIX=/home/potato/.local` against the
+  existing Yosys install. Lowest-risk of the three, worked on the first
+  try. Now `SBY v0.68` at `~/.local/bin/sby`.
+- **`yosys-slang`**: `git clone --recursive
+  https://github.com/povik/yosys-slang ~/yosys-slang-src`, `cmake -B build
+  .` (auto-detected the Yosys install via `yosys-config`), `make -C build
+  -j"$(nproc)"`. Produced `~/yosys-slang-src/build/slang.so`. This
+  environment's `checks.cfg` `[script-defines]` plugin path was updated to
+  point here (was a dangling nix-store path).
+- **`bitwuzla`**: `git clone https://github.com/bitwuzla/bitwuzla
+  ~/bitwuzla-src`. Needed GMP/MPFR dev headers, not present system-wide and
+  not installable via `apt install` (no root) — worked around via
+  `apt-get download libgmp-dev libmpfr-dev` (download-only, needs no root)
+  + `dpkg-deb -x` extraction, then hand-patched the extracted `.pc` files'
+  `prefix`/`libdir`/`Cflags` (Ubuntu's multiarch header layout needs an
+  extra `-I.../x86_64-linux-gnu` the stock `.pc` doesn't include) and
+  recreated two broken relative symlinks (`libgmp.so`/`libmpfr.so`) as
+  absolute links to the real system runtime `.so` files. Built via Meson
+  (`pip3 install --user --break-system-packages meson ninja`, then
+  `PKG_CONFIG_PATH=<extracted pkgconfig dir> python3 ./configure.py &&
+  ninja -C build`) — auto-fetched `cadical`/`symfpu` as fallback
+  subprojects. Produced a working `bitwuzla --version` →
+  `0.9.1-dev-main@dfc8b5f`, symlinked to `~/.local/bin/bitwuzla`.
+
+**A real, non-obvious CLI compatibility break**: the freshly-built
+`bitwuzla` HEAD dropped the `--smt2`/`-i` flags that `yosys-smtbmc`'s own
+bundled `smtio.py` still hardcodes for both `boolector` and `bitwuzla` in
+one shared code branch (confirmed via `bitwuzla --smt2 -i` →
+`invalid option '--smt2'`). Modern `bitwuzla` reads SMT2 by default and
+handles incremental multi-`(check-sat)` scripts with no flag needed at
+all. `smtio.py` lives in the Yosys install (root-owned in this
+environment, not editable directly) — fixed non-destructively via a
+`PYTHONPATH`-shadowed patched copy: `yosys-smtbmc` appends (not prepends)
+the real yosys share dir to `sys.path`, so a `PYTHONPATH`-supplied
+directory is found first by Python's import mechanism. The patch splits
+the shared `if self.solver in ["boolector", "bitwuzla"]:` branch into two
+separate `if` blocks — `boolector` keeps `--smt2 -i` (still required,
+confirmed via `boolector --help`), `bitwuzla` drops both flags entirely.
+Smoke-tested end-to-end (`insn_add_ch0` PASS) before relying on it for
+anything else.
+
+None of these rebuilt artifacts (`~/sby-src`, `~/yosys-slang-src`,
+`~/bitwuzla-src`, the extracted GMP/MPFR `.deb` contents, the patched
+`smtio.py` copy) are part of this git repo — see "Environment setup" below
+for the full, updated build recipe for a future environment hitting the
+same nix-store garbage-collection issue.
+
 ## Next steps, roughly in order
 
 1. Resolve or accept-as-documented-limitation the M-extension
@@ -743,24 +871,72 @@ verilator --lint-only -Wall -Idesign -Itestbench --top-module soc \
   design/wb4_sram.sv design/wb_addr_decoder.sv design/core.sv design/soc.sv
 ```
 
-Yosys 0.61 and z3 were already present. **`sby`** (SymbiYosys) is a
-*separate* repo from Yosys (not a pip package, not bundled) — a `sby`
-binary happened to already exist as a nix-store artifact at
-`/nix/store/5f4l0kgczm4kn3r2rm09arby2g44fmj4-yosys-sby-0.62/bin/sby`; it
-needs `PYTHONPATH` pointed at that same package's `share/yosys/python3/`
-directory to actually run (its own sub-modules like `sby_cmdline.py` live
-there) — a plain symlink onto `PATH` is NOT enough, needs a real wrapper
-script exporting `PYTHONPATH` first (see `~/.local/bin/sby`). If that
-nix-store path isn't present in a future environment: `git clone
-https://github.com/YosysHQ/sby && make install` against an existing Yosys.
-**`yosys-slang`** (required, see above): built plugin at
-`/nix/store/07xn6zd11qvkp8h65gwycfisr3x9hk4f-yosys-slang/share/yosys/plugins/slang.so`
-in this environment. **`bitwuzla`** (required solver, see above): binary at
-`/nix/store/zrcmy1ak6dzhjc48nw3iyi49y34zkj3f-bitwuzla-unstable-2022-10-03/bin/bitwuzla`,
-symlinked to `~/.local/bin/bitwuzla`. All three nix-store paths are
-environment-specific — if they're not present in a future environment,
-search `/nix/store` for the package name, or build from source
-(`YosysHQ/sby`, `povik/yosys-slang`, `bitwuzla/bitwuzla` upstream repos).
+Yosys 0.61 and z3 were already present. **As of 2026-08-19, none of
+`sby`/`yosys-slang`/`bitwuzla` came pre-built in this environment anymore**
+— an earlier session found all three as ready-made nix-store artifacts
+(paths below, kept as a historical pointer only — confirmed dangling/
+garbage-collected on 2026-08-19), but a future environment may have either
+situation. Check for nix-store artifacts first (`find /nix/store -iname
+'*sby*' -o -iname '*slang*' -o -iname '*bitwuzla*'`); if genuinely absent,
+build all three from source, entirely in user-space (no root needed for
+any of this):
+
+```sh
+# sby (SymbiYosys) -- separate repo from Yosys, not a pip package
+git clone https://github.com/YosysHQ/sby ~/sby-src
+cd ~/sby-src && make install PREFIX=/home/potato/.local   # -> ~/.local/bin/sby
+
+# yosys-slang -- required SystemVerilog frontend plugin, see above
+git clone --recursive https://github.com/povik/yosys-slang ~/yosys-slang-src
+cd ~/yosys-slang-src && cmake -B build . && make -C build -j"$(nproc)"
+# -> ~/yosys-slang-src/build/slang.so ; point checks.cfg's [script-defines] at this
+
+# bitwuzla -- required solver, see above. Needs GMP/MPFR dev headers; if
+# `apt install libgmp-dev libmpfr-dev` isn't available (no root), extract
+# them without root instead:
+mkdir -p ~/build-deps && cd ~/build-deps
+apt-get download libgmp-dev libmpfr-dev
+for f in *.deb; do dpkg-deb -x "$f" extracted/; done
+# patch extracted/usr/lib/x86_64-linux-gnu/pkgconfig/{gmp,mpfr,gmpxx}.pc:
+#   prefix=<...>/build-deps/extracted/usr
+#   libdir=<...>/build-deps/extracted/usr/lib/x86_64-linux-gnu
+#   gmp.pc's Cflags also needs -I${includedir}/x86_64-linux-gnu appended
+#   (Ubuntu multiarch header layout)
+# recreate extracted/usr/lib/x86_64-linux-gnu/lib{gmp,mpfr}.so as ABSOLUTE
+# symlinks to the real system runtime .so files (the extracted relative
+# symlinks point at a versioned .so that dpkg-deb -x never extracted)
+pip3 install --user --break-system-packages meson ninja
+git clone https://github.com/bitwuzla/bitwuzla ~/bitwuzla-src
+cd ~/bitwuzla-src
+PKG_CONFIG_PATH=~/build-deps/extracted/usr/lib/x86_64-linux-gnu/pkgconfig \
+  python3 ./configure.py
+ninja -C build -j"$(nproc)"   # -> ~/bitwuzla-src/build/src/main/bitwuzla
+ln -sf ~/bitwuzla-src/build/src/main/bitwuzla ~/.local/bin/bitwuzla
+```
+
+**A modern from-source `bitwuzla` needs one more fix to actually run under
+`sby`**: it dropped the `--smt2`/`-i` CLI flags `yosys-smtbmc`'s own
+bundled `smtio.py` still hardcodes (confirmed: `bitwuzla --smt2 -i` →
+`invalid option '--smt2'`; modern bitwuzla reads SMT2 by default, no flags
+needed). `smtio.py` lives inside the Yosys install (root-owned, not
+editable directly in this environment) — fix via a `PYTHONPATH`-shadowed
+patched copy, since `yosys-smtbmc` *appends* (not prepends) the real yosys
+share dir to `sys.path`:
+```sh
+mkdir -p ~/yosys-py-patch
+cp "$(yosys-config --datdir)/python3/smtio.py" ~/yosys-py-patch/
+# edit ~/yosys-py-patch/smtio.py: split the shared
+#   `if self.solver in ["boolector", "bitwuzla"]:` branch into two
+# separate `if self.solver == "boolector":` / `if self.solver == "bitwuzla":`
+# blocks -- keep --smt2/-i for boolector (still required), drop both for
+# bitwuzla (self.popen_vargs = [self.solver] + self.solver_opts).
+export PYTHONPATH=~/yosys-py-patch   # set this before every sby invocation
+```
+Old nix-store paths (dangling as of 2026-08-19, kept for reference only):
+`sby` at `/nix/store/5f4l0kgczm4kn3r2rm09arby2g44fmj4-yosys-sby-0.62/`,
+`yosys-slang` at
+`/nix/store/07xn6zd11qvkp8h65gwycfisr3x9hk4f-yosys-slang/`, `bitwuzla` at
+`/nix/store/zrcmy1ak6dzhjc48nw3iyi49y34zkj3f-bitwuzla-unstable-2022-10-03/`.
 
 **`boolector`** (required only for `reg_ch0`, see its own "Resolved
 finding" above): unlike the three above, NOT a pre-built nix-store
@@ -784,6 +960,10 @@ To (re-)generate checks and try running one, from `~/riscv-formal/cores/`:
 ```
 mkdir -p quantiumv/design && cp <this-dir>/wrapper.sv <this-dir>/checks.cfg quantiumv/
 cp /mnt/c/Users/Potato/Desktop/core/design/{alu,decoder,register_file,csr_file,divider,c_expand,core}.sv quantiumv/design/
+cp -r /mnt/c/Users/Potato/Desktop/core/design/defaults quantiumv/design/   # required -- every
+                                            # design file `includes defaults/*.sv; omitting this
+                                            # produces a real elaboration failure ("unknown macro
+                                            # or compiler directive"), not an obviously-missing-file error
 cd quantiumv && python3 ../../checks/genchecks.py
 cd checks && ulimit -v 8000000 && timeout 300 sby -f insn_add_ch0.sby
 ```

@@ -101,7 +101,8 @@ module core_isa_coverage_gap_tb;
     logic quiet_on_pass = 1'b0;
     `include "check_lib.sv"
 
-    wire halted = dut.core0.halted;
+    logic halted = 1'b0;
+    always @(posedge clk) if (dut.core0.trap_taken && dut.core0.is_ebreak) halted <= 1'b1;
     `include "halt_wait.sv"
 
     initial begin
@@ -234,7 +235,7 @@ module core_isa_coverage_gap_tb;
         @(posedge clk); #1;
         rst = 0;
 
-        wait_halted_or_timeout(`TIMEOUT_CYCLES_SMALL, "dut.core0.halted never went high");
+        wait_halted_or_timeout(`TIMEOUT_CYCLES_SMALL, "EBREAK trap never fired");
 
         check("AND",   dut.core0.regfile0.gp_registers[1],  64'h82);
         check("OR",    dut.core0.regfile0.gp_registers[2],  64'hEE);
@@ -260,7 +261,7 @@ module core_isa_coverage_gap_tb;
         check("SRAIW arithmetic-shifts then resigns", dut.core0.regfile0.gp_registers[21], 64'hFFFFFFFFF8000000);
         check("FENCE fell through (no stall/corruption)", dut.core0.regfile0.gp_registers[22], 64'd112);
         check("plain NOP fell through (no stall/corruption)", dut.core0.regfile0.gp_registers[23], 64'd223);
-        check("core halted (ebreak reached)", {63'b0, dut.core0.halted}, 64'd1);
+        check("EBREAK trap fired", {63'b0, halted}, 64'd1);
 
         $display("");
         $display("core_isa_coverage_gap_tb: %0d passed, %0d failed", pass_count, fail_count);

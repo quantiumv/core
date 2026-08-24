@@ -117,8 +117,30 @@ module core_priv_u_ecall_tb;
     logic quiet_on_pass = 1'b0;
     `include "check_lib.sv"
 
-    wire halted = dut.core0.halted;
+    logic halted = 1'b0;
+    always @(posedge clk) if (dut.core0.trap_taken && dut.core0.is_ebreak) halted <= 1'b1;
     `include "halt_wait.sv"
+
+    /*
+     * mcause_q/current_priv snapshot, taken on the SAME edge the terminal
+     * ebreak's own trap_taken first fires -- NOT read live at check()
+     * time. mtvec stays armed at M_TRAP_HANDLER through the terminal
+     * ebreak (idx15), which now really traps and bounces right back into
+     * it, corrupting mcause_q/current_priv afterward (same class of bug
+     * as core_priv_tb.sv/core_priv_toolchain_tb.sv -- see their own
+     * comments). mcause_q's own always_ff writes non-blocking on
+     * i_trap_taken, so reading it on this identical edge sees the
+     * PRE-edge value -- whatever it held from phase 1's own trap, before
+     * this ebreak's own entry overwrites it.
+     */
+    logic [63:0] final_mcause_snap;
+    logic [1:0]  final_priv_snap;
+    logic final_state_captured = 1'b0;
+    always @(posedge clk) if (!final_state_captured && dut.core0.trap_taken && dut.core0.is_ebreak) begin
+        final_state_captured <= 1'b1;
+        final_mcause_snap <= dut.core0.csr_file0.mcause_q;
+        final_priv_snap   <= dut.core0.current_priv;
+    end
 
     /*
      * White-box monitors. state_t's declared order in core.sv is
@@ -214,15 +236,16 @@ module core_priv_u_ecall_tb;
         @(posedge clk); #1;
         rst = 0;
 
-        wait_halted_or_timeout(`TIMEOUT_CYCLES_TINY, "dut.halted never went high");
+        wait_halted_or_timeout(`TIMEOUT_CYCLES_TINY, "EBREAK trap never fired");
 
         /* Marker registers -- structural proof control flow visited every phase, in order, and returned correctly each time. */
         check("x1 (phase 1 marker -- returned from U-mode ECALL)", dut.core0.regfile0.gp_registers[1], 64'd811);
         check("x9 (phase 2 before-SFENCE.VMA marker)", dut.core0.regfile0.gp_registers[9], 64'd344);
         check("x10 (phase 2 after-SFENCE.VMA marker -- SFENCE.VMA with real operands was a true no-op)", dut.core0.regfile0.gp_registers[10], 64'd455);
 
+        check("final-state sample was captured (sanity on the monitor itself)", {63'b0, final_state_captured}, 64'd1);
         /* Phase 1: mcause is this program's only trap, never overwritten afterward -- safe to check directly, post-halt. */
-        check("phase 1: mcause == 8 (ECALL from U-mode)", dut.core0.csr_file0.mcause_q, `WORD_SIZE'(8));
+        check("phase 1: mcause == 8 (ECALL from U-mode)", final_mcause_snap, `WORD_SIZE'(8));
 
         /* Phase 1: white-box current_priv sample at the marker's own PC, proving control genuinely returned to U (not stranded in M). */
         check("phase 1 current_priv sample was captured (sanity on the monitor itself)", {63'b0, priv_sample_ecall_u_captured}, 64'd1);
@@ -239,9 +262,9 @@ module core_priv_u_ecall_tb;
         check("x6 (SFENCE.VMA's rs2 operand, ASID-shaped) unchanged after the no-op", dut.core0.regfile0.gp_registers[6], 64'd7);
 
         /* Final state: current_priv stays U for the rest of the program (nothing after phase 1 changes it). */
-        check("final current_priv == U", {62'b0, dut.core0.current_priv}, `WORD_SIZE'(2'b00));
+        check("final current_priv == U", {62'b0, final_priv_snap}, `WORD_SIZE'(2'b00));
 
-        check("core halted (ebreak reached)", {63'b0, dut.core0.halted}, 64'd1);
+        check("EBREAK trap fired", {63'b0, halted}, 64'd1);
 
         $display("");
         $display("core_priv_u_ecall_tb: %0d passed, %0d failed", pass_count, fail_count);

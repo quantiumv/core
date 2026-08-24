@@ -87,7 +87,8 @@ module core_m_w_edgecases_tb;
     logic quiet_on_pass = 1'b0;
     `include "check_lib.sv"
 
-    wire halted = dut.core0.halted;
+    logic halted = 1'b0;
+    always @(posedge clk) if (dut.core0.trap_taken && dut.core0.is_ebreak) halted <= 1'b1;
     `include "halt_wait.sv"
 
     initial begin
@@ -120,13 +121,13 @@ module core_m_w_edgecases_tb;
         @(posedge clk); #1;
         rst = 0;
 
-        wait_halted_or_timeout(`TIMEOUT_CYCLES_LARGE, "dut.core0.halted never went high");
+        wait_halted_or_timeout(`TIMEOUT_CYCLES_LARGE, "EBREAK trap never fired");
 
         check("DIVW-by-zero: -777/0 -> -1, sign-extended", dut.core0.regfile0.gp_registers[1], 64'hFFFFFFFFFFFFFFFF);
         check("DIVUW-by-zero: 321/0 -> 2^32-1, sign-extended", dut.core0.regfile0.gp_registers[2], 64'hFFFFFFFFFFFFFFFF);
         check("REMW-by-zero: -555/0 -> dividend unchanged, sign-extended", dut.core0.regfile0.gp_registers[3], 64'hFFFFFFFFFFFFFDD5);
         check("REMUW-by-zero: 999/0 -> dividend unchanged", dut.core0.regfile0.gp_registers[4], 64'd999);
-        check("core halted (ebreak reached)", {63'b0, dut.core0.halted}, 64'd1);
+        check("EBREAK trap fired", {63'b0, halted}, 64'd1);
 
         $display("");
         $display("core_m_w_edgecases_tb: %0d passed, %0d failed", pass_count, fail_count);

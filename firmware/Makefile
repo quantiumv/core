@@ -48,6 +48,14 @@ A_ASFLAGS = -march=rv64ima -mabi=lp64 -mno-relax
 C_ASFLAGS = -march=rv64imac -mabi=lp64 -mno-relax
 CFLAGS_C  = -march=rv64imac -mabi=lp64 -mno-relax -ffreestanding -nostdlib -O0 -Wall
 
+# interrupt_test.s uses real CSR mnemonics (csrw), mret, and plain ld/sd
+#   memory-access mnemonics against the CLINT MMIO window -- CSR_ASFLAGS'
+#   rv64i_zicsr already covers all of it (mret/etc. need no separate
+#   "privileged" march string either, per PRIV_ASFLAGS's own comment
+#   above), kept as its own named variable anyway for the same
+#   self-documenting reason PRIV_ASFLAGS is.
+INTERRUPT_ASFLAGS = -march=rv64i_zicsr -mabi=lp64 -mno-relax
+
 all:
 	riscv64-unknown-elf-as $(ASFLAGS) crt0.s -o crt0.o
 	riscv64-unknown-elf-gcc $(CFLAGS) -c hello.c -o hello.o
@@ -162,3 +170,17 @@ hello_c:
 	riscv64-unknown-elf-ld -T link.ld -o hello_c.elf crt0_c.o hello_c.o
 	riscv64-unknown-elf-objdump -d hello_c.elf
 	riscv64-unknown-elf-objcopy -O verilog -j .text -j .rodata -j .data --verilog-data-width=8 hello_c.elf hello_c.hex
+
+# Milestone 6 (interrupt-taking): a real-toolchain-encoded end-to-end
+#   machine-timer-interrupt test (firmware/interrupt_test.s), linked
+#   against the SAME crt0.o/link.ld as every other target above --
+#   rebuilt here (plain -march=rv64i, unchanged) rather than assumed to
+#   already exist, so this target works standalone. Produces a DISTINCT
+#   interrupt_test.hex -- every other target's hex output is untouched
+#   either way.
+interrupt_test:
+	riscv64-unknown-elf-as $(ASFLAGS) crt0.s -o crt0.o
+	riscv64-unknown-elf-as $(INTERRUPT_ASFLAGS) interrupt_test.s -o interrupt_test.o
+	riscv64-unknown-elf-ld -T link.ld -o interrupt_test.elf crt0.o interrupt_test.o
+	riscv64-unknown-elf-objdump -d interrupt_test.elf
+	riscv64-unknown-elf-objcopy -O verilog -j .text -j .rodata -j .data --verilog-data-width=8 interrupt_test.elf interrupt_test.hex

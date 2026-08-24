@@ -58,6 +58,19 @@ module cache_complex #(
     output logic        ack_o,
     output logic        err_o,
 
+    /*
+     * Zifencei: passed straight through to icache0.flush_i UNCONDITIONALLY
+     * -- load-bearing to get right, not a style choice. ifetch_i is LOW
+     * throughout S_EXEC (FENCE.I's own commit cycle, where core.sv pulses
+     * icache_flush_o -- see that port's own comment), so gating this on
+     * ifetch_i the way cyc_i/stb_i are routed above would silently make
+     * FENCE.I a permanent no-op: the exact class of bug this signal exists
+     * to prevent, not just an edge case. D$ has no equivalent flush path
+     * (or need for one) -- write-through already keeps a store hit's
+     * cached copy and SRAM in lockstep.
+     */
+    input  logic        flush_i,
+
     // Memory-facing port -- this module is a Wishbone MASTER from
     // wb4_sram.sv's side. Shared by both sub-caches; see this module's
     // own header for why no arbitration is needed.
@@ -82,7 +95,7 @@ module cache_complex #(
     icache #(.num_lines(num_lines), .line_words(line_words)) icache0 (
         .clk(clk), .rst(rst),
         .addr_i(addr_i), .dat_o(ic_dat_o), .cyc_i(cyc_i && ifetch_i), .stb_i(stb_i && ifetch_i),
-        .ack_o(ic_ack), .err_o(ic_err),
+        .ack_o(ic_ack), .err_o(ic_err), .flush_i(flush_i),
         .mem_addr_o(ic_mem_addr), .mem_dat_i(ic_mem_dat_i), .mem_sel_o(ic_mem_sel),
         .mem_we_o(ic_mem_we), .mem_cyc_o(ic_mem_cyc), .mem_stb_o(ic_mem_stb),
         .mem_ack_i(ic_mem_ack), .mem_err_i(ic_mem_err)
