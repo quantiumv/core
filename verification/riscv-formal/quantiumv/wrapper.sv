@@ -49,6 +49,18 @@ module rvfi_wrapper (
     // real rvfi_intr logic in core.sv would be permanently dead code from
     // this formal model's perspective.
     (* keep *) `rvformal_rand_reg i_mtip;
+    // Same reasoning as i_mtip immediately above, applied to Milestone 4's
+    // new halt/resume debug-entry inputs: left unconnected (floating to
+    // core.sv's own ANSI default 1'b0), debug_halt_req_entry and
+    // stepping_q would be provably always-false under BMC, making
+    // S_DEBUG_HALTED (via the external-halt path) and interrupt_taken's
+    // new debug-halt exclusion guard both permanently dead code from this
+    // formal model's perspective. i_debug_resume_req is free too, even
+    // though it's a one-cycle pulse architecturally -- an unconstrained
+    // rand_reg can still coincidentally read 1 on any given cycle, which
+    // is exactly the "could this happen on some cycle" question BMC asks.
+    (* keep *) `rvformal_rand_reg i_debug_halt_req;
+    (* keep *) `rvformal_rand_reg i_debug_resume_req;
 
     core uut (
         .clk(clock),
@@ -64,6 +76,8 @@ module rvfi_wrapper (
         .wb_ack_i(wb_ack),
         .wb_err_i(wb_err),
         .i_mtip(i_mtip),
+        .i_debug_halt_req(i_debug_halt_req),
+        .i_debug_resume_req(i_debug_resume_req),
 
         `RVFI_CONN
     );

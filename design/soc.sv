@@ -101,7 +101,20 @@ module soc (
         .wb_addr_o(wb_addr), .wb_dat_o(wb_dat_m2s), .wb_dat_i(wb_dat_s2m),
         .wb_sel_o(wb_sel), .wb_we_o(wb_we), .wb_cyc_o(wb_cyc), .wb_stb_o(wb_stb),
         .wb_ack_i(wb_ack), .wb_err_i(wb_err), .wb_ifetch_o(wb_ifetch),
-        .icache_flush_o(icache_flush), .i_mtip(clint_mtip)
+        .icache_flush_o(icache_flush), .i_mtip(clint_mtip),
+
+        /*
+         * Milestone 4 (core.sv halt/resume FSM) added real i_debug_halt_req/
+         * i_debug_resume_req/o_debug_mode ports -- both ANSI-defaulted
+         * inputs stay at their inert default (no debugger exists at this
+         * level yet), and o_debug_mode is deliberately, explicitly left
+         * unconnected (not omitted) so lint tools see this as intentional,
+         * same precedent this file's own dram_* ports use. A later
+         * milestone's Debug Module is the real consumer of all three.
+         */
+        /* verilator lint_off PINCONNECTEMPTY */
+        .o_debug_mode()
+        /* verilator lint_on PINCONNECTEMPTY */
     );
 
     logic [31:0] ram_addr, uart_addr, clint_addr;

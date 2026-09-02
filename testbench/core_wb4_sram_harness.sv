@@ -26,7 +26,10 @@ module core_wb4_sram_harness #(
 ) (
     input logic clk,
     input logic rst,
-    input logic i_mtip = 1'b0
+    input logic i_mtip = 1'b0,
+    input logic i_debug_halt_req = 1'b0,
+    input logic i_debug_resume_req = 1'b0,
+    output logic o_debug_mode
 );
 
     logic [31:0] wb_addr;
@@ -38,7 +41,9 @@ module core_wb4_sram_harness #(
         .clk(clk), .rst(rst),
         .wb_addr_o(wb_addr), .wb_dat_o(wb_dat_m2s), .wb_dat_i(wb_dat_s2m),
         .wb_sel_o(wb_sel), .wb_we_o(wb_we), .wb_cyc_o(wb_cyc), .wb_stb_o(wb_stb),
-        .wb_ack_i(wb_ack), .wb_err_i(wb_err), .i_mtip(i_mtip)
+        .wb_ack_i(wb_ack), .wb_err_i(wb_err), .i_mtip(i_mtip),
+        .i_debug_halt_req(i_debug_halt_req), .i_debug_resume_req(i_debug_resume_req),
+        .o_debug_mode(o_debug_mode)
     );
 
     wb4_sram #(.num_words(NUM_WORDS)) sram0 (

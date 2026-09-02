@@ -159,7 +159,22 @@ module core (
     input  logic        wb_err_i,
     output logic        wb_ifetch_o,
     output logic        icache_flush_o,
-    input  logic         i_mtip = 1'b0
+    input  logic         i_mtip = 1'b0,
+
+    /*
+     * Debug Mode halt/resume (Milestone 4 of the EBREAK/JTAG staged
+     * plan). i_debug_halt_req is a LEVEL, not a pulse -- held by an
+     * external debugger until the halt is acknowledged (o_debug_mode
+     * goes high), same "level, not edge-sensitive" contract i_mtip
+     * already establishes. i_debug_resume_req is a one-cycle pulse,
+     * only meaningful while o_debug_mode is already high. Both default
+     * to 1'b0 so the many testbenches that instantiate core directly
+     * without driving them stay compile/lint-clean, same precedent
+     * i_mtip's own default set.
+     */
+    input  logic        i_debug_halt_req = 1'b0,
+    input  logic        i_debug_resume_req = 1'b0,
+    output logic        o_debug_mode
 
     /*
      * RVFI (RISC-V Formal Interface) -- only present when compiled for
@@ -244,7 +259,8 @@ module core (
         S_EXEC,
         S_MEM,
         S_AMO_WRITE,
-        S_FETCH_HI
+        S_FETCH_HI,
+        S_DEBUG_HALTED
     } state_t;
 
     state_t state;
@@ -313,6 +329,29 @@ module core (
     logic interrupt_taken;
     logic interrupt_to_s;
     logic [(`WORD_SIZE - 1):0] trap_vector;
+    /*
+     * ebreak_to_debug/in_debug_mode/debug_ebreak_entry/
+     * debug_halt_req_entry/stepping_q/debug_cause_code: forward-declared
+     * for the same class of reason as trap_taken/interrupt_taken above.
+     * trap_taken's own real assign (narrowed by ebreak_to_debug) and
+     * debug_csr_violation (Milestone 3, narrowed by in_debug_mode) are
+     * both textually BEFORE csr_file0's instantiation, but ebreak_to_debug
+     * itself needs csr_file0's own o_dcsr output (dcsr_w) to compute --
+     * so it, and everything downstream of it, can't be driven until
+     * after that instantiation, same "declare early, drive late" split
+     * trap_vector already uses. debug_ebreak_entry/debug_halt_req_entry
+     * are additionally needed by the state-transition always_ff and
+     * wb_master_drive (both textually early) and by csr_file0's own
+     * i_debug_entry/i_debug_cause connections; stepping_q is needed by
+     * interrupt_taken's own updated exclusion guard (Interrupts section,
+     * textually before the real Debug Mode section below it).
+     */
+    logic ebreak_to_debug;
+    logic in_debug_mode;
+    logic debug_ebreak_entry;
+    logic debug_halt_req_entry;
+    logic stepping_q;
+    logic [2:0] debug_cause_code;
     logic [(`WORD_SIZE - 1):0] amo_rdata_q;
     /*
      * amo_addr_q: WORD_SIZE-wide for the RVFI tap's rvfi_mem_addr (see its
@@ -460,11 +499,33 @@ module core (
             state <= S_FETCH;
         end else begin
             case (state)
-                S_FETCH:     if (wb_done) state <= state_t'(fetch_hi_taken ? S_FETCH_HI : S_EXEC);
+                /*
+                 * debug_halt_req_entry is checked ahead of the ordinary
+                 * wb_done-gated transition -- when it's true, wb_done
+                 * never arrives at all (wb_master_drive's own S_FETCH
+                 * arm suppresses the request entirely, see its comment),
+                 * so this can't be folded into the same if/else chain.
+                 */
+                S_FETCH:     if (debug_halt_req_entry) state <= S_DEBUG_HALTED;
+                             else if (wb_done) state <= state_t'(fetch_hi_taken ? S_FETCH_HI : S_EXEC);
                 S_FETCH_HI:  if (wb_done) state <= S_EXEC;
-                S_EXEC:      state <= state_t'(mem_phase_needed ? S_MEM : (div_stall ? S_EXEC : S_FETCH));
+                /*
+                 * debug_ebreak_entry redirects the same commit_now edge
+                 * that would otherwise send an ordinary EBREAK back to
+                 * S_FETCH -- mutually exclusive with mem_phase_needed/
+                 * div_stall by construction (EBREAK is neither a memory
+                 * op nor a divide).
+                 */
+                S_EXEC:      state <= state_t'(debug_ebreak_entry ? S_DEBUG_HALTED
+                                    : (mem_phase_needed ? S_MEM : (div_stall ? S_EXEC : S_FETCH)));
                 S_MEM:       if (wb_done) state <= state_t'((wb_ok && is_amo_rmw) ? S_AMO_WRITE : S_FETCH);
                 S_AMO_WRITE: if (wb_done) state <= S_FETCH;
+                /*
+                 * Parked here until a real resume request arrives -- no
+                 * program-buffer instruction source exists yet (a later
+                 * milestone), so nothing else can ever leave this state.
+                 */
+                S_DEBUG_HALTED: if (i_debug_resume_req) state <= S_FETCH;
                 default:     state <= S_FETCH;
             endcase
         end
@@ -1183,13 +1244,11 @@ module core (
      * csr_priv_violation untouched. Per the RISC-V Debug spec, Debug
      * CSRs must only be accessible from Debug Mode itself, never merely
      * M-mode, hence a dedicated in_debug_mode gate instead of a
-     * privilege-level comparison. in_debug_mode is a forward reference --
-     * tied 0 here until Milestone 4 builds the real halt/resume FSM this
-     * state belongs to; until then every access from anywhere traps,
-     * which is spec-correct (this core has no Debug Mode to legally be
-     * in yet).
+     * privilege-level comparison. in_debug_mode is a real register now
+     * (Milestone 4's halt/resume FSM) -- forward-declared above, its
+     * real always_ff lives in the new Debug Mode section, since it
+     * depends on csr_file0's own o_dcsr output.
      */
-    wire in_debug_mode = 1'b0;
     wire is_debug_csr_addr = is_csr && (imm_2[11:2] == 10'h1EC);
     wire debug_csr_violation = is_debug_csr_addr && !in_debug_mode;
     wire mret_priv_violation = is_mret && (current_priv != PRIV_M);
@@ -1245,7 +1304,8 @@ module core (
                            mem_store_access_fault               ? 4'd7  :
                                                                    4'd0; // don't-care, gated by trap_taken
 
-    assign trap_taken = commit_now && (fetch_fault_q || is_illegal_instr || is_ebreak || is_ecall
+    assign trap_taken = commit_now && (fetch_fault_q || is_illegal_instr
+                                   || (is_ebreak && !ebreak_to_debug) || is_ecall
                                    || mem_load_misaligned || mem_store_misaligned
                                    || mem_load_access_fault || mem_store_access_fault);
     /* An M-mode trap never delegates, regardless of medeleg -- falls out
@@ -1487,6 +1547,18 @@ module core (
     wire [(`WORD_SIZE - 1):0] mip_w, mie_w, mideleg_w;
     /* verilator lint_on UNUSEDSIGNAL */
     wire mstatus_mie_w, mstatus_sie_w;
+    /*
+     * dcsr_w: only bits [15]/[13]/[12]/[2] (ebreakm/s/u, step) are
+     * consumed this milestone -- the rest exist for a real, spec-shaped
+     * dcsr, not padding, same "wrap the genuinely-partial-usage bits"
+     * precedent mip_w/mie_w/mideleg_w already establish above. dpc_w, by
+     * contrast, is fully consumed (the whole value feeds pc's own resume
+     * arm), so it needs no such wrapper.
+     */
+    /* verilator lint_off UNUSEDSIGNAL */
+    wire [(`WORD_SIZE - 1):0] dcsr_w;
+    /* verilator lint_on UNUSEDSIGNAL */
+    wire [(`WORD_SIZE - 1):0] dpc_w;
 `ifdef RISCV_FORMAL
     wire [(`WORD_SIZE - 1):0] mcause_w, scause_w;
     wire [(`WORD_SIZE - 1):0] mepc_next_w, sepc_next_w, mcause_next_w, scause_next_w;
@@ -1510,6 +1582,9 @@ module core (
         .i_trap_to_s(trap_taken ? trap_to_s : interrupt_to_s),
         .i_mret_taken(mret_taken),
         .i_sret_taken(sret_taken),
+
+        .i_debug_entry(debug_ebreak_entry || debug_halt_req_entry),
+        .i_debug_cause(debug_cause_code),
 
         .o_mtvec(mtvec_w),
         .o_stvec(stvec_w),
@@ -1535,18 +1610,13 @@ module core (
         .o_mstatus_sie(mstatus_sie_w),
 
         /*
-         * Milestone 3 (Debug CSRs) added dcsr/dpc storage in csr_file.sv,
-         * but this milestone's own core.sv work stops at trapping illegal
-         * access to them (see debug_csr_violation above) -- no halt/
-         * resume FSM exists yet to actually consume a live dpc/dcsr
-         * value. Explicitly, deliberately unconnected (not omitted) so
-         * lint tools see this as intentional, not a forgotten
-         * connection -- same precedent soc.sv's own dram_* ports use;
-         * Milestone 4's halt/resume FSM is the real consumer.
+         * Milestone 3 (Debug CSRs) added dcsr/dpc storage in csr_file.sv;
+         * Milestone 4 (this section) is their real consumer --
+         * ebreak_to_debug reads dcsr_w's ebreakm/s/u/step bits, and the
+         * pc always_ff's resume arm reads dpc_w -- see the new Debug
+         * Mode section below.
          */
-        /* verilator lint_off PINCONNECTEMPTY */
-        .o_dcsr(), .o_dpc()
-        /* verilator lint_on PINCONNECTEMPTY */
+        .o_dcsr(dcsr_w), .o_dpc(dpc_w)
 `ifdef RISCV_FORMAL
         ,
         .o_mcause(mcause_w),
@@ -1582,11 +1652,20 @@ module core (
     // own i_trap_taken/i_trap_to_s need them before this section (which
     // itself needs csr_file0's own outputs) can exist.
     //
-    // No `!halted` guard here anymore (removed alongside halted's own
-    // removal below) -- there is no longer a permanent-freeze state to
-    // guard against post-EBREAK; a future Debug Module halt/resume
-    // milestone will reintroduce an analogous guard with real semantics.
-    assign interrupt_taken = commit_now_q && int_pending_and_enabled;
+    // Milestone 4's halt/resume FSM reintroduces the guard the removed
+    // `!halted` used to provide, under new names and with real semantics:
+    // !in_debug_mode covers every steady-state cycle spent parked in
+    // S_DEBUG_HALTED (nothing can retire there, so commit_now_q can only
+    // otherwise pulse on the single entry-transition edge, before
+    // in_debug_mode has been set yet -- exactly the window
+    // !(i_debug_halt_req || stepping_q) covers instead, resolving the
+    // tie in favor of debug entry so a pending interrupt can never sneak
+    // in ahead of a requested halt or an armed single-step). See the new
+    // Debug Mode section below for debug_halt_req_entry/stepping_q's own
+    // real definitions -- both forward-declared, same reason as
+    // in_debug_mode itself.
+    assign interrupt_taken = commit_now_q && int_pending_and_enabled
+                           && !in_debug_mode && !(i_debug_halt_req || stepping_q);
     assign interrupt_to_s  = interrupt_taken && mti_to_s;
 
     logic fetch_redirect_q;
@@ -1596,6 +1675,97 @@ module core (
         else if (state == S_FETCH && wb_done) fetch_redirect_q <= 1'b0;
     end
     wire fetch_from_trap_vector = interrupt_taken || fetch_redirect_q;
+
+    /* --------------------------------------------------------------- *
+     * Debug Mode: halt/resume/step (Milestone 4 of the EBREAK/JTAG
+     * staged plan)
+     * --------------------------------------------------------------- */
+
+    /*
+     * ebreak_to_debug: per the RISC-V Debug spec, EBREAK enters Debug
+     * Mode instead of taking its ordinary synchronous trap (cause 3,
+     * Breakpoint) exactly when the dcsr ebreak-bit for the CURRENT
+     * privilege level is set. Bit positions -- ebreakm=15, ebreaks=13,
+     * ebreaku=12 -- match design/csr_file_tb.sv's own independently-
+     * transcribed DCSR_EBREAKM_BIT/etc. constants and the real RISC-V
+     * Debug spec's dcsr layout.
+     */
+    assign ebreak_to_debug = (current_priv == PRIV_M) ? dcsr_w[15]
+                            : (current_priv == PRIV_S) ? dcsr_w[13]
+                                                        : dcsr_w[12];
+
+    /*
+     * debug_ebreak_entry: same-cycle, commit_now-timed -- mirrors
+     * trap_taken's own timing exactly (EBREAK retires in S_EXEC like any
+     * other non-memory instruction; entering Debug Mode is simply a
+     * different destination for that same commit edge). trap_taken's own
+     * is_ebreak term (see its assign above) is narrowed by
+     * !ebreak_to_debug specifically so the two are mutually exclusive by
+     * construction -- EBREAK either traps normally or enters Debug Mode,
+     * never both.
+     */
+    assign debug_ebreak_entry = commit_now && is_ebreak && ebreak_to_debug && !in_debug_mode;
+
+    /*
+     * stepping_q: armed on resume if dcsr.step (bit 2) was set at that
+     * exact instant; cleared the same cycle it's consumed by
+     * debug_halt_req_entry below, so it's high for exactly the one
+     * instruction between resume and the next retirement boundary -- a
+     * true single "step," not "step until told otherwise."
+     */
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            stepping_q <= 1'b0;
+        end else if (state == S_DEBUG_HALTED && i_debug_resume_req) begin
+            stepping_q <= dcsr_w[2];
+        end else if (debug_halt_req_entry) begin
+            stepping_q <= 1'b0;
+        end
+    end
+
+    /*
+     * debug_halt_req_entry: deferred, commit_now_q-timed -- structurally
+     * identical to interrupt_taken's own one-cycle-deferred model and for
+     * the same reason (must only take effect at a real retirement
+     * boundary, never mid-instruction).
+     */
+    assign debug_halt_req_entry = !in_debug_mode && commit_now_q && (i_debug_halt_req || stepping_q);
+
+    /*
+     * debug_cause_code: per spec (dcsr.cause encoding), 1=ebreak,
+     * 3=haltreq, 4=step. resethaltreq(5)/triggermodule(2) don't apply
+     * yet (no reset-halt-request port, no trigger module until a later
+     * milestone). stepping_q is checked before i_debug_halt_req so a
+     * single-step boundary reports cause=step even if an external halt
+     * request happens to be held at the same instant.
+     */
+    assign debug_cause_code = debug_ebreak_entry ? 3'd1
+                             : stepping_q         ? 3'd4
+                                                   : 3'd3;
+
+    /*
+     * in_debug_mode: real storage now -- Milestone 3 left this hardwired
+     * 0 as a forward reference. Set on either debug-entry path; cleared
+     * only from S_DEBUG_HALTED on a real resume request. current_priv is
+     * deliberately NOT restored here (see the pc always_ff's own resume
+     * arm below) -- it already holds the correct value throughout the
+     * halted period, since nothing else ever changes it while
+     * in_debug_mode is set, so there is nothing to restore. A debugger
+     * writing dcsr.prv while halted is consequently write-then-ignored
+     * on resume in this milestone -- a known, deliberate simplification,
+     * not an oversight.
+     */
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            in_debug_mode <= 1'b0;
+        end else if (debug_ebreak_entry || debug_halt_req_entry) begin
+            in_debug_mode <= 1'b1;
+        end else if (state == S_DEBUG_HALTED && i_debug_resume_req) begin
+            in_debug_mode <= 1'b0;
+        end
+    end
+
+    assign o_debug_mode = in_debug_mode;
 
     /*
      * Branch comparator: NOT routed through alu0. alu_ops.sv has no
@@ -1899,7 +2069,16 @@ module core (
         wb_sel_o  = 8'b0;
         case (state)
             S_FETCH: begin
-                if (!wb_done) begin
+                /*
+                 * debug_halt_req_entry additionally suppresses the
+                 * request entirely (not just redirects its address, the
+                 * way fetch_from_trap_vector does) -- we're about to
+                 * park in S_DEBUG_HALTED with nothing fetched at all, so
+                 * wb_done must never arrive for this cycle's would-be
+                 * request. See the state-transition always_ff's own
+                 * S_FETCH arm, which relies on exactly this.
+                 */
+                if (!wb_done && !debug_halt_req_entry) begin
                     wb_cyc_o  = 1'b1;
                     wb_stb_o  = 1'b1;
                     wb_addr_o = fetch_from_trap_vector ? {trap_vector[31:3], 3'b0} : fetch_addr;
@@ -2053,6 +2232,16 @@ module core (
             pc <= next_pc;
         else if (interrupt_taken)
             pc <= trap_vector;
+        else if (state == S_DEBUG_HALTED && i_debug_resume_req)
+            /*
+             * dpc_w, not the live pc -- a debugger halted here may have
+             * written a new dpc while parked, and this is the only
+             * mechanism that redirects execution to it. current_priv is
+             * deliberately NOT restored on this same edge (see the Debug
+             * Mode section's own in_debug_mode comment) -- it was never
+             * touched since entry, so it's already correct.
+             */
+            pc <= dpc_w;
     end
 
     /*
