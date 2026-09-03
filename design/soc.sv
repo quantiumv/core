@@ -105,15 +105,21 @@ module soc (
 
         /*
          * Milestone 4 (core.sv halt/resume FSM) added real i_debug_halt_req/
-         * i_debug_resume_req/o_debug_mode ports -- both ANSI-defaulted
-         * inputs stay at their inert default (no debugger exists at this
-         * level yet), and o_debug_mode is deliberately, explicitly left
-         * unconnected (not omitted) so lint tools see this as intentional,
-         * same precedent this file's own dram_* ports use. A later
-         * milestone's Debug Module is the real consumer of all three.
+         * i_debug_resume_req/o_debug_mode ports; Milestone 5 (design/dm.sv)
+         * added the Access Register i_dm_.../o_dm_... ports. All ANSI-defaulted
+         * inputs stay at their inert default (no Debug Module instance
+         * exists at this level yet -- that's a real dm0 instantiation, a
+         * deliberately later, separate integration step per the staged
+         * plan's own milestone boundaries, same reasoning DRAM's own
+         * bus-wiring got its own later milestone). All outputs are
+         * deliberately, explicitly left unconnected (not omitted) so lint
+         * tools see this as intentional, same precedent this file's own
+         * dram_* ports use.
          */
         /* verilator lint_off PINCONNECTEMPTY */
-        .o_debug_mode()
+        .o_debug_mode(),
+        .o_dm_csr_rdata(),
+        .o_dm_gpr_rdata()
         /* verilator lint_on PINCONNECTEMPTY */
     );
 

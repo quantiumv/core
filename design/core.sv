@@ -174,7 +174,30 @@ module core (
      */
     input  logic        i_debug_halt_req = 1'b0,
     input  logic        i_debug_resume_req = 1'b0,
-    output logic        o_debug_mode
+    output logic        o_debug_mode,
+
+    /*
+     * Access Register interface (Milestone 5 of the EBREAK/JTAG staged
+     * plan) -- lets an external Debug Module read/write a GPR or CSR
+     * while the hart is genuinely parked in S_DEBUG_HALTED. Both muxes
+     * are gated purely on in_debug_mode, not a separate enable pulse:
+     * a decode-driven CSR/GPR access structurally cannot happen while
+     * in_debug_mode is 1 (commit_now, hence csr_we/reg_write, is hard-0
+     * throughout S_DEBUG_HALTED -- see core.sv's own commit_now/
+     * in_debug_mode invariant), so the two access sources are already
+     * temporally disjoint by construction, with nothing to arbitrate.
+     * All inputs default to 1'b0 so the many testbenches instantiating
+     * core directly without driving them stay compile/lint-clean, same
+     * precedent i_mtip/i_debug_halt_req already set.
+     */
+    input  logic         i_dm_csr_we = 1'b0,
+    input  logic [11:0]  i_dm_csr_addr = 12'b0,
+    input  logic [63:0]  i_dm_csr_wdata = 64'b0,
+    output logic [63:0]  o_dm_csr_rdata,
+    input  logic         i_dm_gpr_we = 1'b0,
+    input  logic [4:0]   i_dm_gpr_sel = 5'b0,
+    input  logic [63:0]  i_dm_gpr_wdata = 64'b0,
+    output logic [63:0]  o_dm_gpr_rdata
 
     /*
      * RVFI (RISC-V Formal Interface) -- only present when compiled for
@@ -749,13 +772,26 @@ module core (
     logic                       reg_write;
     logic [(`WORD_SIZE - 1):0]  reg_write_data;
 
+    /*
+     * Access Register GPR transfer (Milestone 5) reuses read port B and
+     * the sole write port outright, rather than adding new ports to
+     * register_file.sv -- muxed here, at the instantiation boundary,
+     * gated on in_debug_mode exactly like the CSR mux below csr_file0's
+     * own instantiation. read_gpr_B_data/o_dm_gpr_rdata are the SAME
+     * physical wire read by two different consumers at two temporally
+     * disjoint times: rvfi_rs2_rdata trusts it only when a real
+     * instruction retires (commit_now, which requires in_debug_mode==0
+     * by the same invariant cited in core.sv's own Access Register port
+     * doc above), and o_dm_gpr_rdata trusts it only when in_debug_mode
+     * is the very thing selecting it -- no new wire name needed.
+     */
     register_file regfile0 (
         .i_clk(clk),
         .i_read_gpr_A_sel(read_gpr_A_sel),
         .o_read_gpr_A_data(read_gpr_A_data),
-        .i_read_gpr_B_sel(read_gpr_B_sel),
+        .i_read_gpr_B_sel(in_debug_mode ? i_dm_gpr_sel : read_gpr_B_sel),
         .o_read_gpr_B_data(read_gpr_B_data),
-        .i_load_gpr(reg_write),
+        .i_load_gpr(in_debug_mode ? i_dm_gpr_we : reg_write),
         /*
          * imm_3_or_dest_addr means two unrelated things depending on
          * instruction type (see decoder.sv's port doc for the full
@@ -771,9 +807,11 @@ module core (
          * quick smoke test won't catch it, only a negative-offset test
          * will (see core_load_store_tb.sv).
          */
-        .i_load_gpr_sel(imm_3_or_dest_addr[(`L2_REG_FILE_SIZE - 1):0]),
-        .i_load_gpr_data(reg_write_data)
+        .i_load_gpr_sel(in_debug_mode ? i_dm_gpr_sel : imm_3_or_dest_addr[(`L2_REG_FILE_SIZE - 1):0]),
+        .i_load_gpr_data(in_debug_mode ? i_dm_gpr_wdata : reg_write_data)
     );
+
+    assign o_dm_gpr_rdata = read_gpr_B_data;
 
     /* Sign-extended S/B-type offset -- see the comment above. */
     wire [(`WORD_SIZE - 1):0] imm3_sext =
@@ -1564,13 +1602,24 @@ module core (
     wire [(`WORD_SIZE - 1):0] mepc_next_w, sepc_next_w, mcause_next_w, scause_next_w;
 `endif
 
+    /*
+     * Access Register CSR transfer (Milestone 5) is muxed ahead of
+     * csr_file0's existing, generic i_csr_addr/i_csr_we/i_csr_wdata
+     * inputs -- no new ports on csr_file.sv itself -- gated on
+     * in_debug_mode for the same reason regfile0's mux above is: a
+     * decode-driven csr_we can never assert while in_debug_mode is 1
+     * (it requires commit_now, hard-0 throughout S_DEBUG_HALTED), so
+     * the two sources are already temporally disjoint. o_csr_rdata is
+     * combinational and unconditional -- csr_rdata already reflects
+     * whichever address is currently muxed in, for both consumers.
+     */
     csr_file csr_file0 (
         .i_clk(clk),
         .i_rst(rst),
-        .i_csr_addr(imm_2[(`CSR_ADDR_SIZE - 1):0]),
+        .i_csr_addr(in_debug_mode ? i_dm_csr_addr : imm_2[(`CSR_ADDR_SIZE - 1):0]),
         .o_csr_rdata(csr_rdata),
-        .i_csr_we(csr_we),
-        .i_csr_wdata(alu_result),
+        .i_csr_we(in_debug_mode ? i_dm_csr_we : csr_we),
+        .i_csr_wdata(in_debug_mode ? i_dm_csr_wdata : alu_result),
         .i_instr_retired(commit_now),
 
         .i_current_priv(current_priv),
@@ -1627,6 +1676,8 @@ module core (
         .o_scause_next(scause_next_w)
 `endif
     );
+
+    assign o_dm_csr_rdata = csr_rdata;
 
     /* --------------------------------------------------------------- *
      * Interrupts (CLINT machine-timer, Milestone 6)
