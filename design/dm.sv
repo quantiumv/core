@@ -18,19 +18,18 @@
  * one (M7/M8).
  *
  * NOTE ON SPEC FIDELITY: this repo has no local copy of the RISC-V
- * Debug Specification to cross-check exact bit positions against (see
- * the Milestone 5 grounding pass) -- the register addresses and the
- * functionally-load-bearing fields below (dmcontrol.dmactive/haltreq/
- * resumereq, dmstatus.version/authenticated/allhalted/anyhalted/
- * allrunning/anyrunning, abstractcs.datacount/cmderr/busy, command's
- * Access Register encoding) are implemented from memory of the spec and
- * are internally self-consistent and tested by dm_tb.sv, but several
- * dmstatus corner fields (allhavereset/anynonexistent/anyunavail/etc.)
- * are deliberately placed at reserved/best-effort positions and always
- * read 0 -- they carry no functional weight this milestone (nothing
- * reads them) and should be cross-checked against the real spec text
- * before Milestone 10's real OpenOCD integration test, not assumed
- * correct from this comment alone.
+ * Debug Specification, but every register's bit layout below (dmcontrol,
+ * dmstatus, hartinfo, abstractcs, sbcs's access-width mask, command's
+ * Access Register encoding) has been cross-checked field-by-field
+ * against riscv/riscv-debug-spec's own xml/dm_registers.xml -- the
+ * machine-readable source the spec's own published tables are generated
+ * from (Milestone 5's own spec-fidelity fix pass, 2026-09-05; see the
+ * plan file for the full derivation and what it found: two real
+ * position bugs, both now fixed -- abstractcs.cmderr had drifted to
+ * [8:6] instead of the real [10:8], and sbcs's access-width mask was
+ * clearing the wrong 5 bits entirely). Every dmstatus field now has a
+ * real, well-justified value, not a placeholder -- see the dmstatus_real
+ * assign's own comment for the reasoning behind each one.
  *
  * Plain register interface, not the literal 41-bit DMI protocol: DMI's
  * own busy/sticky-error transport semantics (spec ch. 6.1) are a
@@ -149,7 +148,14 @@ module dm (
      * already made for WFI and for MRET's hartreset-adjacent fields
      * elsewhere) -- dmactive does NOT yet gate these other fields'
      * storage (a deliberate, documented simplification: nothing this
-     * milestone's own test needs that gating for).
+     * milestone's own test needs that gating for). Field positions
+     * (haltreq@31/resumereq@30/hartsello@[25:16]/hartselhi@[15:6]/
+     * dmactive@0) are cross-checked against riscv-debug-spec's own
+     * xml/dm_registers.xml and already correct. That same XML lists a
+     * few spec-1.0-only fields this comment doesn't individually name
+     * (ackunavail, setkeepalive/clrkeepalive) -- they're already safely
+     * covered by the raw wdata[29:0] passthrough below, same "accepted,
+     * no special handling" treatment as hartreset/ndmreset.
      * ----------------------------------------------------------------- */
     logic [31:0] dmcontrol_q;
     wire dmcontrol_write_now = i_reg_we && (i_reg_addr == ADDR_DMCONTROL);
@@ -166,20 +172,48 @@ module dm (
     assign o_debug_resume_req = dmcontrol_write_now && i_reg_wdata[30];
 
     /* ----------------------------------------------------------------- *
-     * dmstatus -- read-only, purely combinational. See the module
-     * header's "NOTE ON SPEC FIDELITY" for which fields are real vs.
-     * documented-reserved-0.
+     * dmstatus -- read-only, purely combinational. Field positions below
+     * are cross-checked against riscv/riscv-debug-spec's own
+     * xml/dm_registers.xml (the machine-readable source the spec's
+     * published tables are generated from) -- not a best-effort guess
+     * anymore (see the Milestone 5 spec-fidelity fix pass note in the
+     * plan file for how this was verified). Every field now has a real,
+     * well-justified value: allnonexistent/anynonexistent/allunavail/
+     * anyunavail read 0 because this is a single-hart system where hart
+     * 0 always exists and is always available; allhavereset/anyhavereset
+     * read 0 because no reset-tracking is implemented (consistent with
+     * dmcontrol.hartreset/ndmreset already being accepted-but-inert);
+     * impebreak reads 0 because no Program Buffer execution exists yet
+     * (Milestone 7); hasresethaltreq/confstrptrvalid read 0 because
+     * neither is implemented. allresumeack/anyresumeack are a documented
+     * approximation (dmstatus_resumeack, below) -- this core's resume is
+     * effectively synchronous with no separate ack-tracking state worth
+     * modeling this milestone, so they just mirror "currently running".
      * ----------------------------------------------------------------- */
     wire dmstatus_allhalted  = i_hart_halted;
     wire dmstatus_anyhalted  = i_hart_halted;
     wire dmstatus_allrunning = !i_hart_halted;
     wire dmstatus_anyrunning = !i_hart_halted;
+    wire dmstatus_resumeack  = !i_hart_halted;
     wire [31:0] dmstatus_real = {
-        22'b0,                                   // [31:10] reserved this milestone
-        dmstatus_allrunning, dmstatus_anyrunning, // [9:8]
-        dmstatus_allhalted,  dmstatus_anyhalted,  // [7:6]
-        1'b1,                                     // [5] authenticated
-        1'b0,                                     // [4] authbusy
+        7'b0,                                     // [31:25] reserved
+        1'b0,                                     // [24] ndmresetpending
+        1'b0,                                     // [23] stickyunavail
+        1'b0,                                     // [22] impebreak
+        2'b0,                                      // [21:20] reserved
+        1'b0,                                     // [19] allhavereset
+        1'b0,                                     // [18] anyhavereset
+        dmstatus_resumeack, dmstatus_resumeack,   // [17:16] allresumeack, anyresumeack
+        1'b0,                                     // [15] allnonexistent
+        1'b0,                                     // [14] anynonexistent
+        1'b0,                                     // [13] allunavail
+        1'b0,                                     // [12] anyunavail
+        dmstatus_allrunning, dmstatus_anyrunning, // [11:10] allrunning, anyrunning
+        dmstatus_allhalted,  dmstatus_anyhalted,  // [9:8] allhalted, anyhalted
+        1'b1,                                     // [7] authenticated
+        1'b0,                                     // [6] authbusy
+        1'b0,                                     // [5] hasresethaltreq
+        1'b0,                                     // [4] confstrptrvalid
         4'd2                                      // [3:0] version = 2 (0.13/1.0)
     };
 
@@ -192,17 +226,29 @@ module dm (
      * ----------------------------------------------------------------- */
     localparam [31:0] HARTINFO_VAL = {8'b0, 4'd2, 3'b0, 1'b1, 4'b0, 12'b0};
     // [31:24] reserved, [23:20] nscratch=2, [19:17] reserved, [16] dataaccess=1,
-    // [15:12] datasize=0 (unused, dataaccess=1), [11:0] datastart=0 (unused)
+    // [15:12] datasize=0 (unused, dataaccess=1), [11:0] dataaddr=0 (unused) --
+    // field positions confirmed against riscv-debug-spec's own dm_registers.xml,
+    // identical to this file's own layout, no change needed here beyond this
+    // comment's field name (spec calls it dataaddr, not datastart).
 
     /* ----------------------------------------------------------------- *
      * abstractcs -- datacount is fixed (2 32-bit words = one 64-bit
-     * XLEN transfer via data0+data1); busy/cmderr are real.
+     * XLEN transfer via data0+data1); busy/cmderr are real. Field
+     * positions cross-checked against riscv-debug-spec's own
+     * xml/dm_registers.xml (see the Milestone 5 spec-fidelity fix pass
+     * note in the plan file) -- cmderr genuinely lives at [10:8], not
+     * [8:6] as an earlier pass here had it. progbufsize ([28:24]) and
+     * relaxedpriv ([11], a spec-1.0-only field for non-Debug-Mode
+     * CSR/bus access this core doesn't support) are both absorbed into
+     * the reserved-0 catch-all below -- reporting 0 for both is the
+     * spec-correct way to tell a debugger neither capability exists yet
+     * (Program Buffer/relaxed-priv access are later milestones).
      * ----------------------------------------------------------------- */
     logic [2:0] cmderr_q;
     logic       busy_q;
-    wire [31:0] abstractcs_val = {19'b0, busy_q, 3'b0, cmderr_q, 2'b0, 4'd2};
-    // [31:13] reserved, [12] busy, [11:9] reserved, [8:6] cmderr,
-    // [5:4] reserved, [3:0] datacount=2
+    wire [31:0] abstractcs_val = {3'b0, 5'b0, 11'b0, busy_q, 1'b0, cmderr_q, 4'b0, 4'd2};
+    // [31:29] reserved, [28:24] progbufsize=0, [23:13] reserved, [12] busy,
+    // [11] relaxedpriv=0, [10:8] cmderr, [7:4] reserved, [3:0] datacount=2
 
     /* ----------------------------------------------------------------- *
      * data0/data1 -- the 64-bit GPR/CSR transfer pair (data0 = low
@@ -276,7 +322,7 @@ module dm (
     always_ff @(posedge clk) begin
         if (rst) begin
             cmderr_q <= 3'd0;
-        end else if (i_reg_we && (i_reg_addr == ADDR_ABSTRACTCS) && (i_reg_wdata[8:6] != 3'd0)) begin
+        end else if (i_reg_we && (i_reg_addr == ADDR_ABSTRACTCS) && (i_reg_wdata[10:8] != 3'd0)) begin
             cmderr_q <= 3'd0;
         end else if (cmd_write_now && (cmderr_q == 3'd0)) begin
             if (!i_hart_halted)        cmderr_q <= 3'd4;  // halt/resume
@@ -340,19 +386,21 @@ module dm (
     /* ----------------------------------------------------------------- *
      * System Bus Access + Program Buffer -- storage-only stubs this
      * milestone (Milestone 8 and Milestone 7 give them real backing).
-     * sbcs.sbaccess8/16/32/64/128 (bits [7:5,4] in the real spec layout)
-     * are hardwired 0 within sbcs_val below regardless of what's
-     * written -- a real debugger reads "no access width supported" and
-     * correctly never attempts a System Bus Access against this DM, the
-     * spec-clean way to say "not implemented" without needing a fake
-     * per-transaction sberror flow.
+     * sbcs.sbaccess8/16/32/64/128 (bits [4:0] -- cross-checked against
+     * riscv-debug-spec's own xml/dm_registers.xml; an earlier pass here
+     * had this at bits [8:4], which meant the mask below didn't actually
+     * clear the real capability bits at all) are hardwired 0 within
+     * sbcs_val below regardless of what's written -- a real debugger
+     * reads "no access width supported" and correctly never attempts a
+     * System Bus Access against this DM, the spec-clean way to say "not
+     * implemented" without needing a fake per-transaction sberror flow.
      * ----------------------------------------------------------------- */
     logic [31:0] sbcs_q;
     logic [31:0] sbaddress0_q, sbaddress1_q, sbaddress2_q, sbaddress3_q;
     logic [31:0] sbdata0_q, sbdata1_q, sbdata2_q, sbdata3_q;
     logic [31:0] progbuf_q [0:15];
 
-    localparam [31:0] SBCS_ACCESS_MASK = 32'hFFFF_FE0F;  // clears bits [8:4] (sbaccess128..sbaccess8)
+    localparam [31:0] SBCS_ACCESS_MASK = 32'hFFFF_FFE0;  // clears bits [4:0] (sbaccess8..sbaccess128)
     wire [31:0] sbcs_val = sbcs_q & SBCS_ACCESS_MASK;
 
     always_ff @(posedge clk) begin

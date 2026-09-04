@@ -71,6 +71,7 @@ module dm_tb;
     localparam [6:0] DMI_ABSTRACTCS   = 7'h16;
     localparam [6:0] DMI_COMMAND      = 7'h17;
     localparam [6:0] DMI_ABSTRACTAUTO = 7'h18;
+    localparam [6:0] DMI_SBCS         = 7'h38;
 
     localparam [11:0] CSR_DSCRATCH0 = 12'h7B2;
 
@@ -164,8 +165,12 @@ module dm_tb;
         begin
             logic [31:0] rd;
             basic_dmi_read(DMI_DMSTATUS, rd);
-            check("dut_basic: dmstatus.anyrunning == 1 before any halt request", {63'b0, rd[8]}, 64'd1);
-            check("dut_basic: dmstatus.anyhalted == 0 before any halt request", {63'b0, rd[6]}, 64'd0);
+            check("dut_basic: dmstatus.anyrunning == 1 before any halt request", {63'b0, rd[10]}, 64'd1);
+            check("dut_basic: dmstatus.anyhalted == 0 before any halt request", {63'b0, rd[8]}, 64'd0);
+            check("dut_basic: dmstatus.authenticated == 1", {63'b0, rd[7]}, 64'd1);
+            check("dut_basic: dmstatus.version == 2 (0.13/1.0)", {60'b0, rd[3:0]}, 64'd2);
+            check("dut_basic: dmstatus.anynonexistent == 0 (single-hart, hart 0 exists)",
+                {63'b0, rd[14]}, 64'd0);
         end
 
         // "Activate" the DM (real-debugger hygiene -- see dm.sv's own
@@ -191,6 +196,21 @@ module dm_tb;
             basic_dmi_read(DMI_ABSTRACTAUTO, rd);
             check("dut_basic: abstractauto round trips through a plain DMI write/read",
                 rd, 32'hCAFE_0001);
+        end
+
+        // sbcs's access-width mask: write all five sbaccess8/16/32/64/128
+        // bits (the real spec position, [4:0] -- confirmed against
+        // riscv-debug-spec's own xml/dm_registers.xml) plus some
+        // unrelated bits elsewhere in the word, then confirm the masked
+        // read reports NO access width supported (those 5 bits read 0)
+        // -- proving SBCS_ACCESS_MASK actually clears the real capability
+        // bits, not System Bus Access itself (still out of scope, M8).
+        basic_dmi_write(DMI_SBCS, 32'h0000_101F);
+        begin
+            logic [31:0] rd;
+            basic_dmi_read(DMI_SBCS, rd);
+            check("dut_basic: sbcs reports no System Bus Access width supported",
+                {59'b0, rd[4:0]}, 64'd0);
         end
 
         // Wait for the 1st real commit (addi x1,10), then request a halt
@@ -231,10 +251,11 @@ module dm_tb;
         begin
             logic [31:0] rd;
             basic_dmi_read(DMI_DMSTATUS, rd);
-            check("dut_basic: dmstatus.allhalted == 1 while halted", {63'b0, rd[7]}, 64'd1);
-            check("dut_basic: dmstatus.anyhalted == 1 while halted", {63'b0, rd[6]}, 64'd1);
-            check("dut_basic: dmstatus.allrunning == 0 while halted", {63'b0, rd[9]}, 64'd0);
-            check("dut_basic: dmstatus.anyrunning == 0 while halted", {63'b0, rd[8]}, 64'd0);
+            check("dut_basic: dmstatus.allhalted == 1 while halted", {63'b0, rd[9]}, 64'd1);
+            check("dut_basic: dmstatus.anyhalted == 1 while halted", {63'b0, rd[8]}, 64'd1);
+            check("dut_basic: dmstatus.allrunning == 0 while halted", {63'b0, rd[11]}, 64'd0);
+            check("dut_basic: dmstatus.anyrunning == 0 while halted", {63'b0, rd[10]}, 64'd0);
+            check("dut_basic: dmstatus.allresumeack == 0 while halted", {63'b0, rd[17]}, 64'd0);
         end
 
         // cmderr == 2 (not supported): a command with aarsize=2 (32-bit)
@@ -247,15 +268,15 @@ module dm_tb;
             logic [31:0] rd;
             basic_dmi_read(DMI_ABSTRACTCS, rd);
             check("dut_basic: cmderr == 2 (not supported) -- aarsize=2 while halted",
-                {61'b0, rd[8:6]}, 64'd2);
+                {61'b0, rd[10:8]}, 64'd2);
         end
-        basic_dmi_write(DMI_ABSTRACTCS, {19'b0, 1'b0, 3'b0, 3'd2, 2'b0, 4'b0});  // W1C clear
+        basic_dmi_write(DMI_ABSTRACTCS, {3'b0, 5'b0, 11'b0, 1'b0, 1'b0, 3'd2, 4'b0, 4'b0});  // W1C clear
         #1;
         begin
             logic [31:0] rd;
             basic_dmi_read(DMI_ABSTRACTCS, rd);
             check("dut_basic: cmderr == 0 after clearing the not-supported error",
-                {61'b0, rd[8:6]}, 64'd0);
+                {61'b0, rd[10:8]}, 64'd0);
         end
 
         // cmderr == 1 (busy): two Access Register READ x1 commands issued
@@ -272,15 +293,15 @@ module dm_tb;
             logic [31:0] rd;
             basic_dmi_read(DMI_ABSTRACTCS, rd);
             check("dut_basic: cmderr == 1 (busy) -- 2nd command landed while the 1st was still busy",
-                {61'b0, rd[8:6]}, 64'd1);
+                {61'b0, rd[10:8]}, 64'd1);
         end
-        basic_dmi_write(DMI_ABSTRACTCS, {19'b0, 1'b0, 3'b0, 3'd1, 2'b0, 4'b0});  // W1C clear
+        basic_dmi_write(DMI_ABSTRACTCS, {3'b0, 5'b0, 11'b0, 1'b0, 1'b0, 3'd1, 4'b0, 4'b0});  // W1C clear
         #1;
         begin
             logic [31:0] rd;
             basic_dmi_read(DMI_ABSTRACTCS, rd);
             check("dut_basic: cmderr == 0 after clearing the busy error",
-                {61'b0, rd[8:6]}, 64'd0);
+                {61'b0, rd[10:8]}, 64'd0);
         end
 
         // Access Register READ x1 (regno 0x1001) -- aarsize=3 (64-bit),
@@ -304,7 +325,7 @@ module dm_tb;
             @(posedge clk); #1;
             basic_dmi_read(DMI_ABSTRACTCS, busy_rd);
             check("dut_basic: abstractcs.busy == 0 one cycle later", {63'b0, busy_rd[12]}, 64'd0);
-            check("dut_basic: abstractcs.cmderr == 0 (no error so far)", {61'b0, busy_rd[8:6]}, 64'd0);
+            check("dut_basic: abstractcs.cmderr == 0 (no error so far)", {61'b0, busy_rd[10:8]}, 64'd0);
         end
 
         // Access Register WRITE x2 = 99 (regno 0x1002) -- stage data0/1
@@ -378,20 +399,22 @@ module dm_tb;
             logic [31:0] rd;
             err_dmi_read(DMI_ABSTRACTCS, rd);
             check("dut_err: cmderr == 4 (halt/resume) -- command issued while running",
-                {61'b0, rd[8:6]}, 64'd4);
+                {61'b0, rd[10:8]}, 64'd4);
         end
 
         // Clear cmderr (W1C: write 1 to the field) and confirm it drops
         // back to 0.
-        // abstractcs field layout (32 bits): {rsvd[19], busy[1], rsvd[3],
-        // cmderr[3], rsvd[2], datacount[4]} -- writing any nonzero value
-        // into the cmderr field clears it (W1C, per spec).
-        err_dmi_write(DMI_ABSTRACTCS, {19'b0, 1'b0, 3'b0, 3'd4, 2'b0, 4'b0});
+        // abstractcs field layout (32 bits, matching design/dm.sv's own
+        // spec-cross-checked layout): {rsvd[3], progbufsize[5], rsvd[11],
+        // busy[1], relaxedpriv[1], cmderr[3], rsvd[4], datacount[4]} --
+        // writing any nonzero value into the cmderr field clears it (W1C,
+        // per spec).
+        err_dmi_write(DMI_ABSTRACTCS, {3'b0, 5'b0, 11'b0, 1'b0, 1'b0, 3'd4, 4'b0, 4'b0});
         #1;
         begin
             logic [31:0] rd;
             err_dmi_read(DMI_ABSTRACTCS, rd);
-            check("dut_err: cmderr == 0 after a W1C write", {61'b0, rd[8:6]}, 64'd0);
+            check("dut_err: cmderr == 0 after a W1C write", {61'b0, rd[10:8]}, 64'd0);
         end
 
         $display("");
