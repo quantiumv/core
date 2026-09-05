@@ -180,15 +180,20 @@ module core (
      * Access Register interface (Milestone 5 of the EBREAK/JTAG staged
      * plan) -- lets an external Debug Module read/write a GPR or CSR
      * while the hart is genuinely parked in S_DEBUG_HALTED. Both muxes
-     * are gated purely on in_debug_mode, not a separate enable pulse:
-     * a decode-driven CSR/GPR access structurally cannot happen while
-     * in_debug_mode is 1 (commit_now, hence csr_we/reg_write, is hard-0
-     * throughout S_DEBUG_HALTED -- see core.sv's own commit_now/
-     * in_debug_mode invariant), so the two access sources are already
-     * temporally disjoint by construction, with nothing to arbitrate.
-     * All inputs default to 1'b0 so the many testbenches instantiating
-     * core directly without driving them stay compile/lint-clean, same
-     * precedent i_mtip/i_debug_halt_req already set.
+     * are gated on dm_access_active (in_debug_mode && !debug_progbuf_active),
+     * not in_debug_mode alone -- see that wire's own comment further
+     * down for why. Milestone 5's own original reasoning here (a
+     * decode-driven CSR/GPR access structurally cannot happen while
+     * in_debug_mode is 1, since commit_now/csr_we/reg_write are hard-0
+     * throughout S_DEBUG_HALTED) was correct THEN, before Milestone 7's
+     * Program Buffer existed -- it no longer holds unconditionally,
+     * since a progbuf run retires real decode-driven instructions while
+     * in_debug_mode is STILL 1. dm_access_active restores the same
+     * "temporally disjoint, nothing to arbitrate" property against the
+     * right condition instead. All inputs default to 1'b0 so the many
+     * testbenches instantiating core directly without driving them stay
+     * compile/lint-clean, same precedent i_mtip/i_debug_halt_req already
+     * set.
      */
     input  logic         i_dm_csr_we = 1'b0,
     input  logic [11:0]  i_dm_csr_addr = 12'b0,
@@ -197,7 +202,35 @@ module core (
     input  logic         i_dm_gpr_we = 1'b0,
     input  logic [4:0]   i_dm_gpr_sel = 5'b0,
     input  logic [63:0]  i_dm_gpr_wdata = 64'b0,
-    output logic [63:0]  o_dm_gpr_rdata
+    output logic [63:0]  o_dm_gpr_rdata,
+
+    /*
+     * Program Buffer execution (Milestone 7 of the EBREAK/JTAG staged
+     * plan) -- lets an external Debug Module run a small, in-order,
+     * straight-line sequence of instructions (dm.sv's own progbuf0-15
+     * storage) while the hart is genuinely parked in S_DEBUG_HALTED,
+     * normally terminated by the debugger's own trailing EBREAK.
+     * i_progbuf_start is a one-cycle pulse (only meaningful while
+     * o_debug_mode is already high); o_progbuf_pc is which progbuf word
+     * this core currently wants (a plain 0-15 index, not a byte
+     * address); i_progbuf_data is that word, read back combinationally
+     * (dm.sv's own progbuf storage has no read latency, mirroring how
+     * the Access Register GPR/CSR reads already work). o_progbuf_done
+     * pulses on a clean EBREAK-terminated run; o_progbuf_abort pulses
+     * if any OTHER exception fires during progbuf execution (illegal
+     * instruction, ecall, misaligned/faulting memory access) -- the
+     * Debug Module is expected to report abstractcs.cmderr=3
+     * ("exception") in that case, per spec. All inputs default to
+     * their inert value so the many testbenches instantiating core
+     * directly without driving them stay compile/lint-clean, same
+     * precedent i_mtip/i_debug_halt_req/i_dm_csr_we/i_dm_gpr_we
+     * already set.
+     */
+    input  logic         i_progbuf_start = 1'b0,
+    output logic [3:0]   o_progbuf_pc,
+    input  logic [31:0]  i_progbuf_data = 32'b0,
+    output logic         o_progbuf_done,
+    output logic         o_progbuf_abort
 
     /*
      * RVFI (RISC-V Formal Interface) -- only present when compiled for
@@ -375,6 +408,64 @@ module core (
     logic debug_halt_req_entry;
     logic stepping_q;
     logic [2:0] debug_cause_code;
+    /*
+     * debug_progbuf_active/progbuf_ebreak_done/progbuf_abort (Milestone
+     * 7) -- forward-declared for the same reason trap_taken itself is:
+     * the state-transition always_ff and wb_master_drive (both textually
+     * early) need debug_progbuf_active, and progbuf_ebreak_done/
+     * progbuf_abort's own real assigns (in the Program Buffer section,
+     * right next to trap_taken's) depend on is_illegal_instr/
+     * mem_load_misaligned/mem_store_misaligned/mem_load_access_fault/
+     * mem_store_access_fault -- the exact same forward-declared-until-
+     * their-own-late-assign wires trap_taken already relies on.
+     */
+    logic debug_progbuf_active;
+    logic progbuf_ebreak_done;
+    logic progbuf_abort;
+    /*
+     * dm_access_active: gates every DM Access-Register mux (regfile0's
+     * read/write ports below, csr_file0's addr/we/wdata below) between
+     * the DM's own i_dm_gpr_.../i_dm_csr_... sources and the core's own
+     * ordinary decode-driven sources. Plain in_debug_mode alone is WRONG
+     * here (a real, found-during-M7-bring-up bug, not a hypothetical):
+     * in_debug_mode stays 1 for the entire duration of a Program Buffer
+     * run too (a debugger halted via progbuf execution never actually
+     * resumes), so gating on in_debug_mode alone would silently steal
+     * every progbuf instruction's own GPR/CSR write (and CSR read
+     * address) away from decode and hand it to the DM's inactive
+     * Access-Register ports instead -- the write/address the DM
+     * actually wants only exists on the single cycle cmd_do_gpr/
+     * cmd_do_csr fires, which cmd_legal's own !busy_q term already
+     * guarantees can never overlap a live debug_progbuf_active run.
+     */
+    wire dm_access_active = in_debug_mode && !debug_progbuf_active;
+    /*
+     * instr_faulted (Milestone 7 bring-up fix, found via a new test this
+     * same milestone added -- see testbench/dm_tb.sv's Test E): bare
+     * trap_taken is NOT the right "did this retiring instruction actually
+     * fault" signal once debug_progbuf_active exists, because trap_taken
+     * is unconditionally forced 0 throughout a Program Buffer run (its own
+     * top-level !debug_progbuf_active gate, see trap_taken's own assign
+     * far below). Every site that used to read `!trap_taken` as "suppress
+     * this write, the instruction faulted" (reservation_valid_q's set arm,
+     * csr_we, reg_write) was therefore blind to a progbuf instruction's
+     * own fault: a faulting LOAD executed from the Program Buffer (Test E:
+     * `ld x7,256(x0)` past dut_progbuf's sram range) still correctly set
+     * progbuf_abort and routed back to S_DEBUG_HALTED with cmderr=3, but
+     * reg_write's own `!trap_taken` term stayed true regardless (trap_taken
+     * can never be 1 here), so x7 was written anyway with whatever garbage
+     * sat on wb_dat_i for the errored bus cycle. instr_faulted restores
+     * the "this instruction's normal effects must be suppressed" property
+     * against the right condition in either mode: trap_taken covers
+     * ordinary execution, progbuf_abort covers a Program Buffer run (the
+     * two can never both be true -- trap_taken is hard-0 whenever
+     * progbuf_abort could possibly be 1, and vice versa). Declared here,
+     * forward-referencing trap_taken/progbuf_abort (both already
+     * forward-declared above), so reservation_valid_q's own always_ff --
+     * textually much earlier than trap_taken/progbuf_abort's real assigns
+     * -- can use it too, not just csr_we/reg_write further down.
+     */
+    wire instr_faulted = trap_taken || progbuf_abort;
     logic [(`WORD_SIZE - 1):0] amo_rdata_q;
     /*
      * amo_addr_q: WORD_SIZE-wide for the RVFI tap's rvfi_mem_addr (see its
@@ -523,13 +614,22 @@ module core (
         end else begin
             case (state)
                 /*
-                 * debug_halt_req_entry is checked ahead of the ordinary
-                 * wb_done-gated transition -- when it's true, wb_done
-                 * never arrives at all (wb_master_drive's own S_FETCH
-                 * arm suppresses the request entirely, see its comment),
-                 * so this can't be folded into the same if/else chain.
+                 * debug_progbuf_active is checked ahead of everything
+                 * else: while a Program Buffer run is in flight, S_FETCH
+                 * never issues a real bus request at all (wb_master_drive's
+                 * own S_FETCH arm suppresses it, mirroring
+                 * debug_halt_req_entry's own precedent) -- the "fetch" is
+                 * already available combinationally as i_progbuf_data, so
+                 * there's no wb_done to wait for; this transitions
+                 * straight to S_EXEC the very next cycle. debug_halt_req_entry
+                 * itself is structurally impossible here anyway
+                 * (it requires !in_debug_mode, which is false throughout
+                 * progbuf execution), but is checked ahead of the ordinary
+                 * wb_done-gated transition regardless, for the same "wb_done
+                 * never arrives" reason as before.
                  */
-                S_FETCH:     if (debug_halt_req_entry) state <= S_DEBUG_HALTED;
+                S_FETCH:     if (debug_progbuf_active) state <= S_EXEC;
+                             else if (debug_halt_req_entry) state <= S_DEBUG_HALTED;
                              else if (wb_done) state <= state_t'(fetch_hi_taken ? S_FETCH_HI : S_EXEC);
                 S_FETCH_HI:  if (wb_done) state <= S_EXEC;
                 /*
@@ -537,18 +637,35 @@ module core (
                  * that would otherwise send an ordinary EBREAK back to
                  * S_FETCH -- mutually exclusive with mem_phase_needed/
                  * div_stall by construction (EBREAK is neither a memory
-                 * op nor a divide).
+                 * op nor a divide). progbuf_ebreak_done/progbuf_abort are
+                 * ALSO mutually exclusive with debug_ebreak_entry by
+                 * construction: the latter requires !in_debug_mode, which
+                 * is false throughout progbuf execution (see the module's
+                 * own Program Buffer section for the full reasoning).
                  */
-                S_EXEC:      state <= state_t'(debug_ebreak_entry ? S_DEBUG_HALTED
+                S_EXEC:      state <= state_t'((progbuf_ebreak_done || progbuf_abort) ? S_DEBUG_HALTED
+                                    : debug_ebreak_entry ? S_DEBUG_HALTED
                                     : (mem_phase_needed ? S_MEM : (div_stall ? S_EXEC : S_FETCH)));
-                S_MEM:       if (wb_done) state <= state_t'((wb_ok && is_amo_rmw) ? S_AMO_WRITE : S_FETCH);
-                S_AMO_WRITE: if (wb_done) state <= S_FETCH;
                 /*
-                 * Parked here until a real resume request arrives -- no
-                 * program-buffer instruction source exists yet (a later
-                 * milestone), so nothing else can ever leave this state.
+                 * progbuf_abort can also fire from S_MEM/S_AMO_WRITE --
+                 * a faulting memory access executed from the Program
+                 * Buffer is exactly the case this exists for (see
+                 * mem_load_access_fault/mem_store_access_fault, both
+                 * state-gated to S_MEM, and S_AMO_WRITE's own AMO-write-
+                 * phase fault arm).
                  */
-                S_DEBUG_HALTED: if (i_debug_resume_req) state <= S_FETCH;
+                S_MEM:       if (wb_done) state <= state_t'(progbuf_abort ? S_DEBUG_HALTED
+                                    : ((wb_ok && is_amo_rmw) ? S_AMO_WRITE : S_FETCH));
+                S_AMO_WRITE: if (wb_done) state <= state_t'(progbuf_abort ? S_DEBUG_HALTED : S_FETCH);
+                /*
+                 * i_progbuf_start (Milestone 7) is the other way out of
+                 * this state besides a real resume -- both land on
+                 * S_FETCH; debug_progbuf_active's own always_ff (set on
+                 * this same i_progbuf_start pulse) is what makes THIS
+                 * particular S_FETCH pass instant rather than a real bus
+                 * wait, per the S_FETCH arm's own comment above.
+                 */
+                S_DEBUG_HALTED: if (i_debug_resume_req || i_progbuf_start) state <= S_FETCH;
                 default:     state <= S_FETCH;
             endcase
         end
@@ -630,8 +747,20 @@ module core (
      * triggered S_FETCH_HI), so the !crossed_q term isn't strictly
      * required for correctness here, but keeps this wire's meaning
      * self-evidently right without relying on that cross-reasoning.
+     *
+     * The !debug_progbuf_active guard (Milestone 7) is load-bearing,
+     * not defensive: first_hw/crossed_q are derived from instr_line_q,
+     * which is stale (whatever was last really fetched before halting)
+     * throughout Program Buffer execution -- without this guard, a
+     * spurious is_compressed=1 (and is_illegal_instr's own
+     * is_compressed-gated c_expand_illegal term) could misclassify a
+     * perfectly valid progbuf instruction based on leftover state that
+     * has nothing to do with it. The `instruction` mux below has its
+     * own, separate top-priority override for the same reason; this is
+     * the one every OTHER consumer of is_compressed (is_illegal_instr,
+     * rvfi_insn, ...) also needs.
      */
-    wire is_compressed = !crossed_q && (first_hw[1:0] != 2'b11);
+    wire is_compressed = !debug_progbuf_active && !crossed_q && (first_hw[1:0] != 2'b11);
 
     wire [31:0] c_expand_out;
     wire        c_expand_illegal;
@@ -651,7 +780,23 @@ module core (
     wire [31:0] raw32_noncompressed = crossed_q ? {instr_hi_q, hw3} : {second_hw, first_hw};
 
     logic [(`INSTR_SIZE - 1):0] instruction;
-    assign instruction = fetch_fault_q
+    assign instruction = debug_progbuf_active
+        ? i_progbuf_data /* Milestone 7 -- bypasses ALL of the real-fetch
+                             machinery below (instr_line_q/crossed_q/
+                             fetch_fault_q are all stale/irrelevant during
+                             Program Buffer execution, see is_compressed's
+                             own comment above for why this same override
+                             is ALSO needed there, not just here). Progbuf
+                             words are always treated as a full, plain
+                             32-bit instruction -- no compressed-instruction
+                             support within the Program Buffer, a
+                             deliberate scope decision (real debuggers
+                             emit uncompressed progbuf content in
+                             practice; nothing here would misbehave on a
+                             compressed encoding, it would just decode
+                             wrong, so this is a real, documented
+                             restriction, not an oversight). */
+        : fetch_fault_q
         ? 32'h00000013 /* addi x0,x0,0 -- inert placeholder for a FAULTED fetch
                            (instr_line_q/instr_hi_q are garbage on wb_err_i).
                            Same trick as the compressed-illegal placeholder
@@ -776,22 +921,26 @@ module core (
      * Access Register GPR transfer (Milestone 5) reuses read port B and
      * the sole write port outright, rather than adding new ports to
      * register_file.sv -- muxed here, at the instantiation boundary,
-     * gated on in_debug_mode exactly like the CSR mux below csr_file0's
-     * own instantiation. read_gpr_B_data/o_dm_gpr_rdata are the SAME
-     * physical wire read by two different consumers at two temporally
-     * disjoint times: rvfi_rs2_rdata trusts it only when a real
-     * instruction retires (commit_now, which requires in_debug_mode==0
-     * by the same invariant cited in core.sv's own Access Register port
-     * doc above), and o_dm_gpr_rdata trusts it only when in_debug_mode
-     * is the very thing selecting it -- no new wire name needed.
+     * gated on dm_access_active exactly like the CSR mux below csr_file0's
+     * own instantiation (see dm_access_active's own comment for why
+     * in_debug_mode alone isn't the right gate once Milestone 7's
+     * Program Buffer is in the picture). read_gpr_B_data/o_dm_gpr_rdata
+     * are the SAME physical wire read by two different consumers at two
+     * temporally disjoint times: rvfi_rs2_rdata trusts it only when a
+     * real instruction retires (commit_now, which requires
+     * dm_access_active==0 -- true both in ordinary execution and
+     * throughout a Program Buffer run, since debug_progbuf_active forces
+     * dm_access_active low exactly then), and o_dm_gpr_rdata trusts it
+     * only when dm_access_active is the very thing selecting it -- no
+     * new wire name needed.
      */
     register_file regfile0 (
         .i_clk(clk),
         .i_read_gpr_A_sel(read_gpr_A_sel),
         .o_read_gpr_A_data(read_gpr_A_data),
-        .i_read_gpr_B_sel(in_debug_mode ? i_dm_gpr_sel : read_gpr_B_sel),
+        .i_read_gpr_B_sel(dm_access_active ? i_dm_gpr_sel : read_gpr_B_sel),
         .o_read_gpr_B_data(read_gpr_B_data),
-        .i_load_gpr(in_debug_mode ? i_dm_gpr_we : reg_write),
+        .i_load_gpr(dm_access_active ? i_dm_gpr_we : reg_write),
         /*
          * imm_3_or_dest_addr means two unrelated things depending on
          * instruction type (see decoder.sv's port doc for the full
@@ -807,8 +956,8 @@ module core (
          * quick smoke test won't catch it, only a negative-offset test
          * will (see core_load_store_tb.sv).
          */
-        .i_load_gpr_sel(in_debug_mode ? i_dm_gpr_sel : imm_3_or_dest_addr[(`L2_REG_FILE_SIZE - 1):0]),
-        .i_load_gpr_data(in_debug_mode ? i_dm_gpr_wdata : reg_write_data)
+        .i_load_gpr_sel(dm_access_active ? i_dm_gpr_sel : imm_3_or_dest_addr[(`L2_REG_FILE_SIZE - 1):0]),
+        .i_load_gpr_data(dm_access_active ? i_dm_gpr_wdata : reg_write_data)
     );
 
     assign o_dm_gpr_rdata = read_gpr_B_data;
@@ -925,7 +1074,7 @@ module core (
      * Reservation register (LR/SC). Set unconditionally on LR's own
      * retirement (a fresh LR always creates a new reservation,
      * superseding any prior one -- a plain overwrite, not a conditional
-     * set) -- but ONLY when LR actually retires cleanly (`!trap_taken`),
+     * set) -- but ONLY when LR actually retires cleanly (`!instr_faulted`),
      * same gate reg_write/csr_we already use. Without it, a faulted LR
      * (misaligned, or -- since is_lr is purely combinational/decode-based
      * and doesn't care about the bus outcome -- a real access-fault via
@@ -935,13 +1084,17 @@ module core (
      * spuriously report success. Found via code review, not a test
      * failure -- see testbench/core_reservation_fault_tb.sv for the
      * proof (a faulted LR immediately followed by an SC to the same
-     * address must NOT report success). Cleared on ANY store-class
+     * address must NOT report success). instr_faulted (rather than bare
+     * trap_taken) extends that same protection to a faulted LR executed
+     * from a Milestone 7 Program Buffer run, where trap_taken can never
+     * be 1 but progbuf_abort plays the identical role -- see
+     * instr_faulted's own comment above. Cleared on ANY store-class
      * instruction's retirement: ordinary SB/SH/SW/SD (is_store), SC
      * either way (is_sc, since is_store alone only catches SC's MATCHED
      * case), or an AMO's write (is_amo_rmw) -- matching the spec
      * requirement that a used reservation can't be reused. The clear
-     * arm doesn't need the same `!trap_taken` guard: a faulted store/SC/
-     * AMO-write never actually wrote anything either, but invalidating
+     * arm doesn't need the same `!instr_faulted` guard: a faulted store/
+     * SC/AMO-write never actually wrote anything either, but invalidating
      * the reservation anyway is still spec-conformant (a reservation
      * surviving a faulted store attempt is not architecturally
      * guaranteed) and strictly safer than leaving it valid.
@@ -951,7 +1104,7 @@ module core (
     always_ff @(posedge clk) begin
         if (rst) begin
             reservation_valid_q <= 1'b0;
-        end else if (commit_now && is_lr && !trap_taken) begin
+        end else if (commit_now && is_lr && !instr_faulted) begin
             reservation_valid_q <= 1'b1;
             reservation_addr_q  <= amo_target_addr;
         end else if (commit_now && (is_store || is_sc || is_amo_rmw)) begin
@@ -1342,7 +1495,18 @@ module core (
                            mem_store_access_fault               ? 4'd7  :
                                                                    4'd0; // don't-care, gated by trap_taken
 
-    assign trap_taken = commit_now && (fetch_fault_q || is_illegal_instr
+    /*
+     * !debug_progbuf_active (Milestone 7): while a Program Buffer run is
+     * in flight, NO exception may take the normal trap path -- doing so
+     * would touch pc/current_priv/mepc/mcause via the usual commit_now+
+     * trap_taken machinery, corrupting the hart's real architectural
+     * state that the debugger still believes is exactly as it was before
+     * the run started. progbuf_ebreak_done/progbuf_abort (below) are the
+     * Program Buffer's own, entirely separate handling of is_ebreak and
+     * of this exact same exception OR-list, respectively -- see that
+     * section for the full reasoning.
+     */
+    assign trap_taken = !debug_progbuf_active && commit_now && (fetch_fault_q || is_illegal_instr
                                    || (is_ebreak && !ebreak_to_debug) || is_ecall
                                    || mem_load_misaligned || mem_store_misaligned
                                    || mem_load_access_fault || mem_store_access_fault);
@@ -1350,6 +1514,79 @@ module core (
      * naturally here since current_priv==M forces this wire to 0. */
     wire trap_to_s  = trap_taken && (current_priv != PRIV_M) && medeleg_w[6'(exc_code)];
     wire [(`WORD_SIZE - 1):0] trap_cause = {60'b0, exc_code};
+
+    /* --------------------------------------------------------------- *
+     * Program Buffer (Milestone 7 of the EBREAK/JTAG staged plan) --
+     * lets dm0 run a small, in-order, straight-line sequence of
+     * instructions (its own progbuf0-15 storage) while the hart is
+     * genuinely parked in S_DEBUG_HALTED, normally terminated by the
+     * debugger's own trailing EBREAK. No new state_t encoding: this
+     * reuses S_FETCH/S_EXEC/S_MEM/S_AMO_WRITE exactly as they already
+     * are (see the state-transition always_ff's own progbuf arms) --
+     * decode genuinely doesn't know or care where `instruction` came
+     * from, per the `instruction` mux's own top-priority override above.
+     *
+     * Deliberately NOT supported this milestone: control flow WITHIN
+     * the Program Buffer. progbuf_pc_q below is a plain sequential
+     * counter (0,1,2,...), not a real address -- a JAL/branch executed
+     * from the Program Buffer still has its own ordinary architectural
+     * effect (e.g. linking ra, or updating pc, neither of which matters
+     * while genuinely halted -- see below), but does NOT redirect which
+     * progbuf slot executes next. Real debuggers don't rely on control
+     * flow within the Program Buffer in practice (per spec, it behaves
+     * "as if placed at an implementation-defined location in memory" --
+     * the spec does not mandate real jump support), so this is a real,
+     * documented restriction, not an oversight.
+     *
+     * pc itself is deliberately NOT snapshotted/restored around a
+     * Program Buffer run (unlike dpc/current_priv/mepc/mcause, which
+     * genuinely must not move): pc is never consulted for anything
+     * except a real resume, which always sources from dpc_w, never pc
+     * (see core.sv's own pc always_ff) -- so pc drifting during progbuf
+     * execution (e.g. via a JAL's own side effect) is harmless by
+     * construction, not something this section needs to guard against.
+     */
+    assign progbuf_ebreak_done = debug_progbuf_active && commit_now && is_ebreak;
+    assign progbuf_abort = debug_progbuf_active && commit_now && !is_ebreak
+                          && (fetch_fault_q || is_illegal_instr || is_ecall
+                              || mem_load_misaligned || mem_store_misaligned
+                              || mem_load_access_fault || mem_store_access_fault);
+
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            debug_progbuf_active <= 1'b0;
+        end else if (i_progbuf_start) begin
+            debug_progbuf_active <= 1'b1;
+        end else if (progbuf_ebreak_done || progbuf_abort) begin
+            debug_progbuf_active <= 1'b0;
+        end
+    end
+
+    /*
+     * progbuf_pc_q: which progbuf0-15 slot is "next" -- reset to 0 on
+     * i_progbuf_start (so the run always begins at slot 0, per spec),
+     * and advances by exactly one slot per progbuf instruction actually
+     * retired (commit_now, which already correctly accounts for
+     * multi-phase instructions like a store's own S_EXEC->S_MEM span --
+     * see commit_now's own definition), EXCEPT on the run's own final
+     * commit (progbuf_ebreak_done/progbuf_abort), where advancing would
+     * be meaningless -- the run is over either way.
+     */
+    logic [3:0] progbuf_pc_q;
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            progbuf_pc_q <= 4'b0;
+        end else if (i_progbuf_start) begin
+            progbuf_pc_q <= 4'b0;
+        end else if (debug_progbuf_active && commit_now
+                     && !progbuf_ebreak_done && !progbuf_abort) begin
+            progbuf_pc_q <= progbuf_pc_q + 4'b1;
+        end
+    end
+    assign o_progbuf_pc    = progbuf_pc_q;
+    assign o_progbuf_done  = progbuf_ebreak_done;
+    assign o_progbuf_abort = progbuf_abort;
+
     /*
      * trap_val: forward-declared (`logic`, not `wire ... =`) -- its
      * misaligned-access arm needs mem_paddr, which doesn't exist until
@@ -1366,23 +1603,40 @@ module core (
      */
     logic [(`WORD_SIZE - 1):0] trap_val;
 
-    wire mret_taken = commit_now && is_mret && !mret_priv_violation;
-    wire sret_taken = commit_now && is_sret && !sret_priv_violation;
+    /*
+     * !debug_progbuf_active (Milestone 7 review fix): mret_taken/
+     * sret_taken are the OTHER path (besides trap_taken) that writes
+     * current_priv (see that always_ff further down). Without this
+     * gate, a debugger who places a legal-at-the-halted-privilege
+     * MRET/SRET in the Program Buffer would silently and permanently
+     * change current_priv on resume -- current_priv is one of the four
+     * pieces of state (dpc/current_priv/mepc/mcause) this milestone's
+     * own design explicitly requires stay untouched by a Program Buffer
+     * run, success or abort. A PRIVILEGE-illegal MRET/SRET is unaffected
+     * by this gate (mret_priv_violation/sret_priv_violation still feed
+     * is_illegal_instr regardless of debug_progbuf_active, so it still
+     * correctly aborts via progbuf_abort's own OR-list) -- this only
+     * suppresses the real, otherwise-legal instruction's side effect.
+     */
+    wire mret_taken = !debug_progbuf_active && commit_now && is_mret && !mret_priv_violation;
+    wire sret_taken = !debug_progbuf_active && commit_now && is_sret && !sret_priv_violation;
 
-    wire csr_we = is_csr && commit_now && !csr_write_suppress && !trap_taken;
+    // instr_faulted: declared far above (see that wire's own comment) --
+    // both csr_we and reg_write below need it in place of bare trap_taken.
+    wire csr_we = is_csr && commit_now && !csr_write_suppress && !instr_faulted;
 
     /*
      * reg_write: relocated here (from immediately after reg_write_control
-     * above) since it now depends on trap_taken, which isn't computed
+     * above) since it now depends on instr_faulted, which isn't computed
      * until this classification section -- reg_write itself is already
      * forward-declared near the top of the Decode section (`logic
      * reg_write;`), so driving it later in the file is a continuation of
-     * that same established pattern, not a new one. A trapping
+     * that same established pattern, not a new one. A faulting
      * instruction never writes rd -- its "normal" semantics (including
      * whatever reg_write_ctrl computed) are entirely overridden by
-     * trap-entry.
+     * trap-entry (ordinary execution) or a Program Buffer abort.
      */
-    assign reg_write = reg_write_ctrl && commit_now && !trap_taken;
+    assign reg_write = reg_write_ctrl && commit_now && !instr_faulted;
 
     /*
      * M extension: divide. DIV/DIVU/REM/REMU (and their W variants)
@@ -1606,20 +1860,23 @@ module core (
      * Access Register CSR transfer (Milestone 5) is muxed ahead of
      * csr_file0's existing, generic i_csr_addr/i_csr_we/i_csr_wdata
      * inputs -- no new ports on csr_file.sv itself -- gated on
-     * in_debug_mode for the same reason regfile0's mux above is: a
-     * decode-driven csr_we can never assert while in_debug_mode is 1
-     * (it requires commit_now, hard-0 throughout S_DEBUG_HALTED), so
-     * the two sources are already temporally disjoint. o_csr_rdata is
+     * dm_access_active for the same reason regfile0's mux above is (see
+     * that wire's own comment): a decode-driven csr_we CAN assert while
+     * in_debug_mode is 1 now, during a Milestone 7 Program Buffer run
+     * (e.g. Test D's own csrr x6,dpc), so in_debug_mode alone is no
+     * longer the right gate -- dm_access_active excludes exactly that
+     * window, restoring the "two sources are temporally disjoint"
+     * property this comment originally relied on. o_csr_rdata is
      * combinational and unconditional -- csr_rdata already reflects
      * whichever address is currently muxed in, for both consumers.
      */
     csr_file csr_file0 (
         .i_clk(clk),
         .i_rst(rst),
-        .i_csr_addr(in_debug_mode ? i_dm_csr_addr : imm_2[(`CSR_ADDR_SIZE - 1):0]),
+        .i_csr_addr(dm_access_active ? i_dm_csr_addr : imm_2[(`CSR_ADDR_SIZE - 1):0]),
         .o_csr_rdata(csr_rdata),
-        .i_csr_we(in_debug_mode ? i_dm_csr_we : csr_we),
-        .i_csr_wdata(in_debug_mode ? i_dm_csr_wdata : alu_result),
+        .i_csr_we(dm_access_active ? i_dm_csr_we : csr_we),
+        .i_csr_wdata(dm_access_active ? i_dm_csr_wdata : alu_result),
         .i_instr_retired(commit_now),
 
         .i_current_priv(current_priv),
@@ -2121,15 +2378,19 @@ module core (
         case (state)
             S_FETCH: begin
                 /*
-                 * debug_halt_req_entry additionally suppresses the
-                 * request entirely (not just redirects its address, the
-                 * way fetch_from_trap_vector does) -- we're about to
-                 * park in S_DEBUG_HALTED with nothing fetched at all, so
+                 * debug_halt_req_entry/debug_progbuf_active both
+                 * suppress the request entirely (not just redirect its
+                 * address, the way fetch_from_trap_vector does) --
+                 * debug_halt_req_entry because we're about to park in
+                 * S_DEBUG_HALTED with nothing fetched at all,
+                 * debug_progbuf_active because the "fetch" is already
+                 * available combinationally as i_progbuf_data, with no
+                 * real bus transaction needed at all. Either way,
                  * wb_done must never arrive for this cycle's would-be
                  * request. See the state-transition always_ff's own
                  * S_FETCH arm, which relies on exactly this.
                  */
-                if (!wb_done && !debug_halt_req_entry) begin
+                if (!wb_done && !debug_halt_req_entry && !debug_progbuf_active) begin
                     wb_cyc_o  = 1'b1;
                     wb_stb_o  = 1'b1;
                     wb_addr_o = fetch_from_trap_vector ? {trap_vector[31:3], 3'b0} : fetch_addr;

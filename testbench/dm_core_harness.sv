@@ -9,13 +9,14 @@
  * "dm + core + wb4_sram" wiring for Milestone 5's own DMI backdoor
  * testbench (dm_tb.sv) -- extends core_wb4_sram_harness.sv's own
  * "core + wb4_sram only" shape with a real dm0 instance wired to core0's
- * Milestone 4 halt/resume ports and Milestone 5's new Access Register
- * ports. The DMI-facing side is dm0's own plain register interface
- * (i_reg_addr/i_reg_wdata/i_reg_we/o_reg_rdata, see design/dm.sv's own
- * header for why this isn't the literal 41-bit DMI protocol) -- exposed
- * straight through so a testbench can drive it directly with no DMI
- * transport FSM in the way (that's a separate, later Milestone 6
- * concern, design/dm_dmi.sv).
+ * Milestone 4 halt/resume ports, Milestone 5's Access Register ports,
+ * and Milestone 7's Program Buffer ports. The DMI-facing side is dm0's
+ * own plain register interface (i_reg_addr/i_reg_wdata/i_reg_we/
+ * o_reg_rdata, see design/dm.sv's own header for why this isn't the
+ * literal 41-bit DMI protocol) -- exposed straight through so a
+ * testbench can drive it directly with no DMI transport FSM in the way
+ * (that's design/dm_dmi.sv, a separate Milestone 6 concern, exercised
+ * for real by jtag_dmi_e2e_tb.sv instead of this harness).
  *
  * NUM_WORDS defaults to 4096, same precedent as core_wb4_sram_harness.sv.
  */
@@ -42,6 +43,9 @@ module dm_core_harness #(
     logic [4:0]  dm_gpr_sel;
     logic [11:0] dm_csr_addr;
     logic [63:0] dm_gpr_wdata, dm_csr_wdata, dm_gpr_rdata, dm_csr_rdata;
+    logic        progbuf_start, progbuf_done, progbuf_abort;
+    logic [3:0]  progbuf_pc;
+    logic [31:0] progbuf_data;
 
     core core0 (
         .clk(clk), .rst(rst),
@@ -53,7 +57,10 @@ module dm_core_harness #(
         .i_dm_gpr_we(dm_gpr_we), .i_dm_gpr_sel(dm_gpr_sel),
         .i_dm_gpr_wdata(dm_gpr_wdata), .o_dm_gpr_rdata(dm_gpr_rdata),
         .i_dm_csr_we(dm_csr_we), .i_dm_csr_addr(dm_csr_addr),
-        .i_dm_csr_wdata(dm_csr_wdata), .o_dm_csr_rdata(dm_csr_rdata)
+        .i_dm_csr_wdata(dm_csr_wdata), .o_dm_csr_rdata(dm_csr_rdata),
+        .i_progbuf_start(progbuf_start), .o_progbuf_pc(progbuf_pc),
+        .i_progbuf_data(progbuf_data), .o_progbuf_done(progbuf_done),
+        .o_progbuf_abort(progbuf_abort)
     );
 
     wb4_sram #(.num_words(NUM_WORDS)) sram0 (
@@ -71,7 +78,10 @@ module dm_core_harness #(
         .o_dm_gpr_we(dm_gpr_we), .o_dm_gpr_sel(dm_gpr_sel),
         .o_dm_gpr_wdata(dm_gpr_wdata), .i_dm_gpr_rdata(dm_gpr_rdata),
         .o_dm_csr_we(dm_csr_we), .o_dm_csr_addr(dm_csr_addr),
-        .o_dm_csr_wdata(dm_csr_wdata), .i_dm_csr_rdata(dm_csr_rdata)
+        .o_dm_csr_wdata(dm_csr_wdata), .i_dm_csr_rdata(dm_csr_rdata),
+        .o_progbuf_start(progbuf_start), .i_progbuf_pc(progbuf_pc),
+        .o_progbuf_data(progbuf_data), .i_progbuf_done(progbuf_done),
+        .i_progbuf_abort(progbuf_abort)
     );
 
 endmodule

@@ -144,6 +144,65 @@ module dm_tb;
         rdata = reg_rdata_err;
     endtask
 
+    /* ------------------------------------------------------------- *
+     * dut_progbuf -- Milestone 7's own Program Buffer execution,
+     * proven via the same backdoor DMI interface as dut_basic/dut_err
+     * (a real bit-banged run through the JTAG/DMI transport is
+     * jtag_dmi_e2e_tb.sv's own job, mirroring how dut_basic's own
+     * Access Register scenario already has that split).
+     * ------------------------------------------------------------- */
+
+    logic rst_progbuf = 1;
+    logic [6:0]  reg_addr_progbuf;
+    logic [31:0] reg_wdata_progbuf;
+    logic        reg_we_progbuf = 1'b0;
+    logic [31:0] reg_rdata_progbuf;
+    dm_core_harness #(.NUM_WORDS(32)) dut_progbuf (
+        .clk(clk), .rst(rst_progbuf),
+        .i_reg_addr(reg_addr_progbuf), .i_reg_wdata(reg_wdata_progbuf),
+        .i_reg_we(reg_we_progbuf), .o_reg_rdata(reg_rdata_progbuf)
+    );
+
+    task automatic progbuf_dmi_write(input [6:0] addr, input [31:0] wdata);
+        reg_addr_progbuf  = addr;
+        reg_wdata_progbuf = wdata;
+        reg_we_progbuf    = 1'b1;
+        @(posedge clk); #1;
+        reg_we_progbuf    = 1'b0;
+    endtask
+
+    task automatic progbuf_dmi_read(input [6:0] addr, output [31:0] rdata);
+        reg_addr_progbuf = addr;
+        #1;
+        rdata = reg_rdata_progbuf;
+    endtask
+
+    localparam int PROGBUF_BUSY_RETRY_LIMIT = 100;
+
+    // Polls abstractcs.busy (bit 12) until it clears -- a real Program
+    // Buffer run takes many clk cycles (unlike an ordinary Access
+    // Register transfer's own single-edge resolution), so this can't be
+    // a single dmi_read the way dut_basic's own busy checks are.
+    task automatic progbuf_wait_done();
+        logic [31:0] rd;
+        int tries;
+        tries = 0;
+        rd = 32'h0000_1000;  // seed with busy=1 so the loop runs at least once
+        while (rd[12]) begin
+            if (tries >= PROGBUF_BUSY_RETRY_LIMIT) begin
+                $display("TIMEOUT: dut_progbuf busy never cleared");
+                $finish;
+            end
+            @(posedge clk); #1;
+            progbuf_dmi_read(DMI_ABSTRACTCS, rd);
+            tries++;
+        end
+    endtask
+
+    localparam [6:0] DMI_PROGBUF0 = 7'h20;
+    localparam [6:0] DMI_PROGBUF1 = 7'h21;
+    localparam [11:0] CSR_DPC_PB  = 12'h7B1;
+
     initial begin
         #1;
 
@@ -416,6 +475,269 @@ module dm_tb;
             err_dmi_read(DMI_ABSTRACTCS, rd);
             check("dut_err: cmderr == 0 after a W1C write", {61'b0, rd[10:8]}, 64'd0);
         end
+
+        /* ----------------------------------------------------------- *
+         * dut_progbuf
+         * ----------------------------------------------------------- */
+
+        /*
+         * Program:
+         *  0x00  addi x1,x0,10
+         *  0x04  ebreak                   halt lands here (dpc==0x04) --
+         *                                  1 commit's worth of margin,
+         *                                  same reasoning as dut_basic
+         */
+        dut_progbuf.sram0.memory[0] = {{11'b0, 1'b1, 13'b0, `OPC_SYSTEM},
+                                        encode_i(32'sd10, 5'd0, 3'b000, 5'd1, `OPC_OP_IMM)};
+
+        @(posedge clk); #1;
+        rst_progbuf = 0;
+
+        // haltreq asserted IMMEDIATELY -- deliberately NOT delayed behind
+        // a commit-count wait the way dut_basic's own halt request is.
+        // debug_halt_req_entry structurally can't fire before the first
+        // real commit_now anyway (it requires commit_now_q, itself a
+        // one-cycle-deferred echo of a real commit_now pulse), so this
+        // still lands the halt boundary right after instruction #0
+        // retires (dpc==0x04) -- it does NOT fire one cycle earlier.
+        // Waiting for a commit first (dut_basic's own pattern) would push
+        // the boundary to land after commit #2 instead (the DMI write's
+        // own latency margin, see dut_basic's comment above) -- but
+        // commit #2 HERE is the program's own trailing ebreak itself,
+        // which would then retire as a REAL synchronous trap (dcsr.ebreakm
+        // defaults to 0) and redirect pc to mtvec (0) before
+        // debug_halt_req_entry ever captures dpc -- exactly the dpc==0
+        // bug this ordering avoids.
+        progbuf_dmi_write(DMI_DMCONTROL, 32'h8000_0001);  // haltreq=1, dmactive=1
+
+        fork
+            wait (dut_progbuf.o_debug_mode === 1'b1);
+            begin
+                repeat (`TIMEOUT_CYCLES_SMALL) @(posedge clk);
+                $display("TIMEOUT: dut_progbuf never halted");
+                $finish;
+            end
+        join_any
+        disable fork;
+        #1;
+
+        check("dut_progbuf: dpc == 0x04 after the initial halt",
+            dut_progbuf.core0.dpc_w, 64'h04);
+
+        // Test A: postexec-only (transfer=0) -- run progbuf0/1 directly,
+        // no register transfer involved.
+        progbuf_dmi_write(DMI_PROGBUF0, encode_i(32'sd42, 5'd0, 3'b000, 5'd5, `OPC_OP_IMM));  // addi x5,x0,42
+        progbuf_dmi_write(DMI_PROGBUF1, {11'b0, 1'b1, 13'b0, `OPC_SYSTEM});                   // ebreak
+        // {cmdtype[8]=0, rsvd[1], aarsize[3]=3, aarpostincrement[1]=0,
+        //  postexec[1]=1, transfer[1]=0, write[1]=0, regno[16]=0}
+        progbuf_dmi_write(DMI_COMMAND, {8'h00, 1'b0, 3'd3, 1'b0, 1'b1, 1'b0, 1'b0, 16'h0000});
+        progbuf_wait_done();
+
+        check("dut_progbuf: Test A -- x5 == 42 after a postexec-only run",
+            dut_progbuf.core0.regfile0.gp_registers[5], 64'd42);
+        begin
+            logic [31:0] acs;
+            progbuf_dmi_read(DMI_ABSTRACTCS, acs);
+            check("dut_progbuf: Test A -- cmderr == 0 (success)", {61'b0, acs[10:8]}, 64'd0);
+            // abstractcs.progbufsize (bits [28:24]) is real now (16 words,
+            // not a stub) -- prove a debugger probing capabilities via DMI
+            // actually sees that, not just that dm.sv's internal array
+            // happens to be sized right (Test I below exercises the array
+            // itself, all 16 slots).
+            check("dut_progbuf: abstractcs.progbufsize == 16", {59'b0, acs[28:24]}, 64'd16);
+        end
+        check("dut_progbuf: Test A -- o_debug_mode stays 1 (never resumed)",
+            {63'b0, dut_progbuf.o_debug_mode}, 64'd1);
+        check("dut_progbuf: Test A -- dpc unchanged (still 0x04)",
+            dut_progbuf.core0.dpc_w, 64'h04);
+
+        // Test B: a GPR WRITE transfer combined with postexec -- the
+        // transfer must land BEFORE the Program Buffer starts running.
+        progbuf_dmi_write(DMI_DATA0, 32'd5);
+        progbuf_dmi_write(DMI_DATA1, 32'd0);
+        progbuf_dmi_write(DMI_PROGBUF0, encode_i(32'sd10, 5'd1, 3'b000, 5'd1, `OPC_OP_IMM));  // addi x1,x1,10
+        progbuf_dmi_write(DMI_PROGBUF1, {11'b0, 1'b1, 13'b0, `OPC_SYSTEM});                   // ebreak
+        // transfer=1, write=1, postexec=1, regno=0x1001 (x1)
+        progbuf_dmi_write(DMI_COMMAND, {8'h00, 1'b0, 3'd3, 1'b0, 1'b1, 1'b1, 1'b1, 16'h1001});
+        progbuf_wait_done();
+
+        check("dut_progbuf: Test B -- x1 == 15 (WRITE x1=5, then progbuf adds 10)",
+            dut_progbuf.core0.regfile0.gp_registers[1], 64'd15);
+
+        // Test C: a deliberate fault (illegal instruction) -- must abort
+        // with cmderr=3, NOT a real trap, and mcause/mepc/dpc must stay
+        // provably untouched.
+        progbuf_dmi_write(DMI_PROGBUF0, 32'hFFFF_FFFF);  // guaranteed-illegal encoding
+        // postexec=1, transfer=0 -- no trailing ebreak needed, it aborts
+        // on this very instruction.
+        progbuf_dmi_write(DMI_COMMAND, {8'h00, 1'b0, 3'd3, 1'b0, 1'b1, 1'b0, 1'b0, 16'h0000});
+        progbuf_wait_done();
+
+        begin
+            logic [31:0] acs;
+            progbuf_dmi_read(DMI_ABSTRACTCS, acs);
+            check("dut_progbuf: Test C -- cmderr == 3 (exception)", {61'b0, acs[10:8]}, 64'd3);
+        end
+        check("dut_progbuf: Test C -- o_debug_mode stays 1 (aborted back to Debug Mode, not a real trap)",
+            {63'b0, dut_progbuf.o_debug_mode}, 64'd1);
+        check("dut_progbuf: Test C -- dpc still unchanged (still 0x04)",
+            dut_progbuf.core0.dpc_w, 64'h04);
+
+        // Test C (continued): while cmderr is STILL 3 (not yet W1C-cleared),
+        // prove cmd_legal's own (cmderr_q == 0) gate really blocks a brand
+        // new postexec command, not just an ordinary Access Register
+        // transfer (dut_err's own cmderr==4 scenario predates Milestone 7
+        // and never exercises postexec at all). Reuses Test A's own
+        // program, but targets x8 (untouched by every earlier test) so a
+        // stray successful run would be unambiguous, not masked by a
+        // register some other test already set to the same value.
+        progbuf_dmi_write(DMI_PROGBUF0, encode_i(32'sd42, 5'd0, 3'b000, 5'd8, `OPC_OP_IMM));  // addi x8,x0,42
+        progbuf_dmi_write(DMI_PROGBUF1, {11'b0, 1'b1, 13'b0, `OPC_SYSTEM});                   // ebreak
+        progbuf_dmi_write(DMI_COMMAND, {8'h00, 1'b0, 3'd3, 1'b0, 1'b1, 1'b0, 1'b0, 16'h0000});
+        #1;
+        begin
+            logic [31:0] acs;
+            progbuf_dmi_read(DMI_ABSTRACTCS, acs);
+            check("dut_progbuf: Test C -- a new postexec command is rejected while cmderr==3 is still pending (busy stays 0)",
+                {63'b0, acs[12]}, 64'd0);
+            check("dut_progbuf: Test C -- cmderr stays 3 (the ORIGINAL error, not overwritten)",
+                {61'b0, acs[10:8]}, 64'd3);
+        end
+        check("dut_progbuf: Test C -- x8 == 0 (the rejected command's own progbuf never actually ran)",
+            dut_progbuf.core0.regfile0.gp_registers[8], 64'd0);
+
+        // W1C-clear cmderr=3 before issuing any further command.
+        progbuf_dmi_write(DMI_ABSTRACTCS, {3'b0, 5'b0, 11'b0, 1'b0, 1'b0, 3'd3, 4'b0, 4'b0});
+
+        // Read mcause/mepc back via a normal Access Register CSR
+        // transfer -- both must still read their reset value (0),
+        // proving the abort never routed through the real trap path.
+        begin
+            logic [31:0] rd;
+            // READ mcause (0x342)
+            progbuf_dmi_write(DMI_COMMAND, {8'h00, 1'b0, 3'd3, 1'b0, 1'b0, 1'b1, 1'b0, 4'b0, `CSR_MCAUSE});
+            #1;
+            progbuf_dmi_read(DMI_DATA0, rd);
+            check("dut_progbuf: Test C -- mcause == 0 (untouched by the abort)", {32'b0, rd}, 64'd0);
+            // One extra edge before the next command write -- busy_q is
+            // still 1 immediately after the mcause command above (it only
+            // clears the cycle AFTER acceptance, same "busy for exactly
+            // one cycle" precedent dut_basic's own busy check establishes
+            // above), and issuing this write's own DMI edge too soon would
+            // land it on that still-busy cycle, spuriously rejecting the
+            // mepc read with cmderr=1 -- which would otherwise silently
+            // carry into Test D's own command (dm.sv's cmderr is sticky
+            // until explicitly W1C-cleared).
+            @(posedge clk); #1;
+            // READ mepc (0x341)
+            progbuf_dmi_write(DMI_COMMAND, {8'h00, 1'b0, 3'd3, 1'b0, 1'b0, 1'b1, 1'b0, 4'b0, `CSR_MEPC});
+            #1;
+            progbuf_dmi_read(DMI_DATA0, rd);
+            check("dut_progbuf: Test C -- mepc == 0 (untouched by the abort)", {32'b0, rd}, 64'd0);
+        end
+
+        // Test D: a real CSR instruction (csrr x6,dpc) executed FROM the
+        // Program Buffer -- closes the Milestone 3/4-deferred "inside-
+        // Debug-Mode-legal dcsr/dpc/dscratch* access" test gap, which
+        // needed exactly this (a real instruction stream, not a white-box
+        // peek) and had no way to exist before this milestone.
+        progbuf_dmi_write(DMI_PROGBUF0, encode_csr(CSR_DPC_PB, 5'd0, `FUNCT3_CSRRS, 5'd6, `OPC_SYSTEM));
+        progbuf_dmi_write(DMI_PROGBUF1, {11'b0, 1'b1, 13'b0, `OPC_SYSTEM});  // ebreak
+        progbuf_dmi_write(DMI_COMMAND, {8'h00, 1'b0, 3'd3, 1'b0, 1'b1, 1'b0, 1'b0, 16'h0000});
+        progbuf_wait_done();
+
+        begin
+            logic [31:0] acs;
+            progbuf_dmi_read(DMI_ABSTRACTCS, acs);
+            check("dut_progbuf: Test D -- cmderr == 0 (dpc CSR access is legal in Debug Mode)",
+                {61'b0, acs[10:8]}, 64'd0);
+        end
+        check("dut_progbuf: Test D -- x6 == dpc's real value (0x04), read via a real CSR instruction",
+            dut_progbuf.core0.regfile0.gp_registers[6], 64'h04);
+
+        // Test E: a fault reached via S_MEM (a real LD past dut_progbuf's
+        // own 32-word/256-byte sram range), not the S_EXEC-only
+        // illegal-instruction path Test C already covers -- design/core.sv
+        // added its OWN progbuf_abort arm to both the S_MEM and
+        // S_AMO_WRITE branches of the state-transition always_ff
+        // (distinct from S_EXEC's), so this proves that arm specifically:
+        // a bug isolated to it would either hang progbuf_wait_done() below
+        // (busy never clears) or silently fall through to S_FETCH and
+        // corrupt dpc on the very next real fetch -- neither is caught by
+        // Test C alone. No trailing ebreak needed -- it aborts on this one
+        // instruction, once wb_err_i returns during S_MEM.
+        progbuf_dmi_write(DMI_PROGBUF0, encode_i(32'sd256, 5'd0, 3'b011, 5'd7, `OPC_LOAD));  // ld x7,256(x0)
+        progbuf_dmi_write(DMI_COMMAND, {8'h00, 1'b0, 3'd3, 1'b0, 1'b1, 1'b0, 1'b0, 16'h0000});
+        progbuf_wait_done();
+
+        begin
+            logic [31:0] acs;
+            progbuf_dmi_read(DMI_ABSTRACTCS, acs);
+            check("dut_progbuf: Test E -- cmderr == 3 (exception, reached via S_MEM not S_EXEC)",
+                {61'b0, acs[10:8]}, 64'd3);
+        end
+        check("dut_progbuf: Test E -- o_debug_mode stays 1 (aborted back to Debug Mode)",
+            {63'b0, dut_progbuf.o_debug_mode}, 64'd1);
+        check("dut_progbuf: Test E -- dpc still unchanged (still 0x04)",
+            dut_progbuf.core0.dpc_w, 64'h04);
+        check("dut_progbuf: Test E -- x7 == 0 (the faulting load's own destination was never written)",
+            dut_progbuf.core0.regfile0.gp_registers[7], 64'd0);
+        progbuf_dmi_write(DMI_ABSTRACTCS, {3'b0, 5'b0, 11'b0, 1'b0, 1'b0, 3'd3, 4'b0, 4'b0});  // W1C clear
+
+        // Test F: a register READ transfer combined with postexec (Test B
+        // only ever exercised WRITE+postexec) -- the read must capture the
+        // register's value from BEFORE the Program Buffer runs, not after.
+        // Seed x2 with a known value via a plain postexec-only run first
+        // (mirrors Test A's own pattern), then run a SECOND buffer that
+        // mutates x2 while simultaneously reading its PRE-run value via
+        // transfer=1/write=0.
+        progbuf_dmi_write(DMI_PROGBUF0, encode_i(32'sd99, 5'd0, 3'b000, 5'd2, `OPC_OP_IMM));  // addi x2,x0,99
+        progbuf_dmi_write(DMI_PROGBUF1, {11'b0, 1'b1, 13'b0, `OPC_SYSTEM});                   // ebreak
+        progbuf_dmi_write(DMI_COMMAND, {8'h00, 1'b0, 3'd3, 1'b0, 1'b1, 1'b0, 1'b0, 16'h0000});
+        progbuf_wait_done();
+
+        progbuf_dmi_write(DMI_PROGBUF0, encode_i(32'sd1, 5'd2, 3'b000, 5'd2, `OPC_OP_IMM));  // addi x2,x2,1
+        progbuf_dmi_write(DMI_PROGBUF1, {11'b0, 1'b1, 13'b0, `OPC_SYSTEM});                  // ebreak
+        // transfer=1, write=0 (READ), postexec=1, regno=0x1002 (x2)
+        progbuf_dmi_write(DMI_COMMAND, {8'h00, 1'b0, 3'd3, 1'b0, 1'b1, 1'b1, 1'b0, 16'h1002});
+        progbuf_wait_done();
+
+        begin
+            logic [31:0] rd;
+            progbuf_dmi_read(DMI_DATA0, rd);
+            check("dut_progbuf: Test F -- data0 == 99 (the READ captured x2's value BEFORE the run, not after)",
+                {32'b0, rd}, 64'd99);
+        end
+        check("dut_progbuf: Test F -- x2 == 100 (the progbuf's own addi still ran, mutating the live register)",
+            dut_progbuf.core0.regfile0.gp_registers[2], 64'd100);
+
+        // Test I: fill all 16 progbuf words (progbuf0-14 = addi x9,x9,1,
+        // progbuf15 = ebreak) -- every earlier test only ever used
+        // progbuf0/1, leaving progbufsize's real value of 16 (see the
+        // check next to Test A above) functionally unproven at the high
+        // end of the range. x9 is untouched by every earlier test, so a
+        // final value of exactly 15 proves all 15 addi words -- including
+        // the one at progbuf14, right at the edge of the array -- actually
+        // executed, and that progbuf_pc_q/the DM's own address decode both
+        // genuinely reach index 15 (an off-by-one or truncated progbuf_q
+        // declaration would either hang progbuf_wait_done() below or leave
+        // x9 short of 15).
+        for (int i = 0; i < 15; i++) begin
+            progbuf_dmi_write(7'(DMI_PROGBUF0 + i[6:0]),
+                encode_i(32'sd1, 5'd9, 3'b000, 5'd9, `OPC_OP_IMM));  // addi x9,x9,1
+        end
+        progbuf_dmi_write(7'(DMI_PROGBUF0 + 7'd15), {11'b0, 1'b1, 13'b0, `OPC_SYSTEM});  // progbuf15 = ebreak
+        progbuf_dmi_write(DMI_COMMAND, {8'h00, 1'b0, 3'd3, 1'b0, 1'b1, 1'b0, 1'b0, 16'h0000});
+        progbuf_wait_done();
+
+        begin
+            logic [31:0] acs;
+            progbuf_dmi_read(DMI_ABSTRACTCS, acs);
+            check("dut_progbuf: Test I -- cmderr == 0 (a full 16-word buffer ran cleanly)",
+                {61'b0, acs[10:8]}, 64'd0);
+        end
+        check("dut_progbuf: Test I -- x9 == 15 (all 15 addi words, through progbuf14, actually executed)",
+            dut_progbuf.core0.regfile0.gp_registers[9], 64'd15);
 
         $display("");
         $display("dm_tb: %0d passed, %0d failed", pass_count, fail_count);

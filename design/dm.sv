@@ -8,14 +8,18 @@
  *
  * Debug Module register file (Milestone 5 of the EBREAK/JTAG staged
  * plan -- see [[debug-halt-fsm-milestone]] for Milestone 4, which added
- * the halt/resume/step FSM this module now drives). Implements the
- * subset of the RISC-V Debug Specification (0.13.2/1.0) register set
- * needed for a debugger to halt/resume/step the hart and read/write a
- * GPR or CSR while it's halted (an "Access Register" abstract command,
- * cmdtype=0) -- everything else (System Bus Access, the Program Buffer,
- * Quick Access commands) gets register STORAGE now (so the shape is
- * proven once) but no functional backing until later milestones give it
- * one (M7/M8).
+ * the halt/resume/step FSM this module now drives; [[jtag-tap-dmi-milestone]]
+ * for Milestone 6, the real JTAG/DMI transport in front of this module's
+ * own plain register interface). Implements the subset of the RISC-V
+ * Debug Specification (0.13.2/1.0) register set needed for a debugger to
+ * halt/resume/step the hart, read/write a GPR or CSR while it's halted
+ * (an "Access Register" abstract command, cmdtype=0), and -- Milestone 7
+ * -- run a small Program Buffer sequence against live GPR/CSR state
+ * (that same abstract command's postexec bit, see the Program Buffer
+ * section below and design/core.sv's own matching section for the full
+ * execution design). System Bus Access and Quick Access commands still
+ * get register STORAGE only (so their own shape is proven once) but no
+ * functional backing until Milestone 8.
  *
  * NOTE ON SPEC FIDELITY: this repo has no local copy of the RISC-V
  * Debug Specification, but every register's bit layout below (dmcontrol,
@@ -100,7 +104,23 @@ module dm (
     output logic        o_dm_csr_we,
     output logic [11:0] o_dm_csr_addr,
     output logic [63:0] o_dm_csr_wdata,
-    input  logic [63:0] i_dm_csr_rdata
+    input  logic [63:0] i_dm_csr_rdata,
+
+    /*
+     * Program Buffer execution (Milestone 7's own new core0 ports).
+     * o_progbuf_start is a one-cycle pulse (fires the same cycle a
+     * postexec command is accepted); i_progbuf_pc is which progbuf0-15
+     * slot core0 currently wants (a plain array index, not a byte
+     * address), read back combinationally as o_progbuf_data (this
+     * module's own progbuf_q storage has no read latency, mirroring the
+     * Access Register GPR/CSR reads already above); i_progbuf_done/
+     * i_progbuf_abort are one-cycle pulses reporting how the run ended.
+     */
+    output logic        o_progbuf_start,
+    input  logic [3:0]  i_progbuf_pc,
+    output logic [31:0] o_progbuf_data,
+    input  logic        i_progbuf_done,
+    input  logic        i_progbuf_abort
 );
     /*
      * DMI register address map (RISC-V Debug Spec 0.13.2/1.0's own 7-bit
@@ -183,9 +203,11 @@ module dm (
      * 0 always exists and is always available; allhavereset/anyhavereset
      * read 0 because no reset-tracking is implemented (consistent with
      * dmcontrol.hartreset/ndmreset already being accepted-but-inert);
-     * impebreak reads 0 because no Program Buffer execution exists yet
-     * (Milestone 7); hasresethaltreq/confstrptrvalid read 0 because
-     * neither is implemented. allresumeack/anyresumeack are a documented
+     * impebreak reads 0 because this Program Buffer implementation
+     * (Milestone 7) never auto-appends an implicit ebreak after a run --
+     * the debugger's own trailing EBREAK is required, so a debugger must
+     * not assume one is implied; hasresethaltreq/confstrptrvalid read 0
+     * because neither is implemented. allresumeack/anyresumeack are a documented
      * approximation (dmstatus_resumeack, below) -- this core's resume is
      * effectively synchronous with no separate ack-tracking state worth
      * modeling this milestone, so they just mirror "currently running".
@@ -246,8 +268,25 @@ module dm (
      * ----------------------------------------------------------------- */
     logic [2:0] cmderr_q;
     logic       busy_q;
-    wire [31:0] abstractcs_val = {3'b0, 5'b0, 11'b0, busy_q, 1'b0, cmderr_q, 4'b0, 4'd2};
-    // [31:29] reserved, [28:24] progbufsize=0, [23:13] reserved, [12] busy,
+    /*
+     * progbuf_q/progbuf_running_q: forward-declared here (Icarus needs
+     * declaration-before-use, unlike a plain continuous assign's usual
+     * order-independence) since busy_q's own always_ff below reads
+     * progbuf_running_q, and the Program Buffer section further down
+     * reads progbuf_q -- both well before either's own real write-logic
+     * naturally belongs (progbuf_running_q's own always_ff sits with
+     * the rest of the Program Buffer section; progbuf_q's own storage
+     * write-logic sits with the other DMI-addressed registers, in the
+     * System Bus Access section further down -- same "declare early,
+     * drive/write late" split this file already uses for data0_q/
+     * data1_q above).
+     */
+    logic progbuf_running_q;
+    logic [31:0] progbuf_q [0:15];
+    // progbufsize=16 (Milestone 7 -- real now, not a placeholder: this
+    // module genuinely has 16 progbuf words and can genuinely run them).
+    wire [31:0] abstractcs_val = {3'b0, 5'd16, 11'b0, busy_q, 1'b0, cmderr_q, 4'b0, 4'd2};
+    // [31:29] reserved, [28:24] progbufsize=16, [23:13] reserved, [12] busy,
     // [11] relaxedpriv=0, [10:8] cmderr, [7:4] reserved, [3:0] datacount=2
 
     /* ----------------------------------------------------------------- *
@@ -294,11 +333,18 @@ module dm (
      * stale value data1_q last held (e.g. the upper half of an unrelated
      * earlier READ) -- real data corruption, not a spec-fidelity nicety.
      * Rejecting it here (cmd_supported -> false -> cmderr=2, "not
-     * supported") is the correct, spec-legal response instead.
+     * supported") is the correct, spec-legal response instead. aarsize
+     * is only meaningful when a transfer is actually happening -- a
+     * postexec-only command (transfer=0, just run the Program Buffer)
+     * shouldn't be rejected over an aarsize field the debugger had no
+     * reason to set meaningfully.
      */
     wire cmd_aarsize_ok = (cmd_aarsize == 3'd3);
     wire cmd_regno_ok   = !cmd_transfer || cmd_regno_is_gpr || cmd_regno_is_csr;
-    wire cmd_supported  = (cmd_cmdtype == 8'h00) && !cmd_postexec && cmd_aarsize_ok && cmd_regno_ok;
+    // postexec (Milestone 7) is now accepted for any Access Register
+    // command -- see the Program Buffer section below for its own
+    // execution logic.
+    wire cmd_supported  = (cmd_cmdtype == 8'h00) && (!cmd_transfer || cmd_aarsize_ok) && cmd_regno_ok;
 
     // Legal: hart halted, DM not already mid-command, no sticky error
     // pending, and the requested command is one this milestone supports.
@@ -315,13 +361,27 @@ module dm (
      * reason is never distinguished, matching the spec's own
      * "the DM does not attempt to determine whether more than one error
      * occurred" allowance. A write to abstractcs with a nonzero cmderr
-     * field clears it (W1C, per spec) -- takes priority over a same-
-     * cycle command write since they can't both be addressed to
-     * abstractcs and command at once anyway (different i_reg_addr).
+     * field clears it (W1C, per spec) -- this used to unconditionally
+     * take top priority, on the reasoning that it "can't collide with a
+     * same-cycle command write since they can't both be addressed to
+     * abstractcs and command at once" -- true for cmd_write_now (same
+     * i_reg_addr/i_reg_we port), but FALSE for i_progbuf_abort (Milestone
+     * 7 review fix): that's an independent, core0-originated pulse, not
+     * gated by i_reg_addr/i_reg_we at all, so a debugger W1C-clearing
+     * some earlier, unrelated sticky error could land on the exact same
+     * cycle a running Program Buffer sequence aborts. i_progbuf_abort is
+     * therefore checked FIRST now -- a genuine, fresh hardware-detected
+     * exception must never be silently swallowed by a same-cycle software
+     * clear of a stale, unrelated error. This doesn't change the ordinary
+     * (non-racing) case at all: i_progbuf_abort is 0 on every cycle a W1C
+     * write isn't racing it, so the W1C branch still fires exactly as
+     * before.
      */
     always_ff @(posedge clk) begin
         if (rst) begin
             cmderr_q <= 3'd0;
+        end else if (i_progbuf_abort && (cmderr_q == 3'd0)) begin
+            cmderr_q <= 3'd3;  // exception (Milestone 7) -- see the Program Buffer section below
         end else if (i_reg_we && (i_reg_addr == ADDR_ABSTRACTCS) && (i_reg_wdata[10:8] != 3'd0)) begin
             cmderr_q <= 3'd0;
         end else if (cmd_write_now && (cmderr_q == 3'd0)) begin
@@ -331,9 +391,29 @@ module dm (
         end
     end
 
+    /*
+     * busy_q (Milestone 7 update): a plain 1-cycle-delayed echo of
+     * cmd_legal for an ordinary Access Register transfer (unchanged
+     * from Milestone 5 -- busy for exactly the cycle after acceptance,
+     * then clears), but genuinely MULTI-cycle for a postexec command:
+     * it stays set for as long as progbuf_running_q does, only clearing
+     * once core0 reports i_progbuf_done/i_progbuf_abort. The three
+     * branches are mutually exclusive by construction: i_progbuf_done/
+     * i_progbuf_abort can only fire while progbuf_running_q is already
+     * 1, and cmd_legal cannot be true while busy_q (hence
+     * progbuf_running_q, transitively) is still 1 -- so there's no
+     * cycle where more than one of these branches is actually relevant.
+     */
     always_ff @(posedge clk) begin
-        if (rst) busy_q <= 1'b0;
-        else     busy_q <= cmd_legal;
+        if (rst) begin
+            busy_q <= 1'b0;
+        end else if (i_progbuf_done || i_progbuf_abort) begin
+            busy_q <= 1'b0;
+        end else if (cmd_legal) begin
+            busy_q <= 1'b1;
+        end else if (!progbuf_running_q) begin
+            busy_q <= 1'b0;
+        end
     end
 
     always_ff @(posedge clk) begin
@@ -348,6 +428,31 @@ module dm (
     assign o_dm_csr_we    = cmd_do_csr && cmd_write_reg;
     assign o_dm_csr_addr  = cmd_regno[11:0];
     assign o_dm_csr_wdata = {data1_q, data0_q};
+
+    /* ----------------------------------------------------------------- *
+     * Program Buffer execution (Milestone 7). o_progbuf_start fires the
+     * same cycle a postexec command is accepted -- independent of
+     * cmd_do_gpr/cmd_do_csr above (a command can combine a register
+     * transfer with postexec, or use postexec alone with transfer=0;
+     * both compose correctly since they're separate output pins core0
+     * consumes independently). progbuf_running_q tracks the run for as
+     * long as core0 hasn't yet reported i_progbuf_done/i_progbuf_abort
+     * -- this is the one command shape in this module that doesn't
+     * resolve in a single clock edge (see the module header's own
+     * contrast between Access Register transfers and this).
+     * ----------------------------------------------------------------- */
+    assign o_progbuf_start = cmd_legal && cmd_postexec;
+    assign o_progbuf_data  = progbuf_q[i_progbuf_pc];
+
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            progbuf_running_q <= 1'b0;
+        end else if (cmd_legal && cmd_postexec) begin
+            progbuf_running_q <= 1'b1;
+        end else if (i_progbuf_done || i_progbuf_abort) begin
+            progbuf_running_q <= 1'b0;
+        end
+    end
 
     /* ----------------------------------------------------------------- *
      * abstractauto -- storage only, no functional effect this milestone
@@ -384,21 +489,29 @@ module dm (
     end
 
     /* ----------------------------------------------------------------- *
-     * System Bus Access + Program Buffer -- storage-only stubs this
-     * milestone (Milestone 8 and Milestone 7 give them real backing).
-     * sbcs.sbaccess8/16/32/64/128 (bits [4:0] -- cross-checked against
-     * riscv-debug-spec's own xml/dm_registers.xml; an earlier pass here
-     * had this at bits [8:4], which meant the mask below didn't actually
-     * clear the real capability bits at all) are hardwired 0 within
-     * sbcs_val below regardless of what's written -- a real debugger
-     * reads "no access width supported" and correctly never attempts a
-     * System Bus Access against this DM, the spec-clean way to say "not
-     * implemented" without needing a fake per-transaction sberror flow.
+     * System Bus Access -- storage-only stub (Milestone 8 gives it real
+     * backing). sbcs.sbaccess8/16/32/64/128 (bits [4:0] -- cross-checked
+     * against riscv-debug-spec's own xml/dm_registers.xml; an earlier
+     * pass here had this at bits [8:4], which meant the mask below
+     * didn't actually clear the real capability bits at all) are
+     * hardwired 0 within sbcs_val below regardless of what's written --
+     * a real debugger reads "no access width supported" and correctly
+     * never attempts a System Bus Access against this DM, the spec-clean
+     * way to say "not implemented" without needing a fake per-
+     * transaction sberror flow.
+     *
+     * progbuf_q -- the Program Buffer's own storage -- is declared here
+     * too (same array, same address decode as always), but is no longer
+     * a stub: Milestone 7's own Program Buffer section above reads it
+     * combinationally via o_progbuf_data, and o_progbuf_start/
+     * progbuf_running_q (also above) drive real execution through
+     * core0.
      * ----------------------------------------------------------------- */
     logic [31:0] sbcs_q;
     logic [31:0] sbaddress0_q, sbaddress1_q, sbaddress2_q, sbaddress3_q;
     logic [31:0] sbdata0_q, sbdata1_q, sbdata2_q, sbdata3_q;
-    logic [31:0] progbuf_q [0:15];
+    // progbuf_q itself is forward-declared earlier (see that comment) --
+    // only its write-logic (the always_ff below) lives here.
 
     localparam [31:0] SBCS_ACCESS_MASK = 32'hFFFF_FFE0;  // clears bits [4:0] (sbaccess8..sbaccess128)
     wire [31:0] sbcs_val = sbcs_q & SBCS_ACCESS_MASK;

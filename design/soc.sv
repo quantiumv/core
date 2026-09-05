@@ -145,6 +145,9 @@ module soc (
     logic [4:0]  dm_gpr_sel;
     logic [11:0] dm_csr_addr;
     logic [63:0] dm_gpr_wdata, dm_csr_wdata, dm_gpr_rdata, dm_csr_rdata;
+    logic        progbuf_start, progbuf_done, progbuf_abort;
+    logic [3:0]  progbuf_pc;
+    logic [31:0] progbuf_data;
 
     core core0 (
         .clk(clk), .rst(rst),
@@ -161,14 +164,18 @@ module soc (
          * unconnected through Milestone 5 (no Debug Module instance
          * existed at this level yet) -- Milestone 6 is that
          * instantiation, real for the first time: dm0 (further down)
-         * drives every one of these.
+         * drives every one of these. Milestone 7 adds the Program
+         * Buffer ports, wired the same way.
          */
         .o_debug_mode(debug_mode),
         .i_debug_halt_req(debug_halt_req), .i_debug_resume_req(debug_resume_req),
         .i_dm_gpr_we(dm_gpr_we), .i_dm_gpr_sel(dm_gpr_sel),
         .i_dm_gpr_wdata(dm_gpr_wdata), .o_dm_gpr_rdata(dm_gpr_rdata),
         .i_dm_csr_we(dm_csr_we), .i_dm_csr_addr(dm_csr_addr),
-        .i_dm_csr_wdata(dm_csr_wdata), .o_dm_csr_rdata(dm_csr_rdata)
+        .i_dm_csr_wdata(dm_csr_wdata), .o_dm_csr_rdata(dm_csr_rdata),
+        .i_progbuf_start(progbuf_start), .o_progbuf_pc(progbuf_pc),
+        .i_progbuf_data(progbuf_data), .o_progbuf_done(progbuf_done),
+        .o_progbuf_abort(progbuf_abort)
     );
 
     logic [31:0] ram_addr, uart_addr, clint_addr;
@@ -330,7 +337,10 @@ module soc (
         .o_dm_gpr_we(dm_gpr_we), .o_dm_gpr_sel(dm_gpr_sel),
         .o_dm_gpr_wdata(dm_gpr_wdata), .i_dm_gpr_rdata(dm_gpr_rdata),
         .o_dm_csr_we(dm_csr_we), .o_dm_csr_addr(dm_csr_addr),
-        .o_dm_csr_wdata(dm_csr_wdata), .i_dm_csr_rdata(dm_csr_rdata)
+        .o_dm_csr_wdata(dm_csr_wdata), .i_dm_csr_rdata(dm_csr_rdata),
+        .o_progbuf_start(progbuf_start), .i_progbuf_pc(progbuf_pc),
+        .o_progbuf_data(progbuf_data), .i_progbuf_done(progbuf_done),
+        .i_progbuf_abort(progbuf_abort)
     );
 
 endmodule
