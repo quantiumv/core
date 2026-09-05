@@ -81,11 +81,48 @@
  * No UART pin exists at this level (or anywhere in this design) -- see
  * uart_tx.sv's header for why: this milestone's UART "transmits" via
  * $write in simulation, not real serial timing, so there is nothing for
- * a top-level pin to carry. clk/rst are this module's only ports.
+ * a top-level pin to carry.
+ *
+ * jtag_tck/jtag_tms/jtag_tdi/jtag_tdo/jtag_trst_n (Milestone 6 of the
+ * EBREAK/JTAG staged plan) are this project's first-ever real top-level
+ * pins -- everything else so far (UART, the debug ports below) has been
+ * simulation-only or internal. jtag_tap0 (design/jtag_tap.sv) is a real
+ * IEEE 1149.1 TAP FSM clocked on jtag_tck, genuinely asynchronous to
+ * clk; it instantiates dm_dmi0 (design/dm_dmi.sv) internally, which owns
+ * the DMI transport's own busy/sticky-error protocol and the clock
+ * domain crossing back into dm0's plain register interface -- see both
+ * files' own headers for the full CDC design. dm0 (design/dm.sv,
+ * Milestone 5) is instantiated here for the first time; its Access
+ * Register ports, previously left deliberately, explicitly unconnected
+ * on core0 (no Debug Module instance existed at this level yet), are now
+ * wired for real.
  */
 module soc (
     input logic clk,
-    input logic rst
+    input logic rst,
+
+    /*
+     * ANSI defaults matter here, not just as a formality: ~10 existing
+     * testbenches instantiate `soc dut (.clk(clk), .rst(rst));` with no
+     * idea these pins exist. jtag_trst_n defaults to 1'b0 (ASSERTED --
+     * jtag_tap0 stays cleanly, deterministically held in
+     * Test-Logic-Reset, never X) specifically so those testbenches stay
+     * compile/simulation-clean with no JTAG probe connected at all --
+     * same reasoning this project already established for i_mtip/
+     * i_debug_halt_req/etc.'s own ANSI defaults. jtag_tck defaults to
+     * 1'b0 (idle low, never toggles without an explicit driver, so
+     * jtag_tap0's FSM never advances past reset regardless). jtag_tms
+     * defaults to 1'b1 (the safe idle level per JTAG convention -- if
+     * TCK ever DID spuriously toggle, TMS=1 drives toward
+     * Test-Logic-Reset, not deeper into a live scan). jtag_tdi's default
+     * is arbitrary (1'b0) since it's only sampled while shifting, which
+     * requires TCK to toggle in the first place.
+     */
+    input  logic jtag_tck = 1'b0,
+    input  logic jtag_tms = 1'b1,
+    input  logic jtag_tdi = 1'b0,
+    output logic jtag_tdo,
+    input  logic jtag_trst_n = 1'b0
 );
 
     logic [31:0] wb_addr;
@@ -96,6 +133,19 @@ module soc (
     logic        icache_flush;
     logic        clint_mtip;
 
+    /*
+     * Debug Module wiring (Milestone 6) -- dm0's Access Register ports
+     * are declared here, ahead of core0's own instantiation, since
+     * core0 is the FIRST thing this file instantiates but dm0/jtag_tap0
+     * (further down) are what actually drive/consume these wires.
+     */
+    logic debug_mode;
+    logic debug_halt_req, debug_resume_req;
+    logic dm_gpr_we, dm_csr_we;
+    logic [4:0]  dm_gpr_sel;
+    logic [11:0] dm_csr_addr;
+    logic [63:0] dm_gpr_wdata, dm_csr_wdata, dm_gpr_rdata, dm_csr_rdata;
+
     core core0 (
         .clk(clk), .rst(rst),
         .wb_addr_o(wb_addr), .wb_dat_o(wb_dat_m2s), .wb_dat_i(wb_dat_s2m),
@@ -104,23 +154,21 @@ module soc (
         .icache_flush_o(icache_flush), .i_mtip(clint_mtip),
 
         /*
-         * Milestone 4 (core.sv halt/resume FSM) added real i_debug_halt_req/
-         * i_debug_resume_req/o_debug_mode ports; Milestone 5 (design/dm.sv)
-         * added the Access Register i_dm_.../o_dm_... ports. All ANSI-defaulted
-         * inputs stay at their inert default (no Debug Module instance
-         * exists at this level yet -- that's a real dm0 instantiation, a
-         * deliberately later, separate integration step per the staged
-         * plan's own milestone boundaries, same reasoning DRAM's own
-         * bus-wiring got its own later milestone). All outputs are
-         * deliberately, explicitly left unconnected (not omitted) so lint
-         * tools see this as intentional, same precedent this file's own
-         * dram_* ports use.
+         * Milestone 4 (core.sv halt/resume FSM) added real
+         * i_debug_halt_req/i_debug_resume_req/o_debug_mode ports;
+         * Milestone 5 (design/dm.sv) added the Access Register
+         * i_dm_.../o_dm_... ports. Both were left deliberately
+         * unconnected through Milestone 5 (no Debug Module instance
+         * existed at this level yet) -- Milestone 6 is that
+         * instantiation, real for the first time: dm0 (further down)
+         * drives every one of these.
          */
-        /* verilator lint_off PINCONNECTEMPTY */
-        .o_debug_mode(),
-        .o_dm_csr_rdata(),
-        .o_dm_gpr_rdata()
-        /* verilator lint_on PINCONNECTEMPTY */
+        .o_debug_mode(debug_mode),
+        .i_debug_halt_req(debug_halt_req), .i_debug_resume_req(debug_resume_req),
+        .i_dm_gpr_we(dm_gpr_we), .i_dm_gpr_sel(dm_gpr_sel),
+        .i_dm_gpr_wdata(dm_gpr_wdata), .o_dm_gpr_rdata(dm_gpr_rdata),
+        .i_dm_csr_we(dm_csr_we), .i_dm_csr_addr(dm_csr_addr),
+        .i_dm_csr_wdata(dm_csr_wdata), .o_dm_csr_rdata(dm_csr_rdata)
     );
 
     logic [31:0] ram_addr, uart_addr, clint_addr;
@@ -250,6 +298,39 @@ module soc (
         .addr_i(clint_addr), .dat_i(clint_dat_o), .dat_o(clint_dat_i), .sel_i(clint_sel),
         .ack_o(clint_ack), .err_o(clint_err), .cyc_i(clint_cyc), .stb_i(clint_stb), .we_i(clint_we),
         .mtip_o(clint_mtip)
+    );
+
+    /*
+     * Debug Module (Milestone 6): jtag_tap0's own plain register
+     * interface output (o_reg_addr/o_reg_wdata/o_reg_we/i_reg_rdata,
+     * see design/jtag_tap.sv's header) is wired directly to dm0's
+     * matching input side -- this is a plain, same-clock-domain
+     * register bus (jtag_tap0 already did the TCK->clk CDC bridging
+     * internally via its own dm_dmi0 instance), not a new bus master on
+     * the Wishbone fabric above.
+     */
+    logic [6:0]  dmi_reg_addr;
+    logic [31:0] dmi_reg_wdata;
+    logic        dmi_reg_we;
+    logic [31:0] dmi_reg_rdata;
+
+    jtag_tap jtag_tap0 (
+        .tck(jtag_tck), .tms(jtag_tms), .tdi(jtag_tdi), .tdo(jtag_tdo), .trst_n(jtag_trst_n),
+        .clk(clk), .rst(rst),
+        .o_reg_addr(dmi_reg_addr), .o_reg_wdata(dmi_reg_wdata), .o_reg_we(dmi_reg_we),
+        .i_reg_rdata(dmi_reg_rdata)
+    );
+
+    dm dm0 (
+        .clk(clk), .rst(rst),
+        .i_reg_addr(dmi_reg_addr), .i_reg_wdata(dmi_reg_wdata), .i_reg_we(dmi_reg_we),
+        .o_reg_rdata(dmi_reg_rdata),
+        .i_hart_halted(debug_mode),
+        .o_debug_halt_req(debug_halt_req), .o_debug_resume_req(debug_resume_req),
+        .o_dm_gpr_we(dm_gpr_we), .o_dm_gpr_sel(dm_gpr_sel),
+        .o_dm_gpr_wdata(dm_gpr_wdata), .i_dm_gpr_rdata(dm_gpr_rdata),
+        .o_dm_csr_we(dm_csr_we), .o_dm_csr_addr(dm_csr_addr),
+        .o_dm_csr_wdata(dm_csr_wdata), .i_dm_csr_rdata(dm_csr_rdata)
     );
 
 endmodule
