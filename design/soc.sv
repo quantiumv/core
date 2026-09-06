@@ -6,14 +6,18 @@
 /*
  * Module: soc
  *
- * Top-level integration: core (Wishbone master) <-> wb_addr_decoder <->
- * {cache_complex -> wb4_sram, uart_tx, uart_rx, clint0}. Exactly the wiring already
- * proven in testbench/core_wb_tb.sv (for core<->decoder<->{ram,uart}),
+ * Top-level integration: {core, dm0} (two Wishbone masters, Milestone 8)
+ * <-> wb_arbiter2 <-> wb_addr_decoder <-> {cache_complex -> wb4_sram,
+ * uart_tx, uart_rx, clint0}. Exactly the wiring already proven in
+ * testbench/core_wb_tb.sv (for core<->decoder<->{ram,uart}),
  * testbench/core_cache_harness.sv (for core<->cache_complex<->sram), and
  * testbench/decoder_clint_harness.sv (for decoder<->{ram,uart,clint} at
  * the bus level, see that harness's own header for exactly what it does
  * and doesn't cover) -- this file adds no new logic of its own, only the
- * connections between already-independently-verified pieces.
+ * connections between already-independently-verified pieces (arb0's own
+ * cache_ifetch gating, right where cache0 is instantiated below, is the
+ * one piece of real reasoning THIS file itself contributes, not just a
+ * connection between pieces already proven elsewhere).
  *
  * clint0 (design/clint.sv, Milestone 3, already independently verified)
  * hangs off the decoder's third slave port exactly like uart0 hangs off
@@ -125,13 +129,19 @@ module soc (
     input  logic jtag_trst_n = 1'b0
 );
 
+    logic [31:0] core_wb_addr;
+    logic [63:0] core_wb_dat_m2s, core_wb_dat_s2m;
+    logic [7:0]  core_wb_sel;
+    logic        core_wb_we, core_wb_cyc, core_wb_stb, core_wb_ack, core_wb_err;
     logic [31:0] wb_addr;
     logic [63:0] wb_dat_m2s, wb_dat_s2m;
     logic [7:0]  wb_sel;
     logic        wb_we, wb_cyc, wb_stb, wb_ack, wb_err;
     logic        wb_ifetch;
+    logic        wb_lock;
     logic        icache_flush;
     logic        clint_mtip;
+    logic        arb_grant;
 
     /*
      * Debug Module wiring (Milestone 6) -- dm0's Access Register ports
@@ -148,12 +158,17 @@ module soc (
     logic        progbuf_start, progbuf_done, progbuf_abort;
     logic [3:0]  progbuf_pc;
     logic [31:0] progbuf_data;
+    logic [31:0] sba_addr;
+    logic [63:0] sba_dat_m2s, sba_dat_s2m;
+    logic [7:0]  sba_sel;
+    logic        sba_we, sba_cyc, sba_stb, sba_ack, sba_err;
 
     core core0 (
         .clk(clk), .rst(rst),
-        .wb_addr_o(wb_addr), .wb_dat_o(wb_dat_m2s), .wb_dat_i(wb_dat_s2m),
-        .wb_sel_o(wb_sel), .wb_we_o(wb_we), .wb_cyc_o(wb_cyc), .wb_stb_o(wb_stb),
-        .wb_ack_i(wb_ack), .wb_err_i(wb_err), .wb_ifetch_o(wb_ifetch),
+        .wb_addr_o(core_wb_addr), .wb_dat_o(core_wb_dat_m2s), .wb_dat_i(core_wb_dat_s2m),
+        .wb_sel_o(core_wb_sel), .wb_we_o(core_wb_we), .wb_cyc_o(core_wb_cyc), .wb_stb_o(core_wb_stb),
+        .wb_ack_i(core_wb_ack), .wb_err_i(core_wb_err), .wb_ifetch_o(wb_ifetch),
+        .wb_lock_o(wb_lock),
         .icache_flush_o(icache_flush), .i_mtip(clint_mtip),
 
         /*
@@ -178,12 +193,41 @@ module soc (
         .o_progbuf_abort(progbuf_abort)
     );
 
+    /*
+     * Milestone 8 (System Bus Access): arbitrates core0's own ordinary
+     * bus traffic (m0, lower priority) against dm0's new SBA master port
+     * (m1, higher priority -- see design/wb_arbiter2.sv's own header for
+     * the policy) before either ever reaches decoder0, which needs no
+     * changes at all -- it only ever sees ONE arbitrated master port
+     * regardless of how many real masters sit upstream of it.
+     */
+    wb_arbiter2 arb0 (
+        .clk(clk), .rst(rst),
+        .m0_addr_i(core_wb_addr), .m0_dat_i(core_wb_dat_m2s), .m0_dat_o(core_wb_dat_s2m),
+        .m0_sel_i(core_wb_sel), .m0_we_i(core_wb_we), .m0_cyc_i(core_wb_cyc), .m0_stb_i(core_wb_stb),
+        .m0_ack_o(core_wb_ack), .m0_err_o(core_wb_err), .m0_lock_i(wb_lock),
+        .m1_addr_i(sba_addr), .m1_dat_i(sba_dat_m2s), .m1_dat_o(sba_dat_s2m),
+        .m1_sel_i(sba_sel), .m1_we_i(sba_we), .m1_cyc_i(sba_cyc), .m1_stb_i(sba_stb),
+        .m1_ack_o(sba_ack), .m1_err_o(sba_err), .m1_lock_i(1'b0),
+        .addr_o(wb_addr), .dat_o(wb_dat_m2s), .dat_i(wb_dat_s2m),
+        .sel_o(wb_sel), .we_o(wb_we), .cyc_o(wb_cyc), .stb_o(wb_stb),
+        .ack_i(wb_ack), .err_i(wb_err),
+        .o_grant(arb_grant)
+    );
+
     logic [31:0] ram_addr, uart_addr, clint_addr;
     logic [63:0] ram_dat_o, ram_dat_i, uart_dat_o, uart_dat_i, clint_dat_o, clint_dat_i;
     logic [7:0]  ram_sel, uart_sel, clint_sel;
     logic        ram_we, ram_cyc, ram_stb, ram_ack, ram_err;
     logic        uart_we, uart_cyc, uart_stb, uart_ack, uart_err;
     logic        clint_we, clint_cyc, clint_stb, clint_ack, clint_err;
+
+    // See decoder0's own dram_* port comment below for the full reasoning.
+    // Declared ahead of decoder0's instantiation -- Icarus requires a
+    // plain net used in a port connection to already be declared, unlike
+    // module-level ordering in general.
+    logic dram_stub_cyc, dram_stub_stb;
+    logic dram_stub_err_q;
 
     wb_addr_decoder decoder0 (
         .clk(clk), .rst(rst),
@@ -200,44 +244,102 @@ module soc (
         .clint_stb_o(clint_stb), .clint_ack_i(clint_ack), .clint_err_i(clint_err),
 
         /*
-         * dram_* left explicitly, deliberately unconnected -- design/
-         * wb_addr_decoder.sv's DRAM slave (verification/taxi/rtl/
-         * dram_model.sv) instantiates a SystemVerilog `interface`
-         * internally, so it can only be built via Verilator, never
-         * iverilog (see verification/taxi/README.md). This file must stay
-         * 100% iverilog-compatible -- it's compiled by
+         * dram_addr_o/dram_dat_o/dram_sel_o/dram_we_o left explicitly,
+         * deliberately unconnected -- design/wb_addr_decoder.sv's DRAM
+         * slave (verification/taxi/rtl/dram_model.sv) instantiates a
+         * SystemVerilog `interface` internally, so it can only be built
+         * via Verilator, never iverilog (see verification/taxi/README.md).
+         * This file must stay 100% iverilog-compatible -- it's compiled by
          * testbench/soc_tb.sv, testbench/soc_interrupt_tb.sv,
          * testbench/soc_c_regression_tb.sv, and others -- so it can never
          * instantiate dram_model.sv directly. Empty parens rather than
          * omitting the lines, so lint tools see this as deliberate, not a
          * forgotten connection -- same precedent core0's own
          * .o_instruction_address() already uses in design/core.sv.
-         * Known, accepted gap: any address in 0x0001_8000-0x0001_FFFF
-         * routed through THIS soc.sv today gets an undefined response
-         * (dram_ack_i/dram_err_i float) -- acceptable only because no
-         * existing design/testbench firmware or testbench ever generates
-         * such an address (confirmed by inspection). A real consumer
-         * exists only under verification/taxi/rtl/decoder_dram_harness.sv;
-         * wiring dram_model.sv into THIS file for real would need a
-         * separate Verilator-only top-level, not a change here -- see
+         *
+         * dram_cyc_o/dram_stb_o/dram_dat_i/dram_ack_i/dram_err_i, by
+         * contrast, are wired to a tiny real stub below (dram_stub_err_q),
+         * NOT left floating and NOT tied to bare constants -- a Milestone 8
+         * review-fix, in two parts:
+         *
+         * (1) A floating dram_ack_i/dram_err_i reads as X in simulation,
+         * and an `if (i_sba_ack || i_sba_err)` condition on an X operand
+         * evaluates as false per IEEE 1800 -- so dm.sv's own SBA busy FSM
+         * would NEVER see its access complete, hanging sba_busy_q forever.
+         * Before System Bus Access existed, this window was reachable only
+         * by software deliberately constructing such an address, which no
+         * real firmware/testbench ever did -- an accepted gap. A debugger
+         * driving SBA can target ANY address, including this one, making
+         * the gap newly, involuntarily reachable.
+         *
+         * (2) The first fix attempt tied dram_err_i to a bare constant
+         * 1'b1 -- WRONG, caught by jtag_dmi_e2e_tb.sv's own new SBA test
+         * (see below) failing the very next resume: wb_addr_decoder.sv's
+         * target_q latches which slave's ack/err to route ONE CYCLE AFTER
+         * a request starts, so on the FIRST cycle of a brand new request,
+         * err_o still reflects the PREVIOUS target's response. Every real
+         * slave's err_i naturally decays back to 0 once idle (a registered
+         * echo of its own cyc_i&&stb_i), so this staleness window is
+         * harmless for RAM/UART/CLINT -- but a bare constant 1'b1 NEVER
+         * decays, so the cycle right after an SBA-to-DRAM access, target_q
+         * is still stale (==TARGET_DRAM) for one cycle while core0's own
+         * unrelated fresh request lands, and that request spuriously
+         * inherits a DRAM bus error it never asked for (concretely: a
+         * post-resume instruction fetch got spuriously fault-trapped to
+         * mtvec, PC landing at 0 instead of the real fetch address).
+         * dram_stub_err_q fixes this by being a REAL registered echo of
+         * cyc_i&&stb_i, mirroring wb4_sram.sv's own out-of-range
+         * convention exactly (`if (cyc_i&&stb_i) err_o<=1; else
+         * err_o<=0;`) -- it decays to 0 the very next idle cycle, just
+         * like every other slave here, so it cannot leak into a later,
+         * unrelated transaction the way the bare constant did.
+         *
+         * A real consumer exists only under
+         * verification/taxi/rtl/decoder_dram_harness.sv; wiring
+         * dram_model.sv into THIS file for real would need a separate
+         * Verilator-only top-level, not a change here -- see
          * verification/taxi/README.md's Status section.
          */
         /* verilator lint_off PINCONNECTEMPTY */
-        .dram_addr_o(), .dram_dat_o(), .dram_dat_i(),
-        .dram_sel_o(), .dram_we_o(), .dram_cyc_o(),
-        .dram_stb_o(), .dram_ack_i(), .dram_err_i()
+        .dram_addr_o(), .dram_dat_o(), .dram_sel_o(), .dram_we_o(),
         /* verilator lint_on PINCONNECTEMPTY */
+        .dram_cyc_o(dram_stub_cyc), .dram_stb_o(dram_stub_stb),
+        .dram_dat_i('0), .dram_ack_i(1'b0), .dram_err_i(dram_stub_err_q)
     );
+
+    always_ff @(posedge clk) begin
+        if (rst) dram_stub_err_q <= 1'b0;
+        else     dram_stub_err_q <= dram_stub_cyc && dram_stub_stb;
+    end
 
     logic [31:0] mem_addr;
     logic [63:0] mem_dat_m2s, mem_dat_s2m;
     logic [7:0]  mem_sel;
     logic        mem_we, mem_cyc, mem_stb, mem_ack, mem_err;
 
+    /*
+     * cache_ifetch (Milestone 8): wb_ifetch is core0's OWN "this bus
+     * request is an instruction fetch" hint -- meaningful only for
+     * core0's own traffic, since dm0's System Bus Access never fetches
+     * instructions. Before arb0 existed, cache0 sat directly behind
+     * core0's own port, so wb_ifetch was always trustworthy as-is; now
+     * that arb0 can forward a SBA request (a real RAM-address read/write
+     * that flows through this same cache0 instance) while core0's own
+     * wb_ifetch output is left driving whatever it was last doing
+     * (unrelated to the request actually in flight), gating it by
+     * arb_grant is required, not optional -- without this, a System Bus
+     * Access to a RAM address could get silently misclassified against
+     * the wrong cache (I$ instead of D$, or vice versa) depending on
+     * what core0 happened to be doing the same cycle. arb_grant==0 means
+     * core0 (m0) currently holds the arbitrated port, the only case
+     * wb_ifetch is ever real.
+     */
+    wire cache_ifetch = wb_ifetch && !arb_grant;
+
     cache_complex cache0 (
         .clk(clk), .rst(rst),
         .addr_i(ram_addr), .dat_i(ram_dat_o), .dat_o(ram_dat_i), .sel_i(ram_sel),
-        .we_i(ram_we), .ifetch_i(wb_ifetch), .cyc_i(ram_cyc), .stb_i(ram_stb),
+        .we_i(ram_we), .ifetch_i(cache_ifetch), .cyc_i(ram_cyc), .stb_i(ram_stb),
         .ack_o(ram_ack), .err_o(ram_err), .flush_i(icache_flush),
         .mem_addr_o(mem_addr), .mem_dat_o(mem_dat_m2s), .mem_dat_i(mem_dat_s2m),
         .mem_sel_o(mem_sel), .mem_we_o(mem_we), .mem_cyc_o(mem_cyc), .mem_stb_o(mem_stb),
@@ -340,7 +442,10 @@ module soc (
         .o_dm_csr_wdata(dm_csr_wdata), .i_dm_csr_rdata(dm_csr_rdata),
         .o_progbuf_start(progbuf_start), .i_progbuf_pc(progbuf_pc),
         .o_progbuf_data(progbuf_data), .i_progbuf_done(progbuf_done),
-        .i_progbuf_abort(progbuf_abort)
+        .i_progbuf_abort(progbuf_abort),
+        .o_sba_addr(sba_addr), .o_sba_dat(sba_dat_m2s), .i_sba_dat(sba_dat_s2m),
+        .o_sba_sel(sba_sel), .o_sba_we(sba_we), .o_sba_cyc(sba_cyc), .o_sba_stb(sba_stb),
+        .i_sba_ack(sba_ack), .i_sba_err(sba_err)
     );
 
 endmodule

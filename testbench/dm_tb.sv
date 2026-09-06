@@ -72,6 +72,9 @@ module dm_tb;
     localparam [6:0] DMI_COMMAND      = 7'h17;
     localparam [6:0] DMI_ABSTRACTAUTO = 7'h18;
     localparam [6:0] DMI_SBCS         = 7'h38;
+    localparam [6:0] DMI_SBADDRESS0   = 7'h39;
+    localparam [6:0] DMI_SBDATA0      = 7'h3C;
+    localparam [6:0] DMI_SBDATA1      = 7'h3D;
 
     localparam [11:0] CSR_DSCRATCH0 = 12'h7B2;
 
@@ -203,6 +206,169 @@ module dm_tb;
     localparam [6:0] DMI_PROGBUF1 = 7'h21;
     localparam [11:0] CSR_DPC_PB  = 12'h7B1;
 
+    /* ------------------------------------------------------------- *
+     * dut_sba -- Milestone 8's own System Bus Access, proven via the
+     * same backdoor DMI interface as every other dut_* scenario above.
+     * The one property none of dm_tb.sv's earlier scenarios needed to
+     * prove -- a debugger accessing real memory has NOTHING to do with
+     * whether the hart is halted -- is the whole point of this feature,
+     * so this DUT is deliberately never halted at all: it just runs its
+     * own program (a 200-iteration counting loop) from reset to its own
+     * EBREAK while a sequence of SBA reads/writes lands concurrently.
+     * ------------------------------------------------------------- */
+
+    logic rst_sba = 1;
+    logic [6:0]  reg_addr_sba;
+    logic [31:0] reg_wdata_sba;
+    logic        reg_we_sba = 1'b0;
+    logic [31:0] reg_rdata_sba;
+    dm_core_harness #(.NUM_WORDS(64)) dut_sba (
+        .clk(clk), .rst(rst_sba),
+        .i_reg_addr(reg_addr_sba), .i_reg_wdata(reg_wdata_sba),
+        .i_reg_we(reg_we_sba), .o_reg_rdata(reg_rdata_sba)
+    );
+
+    // Mirrors basic_commit_count above -- used to catch x1's value at
+    // EXACTLY its 50th update (see Test G below), deliberately NOT via
+    // wait(trap_taken && is_ebreak): dut_sba's program never arms
+    // dcsr.ebreakm, so its trailing EBREAK takes a REAL synchronous trap
+    // (mtvec resets to 0), sending core0 right back into the SAME
+    // counting loop instead of stopping -- a wait() on that pulse can
+    // land on any lap, not just the first. Counting real commits is
+    // race-free and doesn't care what happens after the 50th.
+    int sba_commit_count = 0;
+    always @(posedge clk) begin
+        if (dut_sba.core0.commit_now) sba_commit_count <= sba_commit_count + 1;
+    end
+
+    task automatic sba_dmi_write(input [6:0] addr, input [31:0] wdata);
+        reg_addr_sba  = addr;
+        reg_wdata_sba = wdata;
+        reg_we_sba    = 1'b1;
+        @(posedge clk); #1;
+        reg_we_sba    = 1'b0;
+    endtask
+
+    task automatic sba_dmi_read(input [6:0] addr, output [31:0] rdata);
+        reg_addr_sba = addr;
+        #1;
+        rdata = reg_rdata_sba;
+    endtask
+
+    localparam int SBA_BUSY_RETRY_LIMIT = 100;
+
+    // Mirrors progbuf_wait_done() -- a real SBA bus transaction is
+    // multi-cycle, so polling sbcs.sbbusy (bit 21) in a loop is the only
+    // correct way to wait for one to land.
+    task automatic sba_wait_done();
+        logic [31:0] rd;
+        int tries;
+        tries = 0;
+        rd = 32'h0020_0000;  // seed with sbbusy=1 so the loop runs at least once
+        while (rd[21]) begin
+            if (tries >= SBA_BUSY_RETRY_LIMIT) begin
+                $display("TIMEOUT: dut_sba sbcs.sbbusy never cleared");
+                $finish;
+            end
+            @(posedge clk); #1;
+            sba_dmi_read(DMI_SBCS, rd);
+            tries++;
+        end
+    endtask
+
+    // sbcs field packing helper -- {sbreadonaddr, sbaccess[2:0],
+    // sbautoincrement, sbreadondata} at their real bit positions
+    // ([20], [19:17], [16], [15]), everything else 0. Matches this
+    // file's own established "build the exact bit layout at the call
+    // site" idiom (e.g. the Access Register command word above) rather
+    // than hiding the field positions behind named arguments.
+    function automatic logic [31:0] sba_cfg(
+        input logic readonaddr, input logic [2:0] access,
+        input logic autoincrement, input logic readondata
+    );
+        return {11'b0, readonaddr, access, autoincrement, readondata, 15'b0};
+    endfunction
+
+    /* ------------------------------------------------------------- *
+     * dut_amo_sba -- Milestone 8 review-fix regression: a real RMW AMO
+     * (amoadd.d) is not one bus transaction -- it's two (S_MEM's read,
+     * then S_AMO_WRITE's write), with one genuinely idle bus cycle in
+     * between (wb_cyc_o drops the SAME cycle the read's own ack
+     * arrives, since it's gated by !wb_done, but `state` only becomes
+     * S_AMO_WRITE the FOLLOWING edge). Without core.sv's own wb_lock_o
+     * (a real Wishbone B4 LOCK signal) holding the arbiter's grant
+     * through that gap, a pending SBA transaction can win the fixed-
+     * priority tie that arises right as the write's own fresh request
+     * reappears, physically interleaving a debugger's own access
+     * between the AMO's read and write -- silently breaking the
+     * atomicity RISC-V requires against every other bus agent. See
+     * design/wb_arbiter2.sv's own header and design/core.sv's
+     * wb_lock_o port comment for the full derivation.
+     *
+     * Test design: the SBA write is deliberately staged (sbcs/
+     * sbaddress0/sbdata1 written ahead of time) and its OWN triggering
+     * write (sbdata0) is issued the instant dut_amo_sba.core0.wb_lock_o
+     * is FIRST observed high -- i.e. the earliest possible cycle the
+     * AMO's own read has started -- guaranteeing the SBA request is
+     * genuinely pending during the AMO's entire locked window, not
+     * racing to land before or after it by chance. Since the SBA
+     * request can only start once wb_lock_o is already 1, the AMO's
+     * own read is GUARANTEED to see the pre-existing value regardless
+     * of whether the fix works (x6 == V0 either way) -- the real,
+     * discriminating check is the FINAL memory value: with the fix
+     * working, the SBA's own write is held off until the AMO fully
+     * completes and so becomes the last writer (memory == W); with the
+     * bug present, the SBA's write would land between the AMO's read
+     * and write and then be silently overwritten by the AMO's own
+     * (now-stale) computed sum (memory == V0+K instead).
+     * ------------------------------------------------------------- */
+
+    logic rst_amo_sba = 1;
+    logic [6:0]  reg_addr_amo_sba;
+    logic [31:0] reg_wdata_amo_sba;
+    logic        reg_we_amo_sba = 1'b0;
+    logic [31:0] reg_rdata_amo_sba;
+    dm_core_harness #(.NUM_WORDS(64)) dut_amo_sba (
+        .clk(clk), .rst(rst_amo_sba),
+        .i_reg_addr(reg_addr_amo_sba), .i_reg_wdata(reg_wdata_amo_sba),
+        .i_reg_we(reg_we_amo_sba), .o_reg_rdata(reg_rdata_amo_sba)
+    );
+
+    task automatic amo_sba_dmi_write(input [6:0] addr, input [31:0] wdata);
+        reg_addr_amo_sba  = addr;
+        reg_wdata_amo_sba = wdata;
+        reg_we_amo_sba    = 1'b1;
+        @(posedge clk); #1;
+        reg_we_amo_sba    = 1'b0;
+    endtask
+
+    task automatic amo_sba_dmi_read(input [6:0] addr, output [31:0] rdata);
+        reg_addr_amo_sba = addr;
+        #1;
+        rdata = reg_rdata_amo_sba;
+    endtask
+
+    task automatic amo_sba_wait_done();
+        logic [31:0] rd;
+        int tries;
+        tries = 0;
+        rd = 32'h0020_0000;
+        while (rd[21]) begin
+            if (tries >= SBA_BUSY_RETRY_LIMIT) begin
+                $display("TIMEOUT: dut_amo_sba sbcs.sbbusy never cleared");
+                $finish;
+            end
+            @(posedge clk); #1;
+            amo_sba_dmi_read(DMI_SBCS, rd);
+            tries++;
+        end
+    endtask
+
+    localparam int AMO_SBA_T  = 32'h0000_01A0;  // target address (fits a 12-bit signed immediate)
+    localparam int AMO_SBA_K  = 100;            // the AMOADD's own operand
+    localparam int AMO_SBA_V0 = 500;            // pre-loaded original value at T
+    localparam int AMO_SBA_W  = 12345;          // the SBA's own concurrent write value
+
     initial begin
         #1;
 
@@ -257,19 +423,24 @@ module dm_tb;
                 rd, 32'hCAFE_0001);
         end
 
-        // sbcs's access-width mask: write all five sbaccess8/16/32/64/128
-        // bits (the real spec position, [4:0] -- confirmed against
-        // riscv-debug-spec's own xml/dm_registers.xml) plus some
-        // unrelated bits elsewhere in the word, then confirm the masked
-        // read reports NO access width supported (those 5 bits read 0)
-        // -- proving SBCS_ACCESS_MASK actually clears the real capability
-        // bits, not System Bus Access itself (still out of scope, M8).
+        // sbcs's access-width capability bits (real spec position,
+        // [4:0] -- confirmed against riscv-debug-spec's own
+        // xml/dm_registers.xml AND pulp-platform/riscv-dbg's own sbcs_t
+        // struct, cross-checked when Milestone 8 gave System Bus Access
+        // its real implementation): sbaccess8/16/32/64 are hardwired 1
+        // (this core's 64-bit-wide Wishbone bus genuinely supports all
+        // four), sbaccess128 is hardwired 0 (no natural 128-bit path).
+        // Write all five bits plus an unrelated bit (bit 12, part of the
+        // W1C sberror field) to confirm these capability bits are
+        // fixed-function OUTPUTS, not real storage -- a debugger's own
+        // write has no effect on them either way, and the unrelated bit
+        // doesn't interfere with reading them back correctly.
         basic_dmi_write(DMI_SBCS, 32'h0000_101F);
         begin
             logic [31:0] rd;
             basic_dmi_read(DMI_SBCS, rd);
-            check("dut_basic: sbcs reports no System Bus Access width supported",
-                {59'b0, rd[4:0]}, 64'd0);
+            check("dut_basic: sbcs reports sbaccess8/16/32/64 supported, sbaccess128 not",
+                {59'b0, rd[4:0]}, 64'd15);
         end
 
         // Wait for the 1st real commit (addi x1,10), then request a halt
@@ -738,6 +909,267 @@ module dm_tb;
         end
         check("dut_progbuf: Test I -- x9 == 15 (all 15 addi words, through progbuf14, actually executed)",
             dut_progbuf.core0.regfile0.gp_registers[9], 64'd15);
+
+        /* ----------------------------------------------------------- *
+         * dut_sba
+         * ----------------------------------------------------------- */
+
+        /*
+         * Program: 50 straight-line `addi x1,x1,1` instructions (a
+         * deliberately branch-free counting sequence -- no encode_b
+         * needed, no backward-branch-timing subtlety to get right)
+         * followed by a trailing EBREAK. Gives ~150-200+ real clk
+         * cycles of "core0 is genuinely running" window to interleave
+         * the SBA sequence below into, and an unambiguous final check
+         * (x1 == 50) that core0's own execution wasn't corrupted or
+         * stalled by any of that concurrent bus traffic.
+         */
+        for (int w = 0; w < 25; w++) begin  // 25 words = 50 addi instructions, 2 per 64-bit word
+            dut_sba.sram0.memory[w] = {encode_i(32'sd1, 5'd1, 3'b000, 5'd1, `OPC_OP_IMM),
+                                        encode_i(32'sd1, 5'd1, 3'b000, 5'd1, `OPC_OP_IMM)};
+        end
+        dut_sba.sram0.memory[25] = {32'h0, {11'b0, 1'b1, 13'b0, `OPC_SYSTEM}};  // ebreak, right after the loop
+
+        @(posedge clk); #1;
+        rst_sba = 0;
+        // No haltreq anywhere in this scenario -- core0 runs freely from
+        // reset to its own EBREAK. System Bus Access works precisely
+        // BECAUSE it doesn't need the hart halted at all; that's the one
+        // property no earlier dut_* scenario in this file could prove.
+
+        // Test SBA-A: a 64-bit WRITE (sbaccess=3, using both sbdata0 and
+        // sbdata1) to scratch address 0x180 -- comfortably beyond the
+        // running program (which only occupies 0x000-0x0C7) and its
+        // own trailing EBREAK (0x0C8), well within dut_sba's
+        // NUM_WORDS=64 (0-511 byte) range. sbautoincrement=1 proves the
+        // address-advance side of the feature in the same step.
+        sba_dmi_write(DMI_SBCS, sba_cfg(1'b0, 3'd3, 1'b1, 1'b0));  // readonaddr=0, access=64-bit, autoincrement=1
+        sba_dmi_write(DMI_SBADDRESS0, 32'h0000_0180);              // plain address stage (readonaddr=0 -- no auto-read)
+        sba_dmi_write(DMI_SBDATA1, 32'hCAFEBABE);                  // high half staged FIRST, per spec (see dm.sv's own header)
+        sba_dmi_write(DMI_SBDATA0, 32'hDEADBEEF);                  // low half write -- THIS triggers the real bus write
+        sba_wait_done();
+
+        check("dut_sba: Test A -- memory[0x180] == the 64-bit value just written (white-box)",
+            dut_sba.sram0.memory[32'h0000_0180 / 8], 64'hCAFEBABE_DEADBEEF);
+        begin
+            logic [31:0] rd;
+            sba_dmi_read(DMI_SBCS, rd);
+            check("dut_sba: Test A -- sberror == 0 (success)", {61'b0, rd[14:12]}, 64'd0);
+            sba_dmi_read(DMI_SBADDRESS0, rd);
+            check("dut_sba: Test A -- sbaddress0 auto-incremented by 8 (64-bit access width)",
+                {32'b0, rd}, 64'h0000_0188);
+        end
+
+        // Test SBA-B: read the same location back over SBA (not just a
+        // white-box memory peek) -- sbreadonaddr=1 so writing sbaddress0
+        // itself triggers the read.
+        sba_dmi_write(DMI_SBCS, sba_cfg(1'b1, 3'd3, 1'b0, 1'b0));  // readonaddr=1, access=64-bit, autoincrement=0
+        sba_dmi_write(DMI_SBADDRESS0, 32'h0000_0180);              // triggers the read
+        sba_wait_done();
+
+        begin
+            logic [31:0] rd0, rd1;
+            sba_dmi_read(DMI_SBDATA0, rd0);
+            sba_dmi_read(DMI_SBDATA1, rd1);
+            check("dut_sba: Test B -- sbdata0 == the low half read back over SBA", {32'b0, rd0}, 64'hDEADBEEF);
+            check("dut_sba: Test B -- sbdata1 == the high half read back over SBA", {32'b0, rd1}, 64'hCAFEBABE);
+        end
+
+        // Test SBA-C: misalignment is rejected instantly, never
+        // attempted on the bus -- access=32-bit (4-byte aligned
+        // required), address 0x181 (misaligned by 1 byte).
+        sba_dmi_write(DMI_SBCS, sba_cfg(1'b1, 3'd2, 1'b0, 1'b0));  // readonaddr=1, access=32-bit
+        sba_dmi_write(DMI_SBADDRESS0, 32'h0000_0181);
+        begin
+            logic [31:0] rd;
+            #1;
+            sba_dmi_read(DMI_SBCS, rd);
+            check("dut_sba: Test C -- sberror == 3 (misaligned), rejected instantly (sbbusy never even pulses)",
+                {61'b0, rd[14:12]}, 64'd3);
+        end
+        sba_dmi_write(DMI_SBCS, 32'h0000_3000);  // W1C-clear sberror (bits [14:12])
+
+        // Test SBA-D: an unsupported access width (128-bit, sbaccess=4)
+        // is rejected with sberror=4, even at an otherwise-aligned
+        // address.
+        sba_dmi_write(DMI_SBCS, sba_cfg(1'b1, 3'd4, 1'b0, 1'b0));  // readonaddr=1, access=128-bit (unsupported)
+        sba_dmi_write(DMI_SBADDRESS0, 32'h0000_0180);
+        begin
+            logic [31:0] rd;
+            #1;
+            sba_dmi_read(DMI_SBCS, rd);
+            check("dut_sba: Test D -- sberror == 4 (not supported)", {61'b0, rd[14:12]}, 64'd4);
+        end
+        sba_dmi_write(DMI_SBCS, 32'h0000_3000);  // W1C-clear sberror
+
+        // Test SBA-E: a genuine bus error -- address 0x1000 is well
+        // beyond dut_sba's NUM_WORDS=64 (512-byte) range, so wb4_sram
+        // itself returns err_o. Unlike Tests C/D (rejected instantly,
+        // pre-bus), this DOES start a real transaction -- sba_wait_done()
+        // must see sbbusy correctly clear once the error lands, not hang.
+        sba_dmi_write(DMI_SBCS, sba_cfg(1'b1, 3'd2, 1'b0, 1'b0));  // readonaddr=1, access=32-bit, aligned
+        sba_dmi_write(DMI_SBADDRESS0, 32'h0000_1000);
+        sba_wait_done();
+        begin
+            logic [31:0] rd;
+            sba_dmi_read(DMI_SBCS, rd);
+            check("dut_sba: Test E -- sberror == 2 (bad address, a real bus error)", {61'b0, rd[14:12]}, 64'd2);
+        end
+        sba_dmi_write(DMI_SBCS, 32'h0000_3000);  // W1C-clear sberror
+
+        // Test SBA-F: busy-collision -- two sbaddress0 writes issued on
+        // consecutive edges (same idiom dut_basic's own cmderr==1 busy
+        // test uses for Access Register commands above), the second
+        // landing while the first's own read is still in flight.
+        sba_dmi_write(DMI_SBCS, sba_cfg(1'b1, 3'd2, 1'b0, 1'b0));  // readonaddr=1, access=32-bit
+        sba_dmi_write(DMI_SBADDRESS0, 32'h0000_0180);  // triggers the 1st read
+        sba_dmi_write(DMI_SBADDRESS0, 32'h0000_0184);  // 2nd write lands while the 1st is still busy
+        begin
+            logic [31:0] rd;
+            #1;
+            sba_dmi_read(DMI_SBCS, rd);
+            check("dut_sba: Test F -- sbbusyerror == 1 (2nd write collided with the 1st still in flight)",
+                {63'b0, rd[22]}, 64'd1);
+        end
+        sba_wait_done();  // let the 1st (legitimate) op actually finish
+        sba_dmi_write(DMI_SBCS, 32'h0040_0000);  // W1C-clear sbbusyerror (bit 22)
+
+        // Test SBA-H (review-fix regression, closes a real coverage gap):
+        // an sbaddress0 write while busy with sbreadonaddr==0 is a plain
+        // address-staging write, not a trigger -- sba_new_op_requested
+        // never sees it, so Test F's own coverage (which relies on
+        // sbreadonaddr==1 to make the SECOND sbaddress0 write itself the
+        // trigger sba_reject_as_busy_collision keys off) does NOT exercise
+        // this path at all. Before the fix, this write-while-busy went
+        // completely unflagged.
+        sba_dmi_write(DMI_SBCS, sba_cfg(1'b0, 3'd2, 1'b0, 1'b0));  // readonaddr=0, access=32-bit
+        sba_dmi_write(DMI_SBADDRESS0, 32'h0000_0188);  // stage the address (does NOT trigger)
+        sba_dmi_write(DMI_SBDATA0, 32'hDEAD_BEEF);     // triggers the real write
+        sba_dmi_write(DMI_SBADDRESS0, 32'h0000_018C);  // lands while the write above is still busy
+        begin
+            logic [31:0] rd;
+            #1;
+            sba_dmi_read(DMI_SBCS, rd);
+            check("dut_sba: Test H -- sbbusyerror == 1 (sbaddress0 write while busy, sbreadonaddr==0)",
+                {63'b0, rd[22]}, 64'd1);
+        end
+        sba_wait_done();
+        sba_dmi_write(DMI_SBCS, 32'h0040_0000);  // W1C-clear sbbusyerror
+        check("dut_sba: Test H -- memory[0x188] == the write's own value (2nd sbaddress0 write was dropped, not applied)",
+            dut_sba.sram0.memory[32'h188 / 8][31:0], 64'hDEAD_BEEF);
+
+        // Test SBA-I (review-fix regression): sbcs/sbdata1 writes while
+        // busy were already flagged by sba_other_write_while_busy before
+        // this review round, but had no dedicated test distinguishing
+        // this path from Test F's own sbaddress0-while-busy coverage.
+        sba_dmi_write(DMI_SBCS, sba_cfg(1'b1, 3'd2, 1'b0, 1'b0));  // readonaddr=1, access=32-bit
+        sba_dmi_write(DMI_SBADDRESS0, 32'h0000_0190);  // triggers the read
+        sba_dmi_write(DMI_SBDATA1, 32'hFFFF_FFFF);     // lands while busy -- dropped, flags sbbusyerror
+        begin
+            logic [31:0] rd;
+            #1;
+            sba_dmi_read(DMI_SBCS, rd);
+            check("dut_sba: Test I -- sbbusyerror == 1 (sbdata1 write while busy)",
+                {63'b0, rd[22]}, 64'd1);
+        end
+        sba_wait_done();
+        sba_dmi_write(DMI_SBCS, 32'h0040_0000);  // W1C-clear sbbusyerror
+
+        // Test SBA-J (review-fix regression, closes a real coverage gap):
+        // a non-zero-byte-offset SBA access -- every OTHER test in this
+        // scenario uses byte offset 0 within its own 8-byte line, so none
+        // of them can catch an off-by-shift-amount bug in the byte-lane
+        // math (sba_effective_addr_low3/o_sba_sel/o_sba_dat's own <<
+        // shift, sba_rdata_shifted's own >> shift). Proves an 8-bit
+        // access at offset 2 touches ONLY its own byte, in both
+        // directions.
+        dut_sba.sram0.memory[32'h1A0 / 8] = 64'h1122334455667788;
+        sba_dmi_write(DMI_SBCS, sba_cfg(1'b0, 3'd0, 1'b0, 1'b0));  // readonaddr=0, access=8-bit
+        sba_dmi_write(DMI_SBADDRESS0, 32'h0000_01A2);  // byte offset 2 within the line
+        sba_dmi_write(DMI_SBDATA0, 32'h0000_00AB);     // triggers the write
+        sba_wait_done();
+        check("dut_sba: Test J -- non-zero-byte-offset SBA write only touches its own byte",
+            dut_sba.sram0.memory[32'h1A0 / 8], 64'h1122334455AB7788);
+
+        sba_dmi_write(DMI_SBCS, sba_cfg(1'b1, 3'd0, 1'b0, 1'b0));  // readonaddr=1, access=8-bit
+        sba_dmi_write(DMI_SBADDRESS0, 32'h0000_01A2);  // triggers the read
+        sba_wait_done();
+        begin
+            logic [31:0] rd;
+            sba_dmi_read(DMI_SBDATA0, rd);
+            check("dut_sba: Test J -- read-back at the same non-zero offset returns exactly that byte",
+                {56'b0, rd[7:0]}, 64'hAB);
+        end
+
+        // Test SBA-G (the milestone's own core gate): confirm core0
+        // reached its own, correct final state -- x1 == 50, exactly its
+        // 50th update -- completely unaffected by every SBA operation
+        // above, ALL of which landed while core0 was actively executing
+        // its own counting loop, never halted. Waits on sba_commit_count
+        // (see its own comment above for why, not a bare
+        // wait(trap_taken && is_ebreak) on the trailing EBREAK itself --
+        // dcsr.ebreakm is never armed in this scenario, so that EBREAK
+        // takes a real trap back to the same loop rather than stopping,
+        // and a level wait on it could land on any lap).
+        // A plain polling loop (mirroring basic_commit_count's own usage
+        // above), NOT a bare wait() -- a bare wait(sba_commit_count>=50)
+        // can resume the instant the counter's own NBA update becomes
+        // true, with no guarantee that regfile0's OWN sibling NBA update
+        // (x1's actual write, scheduled by a DIFFERENT always block off
+        // the SAME commit_now edge) has already settled -- the identical
+        // class of "checking a signal one edge too early" hazard
+        // testbench/wb_driver.sv's own header documents in detail for
+        // ack_o. @(posedge clk); #1; after the condition is already true
+        // guarantees a full settle past that edge first.
+        while (sba_commit_count < 50) begin
+            @(posedge clk); #1;
+        end
+
+        check("dut_sba: Test G -- x1 == 50 -- core0's own loop finished correctly, undisturbed by concurrent SBA traffic",
+            dut_sba.core0.regfile0.gp_registers[1], 64'd50);
+
+        /* ----------------------------------------------------------- *
+         * dut_amo_sba
+         * ----------------------------------------------------------- */
+
+        // Program: 8x "addi x1,x1,1" padding (gives the testbench room to
+        // stage the SBA's own config via DMI *after* reset deasserts --
+        // dm0 shares dut_amo_sba's single rst input with core0, so any DMI
+        // write issued before deassertion has no lasting effect), then the
+        // real sequence: addi x7,x0,T ; addi x5,x0,K ; amoadd.d x6,x5,(x7) ; ebreak
+        for (int i = 0; i < 4; i++) begin
+            dut_amo_sba.sram0.memory[i] = {encode_i(32'sd1, 5'd1, 3'b000, 5'd1, `OPC_OP_IMM),
+                                            encode_i(32'sd1, 5'd1, 3'b000, 5'd1, `OPC_OP_IMM)};
+        end
+        dut_amo_sba.sram0.memory[4] = {encode_i(AMO_SBA_K, 5'd0, 3'b000, 5'd5, `OPC_OP_IMM),
+                                        encode_i(AMO_SBA_T, 5'd0, 3'b000, 5'd7, `OPC_OP_IMM)};
+        dut_amo_sba.sram0.memory[5] = {{11'b0, 1'b1, 13'b0, `OPC_SYSTEM},
+                                        encode_amo(`FUNCT5_AMOADD, 1'b0, 1'b0, 5'd5, 5'd7,
+                                                    `FUNCT3_AMO_D, 5'd6, `OPC_AMO)};
+        dut_amo_sba.sram0.memory[AMO_SBA_T / 8] = 64'(AMO_SBA_V0);
+
+        @(posedge clk); #1;
+        rst_amo_sba = 0;
+
+        // Stage the SBA write's own config/address/high-data now that dm0
+        // is out of reset -- the 8 padding instructions above guarantee
+        // core0 is nowhere near the AMO yet (it's still working through
+        // the filler), so this always lands well before wb_lock_o rises.
+        amo_sba_dmi_write(DMI_SBCS, sba_cfg(1'b0, 3'd3, 1'b0, 1'b0));  // readonaddr=0, access=64-bit
+        amo_sba_dmi_write(DMI_SBADDRESS0, AMO_SBA_T);
+        amo_sba_dmi_write(DMI_SBDATA1, 32'h0);
+
+        while (!dut_amo_sba.core0.wb_lock_o) begin
+            @(posedge clk); #1;
+        end
+        amo_sba_dmi_write(DMI_SBDATA0, AMO_SBA_W);  // triggers the real SBA write
+        amo_sba_wait_done();
+        @(posedge clk); #1;
+
+        check("dut_amo_sba: x6 == V0 -- the AMO's own read saw the pre-existing value (500)",
+            dut_amo_sba.core0.regfile0.gp_registers[6], 64'd500);
+        check("dut_amo_sba: memory[T] == W -- the SBA's own write landed AFTER the AMO fully completed, not lost between its read and write",
+            dut_amo_sba.sram0.memory[AMO_SBA_T / 8], 64'd12345);
 
         $display("");
         $display("dm_tb: %0d passed, %0d failed", pass_count, fail_count);

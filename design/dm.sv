@@ -13,13 +13,16 @@
  * own plain register interface). Implements the subset of the RISC-V
  * Debug Specification (0.13.2/1.0) register set needed for a debugger to
  * halt/resume/step the hart, read/write a GPR or CSR while it's halted
- * (an "Access Register" abstract command, cmdtype=0), and -- Milestone 7
- * -- run a small Program Buffer sequence against live GPR/CSR state
- * (that same abstract command's postexec bit, see the Program Buffer
- * section below and design/core.sv's own matching section for the full
- * execution design). System Bus Access and Quick Access commands still
- * get register STORAGE only (so their own shape is proven once) but no
- * functional backing until Milestone 8.
+ * (an "Access Register" abstract command, cmdtype=0), run a small
+ * Program Buffer sequence against live GPR/CSR state (Milestone 7, that
+ * same abstract command's postexec bit -- see the Program Buffer section
+ * below and design/core.sv's own matching section for the full execution
+ * design), and -- Milestone 8 -- read/write real memory-mapped state
+ * directly over a second Wishbone master port (System Bus Access, the
+ * sbcs/sbaddress0/sbdata0/sbdata1 registers -- see that section below).
+ * Quick Access commands still get register STORAGE only (so their own
+ * shape is proven once) but no functional backing -- deferred
+ * indefinitely, see the plan file's own scope boundary.
  *
  * NOTE ON SPEC FIDELITY: this repo has no local copy of the RISC-V
  * Debug Specification, but every register's bit layout below (dmcontrol,
@@ -120,7 +123,35 @@ module dm (
     input  logic [3:0]  i_progbuf_pc,
     output logic [31:0] o_progbuf_data,
     input  logic        i_progbuf_done,
-    input  logic        i_progbuf_abort
+    input  logic        i_progbuf_abort,
+
+    /*
+     * System Bus Access (Milestone 8 of the EBREAK/JTAG staged plan --
+     * see [[dm-progbuf-milestone]] for Milestone 7). A genuine second
+     * Wishbone MASTER port -- unlike every other port group above, which
+     * reaches into core0's own internals via dedicated side-channel
+     * ports, this one goes straight onto the shared memory fabric
+     * through design/wb_arbiter2.sv (soc.sv wires it there, arbitrated
+     * against core0's own ordinary master port, m1/higher priority --
+     * see that module's own header for the policy and why). Lets a
+     * debugger read/write real memory-mapped state (RAM, UART, CLINT)
+     * directly, independent of whether the hart is halted at all -- the
+     * one Access Register capability (GPR/CSR read/write) fundamentally
+     * cannot provide, since those require the hart's own decode/execute
+     * path and hence a real halt. Ordinary registered Wishbone classic
+     * timing: cyc_o/stb_o are held until ack_i or err_i arrives, exactly
+     * matching every other master in this design (core.sv's own
+     * wb_master_drive).
+     */
+    output logic [31:0] o_sba_addr,
+    output logic [63:0] o_sba_dat,
+    input  logic [63:0] i_sba_dat,
+    output logic [7:0]  o_sba_sel,
+    output logic        o_sba_we,
+    output logic        o_sba_cyc,
+    output logic        o_sba_stb,
+    input  logic        i_sba_ack,
+    input  logic        i_sba_err
 );
     /*
      * DMI register address map (RISC-V Debug Spec 0.13.2/1.0's own 7-bit
@@ -489,57 +520,278 @@ module dm (
     end
 
     /* ----------------------------------------------------------------- *
-     * System Bus Access -- storage-only stub (Milestone 8 gives it real
-     * backing). sbcs.sbaccess8/16/32/64/128 (bits [4:0] -- cross-checked
-     * against riscv-debug-spec's own xml/dm_registers.xml; an earlier
-     * pass here had this at bits [8:4], which meant the mask below
-     * didn't actually clear the real capability bits at all) are
-     * hardwired 0 within sbcs_val below regardless of what's written --
-     * a real debugger reads "no access width supported" and correctly
-     * never attempts a System Bus Access against this DM, the spec-clean
-     * way to say "not implemented" without needing a fake per-
-     * transaction sberror flow.
+     * System Bus Access (Milestone 8) -- a real second Wishbone master,
+     * driven off sbcs/sbaddress0/sbdata0/sbdata1. sbaddress1-3/sbdata2-3
+     * stay storage-only stubs (see their own declarations further down):
+     * this core's WB address bus is 32 bits (sbasize=32 below, fixed and
+     * real, not a placeholder), so sbaddress1 (bits 63:32 of a wider
+     * address) is spec-optional and never needed; sbdata2-3 are likewise
+     * spec-optional above 64-bit accesses, which this core's 64-bit-wide
+     * bus can't do anyway (sbaccess128 is hardwired 0 below).
      *
-     * progbuf_q -- the Program Buffer's own storage -- is declared here
-     * too (same array, same address decode as always), but is no longer
-     * a stub: Milestone 7's own Program Buffer section above reads it
-     * combinationally via o_progbuf_data, and o_progbuf_start/
-     * progbuf_running_q (also above) drive real execution through
-     * core0.
+     * Field layout cross-checked against TWO independent sources (not
+     * just riscv-debug-spec's own xml/dm_registers.xml, given how much
+     * weight this milestone puts on getting sbcs right on the first
+     * try): the spec XML itself and pulp-platform/riscv-dbg's own
+     * sbcs_t packed struct (a real, widely-deployed implementation) --
+     * both agree exactly on every field's position and width:
+     *   [31:29] sbversion=1 (spec 1.0)   [22]    sbbusyerror (W1C)
+     *   [21]    sbbusy                    [20]    sbreadonaddr
+     *   [19:17] sbaccess                  [16]    sbautoincrement
+     *   [15]    sbreadondata              [14:12] sberror (W1C)
+     *   [11:5]  sbasize=32                [4:0]   sbaccess128..8
+     *
+     * Scope decisions, both deliberate and both documented rather than
+     * silently absent:
+     *  - sbaccess supports 8/16/32/64-bit (0-3); 128-bit (4) and above
+     *    are rejected with sberror=4 ("not supported") -- this core's
+     *    Wishbone bus is 64 bits wide, so 128-bit has no natural path,
+     *    mirroring the Access Register command's own established
+     *    "aarsize=3 (64-bit) only" precedent (see cmd_aarsize_ok above).
+     *  - sbreadondata (auto-trigger a new read when sbdata0 is READ, per
+     *    spec) is accepted/stored for DMI readback but NOT functionally
+     *    honored: implementing it correctly needs a genuine "this cycle
+     *    is a real read access," which this module's plain register
+     *    interface has never needed before (every other register here is
+     *    a side-effect-free combinational readback off i_reg_addr, with
+     *    no separate read-enable/strobe) -- adding one now would mean
+     *    threading a brand-new i_reg_re/o_reg_re signal through
+     *    design/dm_dmi.sv, design/jtag_tap.sv, this module, soc.sv, and
+     *    every existing DMI-backdoor testbench, for a feature this
+     *    milestone's own gate doesn't require (a debugger can still read
+     *    memory correctly via sbreadonaddr + sbautoincrement + an
+     *    explicit sbdata0 read each time -- just without the "read is
+     *    also a prefetch" pipelining sbreadondata exists to speed up).
+     *    Deferred, not silently dropped -- reconsider if/when a real
+     *    OpenOCD integration test (Milestone 10) demonstrates it's
+     *    actually needed. The same limitation applies to sbdata1's own
+     *    spec text ("accesses [including reads] while busy set
+     *    sbbusyerror") -- only WRITE-while-busy is detected here, for
+     *    the identical "no read-strobe exists" reason.
+     *  - Misaligned accesses (sbaddress0 not naturally aligned to the
+     *    current sbaccess width) are rejected instantly with sberror=3,
+     *    never attempted on the bus -- a real, cheap correctness check
+     *    (a misaligned access has no well-defined single-transaction
+     *    byte-lane encoding on this bus), not scope creep.
      * ----------------------------------------------------------------- */
-    logic [31:0] sbcs_q;
+    logic        sbbusyerror_q;      // [22], W1C
+    logic        sbreadonaddr_q;     // [20]
+    logic [2:0]  sbaccess_q;         // [19:17]
+    logic        sbautoincrement_q;  // [16]
+    logic        sbreadondata_q;     // [15] -- stored, not functionally honored (see above)
+    logic [2:0]  sberror_q;          // [14:12], W1C
     logic [31:0] sbaddress0_q, sbaddress1_q, sbaddress2_q, sbaddress3_q;
     logic [31:0] sbdata0_q, sbdata1_q, sbdata2_q, sbdata3_q;
     // progbuf_q itself is forward-declared earlier (see that comment) --
     // only its write-logic (the always_ff below) lives here.
 
-    localparam [31:0] SBCS_ACCESS_MASK = 32'hFFFF_FFE0;  // clears bits [4:0] (sbaccess8..sbaccess128)
-    wire [31:0] sbcs_val = sbcs_q & SBCS_ACCESS_MASK;
+    logic        sba_busy_q;
+    logic        sba_we_q;  // latched direction of the in-flight bus access
+
+    localparam [6:0] SBASIZE = 7'd32;  // this core's real WB address width -- see the section header
+    wire [31:0] sbcs_val = {
+        3'd1,              // [31:29] sbversion = 1 (spec v1.0)
+        6'b0,              // [28:23] reserved
+        sbbusyerror_q,     // [22]
+        sba_busy_q,        // [21] sbbusy
+        sbreadonaddr_q,    // [20]
+        sbaccess_q,        // [19:17]
+        sbautoincrement_q, // [16]
+        sbreadondata_q,    // [15]
+        sberror_q,         // [14:12]
+        SBASIZE,           // [11:5]
+        1'b0,              // [4] sbaccess128 -- not supported, see above
+        1'b1,              // [3] sbaccess64
+        1'b1,              // [2] sbaccess32
+        1'b1,              // [1] sbaccess16
+        1'b1               // [0] sbaccess8
+    };
+
+    /*
+     * Trigger detection. sba_effective_addr is the address a NEW
+     * operation would actually use: for an sbaddress0-write-triggered
+     * read, that's the INCOMING i_reg_wdata (about to become
+     * sbaddress0_q's new value on this very edge, in the always_ff
+     * below) -- using the stale, about-to-be-overwritten sbaddress0_q
+     * here would validate the WRONG address. For an sbdata0-triggered
+     * write, sbaddress0_q is unchanged by this write, so the current,
+     * stored value is exactly right.
+     */
+    wire sba_addr_write_now = i_reg_we && (i_reg_addr == ADDR_SBADDRESS0);
+    wire sba_data_write_now = i_reg_we && (i_reg_addr == ADDR_SBDATA0);
+    wire sba_new_op_requested = (sba_addr_write_now && sbreadonaddr_q) || sba_data_write_now;
+
+    wire sba_access_ok = (sbaccess_q <= 3'd3);
+    wire [2:0] sba_align_mask = (sbaccess_q == 3'd0) ? 3'b000 :
+                                 (sbaccess_q == 3'd1) ? 3'b001 :
+                                 (sbaccess_q == 3'd2) ? 3'b011 : 3'b111;
+    // Only the low 3 bits of whichever address is about to become
+    // effective are ever needed (the alignment check below never looks
+    // higher) -- narrowed to exactly that width rather than declaring a
+    // full 32-bit wire and only reading a slice of it.
+    wire [2:0] sba_effective_addr_low3 = sba_addr_write_now ? i_reg_wdata[2:0] : sbaddress0_q[2:0];
+    // Guarded by sba_access_ok so an unsupported width is reported as
+    // exactly that (sberror=4) rather than ALSO, confusingly, as a
+    // misalignment against a bogus mask for a width this DM doesn't
+    // even support.
+    wire sba_trigger_misaligned = sba_access_ok && (|(sba_effective_addr_low3 & sba_align_mask));
+
+    wire sba_new_op_blocked_by_error = sbbusyerror_q || (sberror_q != 3'd0);
+    wire sba_new_op_would_be_invalid = !sba_access_ok || sba_trigger_misaligned;
+
+    wire sba_reject_as_busy_collision = sba_new_op_requested && sba_busy_q;
+    wire sba_reject_as_invalid = sba_new_op_requested && !sba_busy_q
+                                && !sba_new_op_blocked_by_error && sba_new_op_would_be_invalid;
+    wire sba_start_real_op = sba_new_op_requested && !sba_busy_q
+                            && !sba_new_op_blocked_by_error && !sba_new_op_would_be_invalid;
+
+    // A write to sbcs or sbdata1 while an access is already in flight is
+    // ALSO a busy collision (per spec: "if the bus manager is busy then
+    // accesses set sbbusyerror" -- sbdata1's own wording; extended here
+    // to sbcs writes too for the same reason, see the module header's
+    // "why not just do it right" precedent this project already follows
+    // elsewhere). sbaddress0 needs the same treatment specifically for
+    // the sbreadonaddr_q==0 case: sba_reject_as_busy_collision already
+    // covers an sbaddress0 write while busy WHEN sbreadonaddr_q==1 (that
+    // write is itself a sba_new_op_requested trigger), but when
+    // sbreadonaddr_q==0 the write is a plain address-staging write --
+    // sba_new_op_requested never sees it at all, so without this term a
+    // busy collision on that path went completely unflagged.
+    wire sba_other_write_while_busy = sba_busy_q && i_reg_we
+                                     && ((i_reg_addr == ADDR_SBCS) || (i_reg_addr == ADDR_SBDATA1)
+                                         || (i_reg_addr == ADDR_SBADDRESS0 && !sbreadonaddr_q));
+
+    // Hardware-set conditions are checked BEFORE the software W1C-clear
+    // write, mirroring cmderr_q's own precedent above: a same-cycle race
+    // between a new hardware-detected error and a debugger's clear-write
+    // must let the new error win, not get silently swallowed by the
+    // clear that was aimed at the OLD (about-to-be-superseded) value.
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            sbbusyerror_q <= 1'b0;
+        end else if (sba_reject_as_busy_collision || sba_other_write_while_busy) begin
+            sbbusyerror_q <= 1'b1;
+        end else if (i_reg_we && (i_reg_addr == ADDR_SBCS) && i_reg_wdata[22]) begin
+            sbbusyerror_q <= 1'b0;  // W1C
+        end
+    end
 
     always_ff @(posedge clk) begin
         if (rst) begin
-            sbcs_q       <= 32'h0000_0020;  // sbversion=1 (bits[31:29]=0, spec places
-                                             // sbversion at [31:29]; kept 0 here since
-                                             // this stub advertises no capability either
-                                             // way -- see the header note on fields
-                                             // best-effort-placed without a spec copy)
+            sberror_q <= 3'd0;
+        end else if (sberror_q == 3'd0 && sba_reject_as_invalid) begin
+            sberror_q <= !sba_access_ok ? 3'd4 : 3'd3;  // 4=not supported, 3=misaligned
+        end else if (sberror_q == 3'd0 && sba_busy_q && i_sba_err) begin
+            sberror_q <= 3'd2;  // bad address (a real bus error)
+        end else if (i_reg_we && (i_reg_addr == ADDR_SBCS) && (i_reg_wdata[14:12] != 3'd0)) begin
+            sberror_q <= 3'd0;  // W1C
+        end
+    end
+
+    // Plain configuration fields -- gated !sba_busy_q so a write attempted
+    // mid-transaction is dropped (per spec) rather than silently
+    // reconfiguring an access already in flight; sba_other_write_while_busy
+    // above already flags this case via sbbusyerror.
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            sbreadonaddr_q    <= 1'b0;
+            sbaccess_q        <= 3'd0;
+            sbautoincrement_q <= 1'b0;
+            sbreadondata_q    <= 1'b0;
+        end else if (!sba_busy_q && i_reg_we && (i_reg_addr == ADDR_SBCS)) begin
+            sbreadonaddr_q    <= i_reg_wdata[20];
+            sbaccess_q        <= i_reg_wdata[19:17];
+            sbautoincrement_q <= i_reg_wdata[16];
+            sbreadondata_q    <= i_reg_wdata[15];
+        end
+    end
+
+    /*
+     * The actual bus request. o_sba_addr is dword-aligned (matching
+     * design/core.sv's own mem_addr precedent -- the byte lane, not the
+     * address, carries sub-dword position); o_sba_dat/i_sba_dat are
+     * shifted by the byte offset within the 8-byte line, and sba_sel is
+     * the byte-lane mask shifted to match -- same mask-and-shift
+     * technique design/core.sv's own mem_sel/mem_wdata/mem_rdata_shifted
+     * already use for ordinary loads/stores (see that file's own
+     * comment crediting design/wb4_sram.sv's byte-enable convention).
+     */
+    wire [3:0] sba_width_bytes = (sbaccess_q == 3'd0) ? 4'd1 :
+                                  (sbaccess_q == 3'd1) ? 4'd2 :
+                                  (sbaccess_q == 3'd2) ? 4'd4 : 4'd8;
+    wire [7:0] sba_width_mask  = (sbaccess_q == 3'd0) ? 8'b0000_0001 :
+                                  (sbaccess_q == 3'd1) ? 8'b0000_0011 :
+                                  (sbaccess_q == 3'd2) ? 8'b0000_1111 : 8'b1111_1111;
+
+    assign o_sba_addr = {sbaddress0_q[31:3], 3'b0};
+    assign o_sba_dat  = {sbdata1_q, sbdata0_q} << (sbaddress0_q[2:0] * 8);
+    assign o_sba_sel  = sba_width_mask << sbaddress0_q[2:0];
+    assign o_sba_we   = sba_we_q;
+    assign o_sba_cyc  = sba_busy_q;
+    assign o_sba_stb  = sba_busy_q;
+
+    wire [63:0] sba_rdata_shifted = i_sba_dat >> (sbaddress0_q[2:0] * 8);
+
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            sba_busy_q <= 1'b0;
+            sba_we_q   <= 1'b0;
+        end else if (sba_busy_q) begin
+            if (i_sba_ack || i_sba_err) sba_busy_q <= 1'b0;
+        end else if (sba_start_real_op) begin
+            sba_busy_q <= 1'b1;
+            sba_we_q   <= sba_data_write_now;
+        end
+    end
+
+    always_ff @(posedge clk) begin
+        if (rst) begin
             sbaddress0_q <= 32'b0;
+            sbdata0_q    <= 32'b0;
+            sbdata1_q    <= 32'b0;
+        end else if (sba_busy_q && i_sba_ack) begin
+            // Hardware-driven completion update -- takes priority over a
+            // same-cycle plain-write attempt, which the busy-collision
+            // logic above already rejects (sba_busy_q was already 1 when
+            // that write's own trigger evaluated), so there's no real
+            // conflict between these two branches.
+            if (!sba_we_q) begin
+                sbdata0_q <= sba_rdata_shifted[31:0];
+                if (sbaccess_q == 3'd3) sbdata1_q <= sba_rdata_shifted[63:32];
+            end
+            if (sbautoincrement_q) sbaddress0_q <= sbaddress0_q + {28'b0, sba_width_bytes};
+        end else if (!sba_busy_q && i_reg_we) begin
+            case (i_reg_addr)
+                ADDR_SBADDRESS0: sbaddress0_q <= i_reg_wdata;
+                ADDR_SBDATA0:    sbdata0_q    <= i_reg_wdata;
+                ADDR_SBDATA1:    sbdata1_q    <= i_reg_wdata;
+                default: ;
+            endcase
+        end
+    end
+
+    /* ----------------------------------------------------------------- *
+     * sbaddress1-3/sbdata2-3 -- storage-only stubs, spec-optional given
+     * this core's sbasize=32/max-sbaccess=64-bit (see the section header
+     * above for why). progbuf_q -- the Program Buffer's own storage --
+     * is declared here too (same array, same address decode as always),
+     * but is no longer a stub: Milestone 7's own Program Buffer section
+     * above reads it combinationally via o_progbuf_data, and
+     * o_progbuf_start/progbuf_running_q (also above) drive real
+     * execution through core0.
+     * ----------------------------------------------------------------- */
+    always_ff @(posedge clk) begin
+        if (rst) begin
             sbaddress1_q <= 32'b0;
             sbaddress2_q <= 32'b0;
             sbaddress3_q <= 32'b0;
-            sbdata0_q    <= 32'b0;
-            sbdata1_q    <= 32'b0;
             sbdata2_q    <= 32'b0;
             sbdata3_q    <= 32'b0;
         end else if (i_reg_we) begin
             case (i_reg_addr)
-                ADDR_SBCS:       sbcs_q       <= i_reg_wdata;
-                ADDR_SBADDRESS0: sbaddress0_q <= i_reg_wdata;
                 ADDR_SBADDRESS1: sbaddress1_q <= i_reg_wdata;
                 ADDR_SBADDRESS2: sbaddress2_q <= i_reg_wdata;
                 ADDR_SBADDRESS3: sbaddress3_q <= i_reg_wdata;
-                ADDR_SBDATA0:    sbdata0_q    <= i_reg_wdata;
-                ADDR_SBDATA1:    sbdata1_q    <= i_reg_wdata;
                 ADDR_SBDATA2:    sbdata2_q    <= i_reg_wdata;
                 ADDR_SBDATA3:    sbdata3_q    <= i_reg_wdata;
                 default: ;

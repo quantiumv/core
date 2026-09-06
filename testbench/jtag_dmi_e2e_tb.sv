@@ -107,6 +107,9 @@ module jtag_dmi_e2e_tb;
     localparam [6:0] DMI_DATA1     = 7'h05;
     localparam [6:0] DMI_DMCONTROL = 7'h10;
     localparam [6:0] DMI_COMMAND   = 7'h17;
+    localparam [6:0] DMI_SBCS       = 7'h38;  // Milestone 8, mirrors dm_tb.sv's own value
+    localparam [6:0] DMI_SBADDRESS0 = 7'h39;
+    localparam [6:0] DMI_SBDATA0    = 7'h3C;
 
     localparam [11:0] CSR_DPC = 12'h7B1;  // Milestone 3
 
@@ -285,6 +288,91 @@ module jtag_dmi_e2e_tb;
         dmi_write_reg(DMI_DATA0, 32'h0000_0010);
         dmi_write_reg(DMI_DATA1, 32'd0);
         dmi_write_reg(DMI_COMMAND, {8'h00, 1'b0, 3'd3, 1'b0, 1'b0, 1'b1, 1'b1, 4'b0, CSR_DPC});
+
+        /*
+         * Milestone 8 review-fix regression (Findings #6/#7): a real
+         * System Bus Access transaction, driven through the REAL JTAG/DMI
+         * transport against the REAL soc topology (decoder0 ->
+         * cache_complex -> wb4_sram / decoder0 -> DRAM window), closing
+         * the "zero coverage of SBA through the real soc.sv topology" gap
+         * the M8 review flagged. Done here, while core0 is still halted --
+         * the simplest correct test, no concurrent-traffic complexity
+         * needed (dm_tb.sv's own dut_sba scenario already covers
+         * concurrent SBA-while-running through the simpler
+         * dm_core_harness, which has no decoder/cache/DRAM window at all).
+         */
+        begin
+            logic [31:0] rd;
+            int tries;
+
+            // SBA write, 32-bit, to a RAM address well past this
+            // program's own 3 instruction words -- goes through the REAL
+            // cache_complex -> wb4_sram path this milestone's own
+            // dm_core_harness-based tests never exercise, proving
+            // cache_ifetch's !arb_grant gating and the D$ write-through
+            // path work for real SBA traffic, not just a plain-sram stub.
+            dmi_write_reg(DMI_SBCS, {11'b0, 1'b0, 3'd2, 1'b0, 1'b0, 15'b0});  // readonaddr=0, access=32-bit
+            dmi_write_reg(DMI_SBADDRESS0, 32'h0000_0300);
+            dmi_write_reg(DMI_SBDATA0, 32'hCAFEF00D);  // triggers the write
+            tries = 0;
+            rd = 32'h0020_0000;  // seed with sbbusy=1 so the loop runs at least once
+            while (rd[21]) begin
+                if (tries >= DMI_RETRY_LIMIT) begin
+                    $display("TIMEOUT: jtag_dmi_e2e_tb SBA write never cleared sbbusy");
+                    $finish;
+                end
+                dmi_read_reg(DMI_SBCS, rd);
+                tries++;
+            end
+            check("jtag_dmi_e2e: SBA write -- sberror == 0 (success)", {29'b0, rd[14:12]}, 32'd0);
+            check("jtag_dmi_e2e: SBA write -- memory[0x300] == the value just written, through the real cache/sram path",
+                dut.sram0.memory[32'h300 / 8][31:0], 64'hCAFEF00D);
+
+            // Read the same address back over SBA (sbreadonaddr=1 this
+            // time, so the sbaddress0 write below is itself the trigger),
+            // proving the round trip works in both directions.
+            dmi_write_reg(DMI_SBCS, {11'b0, 1'b1, 3'd2, 1'b0, 1'b0, 15'b0});  // readonaddr=1, access=32-bit
+            dmi_write_reg(DMI_SBADDRESS0, 32'h0000_0300);  // triggers the read
+            tries = 0;
+            rd = 32'h0020_0000;
+            while (rd[21]) begin
+                if (tries >= DMI_RETRY_LIMIT) begin
+                    $display("TIMEOUT: jtag_dmi_e2e_tb SBA read never cleared sbbusy");
+                    $finish;
+                end
+                dmi_read_reg(DMI_SBCS, rd);
+                tries++;
+            end
+            dmi_read_reg(DMI_SBDATA0, rd);
+            check("jtag_dmi_e2e: SBA read-back -- sbdata0 == the value written moments ago", rd, 32'hCAFEF00D);
+
+            // SBA access into the DRAM window (0x0001_8000-0x0001_FFFF).
+            // Before this review-fix, soc.sv's own decoder0 instantiation
+            // left dram_ack_i/dram_err_i floating (X in simulation); since
+            // `if (i_sba_ack || i_sba_err)` on an X operand evaluates
+            // false per IEEE 1800, this access would have hung dm.sv's
+            // own SBA busy FSM forever (Finding #6). Confirms the fix: a
+            // real, deterministic sberror==2 (bus error), not a hang --
+            // the DMI_RETRY_LIMIT-bounded loop below is itself part of
+            // the proof (an unfixed regression here means this testbench
+            // times out and $finish's early, not just a wrong check).
+            dmi_write_reg(DMI_SBCS, {11'b0, 1'b0, 3'd2, 1'b0, 1'b0, 15'b0});  // readonaddr=0, access=32-bit
+            dmi_write_reg(DMI_SBADDRESS0, 32'h0001_8000);
+            dmi_write_reg(DMI_SBDATA0, 32'hDEAD_BEEF);  // triggers the write -- would hang pre-fix
+            tries = 0;
+            rd = 32'h0020_0000;
+            while (rd[21]) begin
+                if (tries >= DMI_RETRY_LIMIT) begin
+                    $display("TIMEOUT: jtag_dmi_e2e_tb SBA DRAM-window access never cleared sbbusy (Finding #6 regressed!)");
+                    $finish;
+                end
+                dmi_read_reg(DMI_SBCS, rd);
+                tries++;
+            end
+            check("jtag_dmi_e2e: SBA access to the DRAM window -- sberror == 2 (real bus error, not a hang)",
+                {29'b0, rd[14:12]}, 32'd2);
+            dmi_write_reg(DMI_SBCS, 32'h0000_3000);  // W1C-clear sberror, tidy up before resuming
+        end
 
         // Resume, through the real TAP -- execution continues from the
         // redirected dpc (0x10): addi x4,x2,0, which must see the

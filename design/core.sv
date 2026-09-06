@@ -124,6 +124,39 @@
  * needs it on, unlike wb_addr_o/wb_cyc_o which combinationally collapse
  * to idle the instant the bus cycle terminates (ack or err).
  *
+ * wb_lock_o: Milestone 8 review fix -- a real Wishbone B4 LOCK signal
+ * (an optional part of the spec for exactly this purpose), high across
+ * an RMW AMO's own two-phase bus sequence (S_MEM's read, then
+ * S_AMO_WRITE's write) so design/wb_arbiter2.sv never grants the OTHER
+ * master (dm.sv's System Bus Access) in the one genuinely idle cycle
+ * between them. That gap is real and was found the hard way: wb_cyc_o
+ * drops the SAME cycle the read's own ack arrives (gated by !wb_done,
+ * see that comment below), but `state` only becomes S_AMO_WRITE the
+ * FOLLOWING clock edge, and S_AMO_WRITE's own fresh wb_cyc_o=1 request
+ * appears immediately that same cycle -- meaning the arbiter's own
+ * in-flight tracking clears and re-arbitrates FRESH on the exact same
+ * cycle the write's own request shows up, a genuine tie an unlocked
+ * arbiter resolves in the OTHER master's favor by fixed priority,
+ * silently interleaving a debugger's own read/write into the middle of
+ * what RISC-V requires to be one atomic read-modify-write. Defined
+ * purely off `state`/is_amo_rmw, deliberately NOT gated by
+ * debug_progbuf_active -- an AMO executed from the Program Buffer (M7)
+ * reuses these exact same states and needs the identical protection.
+ * LR/SC deliberately do NOT need this: each is its own single-phase
+ * S_MEM transaction (no second bus phase to protect), and their own
+ * atomicity is a wholly different mechanism (reservation_valid_q, see
+ * that register's own comment) -- notably NOT one this signal covers
+ * either: an SBA write landing exactly between a hart's own LR and its
+ * later SC does not invalidate the reservation the way the spec
+ * requires of a write from any other agent to the same address. A
+ * known, narrower, deliberately unaddressed gap -- fixing it would
+ * need a new "SBA just wrote address X" signal reaching all the way
+ * back into this file's own reservation logic, real scope beyond this
+ * milestone's own review-fix pass, and LR/SC critical sections are
+ * short enough that a debugger poking the exact same address during
+ * one is a far narrower window than the AMO case above, which triggers
+ * on ANY pending SBA traffic, not just same-address traffic.
+ *
  * icache_flush_o: Zifencei's FENCE.I, side-band like wb_ifetch_o above --
  * pulses one cycle on FENCE.I's own retirement (assign icache_flush_o =
  * commit_now && is_fence_i;), telling a downstream I$ to invalidate its
@@ -158,6 +191,7 @@ module core (
     input  logic        wb_ack_i,
     input  logic        wb_err_i,
     output logic        wb_ifetch_o,
+    output logic        wb_lock_o,
     output logic        icache_flush_o,
     input  logic         i_mtip = 1'b0,
 
@@ -2363,6 +2397,14 @@ module core (
     // why this is a plain wire off `state`, not folded into
     // wb_master_drive's !wb_done-gated combinational block below.
     assign wb_ifetch_o = (state == S_FETCH) || (state == S_FETCH_HI);
+
+    // See this port's own header comment (module port list, above) for
+    // the full reasoning. Deliberately a plain wire off `state`/
+    // is_amo_rmw, same reason as wb_ifetch_o above -- must stay
+    // asserted through the exact cycle wb_cyc_o itself collapses to 0
+    // (the AMO read's own !wb_done-gated drop), which a wb_done-gated
+    // definition would miss entirely.
+    assign wb_lock_o = (state == S_MEM && is_amo_rmw) || (state == S_AMO_WRITE);
 
     // See this port's own header comment (module port list, above) for
     // the timing argument.
