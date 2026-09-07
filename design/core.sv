@@ -1925,6 +1925,20 @@ module core (
     /* verilator lint_on UNUSEDSIGNAL */
     wire mstatus_mie_w, mstatus_sie_w;
     /*
+     * PMP (Milestone 1 of the PMP+PLIC staged plan, csr_file.sv side)
+     * added these 6 outputs; the PMP-enforcement milestone (not yet
+     * implemented) is their real consumer -- same "declared and
+     * connected now, functionally unread until the next milestone"
+     * precedent mip_w/mie_w/mideleg_w above already established for the
+     * CLINT/interrupt-plumbing split. Wrapped in the same
+     * lint_off/on UNUSEDSIGNAL for the identical reason: these exist
+     * for a real, spec-shaped PMP, not padding.
+     */
+    /* verilator lint_off UNUSEDSIGNAL */
+    wire [(`WORD_SIZE - 1):0] pmpcfg0_w, pmpaddr0_w, pmpaddr1_w, pmpaddr2_w, pmpaddr3_w;
+    wire mstatus_mprv_w;
+    /* verilator lint_on UNUSEDSIGNAL */
+    /*
      * dcsr_w: only bits [15]/[13]/[12]/[2] (ebreakm/s/u, step) are
      * consumed this milestone -- the rest exist for a real, spec-shaped
      * dcsr, not padding, same "wrap the genuinely-partial-usage bits"
@@ -2022,7 +2036,18 @@ module core (
          */
         .o_dcsr(dcsr_w), .o_dpc(dpc_w),
         .o_tdata1_0(tdata1_0_w), .o_tdata1_1(tdata1_1_w),
-        .o_tdata2_0(tdata2_0_w), .o_tdata2_1(tdata2_1_w)
+        .o_tdata2_0(tdata2_0_w), .o_tdata2_1(tdata2_1_w),
+
+        /*
+         * Milestone 1 of the PMP+PLIC staged plan (csr_file.sv side)
+         * added these 6 outputs; the PMP-enforcement milestone is their
+         * real consumer -- same deferred-consumer precedent o_mip/etc.
+         * above already established for the CLINT/interrupt split.
+         */
+        .o_pmpcfg0(pmpcfg0_w),
+        .o_pmpaddr0(pmpaddr0_w), .o_pmpaddr1(pmpaddr1_w),
+        .o_pmpaddr2(pmpaddr2_w), .o_pmpaddr3(pmpaddr3_w),
+        .o_mstatus_mprv(mstatus_mprv_w)
 `ifdef RISCV_FORMAL
         ,
         .o_mcause(mcause_w),

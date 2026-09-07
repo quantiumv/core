@@ -65,6 +65,10 @@ module csr_file_tb;
     /* Milestone 3: Debug CSR control-plane exports. */
     logic [(`WORD_SIZE - 1):0]     dcsr_w, dpc_w;
 
+    /* PMP (Milestone 1 of the PMP+PLIC staged plan): control-plane exports. */
+    logic [(`WORD_SIZE - 1):0]     pmpcfg0_w, pmpaddr0_w, pmpaddr1_w, pmpaddr2_w, pmpaddr3_w;
+    logic                          mstatus_mprv_w;
+
     csr_file dut (
         .i_clk(clk),
         .i_rst(rst),
@@ -103,7 +107,14 @@ module csr_file_tb;
         .o_mstatus_sie(mstatus_sie_w),
 
         .o_dcsr(dcsr_w),
-        .o_dpc(dpc_w)
+        .o_dpc(dpc_w),
+
+        .o_pmpcfg0(pmpcfg0_w),
+        .o_pmpaddr0(pmpaddr0_w),
+        .o_pmpaddr1(pmpaddr1_w),
+        .o_pmpaddr2(pmpaddr2_w),
+        .o_pmpaddr3(pmpaddr3_w),
+        .o_mstatus_mprv(mstatus_mprv_w)
     );
 
     /* Local mirrors of csr_file.sv's address map -- this testbench drives
@@ -162,6 +173,37 @@ module csr_file_tb;
     localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_TDATA3  = 12'h7A3;
     localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_TINFO   = 12'h7A4;
     localparam logic [(`WORD_SIZE-1):0] TINFO_EXPECTED = 64'h0000_0000_0100_0041;
+
+    /* PMP (Milestone 1 of the PMP+PLIC staged plan): addresses and field
+     * layout independently transcribed from riscv-isa-manual's own PMP
+     * chapter (see design/csr_file.sv's own header comment for the exact
+     * citations), not read from csr_file.sv's internals. */
+    localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_PMPCFG0  = 12'h3A0;
+    localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_PMPADDR0 = 12'h3B0;
+    localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_PMPADDR1 = 12'h3B1;
+    localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_PMPADDR2 = 12'h3B2;
+    localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_PMPADDR3 = 12'h3B3;
+    localparam logic [(`WORD_SIZE-1):0] PMPADDR_RESET_ALL_MATCH = 64'h003F_FFFF_FFFF_FFFF;
+
+    // Builds a pmpcfg byte from named fields (the value a debugger would write).
+    function automatic logic [7:0] pmp_cfg_byte(
+        input logic l, input logic [1:0] a, input logic x, input logic w, input logic r
+    );
+        return {l, 2'b11, a, x, w, r};  // reserved bits[6:5] deliberately set to 11 in every
+                                         // write this file issues, so every check also proves
+                                         // they're forced back to 0 on readback -- not just
+                                         // coincidentally 0 because nothing ever wrote them.
+    endfunction
+
+    // The real hardware's own post-write value: reserved bits forced 0,
+    // W collapses to 0 whenever R=0 -- independently re-derived here,
+    // not copied from csr_file.sv's own always_ff, matching this file's
+    // own "don't test against your own implementation" discipline.
+    function automatic logic [7:0] pmp_cfg_expected(
+        input logic l, input logic [1:0] a, input logic x, input logic w, input logic r
+    );
+        return {l, 2'b00, a, x, (w & r), r};
+    endfunction
 
     /* mstatus bit positions, independently transcribed from the spec. */
     localparam int SIE_BIT=1, MIE_BIT=3, SPIE_BIT=5, MPIE_BIT=7, SPP_BIT=8;
@@ -863,6 +905,146 @@ module csr_file_tb;
         write_csr(CSR_ADDR_TDATA3, {`WORD_SIZE{1'b1}});
         read_csr(CSR_ADDR_TDATA3, rdata);
         check("tdata3 reads 0 unconditionally (real stub, no storage this round)", rdata, `WORD_SIZE'(0));
+
+        /* ----------------------------------------------------------- *
+         * PMP CSRs (Milestone 1 of the PMP+PLIC staged plan).
+         * ----------------------------------------------------------- */
+
+        // 1. Reset readback: region 0 permissive (L=0,A=NAPOT,X=W=R=1,
+        //    addr=all-1s -- "match everything representable"), regions
+        //    1-3 fully inert (A=OFF, addr=0). See the plan's own
+        //    cross-cutting decision on why the reset default must be
+        //    permissive, not deny-by-default.
+        read_csr(CSR_ADDR_PMPCFG0, rdata);
+        check("PMP reset: region0 byte == permissive (L=0,A=NAPOT,X=W=R=1)",
+            rdata[7:0], pmp_cfg_expected(1'b0, 2'b11, 1'b1, 1'b1, 1'b1));
+        check("PMP reset: regions 1-3 bytes == 0 (A=OFF)", rdata[31:8], 24'h0);
+        check("PMP reset: bytes 4-7 (unimplemented regions) == 0", rdata[63:32], 32'h0);
+        read_csr(CSR_ADDR_PMPADDR0, rdata);
+        check("PMP reset: pmpaddr0 == all-1s in bits[53:0]", rdata, PMPADDR_RESET_ALL_MATCH);
+        read_csr(CSR_ADDR_PMPADDR1, rdata);
+        check("PMP reset: pmpaddr1 == 0", rdata, 64'd0);
+        read_csr(CSR_ADDR_PMPADDR2, rdata);
+        check("PMP reset: pmpaddr2 == 0", rdata, 64'd0);
+        read_csr(CSR_ADDR_PMPADDR3, rdata);
+        check("PMP reset: pmpaddr3 == 0", rdata, 64'd0);
+
+        // 2. Plain WARL round trip, all 4 regions written independently
+        //    in ONE pmpcfg0 write -- proves per-region byte-slicing is
+        //    correct and every region exercises a different A encoding.
+        //    Every byte deliberately sets reserved bits[6:5]=11 (see
+        //    pmp_cfg_byte's own comment) and R=W=1 (no collapse) so this
+        //    test isolates JUST the reserved-bit-masking behavior, not
+        //    the R/W collapse rule (tested separately, step 3).
+        write_csr(CSR_ADDR_PMPCFG0, {
+            pmp_cfg_byte(1'b1, 2'b00, 1'b0, 1'b1, 1'b1),   // region3: L=1,A=OFF,X=0,W=1,R=1
+            pmp_cfg_byte(1'b0, 2'b11, 1'b1, 1'b1, 1'b1),   // region2: L=0,A=NAPOT,X=1,W=1,R=1
+            pmp_cfg_byte(1'b0, 2'b10, 1'b0, 1'b1, 1'b1),   // region1: L=0,A=NA4,X=0,W=1,R=1
+            pmp_cfg_byte(1'b0, 2'b01, 1'b1, 1'b1, 1'b1)    // region0: L=0,A=TOR,X=1,W=1,R=1
+        });
+        read_csr(CSR_ADDR_PMPCFG0, rdata);
+        check("PMP WARL round trip: region0 byte (TOR, reserved bits masked)",
+            rdata[7:0],   pmp_cfg_expected(1'b0, 2'b01, 1'b1, 1'b1, 1'b1));
+        check("PMP WARL round trip: region1 byte (NA4, reserved bits masked)",
+            rdata[15:8],  pmp_cfg_expected(1'b0, 2'b10, 1'b0, 1'b1, 1'b1));
+        check("PMP WARL round trip: region2 byte (NAPOT, reserved bits masked)",
+            rdata[23:16], pmp_cfg_expected(1'b0, 2'b11, 1'b1, 1'b1, 1'b1));
+        check("PMP WARL round trip: region3 byte (OFF, L set, reserved bits masked)",
+            rdata[31:24], pmp_cfg_expected(1'b1, 2'b00, 1'b0, 1'b1, 1'b1));
+
+        // 3. R=0,W=1 WARL collapse (norm:pmp_rwx_warl): isolated on
+        //    region1 (currently unlocked), preserving every other byte
+        //    from step 2's own write.
+        read_csr(CSR_ADDR_PMPCFG0, rdata);
+        write_csr(CSR_ADDR_PMPCFG0, {rdata[63:16], pmp_cfg_byte(1'b0, 2'b10, 1'b0, 1'b1, 1'b0), rdata[7:0]});
+        read_csr(CSR_ADDR_PMPCFG0, rdata);
+        check("PMP R=0,W=1 collapses to W=0 (reserved RWX combination)",
+            rdata[15:8], pmp_cfg_expected(1'b0, 2'b10, 1'b0, 1'b1, 1'b0));
+
+        // 4. Lock persistence: region3 is ALREADY locked from step 2
+        //    (L=1). Attempt to rewrite region3 AND region2 (unlocked) in
+        //    the SAME write -- region3 must hold its step-2 value
+        //    exactly; region2 in that same write must still update.
+        begin
+            logic [7:0] region3_before_attempt;
+            read_csr(CSR_ADDR_PMPCFG0, rdata);
+            region3_before_attempt = rdata[31:24];
+            write_csr(CSR_ADDR_PMPCFG0, {
+                pmp_cfg_byte(1'b1, 2'b01, 1'b1, 1'b1, 1'b1),  // attempt on locked region3
+                pmp_cfg_byte(1'b0, 2'b00, 1'b0, 1'b0, 1'b0),  // fresh value for unlocked region2
+                rdata[15:8], rdata[7:0]                        // leave regions 0/1 untouched
+            });
+            read_csr(CSR_ADDR_PMPCFG0, rdata);
+            check("PMP lock: locked region3 unchanged despite a same-write rewrite attempt",
+                rdata[31:24], region3_before_attempt);
+            check("PMP lock: unlocked region2 in that SAME write still updated",
+                rdata[23:16], pmp_cfg_expected(1'b0, 2'b00, 1'b0, 1'b0, 1'b0));
+        end
+        begin
+            logic [(`WORD_SIZE-1):0] pmpaddr3_before;
+            read_csr(CSR_ADDR_PMPADDR3, pmpaddr3_before);
+            write_csr(CSR_ADDR_PMPADDR3, ~pmpaddr3_before);
+            read_csr(CSR_ADDR_PMPADDR3, rdata);
+            check("PMP lock: locked region3's own pmpaddr3 also refuses a direct rewrite",
+                rdata, pmpaddr3_before);
+        end
+
+        // 5. TOR-preceding-address lock (norm:pmp_l_bit_write_protection):
+        //    a fresh DUT reset first, so region1 (used here) starts
+        //    genuinely unlocked -- step 4 above already permanently
+        //    locked region3, which would otherwise contaminate this
+        //    specific case.
+        rst = 1; @(posedge clk); #1; @(posedge clk); #1; rst = 0;
+        write_csr(CSR_ADDR_PMPCFG0, {
+            8'h00,
+            pmp_cfg_byte(1'b1, 2'b01, 1'b0, 1'b0, 1'b0),  // region2: L=1, A=TOR -- locks pmpaddr1 too
+            8'h00, 8'h00
+        });
+        // pmpaddr1 is ALREADY locked the instant the write above lands
+        // (region2's own L=1/A=TOR takes effect on that same edge) --
+        // capture whatever it currently holds (its own reset value, 0,
+        // since nothing wrote it before the lock existed) and confirm a
+        // rewrite attempt genuinely has no effect.
+        begin
+            logic [(`WORD_SIZE-1):0] pmpaddr1_before;
+            read_csr(CSR_ADDR_PMPADDR1, pmpaddr1_before);
+            write_csr(CSR_ADDR_PMPADDR1, ~pmpaddr1_before);  // attempt to rewrite -- must be refused
+            read_csr(CSR_ADDR_PMPADDR1, rdata);
+            check("PMP TOR-preceding-lock: pmpaddr1 refuses rewrite once region2 is L=1,A=TOR",
+                rdata, pmpaddr1_before);
+        end
+        // pmpaddr2 (region2's OWN address) is ALSO locked here -- but via
+        // the ordinary same-region L-bit rule (region2 itself has L=1),
+        // not the TOR-preceding rule this step is isolating. Both rules
+        // compose (a locked TOR region locks its own address AND the
+        // preceding region's), so this is the expected, not a gap.
+        begin
+            logic [(`WORD_SIZE-1):0] pmpaddr2_before;
+            read_csr(CSR_ADDR_PMPADDR2, pmpaddr2_before);
+            write_csr(CSR_ADDR_PMPADDR2, ~pmpaddr2_before);
+            read_csr(CSR_ADDR_PMPADDR2, rdata);
+            check("PMP TOR-preceding-lock: pmpaddr2 is ALSO locked, via the ordinary same-region rule",
+                rdata, pmpaddr2_before);
+        end
+        write_csr(CSR_ADDR_PMPADDR3, 64'hFFFF_FFFF_FFFF_FFFF);
+        read_csr(CSR_ADDR_PMPADDR3, rdata);
+        check("PMP TOR-preceding-lock: pmpaddr3 (unrelated region) stays writable",
+            rdata, PMPADDR_RESET_ALL_MATCH);
+
+        // 6. Top-10-bits-always-0 on every pmpaddr register, regardless
+        //    of what's written to them.
+        write_csr(CSR_ADDR_PMPADDR0, {`WORD_SIZE{1'b1}});
+        read_csr(CSR_ADDR_PMPADDR0, rdata);
+        check("PMP pmpaddr0 top 10 bits always read 0", rdata[63:54], 10'b0);
+
+        // 7. o_mstatus_mprv readback tracks a direct mstatus bit-17
+        //    write -- proves the new export, independent of any
+        //    consumer existing yet (core.sv wires this up in a later
+        //    milestone).
+        write_csr(CSR_ADDR_MSTATUS, (`WORD_SIZE'(1) << MPRV_BIT));
+        check("PMP: o_mstatus_mprv tracks a direct mstatus write", mstatus_mprv_w, 1'b1);
+        write_csr(CSR_ADDR_MSTATUS, `WORD_SIZE'(0));
+        check("PMP: o_mstatus_mprv clears when mstatus.MPRV is cleared", mstatus_mprv_w, 1'b0);
 
         $display("");
         $display("csr_file_tb: %0d passed, %0d failed", pass_count, fail_count);

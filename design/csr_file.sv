@@ -118,6 +118,10 @@
  *    o_mip/etc. above established for Milestone 6). o_dcsr already
  *    overlays the WARL-fixed xdebugver field, same "never let the raw
  *    register leak into a read path" requirement o_mip has for mip_q.
+ *  o_pmpcfg0/o_pmpaddr0-3/o_mstatus_mprv: control-plane exports for the
+ *    PMP-enforcement milestone in core.sv (unused/unconnected until
+ *    then, same deferred-consumer precedent every other control-plane
+ *    export group above already established).
  */
 module csr_file (
     input  logic i_clk,
@@ -170,7 +174,26 @@ module csr_file (
     output logic [(`WORD_SIZE - 1):0]     o_tdata1_0,
     output logic [(`WORD_SIZE - 1):0]     o_tdata1_1,
     output logic [(`WORD_SIZE - 1):0]     o_tdata2_0,
-    output logic [(`WORD_SIZE - 1):0]     o_tdata2_1
+    output logic [(`WORD_SIZE - 1):0]     o_tdata2_1,
+
+    /*
+     * PMP (Milestone 1 of the PMP+PLIC staged plan): the whole composed
+     * pmpcfg0 register (4 real regions packed into its low 4 bytes,
+     * bytes 4-7 always 0) and each region's own pmpaddr, same "export
+     * the whole register, let the consumer pick bits" precedent as
+     * o_dcsr/o_tdata1_0 above -- core.sv's own PMP enforcement (a later
+     * milestone, unconnected/unread until then) extracts L/A/X/W/R per
+     * region directly from o_pmpcfg0. o_mstatus_mprv is MSTATUS_MPRV_BIT
+     * (already-existing, previously-inert storage)'s first-ever real
+     * consumer -- needed by that same later milestone to compute the
+     * MPRV-aware effective privilege PMP's data-access check requires.
+     */
+    output logic [(`WORD_SIZE - 1):0]     o_pmpcfg0,
+    output logic [(`WORD_SIZE - 1):0]     o_pmpaddr0,
+    output logic [(`WORD_SIZE - 1):0]     o_pmpaddr1,
+    output logic [(`WORD_SIZE - 1):0]     o_pmpaddr2,
+    output logic [(`WORD_SIZE - 1):0]     o_pmpaddr3,
+    output logic                          o_mstatus_mprv
 `ifdef RISCV_FORMAL
     /*
      * mcause/scause: no real core.sv control logic needs these today (unlike
@@ -267,6 +290,24 @@ module csr_file (
     localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_TDATA2  = 12'h7A2;
     localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_TDATA3  = 12'h7A3;
     localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_TINFO   = 12'h7A4;
+
+    /*
+     * Physical Memory Protection CSRs (Milestone 1 of the PMP+PLIC staged
+     * plan). Real spec addresses -- 0x3A0-0x3EF's own bits[9:8]=2'b11
+     * already make every one of these M-mode-only for free via the
+     * existing csr_priv_violation magnitude check in design/core.sv, the
+     * same free privilege-gating precedent the Trigger Module CSRs above
+     * already rely on for their own, different address range. Only 4
+     * regions are implemented (pmpcfg0's low 4 bytes; pmpcfg2 and up,
+     * and pmpaddr4-63, are simply never added to this address map at
+     * all -- see the read mux's own default arm for why that's
+     * sufficient, not a gap).
+     */
+    localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_PMPCFG0  = 12'h3A0;
+    localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_PMPADDR0 = 12'h3B0;
+    localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_PMPADDR1 = 12'h3B1;
+    localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_PMPADDR2 = 12'h3B2;
+    localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_PMPADDR3 = 12'h3B3;
 
     /*
      * Read-only CSRs with no backing storage at all -- fixed values
@@ -799,6 +840,146 @@ module csr_file (
         tdata1_m_q1, 1'b0, tdata1_s_q1, tdata1_u_q1, tdata1_execute_q1, 1'b0, 1'b0
     };
 
+    /*
+     * PMP (Physical Memory Protection, Milestone 1 of the PMP+PLIC staged
+     * plan). Field layout verified against riscv/riscv-isa-manual's own
+     * src/priv/machine.adoc PMP chapter and its pmpcfg.edn/pmpaddr-rv64.edn
+     * bytefield diagram sources (not recalled from memory, matching this
+     * project's own established discipline -- see the Trigger Module's
+     * own mcontrol6 spec-fidelity note above for the precedent). Only 4
+     * of the 8 regions pmpcfg0 packs are implemented -- regions 4-7
+     * (pmpcfg0 bytes 4-7) have no storage and no write-reacting arm,
+     * always reading 0; pmpcfg2 and up, and pmpaddr4-63, are simply
+     * never added to the address map at all (see the read mux's own
+     * default arm).
+     *
+     * Storage is flat, individually-named per region (pmpNcfg_*_q,
+     * pmpaddrN_q) -- the same "_q0/_q1"-style duplication the Trigger
+     * Module above already established for "N parallel slots" in this
+     * file, scaled to 4 rather than 2.
+     *
+     * Granularity G=0 (finest, 4-byte): every one of the 54 implemented
+     * pmpaddr bits is a plain, unconditional, WARL-free software-
+     * controlled bit regardless of the region's own A encoding -- G>=1
+     * would require dynamically masking low address bits on READ
+     * depending on A, which this core deliberately avoids needing.
+     *
+     * Reset default is PERMISSIVE, not deny-by-default, despite most
+     * real silicon resetting to deny-all: the real spec requires that
+     * the instant ANY PMP region is implemented at all (even sitting at
+     * A=OFF), every S/U-mode access fails by default until M-mode
+     * software configures at least one permitting region. This
+     * project's own existing privilege-mode tests (core_priv_tb.sv,
+     * core_priv_toolchain_tb.sv, core_priv_u_ecall_tb.sv,
+     * core_interrupt_tb.sv's S-mode case, soc_interrupt_tb.sv/
+     * firmware/interrupt_test.s) all run real M->S->U transitions and
+     * then execute ordinary S/U-mode load/store/fetch code with no PMP
+     * setup at all -- a deny-by-default reset would break every one of
+     * them for reasons having nothing to do with PMP itself. The spec
+     * leaves PMP reset state entirely platform-defined (WARL, no
+     * mandated value), so a permissive reset is fully spec-legal.
+     * Region 0 resets to L=0, A=NAPOT, X=W=R=1, pmpaddr0=all-1s -- the
+     * standard "match everything representable" NAPOT encoding (an
+     * all-1s address under A=NAPOT is the maximum-size encoding per the
+     * spec's own pmpcfg-napot table). Regions 1-3 reset to A=OFF, fully
+     * inert, the same plain reset-to-0 convention every other CSR in
+     * this file uses.
+     */
+    logic pmp0cfg_l_q, pmp1cfg_l_q, pmp2cfg_l_q, pmp3cfg_l_q;
+    logic [1:0] pmp0cfg_a_q, pmp1cfg_a_q, pmp2cfg_a_q, pmp3cfg_a_q;
+    logic pmp0cfg_x_q, pmp1cfg_x_q, pmp2cfg_x_q, pmp3cfg_x_q;
+    logic pmp0cfg_w_q, pmp1cfg_w_q, pmp2cfg_w_q, pmp3cfg_w_q;
+    logic pmp0cfg_r_q, pmp1cfg_r_q, pmp2cfg_r_q, pmp3cfg_r_q;
+    logic [63:0] pmpaddr0_q, pmpaddr1_q, pmpaddr2_q, pmpaddr3_q;
+
+    // L-bit locking (norm:pmp_l_bit_write_protection): a locked region's
+    // own cfg+addr are write-protected until reset. A region set to TOR
+    // whose OWN L bit is set ALSO write-locks the PRECEDING region's
+    // pmpaddr (its own lower bound), even though that preceding
+    // region's cfg byte may itself be unlocked.
+    wire pmp0_locked = pmp0cfg_l_q;
+    wire pmp1_locked = pmp1cfg_l_q;
+    wire pmp2_locked = pmp2cfg_l_q;
+    wire pmp3_locked = pmp3cfg_l_q;
+    wire pmpaddr0_locked = pmp0_locked || (pmp1cfg_l_q && (pmp1cfg_a_q == 2'b01));
+    wire pmpaddr1_locked = pmp1_locked || (pmp2cfg_l_q && (pmp2cfg_a_q == 2'b01));
+    wire pmpaddr2_locked = pmp2_locked || (pmp3cfg_l_q && (pmp3cfg_a_q == 2'b01));
+    wire pmpaddr3_locked = pmp3_locked;   // no region 4 implemented to lock it
+
+    always_ff @(posedge i_clk) begin
+        if (i_rst) begin
+            pmp0cfg_l_q <= 1'b0; pmp0cfg_a_q <= 2'b11; pmp0cfg_x_q <= 1'b1;
+            pmp0cfg_w_q <= 1'b1; pmp0cfg_r_q <= 1'b1;
+            pmp1cfg_l_q <= 1'b0; pmp1cfg_a_q <= 2'b00; pmp1cfg_x_q <= 1'b0;
+            pmp1cfg_w_q <= 1'b0; pmp1cfg_r_q <= 1'b0;
+            pmp2cfg_l_q <= 1'b0; pmp2cfg_a_q <= 2'b00; pmp2cfg_x_q <= 1'b0;
+            pmp2cfg_w_q <= 1'b0; pmp2cfg_r_q <= 1'b0;
+            pmp3cfg_l_q <= 1'b0; pmp3cfg_a_q <= 2'b00; pmp3cfg_x_q <= 1'b0;
+            pmp3cfg_w_q <= 1'b0; pmp3cfg_r_q <= 1'b0;
+        end else if (i_csr_we && (i_csr_addr == CSR_ADDR_PMPCFG0)) begin
+            // R=0,W=1 is a reserved combination (norm:pmp_rwx_warl) -- W
+            // only takes effect if R is ALSO being set to 1 in this write.
+            if (!pmp0_locked) begin
+                pmp0cfg_l_q <= i_csr_wdata[7];
+                pmp0cfg_a_q <= i_csr_wdata[4:3];
+                pmp0cfg_x_q <= i_csr_wdata[2];
+                pmp0cfg_w_q <= i_csr_wdata[1] & i_csr_wdata[0];
+                pmp0cfg_r_q <= i_csr_wdata[0];
+            end
+            if (!pmp1_locked) begin
+                pmp1cfg_l_q <= i_csr_wdata[15];
+                pmp1cfg_a_q <= i_csr_wdata[12:11];
+                pmp1cfg_x_q <= i_csr_wdata[10];
+                pmp1cfg_w_q <= i_csr_wdata[9] & i_csr_wdata[8];
+                pmp1cfg_r_q <= i_csr_wdata[8];
+            end
+            if (!pmp2_locked) begin
+                pmp2cfg_l_q <= i_csr_wdata[23];
+                pmp2cfg_a_q <= i_csr_wdata[20:19];
+                pmp2cfg_x_q <= i_csr_wdata[18];
+                pmp2cfg_w_q <= i_csr_wdata[17] & i_csr_wdata[16];
+                pmp2cfg_r_q <= i_csr_wdata[16];
+            end
+            if (!pmp3_locked) begin
+                pmp3cfg_l_q <= i_csr_wdata[31];
+                pmp3cfg_a_q <= i_csr_wdata[28:27];
+                pmp3cfg_x_q <= i_csr_wdata[26];
+                pmp3cfg_w_q <= i_csr_wdata[25] & i_csr_wdata[24];
+                pmp3cfg_r_q <= i_csr_wdata[24];
+            end
+            // bytes 4-7 (regions 4-7): no write-reacting arm at all -- always 0.
+        end
+    end
+
+    always_ff @(posedge i_clk) begin
+        if (i_rst) pmpaddr0_q <= 64'h003F_FFFF_FFFF_FFFF;
+        else if (i_csr_we && (i_csr_addr == CSR_ADDR_PMPADDR0) && !pmpaddr0_locked)
+            pmpaddr0_q <= {10'b0, i_csr_wdata[53:0]};   // top 10 bits always 0 (spec-fixed reserved field)
+    end
+    always_ff @(posedge i_clk) begin
+        if (i_rst) pmpaddr1_q <= 64'b0;
+        else if (i_csr_we && (i_csr_addr == CSR_ADDR_PMPADDR1) && !pmpaddr1_locked)
+            pmpaddr1_q <= {10'b0, i_csr_wdata[53:0]};
+    end
+    always_ff @(posedge i_clk) begin
+        if (i_rst) pmpaddr2_q <= 64'b0;
+        else if (i_csr_we && (i_csr_addr == CSR_ADDR_PMPADDR2) && !pmpaddr2_locked)
+            pmpaddr2_q <= {10'b0, i_csr_wdata[53:0]};
+    end
+    always_ff @(posedge i_clk) begin
+        if (i_rst) pmpaddr3_q <= 64'b0;
+        else if (i_csr_we && (i_csr_addr == CSR_ADDR_PMPADDR3) && !pmpaddr3_locked)
+            pmpaddr3_q <= {10'b0, i_csr_wdata[53:0]};
+    end
+
+    // Composed pmpcfg0 byte per region, and the full 64-bit register --
+    // bytes 4-7 (regions 4-7) are hardcoded 0, never backed by storage.
+    wire [7:0] pmp0cfg_val = {pmp0cfg_l_q, 2'b0, pmp0cfg_a_q, pmp0cfg_x_q, pmp0cfg_w_q, pmp0cfg_r_q};
+    wire [7:0] pmp1cfg_val = {pmp1cfg_l_q, 2'b0, pmp1cfg_a_q, pmp1cfg_x_q, pmp1cfg_w_q, pmp1cfg_r_q};
+    wire [7:0] pmp2cfg_val = {pmp2cfg_l_q, 2'b0, pmp2cfg_a_q, pmp2cfg_x_q, pmp2cfg_w_q, pmp2cfg_r_q};
+    wire [7:0] pmp3cfg_val = {pmp3cfg_l_q, 2'b0, pmp3cfg_a_q, pmp3cfg_x_q, pmp3cfg_w_q, pmp3cfg_r_q};
+    wire [(`WORD_SIZE - 1):0] pmpcfg0_val = {32'b0, pmp3cfg_val, pmp2cfg_val, pmp1cfg_val, pmp0cfg_val};
+
     /* mip_effective: MTIP (bit 7) is a live combinational function of
      * i_mtip, not stored state like every other mip bit. Every mip/sip
      * read arm and o_mip below must go through this wire -- raw mip_q
@@ -825,6 +1006,12 @@ module csr_file (
     assign o_tdata1_1    = tdata1_val1;
     assign o_tdata2_0    = tdata2_q0;
     assign o_tdata2_1    = tdata2_q1;
+    assign o_pmpcfg0      = pmpcfg0_val;
+    assign o_pmpaddr0     = pmpaddr0_q;
+    assign o_pmpaddr1     = pmpaddr1_q;
+    assign o_pmpaddr2     = pmpaddr2_q;
+    assign o_pmpaddr3     = pmpaddr3_q;
+    assign o_mstatus_mprv = mstatus_q[MSTATUS_MPRV_BIT];
 `ifdef RISCV_FORMAL
     assign o_mcause      = mcause_q;
     assign o_scause      = scause_q;
@@ -884,6 +1071,13 @@ module csr_file (
             CSR_ADDR_TDATA2:  o_csr_rdata = tselect_q ? tdata2_q1 : tdata2_q0;
             CSR_ADDR_TDATA3:  o_csr_rdata = `WORD_SIZE'(0);
             CSR_ADDR_TINFO:   o_csr_rdata = TINFO_VALUE;
+
+            /* PMP CSRs (Milestone 1 of the PMP+PLIC staged plan). */
+            CSR_ADDR_PMPCFG0:  o_csr_rdata = pmpcfg0_val;
+            CSR_ADDR_PMPADDR0: o_csr_rdata = pmpaddr0_q;
+            CSR_ADDR_PMPADDR1: o_csr_rdata = pmpaddr1_q;
+            CSR_ADDR_PMPADDR2: o_csr_rdata = pmpaddr2_q;
+            CSR_ADDR_PMPADDR3: o_csr_rdata = pmpaddr3_q;
 
             default:            o_csr_rdata = `WORD_SIZE'(0);
         endcase
