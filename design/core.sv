@@ -176,6 +176,13 @@
  * ANSI default (= 1'b0) so the 16+ testbenches/harnesses that
  * instantiate core directly without driving this port stay compile-
  * and lint-clean (same precedent as csr_file.sv's own i_mtip default).
+ *
+ * i_meip/i_seip: PMP+PLIC plan Milestone 3's generalization of i_mtip's
+ * exact same pattern -- external-interrupt-pending levels from a future
+ * PLIC (design/plic.sv's o_meip/o_seip, not yet instantiated in soc.sv
+ * until that plan's own Milestone 6), spliced into mip bits 11/9 inside
+ * csr_file0, consumed by the same Interrupts section's now-generalized
+ * MEI>MTI>SEI priority mux. Same ANSI-defaulted-0 reasoning as i_mtip.
  */
 module core (
     input logic clk,
@@ -194,6 +201,8 @@ module core (
     output logic        wb_lock_o,
     output logic        icache_flush_o,
     input  logic         i_mtip = 1'b0,
+    input  logic         i_meip = 1'b0,
+    input  logic         i_seip = 1'b0,
 
     /*
      * Debug Mode halt/resume (Milestone 4 of the EBREAK/JTAG staged
@@ -433,9 +442,16 @@ module core (
      * S_FETCH arm now needs to read it, but wb_master_drive is textually
      * BEFORE trap_vector's own real assign (down near Next PC) -- same
      * "declare early, drive late" split trap_val/amo_rdata_q already use.
+     *
+     * int_cause: same reason as interrupt_taken/interrupt_to_s above --
+     * csr_file0's own i_trap_cause connection needs the generalized
+     * MEI/MTI/SEI priority mux (PMP+PLIC plan Milestone 3), but its real
+     * assign also lives in the Interrupts section after csr_file0's own
+     * mip_w/mie_w/mideleg_w outputs exist.
      */
     logic interrupt_taken;
     logic interrupt_to_s;
+    logic [3:0] int_cause;
     logic [(`WORD_SIZE - 1):0] trap_vector;
     /*
      * ebreak_to_debug/in_debug_mode/debug_ebreak_entry/
@@ -2231,8 +2247,10 @@ module core (
 
         .i_current_priv(current_priv),
         .i_mtip(i_mtip),
+        .i_meip(i_meip),
+        .i_seip(i_seip),
         .i_trap_taken(trap_taken || interrupt_taken),
-        .i_trap_cause(trap_taken ? trap_cause : {1'b1, 63'd7}),
+        .i_trap_cause(trap_taken ? trap_cause : {1'b1, 59'b0, int_cause}),
         .i_trap_val(trap_taken ? trap_val : `WORD_SIZE'(0)),
         .i_trap_pc(pc),
         .i_trap_to_s(trap_taken ? trap_to_s : interrupt_to_s),
@@ -2300,7 +2318,8 @@ module core (
     assign o_dm_csr_rdata = csr_rdata;
 
     /* --------------------------------------------------------------- *
-     * Interrupts (CLINT machine-timer, Milestone 6)
+     * Interrupts (CLINT machine-timer, Milestone 6; generalized to
+     * MEI/SEI by the PMP+PLIC plan's own Milestone 3)
      * --------------------------------------------------------------- */
 
     // MTIE & MTIP (bit 7). mti_to_s reads mideleg_w[7] -- real, unmasked,
@@ -2311,7 +2330,44 @@ module core (
     wire mti_enabled = mti_to_s
         ? ((current_priv == PRIV_U) ? 1'b1 : (current_priv == PRIV_S) ? mstatus_sie_w : 1'b0)
         : ((current_priv != PRIV_M) ? 1'b1 : mstatus_mie_w);
-    wire int_pending_and_enabled = mti_pending && mti_enabled;
+
+    // MEIE & MEIP (bit 11), SEIE & SEIP (bit 9) -- same shape as MTI
+    // above, own mideleg bit each. mei_to_s is expected to stay 0 in
+    // practice (a real PLIC routes S-mode external interrupts via its
+    // own independent SEI hart context, not via mideleg-delegated MEI --
+    // see the PMP+PLIC plan's own cross-cutting decision #6), but kept
+    // generic for consistency with every other delegatable cause this
+    // core already implements this way. sei_to_s, by contrast, IS
+    // expected to be genuinely exercised once a real PLIC exists
+    // (mideleg[9]=1 lets Linux take its own device interrupts directly
+    // without trapping through M-mode first).
+    wire mei_pending = mie_w[11] & mip_w[11];
+    wire mei_to_s    = mideleg_w[11];
+    wire mei_enabled = mei_to_s
+        ? ((current_priv == PRIV_U) ? 1'b1 : (current_priv == PRIV_S) ? mstatus_sie_w : 1'b0)
+        : ((current_priv != PRIV_M) ? 1'b1 : mstatus_mie_w);
+
+    wire sei_pending = mie_w[9] & mip_w[9];
+    wire sei_to_s    = mideleg_w[9];
+    wire sei_enabled = sei_to_s
+        ? ((current_priv == PRIV_U) ? 1'b1 : (current_priv == PRIV_S) ? mstatus_sie_w : 1'b0)
+        : ((current_priv != PRIV_M) ? 1'b1 : mstatus_mie_w);
+
+    // Real relative priority order for the subset this core implements:
+    // MEI > MTI > SEI (the full spec order is MEI>MSI>MTI>SEI>SSI>STI>
+    // LCOFI; MSI/SSI/STI/LCOFI are all deliberately out of scope -- see
+    // the PMP+PLIC plan's own cross-cutting decision #7).
+    wire int_pending_and_enabled = (mei_pending && mei_enabled)
+                                 || (mti_pending && mti_enabled)
+                                 || (sei_pending && sei_enabled);
+    assign int_cause = (mei_pending && mei_enabled) ? 4'd11
+                      : (mti_pending && mti_enabled) ? 4'd7
+                      : (sei_pending && sei_enabled) ? 4'd9
+                                                      : 4'd0;
+    wire int_to_s        = (mei_pending && mei_enabled) ? mei_to_s
+                          : (mti_pending && mti_enabled) ? mti_to_s
+                          : (sei_pending && sei_enabled) ? sei_to_s
+                                                          : 1'b0;
 
     logic commit_now_q;
     always_ff @(posedge clk) begin
@@ -2337,7 +2393,7 @@ module core (
     // in_debug_mode itself.
     assign interrupt_taken = commit_now_q && int_pending_and_enabled
                            && !in_debug_mode && !(i_debug_halt_req || stepping_q);
-    assign interrupt_to_s  = interrupt_taken && mti_to_s;
+    assign interrupt_to_s  = interrupt_taken && int_to_s;
 
     logic fetch_redirect_q;
     always_ff @(posedge clk) begin

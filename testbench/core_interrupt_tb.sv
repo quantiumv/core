@@ -17,8 +17,10 @@
  * own header for why a real port was added instead of a hierarchical
  * force/release).
  *
- * Nine independent DUT instances, one per required case -- NOT nine
- * phases of one continuous program. Every case needs its own precise
+ * Eleven independent DUT instances (nine from the original CLINT
+ * machine-timer milestone, plus Cases 8-9 added by the PMP+PLIC plan's
+ * own Milestone 3 for MEI/priority coverage), one per required case --
+ * NOT eleven phases of one continuous program. Every case needs its own precise
  * relationship between "when mie.MTIE/mstatus.MIE become enabled" and
  * "when i_mtip actually asserts", and since i_mtip is driven directly by
  * this testbench (not by any instruction the DUT executes), the two are
@@ -388,6 +390,51 @@ module core_interrupt_tb;
         end
     end
 
+    /* ----------------------------------------------------------------- *
+     * Case 8: MEI alone (PMP+PLIC plan Milestone 3's own new
+     * mei_pending/mei_enabled path) -- mie bit 11 set, i_meip asserted on
+     * TRIGGER's own commit edge (i_mtip/i_seip left at their default 0
+     * throughout), same shape as Case 5's M-mode routing check. Confirms
+     * mcause reads the real MEI encoding (cause 11), not the MTI one
+     * (cause 7) this whole section previously hardcoded as its only
+     * possible interrupt cause.
+     * ----------------------------------------------------------------- */
+    logic i_meip_mei_alone = 1'b0;
+    core_wb4_sram_harness #(.NUM_WORDS(64)) dut_mei_alone (.clk(clk), .rst(rst), .i_meip(i_meip_mei_alone));
+    logic mei_alone_halted = 1'b0;
+    logic [63:0] mei_alone_x10_snap;
+    always @(posedge clk) if (!mei_alone_halted && dut_mei_alone.core0.commit_now && dut_mei_alone.core0.pc == 64'h84) begin
+        mei_alone_halted <= 1'b1;
+        mei_alone_x10_snap <= dut_mei_alone.core0.regfile0.gp_registers[10];
+    end
+    always @(posedge clk) begin
+        if (dut_mei_alone.core0.commit_now && dut_mei_alone.core0.pc == 64'h1C) i_meip_mei_alone <= 1'b1;
+    end
+
+    /* ----------------------------------------------------------------- *
+     * Case 9: MEI and MTI both pending+enabled simultaneously (i_meip AND
+     * i_mtip both asserted on the SAME trigger edge, mie bits 7 and 11
+     * both set) -- the direct proof of this milestone's real relative
+     * priority order (MEI > MTI > SEI): mcause must read the MEI encoding
+     * (cause 11), never the MTI one (cause 7), even though both are
+     * simultaneously eligible.
+     * ----------------------------------------------------------------- */
+    logic i_meip_priority = 1'b0;
+    logic i_mtip_priority = 1'b0;
+    core_wb4_sram_harness #(.NUM_WORDS(64)) dut_priority (.clk(clk), .rst(rst), .i_meip(i_meip_priority), .i_mtip(i_mtip_priority));
+    logic priority_halted = 1'b0;
+    logic [63:0] priority_x10_snap;
+    always @(posedge clk) if (!priority_halted && dut_priority.core0.commit_now && dut_priority.core0.pc == 64'h84) begin
+        priority_halted <= 1'b1;
+        priority_x10_snap <= dut_priority.core0.regfile0.gp_registers[10];
+    end
+    always @(posedge clk) begin
+        if (dut_priority.core0.commit_now && dut_priority.core0.pc == 64'h20) begin
+            i_meip_priority <= 1'b1;
+            i_mtip_priority <= 1'b1;
+        end
+    end
+
     initial begin
         #1; // run after every wb4_sram sub-instance's own time-0 crt0.hex init
 
@@ -563,6 +610,44 @@ module core_interrupt_tb;
         dut_halted.sram0.memory[17] = {32'h0,
                                          {11'b0, 1'b1, 13'b0, `OPC_SYSTEM}};                            // ebreak (0x88, handler completion)
 
+        /* ---- Case 8: MEI alone -- mie bit 11 (2048) only. 2048 exceeds
+         * ADDI's 12-bit signed range (max +2047), same "li 1, slli 11"
+         * technique Case 5 already uses for mstatus.MPP=S's own 2048. */
+        dut_mei_alone.sram0.memory[0] = {encode_csr(`CSR_MTVEC, 5'd28, `FUNCT3_CSRRW, 5'd0, `OPC_SYSTEM),  // 0x04
+                                           encode_i(32'sd128, 5'd0, 3'b000, 5'd28, `OPC_OP_IMM)};            // 0x00
+        dut_mei_alone.sram0.memory[1] = {encode_shift64(6'b000000, 6'd11, 5'd28, 3'b001, 5'd28, `OPC_OP_IMM), // slli x28,x28,11 -> 2048 (0x0C)
+                                           encode_i(32'sd1, 5'd0, 3'b000, 5'd28, `OPC_OP_IMM)};              // addi x28,x0,1 (0x08)
+        dut_mei_alone.sram0.memory[2] = {encode_i(32'sd8, 5'd0, 3'b000, 5'd28, `OPC_OP_IMM),                // addi x28,x0,8 (0x14)
+                                           encode_csr(`CSR_MIE, 5'd28, `FUNCT3_CSRRW, 5'd0, `OPC_SYSTEM)};   // csrw mie,x28 = 2048 (0x10)
+        dut_mei_alone.sram0.memory[3] = {encode_i(32'sd555, 5'd0, 3'b000, 5'd1, `OPC_OP_IMM),               // addi x1,x0,555 (TRIGGER, 0x1C)
+                                           encode_csr(`CSR_MSTATUS, 5'd28, `FUNCT3_CSRRW, 5'd0, `OPC_SYSTEM)}; // csrw mstatus,x28 = 8 (0x18)
+        dut_mei_alone.sram0.memory[4] = {{11'b0, 1'b1, 13'b0, `OPC_SYSTEM},                                 // ebreak, safety net (0x24)
+                                           encode_i(32'sd999, 5'd0, 3'b000, 5'd2, `OPC_OP_IMM)};             // addi x2,x0,999 (poison, 0x20)
+        dut_mei_alone.sram0.memory[16] = {encode_i(32'sd1, 5'd0, 3'b000, 5'd11, `OPC_OP_IMM),                // addi x11,x0,1 (0x84)
+                                            encode_csr(`CSR_MCAUSE, 5'd0, `FUNCT3_CSRRS, 5'd10, `OPC_SYSTEM)}; // csrr x10,mcause (0x80)
+        dut_mei_alone.sram0.memory[17] = {32'h0,
+                                            {11'b0, 1'b1, 13'b0, `OPC_SYSTEM}};                              // ebreak (0x88)
+
+        /* ---- Case 9: MEI+MTI both pending -- mie bits 7 and 11 (2176).
+         * 2176 = 2048 + 128, built as "li 1, slli 11, addi +128" (the
+         * final +128 fits ADDI's own 12-bit signed range directly). ---- */
+        dut_priority.sram0.memory[0] = {encode_csr(`CSR_MTVEC, 5'd28, `FUNCT3_CSRRW, 5'd0, `OPC_SYSTEM),    // 0x04
+                                          encode_i(32'sd128, 5'd0, 3'b000, 5'd28, `OPC_OP_IMM)};              // 0x00
+        dut_priority.sram0.memory[1] = {encode_shift64(6'b000000, 6'd11, 5'd28, 3'b001, 5'd28, `OPC_OP_IMM), // slli x28,x28,11 -> 2048 (0x0C)
+                                          encode_i(32'sd1, 5'd0, 3'b000, 5'd28, `OPC_OP_IMM)};                // addi x28,x0,1 (0x08)
+        dut_priority.sram0.memory[2] = {encode_csr(`CSR_MIE, 5'd28, `FUNCT3_CSRRW, 5'd0, `OPC_SYSTEM),       // csrw mie,x28 = 2176 (0x14)
+                                          encode_i(32'sd128, 5'd28, 3'b000, 5'd28, `OPC_OP_IMM)};             // addi x28,x28,128 -> 2176 (0x10)
+        dut_priority.sram0.memory[3] = {encode_csr(`CSR_MSTATUS, 5'd28, `FUNCT3_CSRRW, 5'd0, `OPC_SYSTEM),   // csrw mstatus,x28 = 8 (0x1C)
+                                          encode_i(32'sd8, 5'd0, 3'b000, 5'd28, `OPC_OP_IMM)};                // addi x28,x0,8 (0x18)
+        dut_priority.sram0.memory[4] = {encode_i(32'sd999, 5'd0, 3'b000, 5'd2, `OPC_OP_IMM),                 // addi x2,x0,999 (poison, 0x24)
+                                          encode_i(32'sd555, 5'd0, 3'b000, 5'd1, `OPC_OP_IMM)};               // addi x1,x0,555 (TRIGGER, 0x20)
+        dut_priority.sram0.memory[5] = {32'h0,
+                                          {11'b0, 1'b1, 13'b0, `OPC_SYSTEM}};                                 // ebreak, safety net (0x28)
+        dut_priority.sram0.memory[16] = {encode_i(32'sd1, 5'd0, 3'b000, 5'd11, `OPC_OP_IMM),                 // addi x11,x0,1 (0x84)
+                                           encode_csr(`CSR_MCAUSE, 5'd0, `FUNCT3_CSRRS, 5'd10, `OPC_SYSTEM)}; // csrr x10,mcause (0x80)
+        dut_priority.sram0.memory[17] = {32'h0,
+                                           {11'b0, 1'b1, 13'b0, `OPC_SYSTEM}};                                // ebreak (0x88)
+
         @(posedge clk); #1;
         rst = 0;
 
@@ -579,6 +664,8 @@ module core_interrupt_tb;
                 wait (smode_deleg_x15_done === 1'b1); // strictly later than smode_deleg_halted (0xCC vs 0xC8) --
                                                         // waiting on it also guarantees the earlier snapshots landed
                 wait (case6_done === 1'b1);
+                wait (mei_alone_halted === 1'b1);
+                wait (priority_halted === 1'b1);
             end
             begin : timeout
                 repeat (TIMEOUT_CYCLES) @(posedge clk);
@@ -673,6 +760,22 @@ module core_interrupt_tb;
         check("case6: mepc == EBREAK's own address (0x18)", case6_x10_snap, 64'h18);
         check("case6: real forward progress -- handler ran to its own completion", {63'b0, case6_done}, 64'd1);
         check("case6: pending interrupt did not spuriously fire racing EBREAK's own trap-entry", {63'b0, bad_interrupt_racing_ebreak}, 64'd0);
+
+        /* ---- Case 8 checks (MEI alone, PMP+PLIC plan Milestone 3) ---- */
+        check("case8: TRIGGER genuinely ran (x1==555)", dut_mei_alone.core0.regfile0.gp_registers[1], 64'd555);
+        check("case8: poison marker never ran (x2==0)", dut_mei_alone.core0.regfile0.gp_registers[2], 64'd0);
+        check("case8: mcause == standard machine-external-interrupt encoding (cause 11)",
+              mei_alone_x10_snap, 64'h8000_0000_0000_000B);
+        check("case8: handler ran (x11==1)", dut_mei_alone.core0.regfile0.gp_registers[11], 64'd1);
+        check("case8: EBREAK trap fired", {63'b0, mei_alone_halted}, 64'd1);
+
+        /* ---- Case 9 checks (MEI+MTI both pending -- MEI must win) ---- */
+        check("case9: TRIGGER genuinely ran (x1==555)", dut_priority.core0.regfile0.gp_registers[1], 64'd555);
+        check("case9: poison marker never ran (x2==0)", dut_priority.core0.regfile0.gp_registers[2], 64'd0);
+        check("case9: mcause == MEI (cause 11), NOT MTI (cause 7), despite both pending",
+              priority_x10_snap, 64'h8000_0000_0000_000B);
+        check("case9: handler ran (x11==1)", dut_priority.core0.regfile0.gp_registers[11], 64'd1);
+        check("case9: EBREAK trap fired", {63'b0, priority_halted}, 64'd1);
 
         $display("");
         $display("core_interrupt_tb: %0d passed, %0d failed", pass_count, fail_count);

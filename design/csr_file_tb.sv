@@ -39,6 +39,7 @@ module csr_file_tb;
 
     logic [1:0]                    current_priv;
     logic                          mtip;
+    logic                          meip, seip;  // PMP+PLIC plan Milestone 3
     logic                          trap_taken;
     logic [(`WORD_SIZE - 1):0]     trap_cause;
     logic [(`WORD_SIZE - 1):0]     trap_val;
@@ -80,6 +81,8 @@ module csr_file_tb;
 
         .i_current_priv(current_priv),
         .i_mtip(mtip),
+        .i_meip(meip),
+        .i_seip(seip),
         .i_trap_taken(trap_taken),
         .i_trap_cause(trap_cause),
         .i_trap_val(trap_val),
@@ -259,7 +262,7 @@ module csr_file_tb;
 
     initial begin
         csr_addr = 0; csr_we = 0; csr_wdata = 0; instr_retired = 0;
-        current_priv = 0; mtip = 0; trap_taken = 0; trap_cause = 0; trap_val = 0; trap_pc = 0; trap_to_s = 0;
+        current_priv = 0; mtip = 0; meip = 0; seip = 0; trap_taken = 0; trap_cause = 0; trap_val = 0; trap_pc = 0; trap_to_s = 0;
         mret_taken = 0; sret_taken = 0;
         debug_entry = 0; debug_cause = 0;
 
@@ -470,15 +473,18 @@ module csr_file_tb;
         check("o_mie output matches mie_q after sie-masked write", mie_w,
               {`WORD_SIZE{1'b1}} & ~((`WORD_SIZE'(1) << 1) | (`WORD_SIZE'(1) << 5)));
         /* sip: identical shape, spot-checked once (mip/mie share the same masked-write logic).
-         * Bit 7 (MTIP) is excluded from the expected pattern: Milestone 5's write-masking
-         * means bit 7 never sticks from a software write to mip/sip regardless of value
-         * written, and mip_effective's read-mux override means it reads back i_mtip's
-         * current value (still 0 at this point in the sequence) rather than 1 or X. */
+         * Bits 7/9/11 (MTIP/SEIP/MEIP) are excluded from the expected pattern:
+         * write-masking means these bits never stick from a software write to
+         * mip/sip regardless of value written, and mip_effective's read-mux
+         * override means each reads back its own external i_mtip/i_seip/i_meip
+         * current value (all still 0 at this point in the sequence) rather
+         * than 1 or X. */
         write_csr(CSR_ADDR_MIP, {`WORD_SIZE{1'b1}});
         write_csr(CSR_ADDR_SIP, `WORD_SIZE'(0));
         read_csr(CSR_ADDR_MIP, rdata);
-        check("sip write to 0: only mideleg-delegated bits cleared in mip, rest stay 1 (bit 7 excluded -- see comment)",
-              rdata, ({`WORD_SIZE{1'b1}} & ~((`WORD_SIZE'(1) << 1) | (`WORD_SIZE'(1) << 5))) & ~(`WORD_SIZE'(1) << 7));
+        check("sip write to 0: only mideleg-delegated bits cleared in mip, rest stay 1 (bits 7/9/11 excluded -- see comment)",
+              rdata, ({`WORD_SIZE{1'b1}} & ~((`WORD_SIZE'(1) << 1) | (`WORD_SIZE'(1) << 5)))
+                     & ~((`WORD_SIZE'(1) << 7) | (`WORD_SIZE'(1) << 9) | (`WORD_SIZE'(1) << 11)));
         write_csr(CSR_ADDR_MIDELEG, `WORD_SIZE'(0));  // clean up for later sections
 
         /*
@@ -714,12 +720,28 @@ module csr_file_tb;
         write_csr(CSR_ADDR_MIP, {`WORD_SIZE{1'b1}});
         check("direct mip write-arm masks bit 7 out of mip_q storage itself",
               dut.mip_q[7], 1'b0);
+        // Bits 9/11 (SEIP/MEIP, PMP+PLIC plan Milestone 3) share the SAME
+        // single ~64'hA80 mask expression as bit 7 above -- checked here
+        // too, not just assumed, since a bug narrowing that mask (e.g.
+        // forgetting one bit) would be invisible to every black-box mip/
+        // sip read (mip_effective's read-side override hides mip_q's raw
+        // storage on every read path regardless of what's actually
+        // masked), making this hierarchical peek the ONLY place such a
+        // bug could ever be caught.
+        check("direct mip write-arm ALSO masks bit 9 (SEIP) out of mip_q storage",
+              dut.mip_q[9], 1'b0);
+        check("direct mip write-arm ALSO masks bit 11 (MEIP) out of mip_q storage",
+              dut.mip_q[11], 1'b0);
 
         write_csr(CSR_ADDR_MIP, `WORD_SIZE'(0));
         write_csr(CSR_ADDR_MIDELEG, `WORD_SIZE'(1) << 7);
         write_csr(CSR_ADDR_SIP, {`WORD_SIZE{1'b1}});
         check("sip-derived write-arm masks bit 7 out of mip_q storage itself",
               dut.mip_q[7], 1'b0);
+        check("sip-derived write-arm ALSO masks bit 9 (SEIP) out of mip_q storage",
+              dut.mip_q[9], 1'b0);
+        check("sip-derived write-arm ALSO masks bit 11 (MEIP) out of mip_q storage",
+              dut.mip_q[11], 1'b0);
         write_csr(CSR_ADDR_MIDELEG, `WORD_SIZE'(0));  // clean up
 
         /*
@@ -1045,6 +1067,63 @@ module csr_file_tb;
         check("PMP: o_mstatus_mprv tracks a direct mstatus write", mstatus_mprv_w, 1'b1);
         write_csr(CSR_ADDR_MSTATUS, `WORD_SIZE'(0));
         check("PMP: o_mstatus_mprv clears when mstatus.MPRV is cleared", mstatus_mprv_w, 1'b0);
+
+        /*
+         * ===================================================================
+         * PMP+PLIC plan Milestone 3: mip.MEIP (bit 11)/mip.SEIP (bit 9) are
+         * live combinational functions of i_meip/i_seip, generalizing bit
+         * 7's own Milestone 5 treatment above -- same live-no-clock-edge
+         * tracking, same sip-delegation-gating (mideleg, not the external
+         * signal alone, controls sip visibility), same "a direct all-1s
+         * software write never sticks" property. No separate dut.mip_q
+         * hierarchical peek down here -- section 20 above was EXTENDED to
+         * check bits 9/11 alongside its existing bit-7 check (same single
+         * `~64'hA80` mask expression covers all three bits at once, and a
+         * bug narrowing that mask would otherwise be invisible to every
+         * black-box mip/sip read here, since mip_effective's read-side
+         * override hides mip_q's raw storage regardless).
+         * ===================================================================
+         */
+        write_csr(CSR_ADDR_MIDELEG, `WORD_SIZE'(0));
+        write_csr(CSR_ADDR_MIP, `WORD_SIZE'(0));
+
+        meip = 0; seip = 0;
+        read_csr(CSR_ADDR_MIP, rdata);
+        check("mip bits 9/11 read 0 with i_seip=i_meip=0", `WORD_SIZE'({rdata[11], rdata[9]}), `WORD_SIZE'(0));
+
+        meip = 1; seip = 1;  // direct signal change -- no write_csr, no clock edge
+        read_csr(CSR_ADDR_MIP, rdata);
+        check("mip bit 11 reads 1 immediately when i_meip=1, no clock edge involved",
+              `WORD_SIZE'(rdata[11]), `WORD_SIZE'(1));
+        check("mip bit 9 reads 1 immediately when i_seip=1, no clock edge involved",
+              `WORD_SIZE'(rdata[9]), `WORD_SIZE'(1));
+        check("o_mip control-plane output live-tracks i_meip/i_seip the same as CSR_ADDR_MIP",
+              `WORD_SIZE'({mip_w[11], mip_w[9]}), `WORD_SIZE'(2'b11));
+
+        /* sip view: with mideleg bits 9/11 still 0, sip must NOT show
+         * either bit even though both external signals are asserted. */
+        read_csr(CSR_ADDR_SIP, rdata);
+        check("sip bits 9/11 stay 0 when mideleg doesn't delegate them, i_meip=i_seip=1",
+              `WORD_SIZE'({rdata[11], rdata[9]}), `WORD_SIZE'(0));
+
+        /* Delegate bit 9 (SEI) only -- sip's view must show bit 9 but NOT
+         * bit 11, proving the two bits are independently gated by their
+         * own mideleg bit, not a shared/aliased one. */
+        write_csr(CSR_ADDR_MIDELEG, `WORD_SIZE'(1) << 9);
+        read_csr(CSR_ADDR_SIP, rdata);
+        check("sip bit 9 shows through once mideleg[9] delegates it", `WORD_SIZE'(rdata[9]), `WORD_SIZE'(1));
+        check("sip bit 11 still hidden -- mideleg[11] not set", `WORD_SIZE'(rdata[11]), `WORD_SIZE'(0));
+
+        meip = 0; seip = 0;
+        write_csr(CSR_ADDR_MIDELEG, `WORD_SIZE'(0));  // clean up
+
+        /* A direct all-1s software write to mip must not make bits 9/11
+         * stick -- same live-override reasoning as bit 7's own section 19. */
+        write_csr(CSR_ADDR_MIP, {`WORD_SIZE{1'b1}});
+        read_csr(CSR_ADDR_MIP, rdata);
+        check("mip all-1s software write: bits 9/11 read back as i_seip/i_meip (0), not 1",
+              `WORD_SIZE'({rdata[11], rdata[9]}), `WORD_SIZE'(0));
+        write_csr(CSR_ADDR_MIP, `WORD_SIZE'(0));  // clean up
 
         $display("");
         $display("csr_file_tb: %0d passed, %0d failed", pass_count, fail_count);

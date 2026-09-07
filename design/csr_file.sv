@@ -76,6 +76,13 @@
  *    csr_file_priv_random_tb.sv, which don't drive it either) sees
  *    inert behavior -- an unconnected port floating to X would
  *    otherwise contaminate every mip/sip read on bit 7.
+ *  i_meip/i_seip: PMP+PLIC plan Milestone 3's own generalization of
+ *    i_mtip's exact same pattern -- continuously-valid external status
+ *    levels, sourced from a future PLIC's o_meip/o_seip once core.sv
+ *    wires them up (Milestone 6 of that plan). Spliced into mip bits 11
+ *    and 9 respectively (see mip_effective below); same ANSI-defaulted
+ *    1'b0, same reason (an unconnected port floating to X would
+ *    contaminate mip/sip reads on those bits).
  *  i_trap_taken/i_trap_cause/i_trap_val/i_trap_pc/i_trap_to_s: the
  *    trap-entry side channel -- independent of i_csr_we/i_csr_addr,
  *    same "core.sv computes WHY, this module just honors it" division
@@ -134,6 +141,8 @@ module csr_file (
 
     input  logic [1:0]                    i_current_priv,
     input  logic                          i_mtip = 1'b0,
+    input  logic                          i_meip = 1'b0,
+    input  logic                          i_seip = 1'b0,
 
     input  logic                          i_trap_taken,
     input  logic [(`WORD_SIZE - 1):0]     i_trap_cause,
@@ -485,9 +494,9 @@ module csr_file (
         if (i_rst) begin
             mip_q <= '0;
         end else if (i_csr_we && (i_csr_addr == CSR_ADDR_MIP)) begin
-            mip_q <= i_csr_wdata & ~64'h80;
+            mip_q <= i_csr_wdata & ~64'hA80;
         end else if (i_csr_we && (i_csr_addr == CSR_ADDR_SIP)) begin
-            mip_q <= ((mip_q & ~mideleg_q) | (i_csr_wdata & mideleg_q)) & ~64'h80;
+            mip_q <= ((mip_q & ~mideleg_q) | (i_csr_wdata & mideleg_q)) & ~64'hA80;
         end
     end
 
@@ -980,11 +989,13 @@ module csr_file (
     wire [7:0] pmp3cfg_val = {pmp3cfg_l_q, 2'b0, pmp3cfg_a_q, pmp3cfg_x_q, pmp3cfg_w_q, pmp3cfg_r_q};
     wire [(`WORD_SIZE - 1):0] pmpcfg0_val = {32'b0, pmp3cfg_val, pmp2cfg_val, pmp1cfg_val, pmp0cfg_val};
 
-    /* mip_effective: MTIP (bit 7) is a live combinational function of
-     * i_mtip, not stored state like every other mip bit. Every mip/sip
-     * read arm and o_mip below must go through this wire -- raw mip_q
-     * must never leak into a read path again. */
-    wire [(`WORD_SIZE - 1):0] mip_effective = {mip_q[63:8], i_mtip, mip_q[6:0]};
+    /* mip_effective: MTIP (bit 7), SEIP (bit 9), and MEIP (bit 11) are
+     * live combinational functions of i_mtip/i_seip/i_meip, not stored
+     * state like every other mip bit. Every mip/sip read arm and o_mip
+     * below must go through this wire -- raw mip_q must never leak into
+     * a read path again. */
+    wire [(`WORD_SIZE - 1):0] mip_effective =
+        {mip_q[63:12], i_meip, mip_q[10], i_seip, mip_q[8], i_mtip, mip_q[6:0]};
 
     /* Control-plane outputs -- see the port-list comment above for why these exist. */
     assign o_mtvec       = mtvec_q;
