@@ -397,6 +397,24 @@ module core (
     logic mem_load_misaligned, mem_store_misaligned;
     logic mem_load_access_fault, mem_store_access_fault;
     /*
+     * PMP (PMP+PLIC staged plan, Milestone 2): forward-declared for the
+     * same reason as mem_load_misaligned/mem_load_access_fault above --
+     * trap_taken's own assign and the state-transition always_ff's
+     * S_FETCH arm need pmp_fetchlo_fault/pmp_fetchhi_fault, but their
+     * real assigns live in the new PMP section much further down (right
+     * after fetch_paddr/fetch_paddr_hi exist, which is itself textually
+     * after this point). pmp_fetchhi_fault is deliberately a SEPARATE
+     * signal from pmp_fetchlo_fault, not a single combined
+     * "either half denied" wire -- fetch_hi_needed (whether a second
+     * dword is even needed) depends on wb_dat_i, the FIRST fetch's own
+     * response, so the high half's own permission genuinely cannot be
+     * evaluated until after the low half's bus request has already gone
+     * out; only the low half's own check can gate whether that first
+     * request is issued at all.
+     */
+    logic pmp_fetchlo_fault, pmp_fetchhi_fault;
+    logic pmp_load_fault, pmp_store_fault;
+    /*
      * trap_taken: forward-declared here (assigned near exc_code far
      * below) purely so the reservation register block above its own
      * declaration site can gate on it -- same forward-reference pattern
@@ -572,9 +590,15 @@ module core (
      * split as is_load/is_store) suppress the bus phase entirely for a
      * misaligned access: it commits (traps) at the end of S_EXEC instead,
      * same mechanism illegal-instruction/ecall already use to trap
-     * without ever touching the bus.
+     * without ever touching the bus. pmp_load_fault/pmp_store_fault
+     * (PMP+PLIC staged plan, Milestone 2) join them for the identical
+     * reason -- a PMP-blocked store's write must never reach the bus at
+     * all, mirroring the misalignment precedent exactly, not the
+     * bus-error one (which reacts to a real wb_err_i that already came
+     * back from a real slave).
      */
-    wire mem_phase_needed = (is_load || is_store) && !(mem_load_misaligned || mem_store_misaligned);
+    wire mem_phase_needed = (is_load || is_store)
+                          && !(mem_load_misaligned || mem_store_misaligned || pmp_load_fault || pmp_store_fault);
 
     /*
      * wb_done/wb_ok: wb4_sram.sv (the real leaf memory) keeps ack/err
@@ -680,7 +704,25 @@ module core (
                  */
                 S_FETCH:     if (debug_progbuf_active) state <= S_EXEC;
                              else if (debug_halt_req_entry) state <= S_DEBUG_HALTED;
-                             else if (wb_done) state <= state_t'(fetch_hi_taken ? S_FETCH_HI : S_EXEC);
+                             /*
+                              * pmp_fetchlo_fault (PMP+PLIC plan, Milestone 2):
+                              * known combinationally off fetch_paddr before
+                              * any bus request for this fetch is ever issued
+                              * (wb_master_drive's own S_FETCH arm suppresses
+                              * it in lockstep, per that arm's own comment) --
+                              * falls straight through to S_EXEC with no
+                              * wb_done to wait for, same shape as
+                              * debug_progbuf_active immediately above, for
+                              * an unrelated reason. pmp_fetchhi_fault
+                              * (the SECOND dword's own permission, only
+                              * ever meaningful once fetch_hi_taken is
+                              * already known) is checked alongside
+                              * fetch_hi_taken itself below, not here -- see
+                              * pmp_fetchhi_fault's own forward-declaration
+                              * comment for why it can't be known this early.
+                              */
+                             else if (pmp_fetchlo_fault) state <= S_EXEC;
+                             else if (wb_done) state <= state_t'((fetch_hi_taken && !pmp_fetchhi_fault) ? S_FETCH_HI : S_EXEC);
                 S_FETCH_HI:  if (wb_done) state <= S_EXEC;
                 /*
                  * debug_ebreak_entry redirects the same commit_now edge
@@ -766,20 +808,58 @@ module core (
      * uninitialized. Consumed by `instruction` below (substitutes an
      * inert placeholder so decode never runs on garbage fetched bits) and
      * by exc_code/trap_val (instruction access fault, cause 1).
+     *
+     * PMP+PLIC staged plan, Milestone 2: fetch_fault_q ALSO captures a
+     * PMP-denied fetch now (either half), not just a real bus error --
+     * both are the same architectural cause (1, instruction access
+     * fault), and both are only actually knowable at S_FETCH's own
+     * fetch_paddr/fetch_paddr_hi-checking granularity, not later at
+     * exc_code's own S_EXEC-timed evaluation. exc_code/trap_val
+     * therefore need NO separate pmp_fetchlo_fault/pmp_fetchhi_fault
+     * terms of their own -- fetch_fault_q is already the canonical,
+     * sufficient capture for every instruction-access-fault cause,
+     * mirroring how mem_load_access_fault/mem_store_access_fault (a
+     * real bus error, PURELY combinational, no register needed) and
+     * pmp_load_fault/pmp_store_fault (also purely combinational, same
+     * S_EXEC edge) DO both need their own explicit exc_code/trap_taken
+     * terms -- the difference is exactly whether the check happens at
+     * the SAME edge exc_code fires from (mem side, no register needed)
+     * or an EARLIER one (fetch side, needs fetch_fault_q to carry it
+     * forward).
      */
     logic        fetch_fault_q;
     always_ff @(posedge clk) begin
-        if (state == S_FETCH && wb_done) begin
+        if (state == S_FETCH && pmp_fetchlo_fault) begin
+            // Low half denied -- known combinationally, no real bus
+            // request was ever issued (wb_master_drive's own S_FETCH arm
+            // suppressed it), so there's no wb_dat_i to capture at all;
+            // instr_line_q/crossed_q are left stale/irrelevant, same as
+            // they always are whenever fetch_fault_q ends up set (the
+            // `instruction` substitution mux below ignores them either
+            // way). Structurally exclusive with the wb_done branch below
+            // (wb_master_drive never asserts a request this cycle), but
+            // written as an explicit priority arm anyway, not relying on
+            // that exclusivity.
+            fetch_fault_q <= 1'b1;
+        end else if (state == S_FETCH && wb_done) begin
             instr_line_q  <= wb_dat_i;
-            crossed_q     <= fetch_hi_taken;
-            fetch_fault_q <= wb_err_i;
+            crossed_q     <= fetch_hi_taken && !pmp_fetchhi_fault;
+            // A real bus error on the low half is a fault regardless of
+            // the high half; a CLEAN low half whose own second dword
+            // (fetch_hi_taken) is PMP-denied is ALSO a fault, discovered
+            // right here rather than after a second (never-issued) bus
+            // request -- see pmp_fetchhi_fault's own assign for why it's
+            // only meaningful once fetch_hi_taken is known, exactly this
+            // edge.
+            fetch_fault_q <= wb_err_i || (fetch_hi_taken && pmp_fetchhi_fault);
         end
         if (state == S_FETCH_HI && wb_done) begin
             instr_hi_q    <= wb_dat_i[15:0];
             fetch_fault_q <= wb_err_i;  // plain overwrite, not an OR-latch: S_FETCH_HI is
                                          // only ever reached when S_FETCH's own crossed_q
-                                         // (== wb_ok) was set, so fetch_fault_q is
-                                         // guaranteed 0 walking into S_FETCH_HI.
+                                         // (== wb_ok && !pmp_fetchhi_fault) was set, so
+                                         // fetch_fault_q is guaranteed 0 walking into
+                                         // S_FETCH_HI.
         end
     end
 
@@ -922,6 +1002,31 @@ module core (
      * width without a resize, so the unused bits are structural, not an
      * oversight.
      */
+    /*
+     * csr_file0's own PMP control-plane exports (PMP+PLIC staged plan,
+     * Milestone 1) -- declared here, well before csr_file0's own
+     * instantiation further down, purely because the PMP fetch-side
+     * check right below needs them and Icarus wants a signal declared
+     * before its first use textually (same class of forward reference
+     * mip_w/mie_w/mideleg_w already are for the Interrupts section,
+     * just needed even earlier here). The real driving connection
+     * (.o_pmpcfg0(pmpcfg0_w) etc.) still lives at csr_file0's own
+     * instantiation, unchanged by where the bare wire is declared.
+     *
+     * UNUSEDSIGNAL wrap: pmpcfg0_w's own reserved bits ([63:32] --
+     * regions 4-7, never implemented; [6:5]/[14:13]/[22:21]/[30:29] --
+     * each real region's own reserved cfg bits) and each pmpaddr's own
+     * [63:54] (the spec-fixed-0 reserved field above address[55:2]) are
+     * genuinely never read anywhere -- real, spec-shaped registers with
+     * some structurally-unused bits, not padding, same "wrap the
+     * genuinely-partial-usage bits" precedent mip_w/mie_w/mideleg_w
+     * already establish above.
+     */
+    /* verilator lint_off UNUSEDSIGNAL */
+    wire [(`WORD_SIZE - 1):0] pmpcfg0_w, pmpaddr0_w, pmpaddr1_w, pmpaddr2_w, pmpaddr3_w;
+    /* verilator lint_on UNUSEDSIGNAL */
+    wire mstatus_mprv_w;
+
     /* verilator lint_off UNUSEDSIGNAL */
     wire [(`WORD_SIZE - 1):0] fetch_paddr = pc;
     /* verilator lint_on UNUSEDSIGNAL */
@@ -936,6 +1041,152 @@ module core (
     wire [(`WORD_SIZE - 1):0] fetch_paddr_hi = fetch_paddr + `WORD_SIZE'(8);
     /* verilator lint_on UNUSEDSIGNAL */
     wire [31:0] fetch_addr_hi = {fetch_paddr_hi[31:3], 3'b0};
+
+    /* --------------------------------------------------------------- *
+     * PMP (Physical Memory Protection, PMP+PLIC staged plan, Milestone
+     * 2). Region field extraction, byte-address region bounds, and the
+     * fetch-side (instruction access) checks live here, right after
+     * fetch_paddr/fetch_paddr_hi -- the mem-side (load/store) checks
+     * live much further down, in the Memory section, right where
+     * mem_paddr exists, but REUSE the exact same region-field wires
+     * declared here (plain module-scope wires, visible throughout,
+     * despite Icarus's own declare-before-first-USE requirement only
+     * mattering for whichever consumer happens to come first textually
+     * -- that's this fetch-side check).
+     *
+     * Bit positions per design/csr_file.sv's own real pmpcfg layout
+     * (L[7], reserved[6:5], A[4:3], X[2], W[1], R[0]), replicated 4
+     * times across pmpcfg0's own 4 real bytes -- same flat, per-region
+     * duplication idiom that file's own storage already establishes,
+     * scaled the same way here. "wperm"/"rperm" (not "w"/"r") avoid
+     * colliding with this file's own established "_w" suffix meaning
+     * "wire sourced from a csr_file0 output".
+     */
+    wire        pmp0_l = pmpcfg0_w[7],  pmp1_l = pmpcfg0_w[15], pmp2_l = pmpcfg0_w[23], pmp3_l = pmpcfg0_w[31];
+    wire [1:0]  pmp0_a = pmpcfg0_w[4:3], pmp1_a = pmpcfg0_w[12:11], pmp2_a = pmpcfg0_w[20:19], pmp3_a = pmpcfg0_w[28:27];
+    wire        pmp0_x = pmpcfg0_w[2],  pmp1_x = pmpcfg0_w[10], pmp2_x = pmpcfg0_w[18], pmp3_x = pmpcfg0_w[26];
+    wire        pmp0_wperm = pmpcfg0_w[1], pmp1_wperm = pmpcfg0_w[9],  pmp2_wperm = pmpcfg0_w[17], pmp3_wperm = pmpcfg0_w[25];
+    wire        pmp0_rperm = pmpcfg0_w[0], pmp1_rperm = pmpcfg0_w[8],  pmp2_rperm = pmpcfg0_w[16], pmp3_rperm = pmpcfg0_w[24];
+
+    /*
+     * Region bounds/masks, all in BYTE-address terms (consistently, not
+     * mixing word- and byte-address units -- mem_end_paddr, added below
+     * in the Memory section for the mem-side PMP check, uses this same
+     * byte-address convention). pmpaddrN_w holds
+     * address[55:2] (a real, spec-verified 54-bit field, see
+     * design/csr_file.sv's own header) -- left-shifting by 2 recovers
+     * the byte address TOR/NAPOT actually compare against.
+     *
+     * NAPOT mask derivation is the standard "(addr ^ (addr+1))"
+     * trailing-1s technique, directly derived from the real spec's own
+     * pmpcfg-napot encoding table (see the plan file's own citation) --
+     * computed in WORD units (pmpaddrN_w's own native granularity) then
+     * widened to byte units by appending 2'b11 (the byte-within-word
+     * offset is always don't-care at word granularity or coarser).
+     */
+    wire [(`WORD_SIZE-1):0] pmp0_region_base = {8'b0, pmpaddr0_w[53:0], 2'b0};
+    wire [(`WORD_SIZE-1):0] pmp1_region_base = {8'b0, pmpaddr1_w[53:0], 2'b0};
+    wire [(`WORD_SIZE-1):0] pmp2_region_base = {8'b0, pmpaddr2_w[53:0], 2'b0};
+    wire [(`WORD_SIZE-1):0] pmp3_region_base = {8'b0, pmpaddr3_w[53:0], 2'b0};
+    wire [53:0] pmp0_napot_wordmask = pmpaddr0_w[53:0] ^ (pmpaddr0_w[53:0] + 54'd1);
+    wire [53:0] pmp1_napot_wordmask = pmpaddr1_w[53:0] ^ (pmpaddr1_w[53:0] + 54'd1);
+    wire [53:0] pmp2_napot_wordmask = pmpaddr2_w[53:0] ^ (pmpaddr2_w[53:0] + 54'd1);
+    wire [53:0] pmp3_napot_wordmask = pmpaddr3_w[53:0] ^ (pmpaddr3_w[53:0] + 54'd1);
+    wire [(`WORD_SIZE-1):0] pmp0_napot_mask = {8'b0, pmp0_napot_wordmask, 2'b11};
+    wire [(`WORD_SIZE-1):0] pmp1_napot_mask = {8'b0, pmp1_napot_wordmask, 2'b11};
+    wire [(`WORD_SIZE-1):0] pmp2_napot_mask = {8'b0, pmp2_napot_wordmask, 2'b11};
+    wire [(`WORD_SIZE-1):0] pmp3_napot_mask = {8'b0, pmp3_napot_wordmask, 2'b11};
+    wire [(`WORD_SIZE-1):0] pmp0_napot_base = pmp0_region_base & ~pmp0_napot_mask;
+    wire [(`WORD_SIZE-1):0] pmp1_napot_base = pmp1_region_base & ~pmp1_napot_mask;
+    wire [(`WORD_SIZE-1):0] pmp2_napot_base = pmp2_region_base & ~pmp2_napot_mask;
+    wire [(`WORD_SIZE-1):0] pmp3_napot_base = pmp3_region_base & ~pmp3_napot_mask;
+
+    /*
+     * Fetch-side access span: this core issues one 8-byte (dword) bus
+     * read per fetch beat (S_FETCH/S_FETCH_HI, wb_sel_o=8'hFF) --
+     * PMP is checked against that WHOLE dword, not just the 2-4 bytes
+     * the eventual instruction turns out to need (which isn't even
+     * known yet at this point -- decode hasn't run). This is
+     * deliberately conservative (per the real spec's own "must cover
+     * ALL bytes or the whole access faults" rule, a region smaller than
+     * 8 bytes -- i.e. NA4 -- can therefore never permit an instruction
+     * fetch under this simplification, only TOR/NAPOT regions >=8 bytes
+     * can), matching exactly what's actually transferred over the bus
+     * rather than trying to predict the eventual instruction length
+     * before it's fetched.
+     */
+    wire [(`WORD_SIZE-1):0] fetch_end_paddr    = fetch_paddr    + `WORD_SIZE'(7);
+    wire [(`WORD_SIZE-1):0] fetch_hi_end_paddr = fetch_paddr_hi + `WORD_SIZE'(7);
+
+    wire pmp0_fetchlo_match = (pmp0_a == 2'b00) ? 1'b0
+        : (pmp0_a == 2'b10) ? (fetch_paddr[55:2] == pmpaddr0_w[53:0] && fetch_end_paddr[55:2] == pmpaddr0_w[53:0])
+        : (pmp0_a == 2'b01) ? (fetch_end_paddr < pmp0_region_base)
+        :                     ((fetch_paddr & ~pmp0_napot_mask) == pmp0_napot_base
+                            && (fetch_end_paddr & ~pmp0_napot_mask) == pmp0_napot_base);
+    wire pmp1_fetchlo_match = (pmp1_a == 2'b00) ? 1'b0
+        : (pmp1_a == 2'b10) ? (fetch_paddr[55:2] == pmpaddr1_w[53:0] && fetch_end_paddr[55:2] == pmpaddr1_w[53:0])
+        : (pmp1_a == 2'b01) ? (fetch_paddr >= pmp0_region_base && fetch_end_paddr < pmp1_region_base)
+        :                     ((fetch_paddr & ~pmp1_napot_mask) == pmp1_napot_base
+                            && (fetch_end_paddr & ~pmp1_napot_mask) == pmp1_napot_base);
+    wire pmp2_fetchlo_match = (pmp2_a == 2'b00) ? 1'b0
+        : (pmp2_a == 2'b10) ? (fetch_paddr[55:2] == pmpaddr2_w[53:0] && fetch_end_paddr[55:2] == pmpaddr2_w[53:0])
+        : (pmp2_a == 2'b01) ? (fetch_paddr >= pmp1_region_base && fetch_end_paddr < pmp2_region_base)
+        :                     ((fetch_paddr & ~pmp2_napot_mask) == pmp2_napot_base
+                            && (fetch_end_paddr & ~pmp2_napot_mask) == pmp2_napot_base);
+    wire pmp3_fetchlo_match = (pmp3_a == 2'b00) ? 1'b0
+        : (pmp3_a == 2'b10) ? (fetch_paddr[55:2] == pmpaddr3_w[53:0] && fetch_end_paddr[55:2] == pmpaddr3_w[53:0])
+        : (pmp3_a == 2'b01) ? (fetch_paddr >= pmp2_region_base && fetch_end_paddr < pmp3_region_base)
+        :                     ((fetch_paddr & ~pmp3_napot_mask) == pmp3_napot_base
+                            && (fetch_end_paddr & ~pmp3_napot_mask) == pmp3_napot_base);
+
+    wire pmp0_fetchhi_match = (pmp0_a == 2'b00) ? 1'b0
+        : (pmp0_a == 2'b10) ? (fetch_paddr_hi[55:2] == pmpaddr0_w[53:0] && fetch_hi_end_paddr[55:2] == pmpaddr0_w[53:0])
+        : (pmp0_a == 2'b01) ? (fetch_hi_end_paddr < pmp0_region_base)
+        :                     ((fetch_paddr_hi & ~pmp0_napot_mask) == pmp0_napot_base
+                            && (fetch_hi_end_paddr & ~pmp0_napot_mask) == pmp0_napot_base);
+    wire pmp1_fetchhi_match = (pmp1_a == 2'b00) ? 1'b0
+        : (pmp1_a == 2'b10) ? (fetch_paddr_hi[55:2] == pmpaddr1_w[53:0] && fetch_hi_end_paddr[55:2] == pmpaddr1_w[53:0])
+        : (pmp1_a == 2'b01) ? (fetch_paddr_hi >= pmp0_region_base && fetch_hi_end_paddr < pmp1_region_base)
+        :                     ((fetch_paddr_hi & ~pmp1_napot_mask) == pmp1_napot_base
+                            && (fetch_hi_end_paddr & ~pmp1_napot_mask) == pmp1_napot_base);
+    wire pmp2_fetchhi_match = (pmp2_a == 2'b00) ? 1'b0
+        : (pmp2_a == 2'b10) ? (fetch_paddr_hi[55:2] == pmpaddr2_w[53:0] && fetch_hi_end_paddr[55:2] == pmpaddr2_w[53:0])
+        : (pmp2_a == 2'b01) ? (fetch_paddr_hi >= pmp1_region_base && fetch_hi_end_paddr < pmp2_region_base)
+        :                     ((fetch_paddr_hi & ~pmp2_napot_mask) == pmp2_napot_base
+                            && (fetch_hi_end_paddr & ~pmp2_napot_mask) == pmp2_napot_base);
+    wire pmp3_fetchhi_match = (pmp3_a == 2'b00) ? 1'b0
+        : (pmp3_a == 2'b10) ? (fetch_paddr_hi[55:2] == pmpaddr3_w[53:0] && fetch_hi_end_paddr[55:2] == pmpaddr3_w[53:0])
+        : (pmp3_a == 2'b01) ? (fetch_paddr_hi >= pmp2_region_base && fetch_hi_end_paddr < pmp3_region_base)
+        :                     ((fetch_paddr_hi & ~pmp3_napot_mask) == pmp3_napot_base
+                            && (fetch_hi_end_paddr & ~pmp3_napot_mask) == pmp3_napot_base);
+
+    /*
+     * Priority-encode (lowest-numbered region wins, norm:pmp_entry_priority)
+     * + X-permission check, one instantiation per fetch stream. Fetch
+     * never uses mem_effective_priv (MPRV only ever affects DATA
+     * accesses, never instruction fetch -- norm:pmp_check_priv_modes),
+     * always raw current_priv.
+     */
+    wire pmp_fetchlo_matched = pmp0_fetchlo_match || pmp1_fetchlo_match || pmp2_fetchlo_match || pmp3_fetchlo_match;
+    wire pmp_fetchlo_x = pmp0_fetchlo_match ? pmp0_x : pmp1_fetchlo_match ? pmp1_x : pmp2_fetchlo_match ? pmp2_x : pmp3_x;
+    wire pmp_fetchlo_l = pmp0_fetchlo_match ? pmp0_l : pmp1_fetchlo_match ? pmp1_l : pmp2_fetchlo_match ? pmp2_l : pmp3_l;
+    // norm:pmp_rwx_check + norm:pmp_no_entry_match: M-mode with L clear
+    // or no match always succeeds; S/U or a locked match needs the real
+    // X bit; S/U with NO match FAILS (>=1 region implemented, always
+    // true here).
+    wire pmp_fetchlo_x_ok = (current_priv == PRIV_M && !pmp_fetchlo_matched) ? 1'b1
+                           : (current_priv == PRIV_M && !pmp_fetchlo_l)      ? 1'b1
+                           : pmp_fetchlo_matched && pmp_fetchlo_x;
+
+    wire pmp_fetchhi_matched = pmp0_fetchhi_match || pmp1_fetchhi_match || pmp2_fetchhi_match || pmp3_fetchhi_match;
+    wire pmp_fetchhi_x = pmp0_fetchhi_match ? pmp0_x : pmp1_fetchhi_match ? pmp1_x : pmp2_fetchhi_match ? pmp2_x : pmp3_x;
+    wire pmp_fetchhi_l = pmp0_fetchhi_match ? pmp0_l : pmp1_fetchhi_match ? pmp1_l : pmp2_fetchhi_match ? pmp2_l : pmp3_l;
+    wire pmp_fetchhi_x_ok = (current_priv == PRIV_M && !pmp_fetchhi_matched) ? 1'b1
+                           : (current_priv == PRIV_M && !pmp_fetchhi_l)      ? 1'b1
+                           : pmp_fetchhi_matched && pmp_fetchhi_x;
+
+    assign pmp_fetchlo_fault = !debug_progbuf_active && !pmp_fetchlo_x_ok;
+    assign pmp_fetchhi_fault = !debug_progbuf_active && !pmp_fetchhi_x_ok;
 
     /* --------------------------------------------------------------- *
      * Decode
@@ -1576,8 +1827,8 @@ module core (
                            (is_ecall && current_priv == PRIV_M)  ? 4'd11 :
                            mem_load_misaligned                   ? 4'd4  :
                            mem_store_misaligned                  ? 4'd6  :
-                           mem_load_access_fault                 ? 4'd5  :
-                           mem_store_access_fault                ? 4'd7  :
+                           (mem_load_access_fault || pmp_load_fault)   ? 4'd5  :
+                           (mem_store_access_fault || pmp_store_fault) ? 4'd7  :
                                                                     4'd0; // don't-care, gated by trap_taken
 
     /*
@@ -1594,7 +1845,8 @@ module core (
     assign trap_taken = !debug_progbuf_active && commit_now && (fetch_fault_q || is_illegal_instr
                                    || (is_ebreak && !ebreak_to_debug) || trigger_exception_match || is_ecall
                                    || mem_load_misaligned || mem_store_misaligned
-                                   || mem_load_access_fault || mem_store_access_fault);
+                                   || mem_load_access_fault || mem_store_access_fault
+                                   || pmp_load_fault || pmp_store_fault);
     /* An M-mode trap never delegates, regardless of medeleg -- falls out
      * naturally here since current_priv==M forces this wire to 0. */
     wire trap_to_s  = trap_taken && (current_priv != PRIV_M) && medeleg_w[6'(exc_code)];
@@ -1924,20 +2176,6 @@ module core (
     wire [(`WORD_SIZE - 1):0] mip_w, mie_w, mideleg_w;
     /* verilator lint_on UNUSEDSIGNAL */
     wire mstatus_mie_w, mstatus_sie_w;
-    /*
-     * PMP (Milestone 1 of the PMP+PLIC staged plan, csr_file.sv side)
-     * added these 6 outputs; the PMP-enforcement milestone (not yet
-     * implemented) is their real consumer -- same "declared and
-     * connected now, functionally unread until the next milestone"
-     * precedent mip_w/mie_w/mideleg_w above already established for the
-     * CLINT/interrupt-plumbing split. Wrapped in the same
-     * lint_off/on UNUSEDSIGNAL for the identical reason: these exist
-     * for a real, spec-shaped PMP, not padding.
-     */
-    /* verilator lint_off UNUSEDSIGNAL */
-    wire [(`WORD_SIZE - 1):0] pmpcfg0_w, pmpaddr0_w, pmpaddr1_w, pmpaddr2_w, pmpaddr3_w;
-    wire mstatus_mprv_w;
-    /* verilator lint_on UNUSEDSIGNAL */
     /*
      * dcsr_w: only bits [15]/[13]/[12]/[2] (ebreakm/s/u, step) are
      * consumed this milestone -- the rest exist for a real, spec-shaped
@@ -2417,6 +2655,95 @@ module core (
     assign mem_store_misaligned = (state == S_EXEC) && mem_misaligned && (is_store || is_sc || is_lr || is_amo_rmw);
 
     /*
+     * PMP mem-side check (PMP+PLIC staged plan, Milestone 2). Reuses the
+     * exact same pmp0_l/pmp0_a/pmp0_x/pmp0_wperm/pmp0_rperm/
+     * pmp0_region_base/pmp0_napot_mask/pmp0_napot_base region-field
+     * wires (and their region 1-3 siblings) the fetch-side check above
+     * already declared -- plain module-scope wires, one real region
+     * config regardless of which access stream is checking it.
+     *
+     * mem_end_paddr mirrors fetch_end_paddr's own byte-address-span
+     * convention exactly, sized from the REAL access width (mem_size)
+     * rather than fetch's own conservative "whole 8-byte dword"
+     * simplification -- unlike fetch, decode has already run by the
+     * time this is checked (S_EXEC), so the real access size is known.
+     */
+    wire [(`WORD_SIZE - 1):0] mem_end_paddr = mem_paddr + (`WORD_SIZE'(1) << mem_size) - `WORD_SIZE'(1);
+
+    /*
+     * mem_effective_priv (norm:pmp_check_priv_modes): PMP checks apply
+     * to DATA accesses in M-mode when mstatus.MPRV is set and
+     * mstatus.MPP holds S or U -- the real mechanism OpenSBI/a trap
+     * handler relies on to access S/U memory as if running at that
+     * lower privilege. Consumed ONLY here -- mstatus_mprv_w/
+     * mstatus_mpp_w have no other reader in this file (mstatus_mpp_w
+     * already exists, reused from MRET's own current_priv restoration
+     * arm; mstatus_mprv_w is Milestone 1's own new export). Instruction
+     * fetch never uses this (see the fetch-side check above) -- MPRV
+     * never affects fetch, per the same citation.
+     */
+    priv_t mem_effective_priv;
+    assign mem_effective_priv = priv_t'((mstatus_mprv_w && current_priv == PRIV_M)
+                               ? mstatus_mpp_w : current_priv);
+
+    wire pmp0_mem_match = (pmp0_a == 2'b00) ? 1'b0
+        : (pmp0_a == 2'b10) ? (mem_paddr[55:2] == pmpaddr0_w[53:0] && mem_end_paddr[55:2] == pmpaddr0_w[53:0])
+        : (pmp0_a == 2'b01) ? (mem_end_paddr < pmp0_region_base)
+        :                     ((mem_paddr & ~pmp0_napot_mask) == pmp0_napot_base
+                            && (mem_end_paddr & ~pmp0_napot_mask) == pmp0_napot_base);
+    wire pmp1_mem_match = (pmp1_a == 2'b00) ? 1'b0
+        : (pmp1_a == 2'b10) ? (mem_paddr[55:2] == pmpaddr1_w[53:0] && mem_end_paddr[55:2] == pmpaddr1_w[53:0])
+        : (pmp1_a == 2'b01) ? (mem_paddr >= pmp0_region_base && mem_end_paddr < pmp1_region_base)
+        :                     ((mem_paddr & ~pmp1_napot_mask) == pmp1_napot_base
+                            && (mem_end_paddr & ~pmp1_napot_mask) == pmp1_napot_base);
+    wire pmp2_mem_match = (pmp2_a == 2'b00) ? 1'b0
+        : (pmp2_a == 2'b10) ? (mem_paddr[55:2] == pmpaddr2_w[53:0] && mem_end_paddr[55:2] == pmpaddr2_w[53:0])
+        : (pmp2_a == 2'b01) ? (mem_paddr >= pmp1_region_base && mem_end_paddr < pmp2_region_base)
+        :                     ((mem_paddr & ~pmp2_napot_mask) == pmp2_napot_base
+                            && (mem_end_paddr & ~pmp2_napot_mask) == pmp2_napot_base);
+    wire pmp3_mem_match = (pmp3_a == 2'b00) ? 1'b0
+        : (pmp3_a == 2'b10) ? (mem_paddr[55:2] == pmpaddr3_w[53:0] && mem_end_paddr[55:2] == pmpaddr3_w[53:0])
+        : (pmp3_a == 2'b01) ? (mem_paddr >= pmp2_region_base && mem_end_paddr < pmp3_region_base)
+        :                     ((mem_paddr & ~pmp3_napot_mask) == pmp3_napot_base
+                            && (mem_end_paddr & ~pmp3_napot_mask) == pmp3_napot_base);
+
+    wire pmp_mem_matched = pmp0_mem_match || pmp1_mem_match || pmp2_mem_match || pmp3_mem_match;
+    wire pmp_mem_rperm = pmp0_mem_match ? pmp0_rperm : pmp1_mem_match ? pmp1_rperm : pmp2_mem_match ? pmp2_rperm : pmp3_rperm;
+    wire pmp_mem_wperm = pmp0_mem_match ? pmp0_wperm : pmp1_mem_match ? pmp1_wperm : pmp2_mem_match ? pmp2_wperm : pmp3_wperm;
+    wire pmp_mem_l     = pmp0_mem_match ? pmp0_l     : pmp1_mem_match ? pmp1_l     : pmp2_mem_match ? pmp2_l     : pmp3_l;
+    // norm:pmp_rwx_check + norm:pmp_no_entry_match: effective-M-mode
+    // with L clear or no match always succeeds; S/U or a locked match
+    // needs the real R/W bit; S/U with NO match FAILS (>=1 region
+    // implemented, always true here).
+    wire pmp_mem_read_ok  = (mem_effective_priv == PRIV_M && !pmp_mem_matched) ? 1'b1
+                           : (mem_effective_priv == PRIV_M && !pmp_mem_l)      ? 1'b1
+                           : pmp_mem_matched && pmp_mem_rperm;
+    wire pmp_mem_write_ok = (mem_effective_priv == PRIV_M && !pmp_mem_matched) ? 1'b1
+                           : (mem_effective_priv == PRIV_M && !pmp_mem_l)      ? 1'b1
+                           : pmp_mem_matched && pmp_mem_wperm;
+
+    /*
+     * pmp_load_fault/pmp_store_fault: same is_load/is_lr/is_amo_rmw
+     * split as mem_load_misaligned/mem_store_misaligned above, same
+     * S_EXEC-gated combinational-before-the-bus-phase timing (mem_paddr
+     * is already known the instant S_EXEC begins -- the ALU computed it
+     * this same cycle). !debug_progbuf_active exempts Program Buffer
+     * execution entirely (PMP+PLIC plan's own cross-cutting decision):
+     * a debugger's own progbuf-driven memory access is trusted, same
+     * exemption System Bus Access already gets structurally (it's a
+     * wholly separate Wishbone master that never touches mem_paddr at
+     * all). Without this exemption, a PMP-denied progbuf store would be
+     * silently swallowed by mem_phase_needed with no resulting trap
+     * either (trap_taken's own top-level !debug_progbuf_active gate
+     * would suppress that) -- a real silent-data-loss hazard, not just
+     * an inconsistency.
+     */
+    assign pmp_load_fault  = (state == S_EXEC) && !debug_progbuf_active
+                            && is_load && !is_lr && !is_amo_rmw && !pmp_mem_read_ok;
+    assign pmp_store_fault = (state == S_EXEC) && !debug_progbuf_active
+                            && (is_store || is_sc || is_lr || is_amo_rmw) && !pmp_mem_write_ok;
+
+    /*
      * mem_load_access_fault/mem_store_access_fault: same is_load/is_lr/
      * is_amo_rmw split as mem_load_misaligned/mem_store_misaligned above
      * (LR is spec-classified under store/AMO, cause 7, not load, cause 5
@@ -2458,7 +2785,12 @@ module core (
         : is_illegal_instr ? (is_compressed ? {48'b0, first_hw}
                                              : {{(`WORD_SIZE - `INSTR_SIZE){1'b0}}, instruction})
         : (mem_load_misaligned || mem_store_misaligned) ? mem_paddr
-        : (mem_load_access_fault || mem_store_access_fault) ? mem_access_fault_addr
+        // pmp_load_fault/pmp_store_fault reuse mem_access_fault_addr's
+        // own state==S_AMO_WRITE-vs-mem_paddr mux even though a PMP
+        // fault can never actually fire from S_AMO_WRITE (both are
+        // S_EXEC-gated) -- it's already exactly the right address
+        // (mem_paddr) in that case, no separate wire needed.
+        : (mem_load_access_fault || mem_store_access_fault || pmp_load_fault || pmp_store_fault) ? mem_access_fault_addr
         : trigger_exception_match ? pc
         : `WORD_SIZE'(0);
 
@@ -2628,12 +2960,20 @@ module core (
                  * S_DEBUG_HALTED with nothing fetched at all,
                  * debug_progbuf_active because the "fetch" is already
                  * available combinationally as i_progbuf_data, with no
-                 * real bus transaction needed at all. Either way,
-                 * wb_done must never arrive for this cycle's would-be
-                 * request. See the state-transition always_ff's own
-                 * S_FETCH arm, which relies on exactly this.
+                 * real bus transaction needed at all. pmp_fetchlo_fault
+                 * (PMP+PLIC plan, Milestone 2) suppresses it for a third
+                 * reason: unlike a real bus error (only discoverable
+                 * once a request actually comes back), a low-half PMP
+                 * denial is already known combinationally off
+                 * fetch_paddr before this request would even be issued --
+                 * the request must never be issued at all, mirroring the
+                 * misalignment precedent (checked before the bus phase
+                 * starts), not the bus-error one (reacts after). Either
+                 * way, wb_done must never arrive for this cycle's
+                 * would-be request. See the state-transition always_ff's
+                 * own S_FETCH arm, which relies on exactly this.
                  */
-                if (!wb_done && !debug_halt_req_entry && !debug_progbuf_active) begin
+                if (!wb_done && !debug_halt_req_entry && !debug_progbuf_active && !pmp_fetchlo_fault) begin
                     wb_cyc_o  = 1'b1;
                     wb_stb_o  = 1'b1;
                     wb_addr_o = fetch_from_trap_vector ? {trap_vector[31:3], 3'b0} : fetch_addr;

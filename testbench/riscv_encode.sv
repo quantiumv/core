@@ -196,6 +196,15 @@ endfunction
 `define CSR_MTVAL      12'h343
 `define CSR_MIP        12'h344
 
+/* PMP (PMP+PLIC staged plan, Milestone 2). Real spec addresses,
+ * independently transcribed here (not read from design/csr_file.sv's
+ * own internals), same discipline as every other CSR_* macro above. */
+`define CSR_PMPCFG0    12'h3A0
+`define CSR_PMPADDR0   12'h3B0
+`define CSR_PMPADDR1   12'h3B1
+`define CSR_PMPADDR2   12'h3B2
+`define CSR_PMPADDR3   12'h3B3
+
 /*
  * A extension (atomics): R-type shaped, but funct7's role is split into
  * funct5[4:0]+aq+rl rather than one plain 7-bit field -- encode_r's
