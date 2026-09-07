@@ -88,6 +88,21 @@ module wb_arbiter2_tb;
         end
     end
 
+    // Small backing memory for the write-path tests (Finding #8): a real
+    // write must land the WRITING master's own data at the WRITING
+    // master's own address, not get misattributed to the other master
+    // mid-arbitration -- every prior test here only ever exercised
+    // READS. Indexed directly by addr_o[31:28] -- every test address in
+    // this file (both the pre-existing read-only ones and the new
+    // write-path ones below) has a distinct top nibble, so this never
+    // aliases two tests onto the same entry.
+    logic [63:0] slave_mem [0:15];
+    always @(posedge clk) begin
+        if (cyc_o && stb_o && we_o && !force_err) begin
+            slave_mem[addr_o[31:28]] <= dat_o;
+        end
+    end
+
     int pass_count = 0;
     int fail_count = 0;
     logic quiet_on_pass = 1'b0;
@@ -362,6 +377,84 @@ module wb_arbiter2_tb;
             m0_dat_o, {32'hFEED_0000, 32'hA000_0000});
         @(posedge clk); #1;
         m0_cyc = 1'b0; m0_stb = 1'b0;
+        @(negedge clk);
+
+        // Test 9: write-path tie-break (Finding #8) -- mirrors Test 3's
+        // own read-based tie-break exactly, but with we_i=1 and DISTINCT
+        // write data per master, checking the fake slave's own backing
+        // memory (slave_mem, keyed by address) to directly prove the
+        // WINNING master's own write data landed at the WINNING master's
+        // own address -- not silently misattributed to the other master
+        // mid-arbitration, the same class of bug the read-path tie-break
+        // test already proves for reads. Every prior test in this file
+        // only ever exercised reads.
+        @(negedge clk);
+        m0_addr = 32'hC000_0000; m0_dat_i = 64'hC0C0C0C0_C0C0C0C0; m0_sel = 8'hFF; m0_we = 1'b1;
+        m1_addr = 32'hD000_0000; m1_dat_i = 64'hD1D1D1D1_D1D1D1D1; m1_sel = 8'hFF; m1_we = 1'b1;
+        m0_cyc = 1'b1; m0_stb = 1'b1;
+        m1_cyc = 1'b1; m1_stb = 1'b1;
+        #1;
+        check("write tie-break: m1 wins -- addr_o is m1's address", {32'b0, addr_o}, {32'b0, 32'hD000_0000});
+        check("write tie-break: o_grant == 1 (m1)", {63'b0, grant}, 64'd1);
+        while (!m1_ack && !m1_err) begin
+            @(posedge clk); #1;
+            check("write tie-break: m0_ack stays low throughout m1's transaction", {63'b0, m0_ack}, 64'd0);
+        end
+        check("write tie-break: m1's OWN write landed at m1's OWN address", slave_mem[4'hD], 64'hD1D1D1D1_D1D1D1D1);
+        // m1's own ack has arrived -- it now holds cyc/stb for ONE MORE
+        // cycle (matching real master timing, and Test 3's own read-path
+        // precedent) before dropping. THIS is exactly the cycle
+        // wb4_sram's own ghost re-ack fires -- m0 must still see nothing.
+        @(posedge clk); #1;
+        check("write tie-break: on m1's own ghost-ack cycle, m0_ack still stays low", {63'b0, m0_ack}, 64'd0);
+        m1_cyc = 1'b0; m1_stb = 1'b0;
+        @(posedge clk); #1;
+        check("write tie-break: once m1 vacates, m0 is granted immediately",
+            {32'b0, addr_o}, {32'b0, 32'hC000_0000});
+        while (!m0_ack && !m0_err) begin
+            @(posedge clk); #1;
+        end
+        check("write tie-break: m0's OWN write landed at m0's OWN address, not overwriting m1's",
+            slave_mem[4'hC], 64'hC0C0C0C0_C0C0C0C0);
+        check("write tie-break: m1's earlier write is still intact, undisturbed by m0's later one",
+            slave_mem[4'hD], 64'hD1D1D1D1_D1D1D1D1);
+        @(posedge clk); #1;
+        m0_cyc = 1'b0; m0_stb = 1'b0;
+        @(negedge clk);
+
+        // Test 10: write-path grant-holds (Finding #8) -- mirrors Test
+        // 4's own grant-holds-until-idle scenario, but with writes: m0
+        // starts a write alone, m1 shows up wanting the bus mid-
+        // transaction, the arbiter must not switch until m0 has
+        // genuinely vacated, and m1's own subsequent write must land at
+        // ITS OWN address without corrupting m0's just-completed one.
+        @(negedge clk);
+        m0_addr = 32'hE000_0000; m0_dat_i = 64'hE2E2E2E2_E2E2E2E2; m0_sel = 8'hFF; m0_we = 1'b1;
+        m0_cyc = 1'b1; m0_stb = 1'b1;
+        #1;
+        check("write grant-holds: m0 granted immediately", {63'b0, grant}, 64'd0);
+        while (!m0_ack && !m0_err) begin
+            @(posedge clk); #1;
+        end
+        check("write grant-holds: m0's OWN write lands at m0's OWN address", slave_mem[4'hE], 64'hE2E2E2E2_E2E2E2E2);
+        m1_addr = 32'hF000_0000; m1_dat_i = 64'hF3F3F3F3_F3F3F3F3; m1_sel = 8'hFF; m1_we = 1'b1;
+        m1_cyc = 1'b1; m1_stb = 1'b1;
+        check("write grant-holds: still m0 despite m1 now also asserting", {63'b0, grant}, 64'd0);
+        @(posedge clk); #1;
+        check("write grant-holds: on m0's own ghost-ack cycle, m1_ack still stays low", {63'b0, m1_ack}, 64'd0);
+        m0_cyc = 1'b0; m0_stb = 1'b0;
+        @(posedge clk); #1;
+        check("write grant-holds: once m0 vacates, m1 (waiting) is granted immediately",
+            {32'b0, addr_o}, {32'b0, 32'hF000_0000});
+        while (!m1_ack && !m1_err) begin
+            @(posedge clk); #1;
+        end
+        check("write grant-holds: m1's OWN write lands at m1's OWN address",
+            slave_mem[4'hF], 64'hF3F3F3F3_F3F3F3F3);
+        check("write grant-holds: m0's earlier write is still intact, undisturbed by m1's later one",
+            slave_mem[4'hE], 64'hE2E2E2E2_E2E2E2E2);
+        @(posedge clk); #1;
+        m1_cyc = 1'b0; m1_stb = 1'b0;
         @(negedge clk);
 
         $display("");

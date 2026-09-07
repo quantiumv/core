@@ -1101,6 +1101,78 @@ module dm_tb;
                 {56'b0, rd[7:0]}, 64'hAB);
         end
 
+        // Test SBA-K (review-fix regression, Finding #4): the
+        // sbbusyerror_q W1C-clear priority race. A SINGLE sbcs write
+        // landing WHILE an op is busy, whose OWN wdata ALSO has bit 22
+        // set (a W1C-clear-sbbusyerror intent), must be interpreted as
+        // the NEW busy-collision it itself causes, not silently
+        // swallowed by its own coincidental clear bit -- see dm.sv's
+        // sbbusyerror_q always_ff (hardware-set checked BEFORE the
+        // software clear, mirroring cmderr_q's own precedent). Before
+        // that fix (software-clear checked first), this exact write
+        // would have left sbbusyerror at 0, hiding the very collision it
+        // just caused. No filler edge needed: sba_busy_q is already 1
+        // starting the cycle right after the trigger write lands, so the
+        // very next DMI write (this one) samples it mid-transaction.
+        sba_dmi_write(DMI_SBCS, sba_cfg(1'b1, 3'd2, 1'b0, 1'b0));  // readonaddr=1, access=32-bit
+        sba_dmi_write(DMI_SBADDRESS0, 32'h0000_01B0);  // triggers a real read (busy window opens next edge)
+        sba_dmi_write(DMI_SBCS, 32'h0040_0000);        // lands WHILE busy, own wdata[22]=1 -- the race itself
+        sba_wait_done();
+        begin
+            logic [31:0] rd;
+            sba_dmi_read(DMI_SBCS, rd);
+            check("dut_sba: Test K -- sbbusyerror == 1 (the race's own hardware-set beats its own same-write clear bit)",
+                {63'b0, rd[22]}, 64'd1);
+        end
+        sba_dmi_write(DMI_SBCS, 32'h0040_0000);  // W1C-clear sbbusyerror, tidy up
+
+        // Test SBA-L (review-fix regression, Finding #4): sberror_q's
+        // own version of the same race -- a REAL bus error landing on
+        // the EXACT same edge a W1C-clear write to sbcs lands, proving
+        // the hardware-set (a genuinely NEW error) wins over a same-
+        // cycle software clear, distinct from Test K's simpler same-
+        // write race. Timing derived from wb4_sram's own 1-wait-state
+        // convention: the trigger write lands at edge N; sba_busy_q (and
+        // o_sba_cyc) first read 1 starting N+1; the slave's own err_o
+        // registers at edge N+1, becoming visible (and sberror_q's own
+        // hardware-set firing) at edge N+2. One filler edge after the
+        // trigger lands this write's own sampling on that exact edge.
+        //
+        // A precondition check (review-caught): the final sberror==2
+        // result alone can't distinguish a GENUINE race from a mistimed
+        // one that happens to look the same -- a clear-write landing ONE
+        // EDGE TOO EARLY (before the real error has even registered)
+        // would ALSO leave sberror==2 at the end, but for a completely
+        // mundane, non-racing reason (the clear is a no-op against an
+        // already-0 sberror_q, and the real error then latches, un-raced,
+        // on the very next edge). Directly sampling i_sba_err right after
+        // the filler edge -- i.e. the SAME cycle the race write is about
+        // to land -- proves the race is genuinely live at this exact
+        // moment, not one cycle off; a future change elsewhere that
+        // shifts this timing by a cycle would fail THIS check loudly,
+        // instead of silently downgrading the final check into an
+        // accidental, non-discriminating pass.
+        sba_dmi_write(DMI_SBCS, sba_cfg(1'b1, 3'd2, 1'b0, 1'b0));  // readonaddr=1, access=32-bit
+        sba_dmi_write(DMI_SBADDRESS0, 32'h0000_1000);  // trigger -- out of range, a real bus error (edge N)
+        @(posedge clk); #1;                             // filler (edge N+1)
+        check("dut_sba: Test L -- precondition: i_sba_err is genuinely live the same cycle the race write is about to land",
+            {63'b0, dut_sba.dm0.i_sba_err}, 64'd1);
+        sba_dmi_write(DMI_SBCS, 32'h0000_3000);         // races the hardware-set at edge N+2
+        sba_wait_done();
+        begin
+            logic [31:0] rd;
+            sba_dmi_read(DMI_SBCS, rd);
+            check("dut_sba: Test L -- sberror == 2 (the race's own hardware-set beats the same-cycle clear write)",
+                {61'b0, rd[14:12]}, 64'd2);
+        end
+        // W1C-clear sberror AND sbbusyerror -- tidy up. The race write
+        // above is itself an sbcs write landing while sba_busy_q is still
+        // 1, so it also incidentally trips sba_other_write_while_busy,
+        // setting sbbusyerror_q=1 as a side effect (review-caught,
+        // harmless -- nothing else in this file reads dut_sba's sbcs
+        // again -- but cleaned up here rather than left dangling).
+        sba_dmi_write(DMI_SBCS, 32'h0040_3000);
+
         // Test SBA-G (the milestone's own core gate): confirm core0
         // reached its own, correct final state -- x1 == 50, exactly its
         // 50th update -- completely unaffected by every SBA operation
