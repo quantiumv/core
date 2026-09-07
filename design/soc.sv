@@ -82,6 +82,19 @@
  * where that split is wired, next to the uart0/uart_rx0 instantiations
  * below.
  *
+ * plic0 (design/plic.sv, Milestone 4 of the PMP+PLIC staged plan) hangs
+ * off the decoder's new fifth slave port, addr_i[22]'s own 4MB window
+ * (see wb_addr_decoder.sv's own header). Two of its ports stay
+ * deliberately unconnected THIS milestone (bus wiring only, Milestone 5
+ * of that plan): i_uart_rx_irq is tied to a constant 1'b0 (uart_rx0's
+ * own o_rx_irq doesn't exist as a port yet -- Milestone 6 adds it and
+ * wires it here), and o_meip/o_seip are left as free-standing wires
+ * with no core0 consumer (core0.i_meip/i_seip, added by that plan's own
+ * Milestone 3, stay unconnected on core0's own instantiation until that
+ * same later milestone). This mirrors clint0's own Milestone 4-to-6
+ * staging precedent exactly (mtip_o existed and was real one milestone
+ * before core0.i_mtip was ever wired to it).
+ *
  * No UART pin exists at this level (or anywhere in this design) -- see
  * uart_tx.sv's header for why: this milestone's UART "transmits" via
  * $write in simulation, not real serial timing, so there is nothing for
@@ -215,12 +228,21 @@ module soc (
         .o_grant(arb_grant)
     );
 
-    logic [31:0] ram_addr, uart_addr, clint_addr;
-    logic [63:0] ram_dat_o, ram_dat_i, uart_dat_o, uart_dat_i, clint_dat_o, clint_dat_i;
-    logic [7:0]  ram_sel, uart_sel, clint_sel;
+    logic [31:0] ram_addr, uart_addr, clint_addr, plic_addr;
+    logic [63:0] ram_dat_o, ram_dat_i, uart_dat_o, uart_dat_i, clint_dat_o, clint_dat_i, plic_dat_o, plic_dat_i;
+    logic [7:0]  ram_sel, uart_sel, clint_sel, plic_sel;
     logic        ram_we, ram_cyc, ram_stb, ram_ack, ram_err;
     logic        uart_we, uart_cyc, uart_stb, uart_ack, uart_err;
     logic        clint_we, clint_cyc, clint_stb, clint_ack, clint_err;
+    logic        plic_we, plic_cyc, plic_stb, plic_ack, plic_err;
+    logic        uart_rx_irq;
+    // plic_meip/plic_seip: no consumer yet -- core0.i_meip/i_seip stay
+    // unconnected until Milestone 6 of the PMP+PLIC plan (see this
+    // file's own header) -- same genuinely-unused-for-now situation
+    // clint_mtip was in between that plan's own Milestones 4 and 6.
+    /* verilator lint_off UNUSEDSIGNAL */
+    logic        plic_meip, plic_seip;
+    /* verilator lint_on UNUSEDSIGNAL */
 
     // See decoder0's own dram_* port comment below for the full reasoning.
     // Declared ahead of decoder0's instantiation -- Icarus requires a
@@ -242,6 +264,9 @@ module soc (
         .clint_addr_o(clint_addr), .clint_dat_o(clint_dat_o), .clint_dat_i(clint_dat_i),
         .clint_sel_o(clint_sel), .clint_we_o(clint_we), .clint_cyc_o(clint_cyc),
         .clint_stb_o(clint_stb), .clint_ack_i(clint_ack), .clint_err_i(clint_err),
+        .plic_addr_o(plic_addr), .plic_dat_o(plic_dat_o), .plic_dat_i(plic_dat_i),
+        .plic_sel_o(plic_sel), .plic_we_o(plic_we), .plic_cyc_o(plic_cyc),
+        .plic_stb_o(plic_stb), .plic_ack_i(plic_ack), .plic_err_i(plic_err),
 
         /*
          * dram_addr_o/dram_dat_o/dram_sel_o/dram_we_o left explicitly,
@@ -407,6 +432,18 @@ module soc (
         .addr_i(clint_addr), .dat_i(clint_dat_o), .dat_o(clint_dat_i), .sel_i(clint_sel),
         .ack_o(clint_ack), .err_o(clint_err), .cyc_i(clint_cyc), .stb_i(clint_stb), .we_i(clint_we),
         .mtip_o(clint_mtip)
+    );
+
+    // uart_rx_irq/plic_meip/plic_seip: see this file's own header for why
+    // these stay unconnected to a real UART RX level / to core0 this
+    // milestone (PMP+PLIC plan Milestone 5, bus wiring only).
+    assign uart_rx_irq = 1'b0;
+
+    plic plic0 (
+        .clk(clk), .rst(rst),
+        .addr_i(plic_addr), .dat_i(plic_dat_o), .dat_o(plic_dat_i), .sel_i(plic_sel),
+        .ack_o(plic_ack), .err_o(plic_err), .cyc_i(plic_cyc), .stb_i(plic_stb), .we_i(plic_we),
+        .i_uart_rx_irq(uart_rx_irq), .o_meip(plic_meip), .o_seip(plic_seip)
     );
 
     /*
