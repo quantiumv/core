@@ -155,6 +155,14 @@ module csr_file_tb;
     localparam int DCSR_EBREAKM_BIT=15, DCSR_STEPIE_BIT=11;
     localparam logic [(`WORD_SIZE-1):0] DCSR_XDEBUGVER_FIXED = (`WORD_SIZE'(4) << 28);
 
+    /* Milestone 9: Trigger Module CSR addresses, independently transcribed. */
+    localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_TSELECT = 12'h7A0;
+    localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_TDATA1  = 12'h7A1;
+    localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_TDATA2  = 12'h7A2;
+    localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_TDATA3  = 12'h7A3;
+    localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_TINFO   = 12'h7A4;
+    localparam logic [(`WORD_SIZE-1):0] TINFO_EXPECTED = 64'h0000_0000_0100_0041;
+
     /* mstatus bit positions, independently transcribed from the spec. */
     localparam int SIE_BIT=1, MIE_BIT=3, SPIE_BIT=5, MPIE_BIT=7, SPP_BIT=8;
     localparam int MPP_LSB=11, MPP_MSB=12;
@@ -784,6 +792,77 @@ module csr_file_tb;
         check("dscratch1 read/write round trip", rdata, 64'hCAFE_F00D_0000_0002);
         read_csr(CSR_ADDR_DSCRATCH0, rdata);
         check("dscratch0 unaffected by dscratch1's write", rdata, 64'hCAFE_F00D_0000_0001);
+
+        /* Milestone 9: Trigger Module CSR checks. */
+
+        /* tinfo: read-only, unconditional. */
+        read_csr(CSR_ADDR_TINFO, rdata);
+        check("tinfo reads version=1/info=0x0041 unconditionally", rdata, TINFO_EXPECTED);
+
+        /* tselect: WARL across exactly 2 legal slots (bit-0-only storage). */
+        write_csr(CSR_ADDR_TSELECT, 64'd7);
+        read_csr(CSR_ADDR_TSELECT, rdata);
+        check("tselect write 7 reads back 1 (bit-0-only storage)", rdata, 64'd1);
+        write_csr(CSR_ADDR_TSELECT, 64'd2);
+        read_csr(CSR_ADDR_TSELECT, rdata);
+        check("tselect write 2 reads back 0 (bit-0-only storage)", rdata, 64'd0);
+
+        /* tdata1 WARL spot-checks, slot 0. */
+        write_csr(CSR_ADDR_TSELECT, 64'd0);
+        write_csr(CSR_ADDR_TDATA1, (`WORD_SIZE'(5) << 7));  // match=5
+        read_csr(CSR_ADDR_TDATA1, rdata);
+        check("tdata1 match field is WARL-hardwired 0 regardless of what's written", rdata[10:7], 4'd0);
+
+        write_csr(CSR_ADDR_TDATA1, (`WORD_SIZE'(1) << 18));  // size bit set
+        read_csr(CSR_ADDR_TDATA1, rdata);
+        check("tdata1 size field is WARL-hardwired 0", rdata[18:16], 3'd0);
+
+        write_csr(CSR_ADDR_TDATA1, (`WORD_SIZE'(1) << 11));  // chain
+        read_csr(CSR_ADDR_TDATA1, rdata);
+        check("tdata1 chain bit is WARL-hardwired 0", rdata[11], 1'd0);
+
+        write_csr(CSR_ADDR_TDATA1, (`WORD_SIZE'(1) << 21));  // select
+        read_csr(CSR_ADDR_TDATA1, rdata);
+        check("tdata1 select bit is WARL-hardwired 0", rdata[21], 1'd0);
+
+        write_csr(CSR_ADDR_TDATA1, `WORD_SIZE'(3));  // store|load
+        read_csr(CSR_ADDR_TDATA1, rdata);
+        check("tdata1 store/load bits are WARL-hardwired 0", rdata[1:0], 2'd0);
+
+        write_csr(CSR_ADDR_TDATA1, (`WORD_SIZE'(3) << 12));  // action=3
+        read_csr(CSR_ADDR_TDATA1, rdata);
+        check("tdata1 action=3 clamps to 1 (WARL)", rdata[15:12], 4'd1);
+
+        write_csr(CSR_ADDR_TDATA1, `WORD_SIZE'(0));  // action=0
+        read_csr(CSR_ADDR_TDATA1, rdata);
+        check("tdata1 action=0 stays 0 (not clamped)", rdata[15:12], 4'd0);
+
+        write_csr(CSR_ADDR_TDATA1, {`WORD_SIZE{1'b1}});  // all-1s write
+        read_csr(CSR_ADDR_TDATA1, rdata);
+        check("tdata1 type field always reads 6 regardless of what's written", rdata[63:60], 4'd6);
+
+        /* tdata1/tdata2 per-slot independence. */
+        write_csr(CSR_ADDR_TSELECT, 64'd0);
+        write_csr(CSR_ADDR_TDATA1, (`WORD_SIZE'(1) << 12) | (`WORD_SIZE'(1) << 2));  // action=1, execute=1
+        write_csr(CSR_ADDR_TDATA2, 64'h0000_0000_0000_1000);
+        write_csr(CSR_ADDR_TSELECT, 64'd1);
+        write_csr(CSR_ADDR_TDATA1, (`WORD_SIZE'(1) << 6));  // m=1, action=0 (deliberately different)
+        write_csr(CSR_ADDR_TDATA2, 64'h0000_0000_0000_2000);
+        write_csr(CSR_ADDR_TSELECT, 64'd0);
+        read_csr(CSR_ADDR_TDATA1, rdata);
+        check("tdata1 slot 0 undisturbed by slot 1's own write -- action", rdata[15:12], 4'd1);
+        read_csr(CSR_ADDR_TDATA2, rdata);
+        check("tdata2 slot 0 undisturbed by slot 1's own write -- address", rdata, 64'h0000_0000_0000_1000);
+        write_csr(CSR_ADDR_TSELECT, 64'd1);
+        read_csr(CSR_ADDR_TDATA1, rdata);
+        check("tdata1 slot 1 holds its own distinct value -- m bit", rdata[6], 1'd1);
+        read_csr(CSR_ADDR_TDATA2, rdata);
+        check("tdata2 slot 1 holds its own distinct address", rdata, 64'h0000_0000_0000_2000);
+
+        /* tdata3: real stub, no storage. */
+        write_csr(CSR_ADDR_TDATA3, {`WORD_SIZE{1'b1}});
+        read_csr(CSR_ADDR_TDATA3, rdata);
+        check("tdata3 reads 0 unconditionally (real stub, no storage this round)", rdata, `WORD_SIZE'(0));
 
         $display("");
         $display("csr_file_tb: %0d passed, %0d failed", pass_count, fail_count);

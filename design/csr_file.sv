@@ -158,7 +158,19 @@ module csr_file (
     output logic                          o_mstatus_sie,
 
     output logic [(`WORD_SIZE - 1):0]     o_dcsr,
-    output logic [(`WORD_SIZE - 1):0]     o_dpc
+    output logic [(`WORD_SIZE - 1):0]     o_dpc,
+
+    /*
+     * Trigger Module (Milestone 9 groundwork): the full composed
+     * mcontrol6 value per slot, mirroring o_dcsr's own "export the
+     * whole register, let the consumer pick bits" precedent -- core.sv
+     * extracts m/s/u/execute/action directly from o_tdata1_0/1, same
+     * as it already extracts ebreakm/s/u/step from o_dcsr.
+     */
+    output logic [(`WORD_SIZE - 1):0]     o_tdata1_0,
+    output logic [(`WORD_SIZE - 1):0]     o_tdata1_1,
+    output logic [(`WORD_SIZE - 1):0]     o_tdata2_0,
+    output logic [(`WORD_SIZE - 1):0]     o_tdata2_1
 `ifdef RISCV_FORMAL
     /*
      * mcause/scause: no real core.sv control logic needs these today (unlike
@@ -243,6 +255,20 @@ module csr_file (
     localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_DSCRATCH1 = 12'h7B3;
 
     /*
+     * Trigger Module CSRs (Milestone 9 groundwork -- mcontrol6 only, 2
+     * fixed slots, execute-address-match only). Real spec addresses.
+     * Same Debug-Mode-only division of responsibility as the Debug-mode
+     * CSR block above -- this module does no address-based access
+     * control; see design/core.sv's is_trigger_csr_addr/
+     * trigger_csr_violation.
+     */
+    localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_TSELECT = 12'h7A0;
+    localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_TDATA1  = 12'h7A1;
+    localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_TDATA2  = 12'h7A2;
+    localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_TDATA3  = 12'h7A3;
+    localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_TINFO   = 12'h7A4;
+
+    /*
      * Read-only CSRs with no backing storage at all -- fixed values
      * returned directly by the read mux below, nothing to reset. misa's
      * value: MXL = 2 in bits[63:62] (selects XLEN=64) plus bit 8 set
@@ -257,6 +283,14 @@ module csr_file (
     localparam logic [(`WORD_SIZE - 1):0] MARCHID_VALUE   = `WORD_SIZE'(0);
     localparam logic [(`WORD_SIZE - 1):0] MIMPID_VALUE    = `WORD_SIZE'(0);
     localparam logic [(`WORD_SIZE - 1):0] MHARTID_VALUE   = `WORD_SIZE'(0);
+    /*
+     * tinfo (Milestone 9): version=1 (bits[31:24], ratified Sdtrig
+     * v1.0 -- required since this core implements mcontrol6, which
+     * needs tinfo.version>=1), info=0x0041 (bits[15:0]: bit 0 = type 0
+     * "no trigger" always trivially supported, bit 6 = type 6
+     * mcontrol6; every other type unsupported).
+     */
+    localparam logic [(`WORD_SIZE - 1):0] TINFO_VALUE = 64'h0000_0000_0100_0041;
 
     /*
      * Unlike register_file.sv's gp_registers (no reset port there at
@@ -661,6 +695,110 @@ module csr_file (
         else if (i_csr_we && (i_csr_addr == CSR_ADDR_DSCRATCH1)) dscratch1_q <= i_csr_wdata;
     end
 
+    /*
+     * Trigger Module storage (Milestone 9 groundwork) -- mcontrol6, 2
+     * fixed slots. Per-slot fields are individually-named registers
+     * (_q0/_q1 suffix), not one packed register per slot, directly
+     * extending design/dm.sv's own Milestone 5 precedent
+     * (sbaddress0_q..sbaddress3_q, not one packed sbcs_q) -- required
+     * here specifically because action's WARL clamp (below) isn't
+     * expressible as a static AND-mask the way a "no storage, OR'd in
+     * at read time" field is. Every OTHER tdata1 field this core
+     * doesn't implement (uncertain/vs/vu/select/size/chain/match/
+     * uncertainen/store/load) has no storage bit at all -- hardcoded
+     * directly into tdata1_val0/1 below, nothing to reset or mask.
+     */
+    logic tselect_q;
+    logic [(`WORD_SIZE - 1):0] tdata2_q0, tdata2_q1;
+    logic tdata1_dmode_q0,   tdata1_dmode_q1;
+    logic tdata1_hit1_q0,    tdata1_hit1_q1;
+    logic tdata1_hit0_q0,    tdata1_hit0_q1;
+    logic [3:0] tdata1_action_q0, tdata1_action_q1;
+    logic tdata1_m_q0,       tdata1_m_q1;
+    logic tdata1_s_q0,       tdata1_s_q1;
+    logic tdata1_u_q0,       tdata1_u_q1;
+    logic tdata1_execute_q0, tdata1_execute_q1;
+
+    /* tselect: WARL across exactly 2 legal slots -- storing only bit 0
+     * of any write trivially guarantees the readback is always in
+     * {0,1} regardless of what was written. Spec-legal: the real
+     * tselect field is documented WARL, "writes of values >= the
+     * number of supported triggers may result in a different value...
+     * than what was written" (riscv-debug-spec xml/hwbp_registers.xml). */
+    always_ff @(posedge i_clk) begin
+        if (i_rst) tselect_q <= 1'b0;
+        else if (i_csr_we && (i_csr_addr == CSR_ADDR_TSELECT)) tselect_q <= i_csr_wdata[0];
+    end
+
+    always_ff @(posedge i_clk) begin
+        if (i_rst) begin
+            tdata2_q0 <= '0; tdata2_q1 <= '0;
+        end else if (i_csr_we && (i_csr_addr == CSR_ADDR_TDATA2) && !tselect_q) begin
+            tdata2_q0 <= i_csr_wdata;
+        end else if (i_csr_we && (i_csr_addr == CSR_ADDR_TDATA2) && tselect_q) begin
+            tdata2_q1 <= i_csr_wdata;
+        end
+    end
+
+    /* action is the one real tdata1 field needing WARL clamping on
+     * write: anything but 0 clamps to 1 (prefers Debug Mode entry --
+     * the common hardware-breakpoint use case a real debugger almost
+     * always wants -- as the fallback for any unrecognized value). */
+    always_ff @(posedge i_clk) begin
+        if (i_rst) begin
+            tdata1_dmode_q0 <= 1'b0; tdata1_dmode_q1 <= 1'b0;
+            tdata1_hit1_q0  <= 1'b0; tdata1_hit1_q1  <= 1'b0;
+            tdata1_hit0_q0  <= 1'b0; tdata1_hit0_q1  <= 1'b0;
+            tdata1_action_q0 <= 4'b0; tdata1_action_q1 <= 4'b0;
+            tdata1_m_q0 <= 1'b0; tdata1_m_q1 <= 1'b0;
+            tdata1_s_q0 <= 1'b0; tdata1_s_q1 <= 1'b0;
+            tdata1_u_q0 <= 1'b0; tdata1_u_q1 <= 1'b0;
+            tdata1_execute_q0 <= 1'b0; tdata1_execute_q1 <= 1'b0;
+        end else if (i_csr_we && (i_csr_addr == CSR_ADDR_TDATA1) && !tselect_q) begin
+            tdata1_dmode_q0   <= i_csr_wdata[59];
+            tdata1_hit1_q0    <= i_csr_wdata[25];
+            tdata1_hit0_q0    <= i_csr_wdata[22];
+            tdata1_action_q0  <= (i_csr_wdata[15:12] == 4'b0) ? 4'b0 : 4'd1;
+            tdata1_m_q0       <= i_csr_wdata[6];
+            tdata1_s_q0       <= i_csr_wdata[4];
+            tdata1_u_q0       <= i_csr_wdata[3];
+            tdata1_execute_q0 <= i_csr_wdata[2];
+        end else if (i_csr_we && (i_csr_addr == CSR_ADDR_TDATA1) && tselect_q) begin
+            tdata1_dmode_q1   <= i_csr_wdata[59];
+            tdata1_hit1_q1    <= i_csr_wdata[25];
+            tdata1_hit0_q1    <= i_csr_wdata[22];
+            tdata1_action_q1  <= (i_csr_wdata[15:12] == 4'b0) ? 4'b0 : 4'd1;
+            tdata1_m_q1       <= i_csr_wdata[6];
+            tdata1_s_q1       <= i_csr_wdata[4];
+            tdata1_u_q1       <= i_csr_wdata[3];
+            tdata1_execute_q1 <= i_csr_wdata[2];
+        end
+    end
+
+    /*
+     * tdata1_val0/1: full 64-bit composed mcontrol6 value per slot,
+     * matching o_dcsr's own "export the full composed register, let
+     * the consumer pick bits" precedent. Needed unconditionally for
+     * BOTH slots every cycle, independent of tselect_q -- core.sv's
+     * hardware comparators watch both slots simultaneously, not just
+     * whichever one the CSR read/write window currently points at.
+     * Field order top-to-bottom: type[63:60], dmode[59],
+     * reserved[58:27] (32b), uncertain[26], hit1[25], vs[24], vu[23],
+     * hit0[22], select[21], reserved[20:19] (2b), size[18:16] (3b),
+     * action[15:12] (4b), chain[11], match[10:7] (4b), m[6],
+     * uncertainen[5], s[4], u[3], execute[2], store[1], load[0].
+     */
+    wire [(`WORD_SIZE - 1):0] tdata1_val0 = {
+        4'd6, tdata1_dmode_q0, 32'b0, 1'b0, tdata1_hit1_q0, 1'b0, 1'b0, tdata1_hit0_q0,
+        1'b0, 2'b0, 3'b0, tdata1_action_q0, 1'b0, 4'b0,
+        tdata1_m_q0, 1'b0, tdata1_s_q0, tdata1_u_q0, tdata1_execute_q0, 1'b0, 1'b0
+    };
+    wire [(`WORD_SIZE - 1):0] tdata1_val1 = {
+        4'd6, tdata1_dmode_q1, 32'b0, 1'b0, tdata1_hit1_q1, 1'b0, 1'b0, tdata1_hit0_q1,
+        1'b0, 2'b0, 3'b0, tdata1_action_q1, 1'b0, 4'b0,
+        tdata1_m_q1, 1'b0, tdata1_s_q1, tdata1_u_q1, tdata1_execute_q1, 1'b0, 1'b0
+    };
+
     /* mip_effective: MTIP (bit 7) is a live combinational function of
      * i_mtip, not stored state like every other mip bit. Every mip/sip
      * read arm and o_mip below must go through this wire -- raw mip_q
@@ -683,6 +821,10 @@ module csr_file (
     assign o_mstatus_sie = mstatus_q[MSTATUS_SIE_BIT];
     assign o_dcsr        = dcsr_q | DCSR_XDEBUGVER_FIXED;
     assign o_dpc         = dpc_q;
+    assign o_tdata1_0    = tdata1_val0;
+    assign o_tdata1_1    = tdata1_val1;
+    assign o_tdata2_0    = tdata2_q0;
+    assign o_tdata2_1    = tdata2_q1;
 `ifdef RISCV_FORMAL
     assign o_mcause      = mcause_q;
     assign o_scause      = scause_q;
@@ -735,6 +877,13 @@ module csr_file (
             CSR_ADDR_DPC:        o_csr_rdata = dpc_q;
             CSR_ADDR_DSCRATCH0:  o_csr_rdata = dscratch0_q;
             CSR_ADDR_DSCRATCH1:  o_csr_rdata = dscratch1_q;
+
+            /* Trigger Module CSRs (Milestone 9). */
+            CSR_ADDR_TSELECT: o_csr_rdata = {63'b0, tselect_q};
+            CSR_ADDR_TDATA1:  o_csr_rdata = tselect_q ? tdata1_val1 : tdata1_val0;
+            CSR_ADDR_TDATA2:  o_csr_rdata = tselect_q ? tdata2_q1 : tdata2_q0;
+            CSR_ADDR_TDATA3:  o_csr_rdata = `WORD_SIZE'(0);
+            CSR_ADDR_TINFO:   o_csr_rdata = TINFO_VALUE;
 
             default:            o_csr_rdata = `WORD_SIZE'(0);
         endcase

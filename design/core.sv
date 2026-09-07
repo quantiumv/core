@@ -442,6 +442,8 @@ module core (
     logic debug_halt_req_entry;
     logic stepping_q;
     logic [2:0] debug_cause_code;
+    logic trigger_debug_entry;
+    logic trigger_exception_match;
     /*
      * debug_progbuf_active/progbuf_ebreak_done/progbuf_abort (Milestone
      * 7) -- forward-declared for the same reason trap_taken itself is:
@@ -498,8 +500,22 @@ module core (
      * forward-declared above), so reservation_valid_q's own always_ff --
      * textually much earlier than trap_taken/progbuf_abort's real assigns
      * -- can use it too, not just csr_we/reg_write further down.
+     *
+     * trigger_debug_entry (Milestone 9) needs the identical treatment,
+     * for the identical underlying reason: it can fire on the exact
+     * same S_EXEC edge commit_now does (a non-memory instruction sitting
+     * at a matched trigger address), and without it here, reg_write's
+     * own commit_now-gated write would still land even though the
+     * instruction is simultaneously being redirected into Debug Mode --
+     * violating the spec's own "this instruction's effects must not
+     * take effect" requirement for an execute trigger. trap_taken and
+     * trigger_debug_entry can never both be true the same cycle either
+     * (trigger_debug_entry requires !in_debug_mode and is mutually
+     * exclusive with trigger_exception_match by construction, the same
+     * "Debug Mode entry wins the tie" property documented at that
+     * signal's own assign).
      */
-    wire instr_faulted = trap_taken || progbuf_abort;
+    wire instr_faulted = trap_taken || progbuf_abort || trigger_debug_entry;
     logic [(`WORD_SIZE - 1):0] amo_rdata_q;
     /*
      * amo_addr_q: WORD_SIZE-wide for the RVFI tap's rvfi_mem_addr (see its
@@ -676,9 +692,26 @@ module core (
                  * construction: the latter requires !in_debug_mode, which
                  * is false throughout progbuf execution (see the module's
                  * own Program Buffer section for the full reasoning).
+                 *
+                 * trigger_debug_entry (Milestone 9) is checked HERE,
+                 * ahead of mem_phase_needed's own ternary, deliberately --
+                 * NOT mirroring debug_ebreak_entry's commit_now timing.
+                 * See trigger_debug_entry's own assign (this module's
+                 * Trigger Module section) for the full reasoning: a
+                 * trigger can match a LOAD/STORE/AMO instruction's own PC
+                 * just as easily as an ALU op's, and checking ahead of
+                 * mem_phase_needed here (rather than commit_now-gated,
+                 * which for a memory op would only ever fire from
+                 * S_MEM/S_AMO_WRITE, after that instruction's own bus
+                 * transaction already completed) means a matched
+                 * load/store never reaches S_MEM at all -- no separate
+                 * S_MEM/S_AMO_WRITE arm is needed for this signal, unlike
+                 * progbuf_abort immediately below, which genuinely can
+                 * only be discovered once a memory operation is already
+                 * in flight.
                  */
                 S_EXEC:      state <= state_t'((progbuf_ebreak_done || progbuf_abort) ? S_DEBUG_HALTED
-                                    : debug_ebreak_entry ? S_DEBUG_HALTED
+                                    : (debug_ebreak_entry || trigger_debug_entry) ? S_DEBUG_HALTED
                                     : (mem_phase_needed ? S_MEM : (div_stall ? S_EXEC : S_FETCH)));
                 /*
                  * progbuf_abort can also fire from S_MEM/S_AMO_WRITE --
@@ -1476,6 +1509,24 @@ module core (
      */
     wire is_debug_csr_addr = is_csr && (imm_2[11:2] == 10'h1EC);
     wire debug_csr_violation = is_debug_csr_addr && !in_debug_mode;
+    /*
+     * Trigger Module CSRs (Milestone 9), same Debug-Mode-only gating
+     * class as debug_csr_violation above -- 0x7A0-0x7A4 doesn't share
+     * is_debug_csr_addr's own single-range-check luck (0x7B0-0x7B3 is a
+     * clean 4-address-aligned block; 0x7A0-0x7A4 is FIVE addresses, one
+     * past the 4-aligned block 0x7A0-0x7A3 covers). Two explicit terms:
+     * imm_2[11:2]==10'h1E8 covers tselect/tdata1/tdata2/tdata3
+     * (0x7A0-0x7A3); imm_2[11:0]==12'h7A4 covers tinfo alone.
+     * Deliberately NOT the broader imm_2[11:3]==9'h0F4 (which would
+     * also cover 0x7A0-0x7A7, incidentally gating the unimplemented
+     * 0x7A5-0x7A7 reserved addresses as illegal-instruction-outside-
+     * Debug-Mode too -- a real behavior change from today's harmless
+     * default-arm "read 0, ignore writes at any privilege" treatment
+     * those addresses get, avoided by using the tight, exact 5-address
+     * check instead.
+     */
+    wire is_trigger_csr_addr = is_csr && ((imm_2[11:2] == 10'h1E8) || (imm_2[11:0] == 12'h7A4));
+    wire trigger_csr_violation = is_trigger_csr_addr && !in_debug_mode;
     wire mret_priv_violation = is_mret && (current_priv != PRIV_M);
     wire sret_priv_violation = is_sret && ((current_priv == PRIV_U)
                               || (current_priv == PRIV_S && mstatus_tsr_w));
@@ -1489,7 +1540,7 @@ module core (
      * alone.
      */
     wire is_illegal_instr = is_invalid_instr || csr_priv_violation || csr_readonly_violation
-                          || debug_csr_violation
+                          || debug_csr_violation || trigger_csr_violation
                           || mret_priv_violation || sret_priv_violation
                           || (is_compressed && c_expand_illegal);
     wire is_ecall = (decoded_instruction == `INSTR_CODE(ECALL));
@@ -1517,17 +1568,17 @@ module core (
      * (the `instruction` substitution above already makes is_illegal_instr
      * etc. structurally false whenever it's set), but omitting its own
      * arm would let the fault be silently swallowed as a harmless ADDI. */
-    wire [3:0] exc_code = fetch_fault_q                         ? 4'd1  :
-                           is_illegal_instr                     ? 4'd2  :
-                           is_ebreak                            ? 4'd3  :
-                           (is_ecall && current_priv == PRIV_U) ? 4'd8  :
-                           (is_ecall && current_priv == PRIV_S) ? 4'd9  :
-                           (is_ecall && current_priv == PRIV_M) ? 4'd11 :
-                           mem_load_misaligned                  ? 4'd4  :
-                           mem_store_misaligned                 ? 4'd6  :
-                           mem_load_access_fault                ? 4'd5  :
-                           mem_store_access_fault               ? 4'd7  :
-                                                                   4'd0; // don't-care, gated by trap_taken
+    wire [3:0] exc_code = fetch_fault_q                          ? 4'd1  :
+                           is_illegal_instr                      ? 4'd2  :
+                           (is_ebreak || trigger_exception_match) ? 4'd3  :
+                           (is_ecall && current_priv == PRIV_U)  ? 4'd8  :
+                           (is_ecall && current_priv == PRIV_S)  ? 4'd9  :
+                           (is_ecall && current_priv == PRIV_M)  ? 4'd11 :
+                           mem_load_misaligned                   ? 4'd4  :
+                           mem_store_misaligned                  ? 4'd6  :
+                           mem_load_access_fault                 ? 4'd5  :
+                           mem_store_access_fault                ? 4'd7  :
+                                                                    4'd0; // don't-care, gated by trap_taken
 
     /*
      * !debug_progbuf_active (Milestone 7): while a Program Buffer run is
@@ -1541,7 +1592,7 @@ module core (
      * section for the full reasoning.
      */
     assign trap_taken = !debug_progbuf_active && commit_now && (fetch_fault_q || is_illegal_instr
-                                   || (is_ebreak && !ebreak_to_debug) || is_ecall
+                                   || (is_ebreak && !ebreak_to_debug) || trigger_exception_match || is_ecall
                                    || mem_load_misaligned || mem_store_misaligned
                                    || mem_load_access_fault || mem_store_access_fault);
     /* An M-mode trap never delegates, regardless of medeleg -- falls out
@@ -1885,6 +1936,19 @@ module core (
     wire [(`WORD_SIZE - 1):0] dcsr_w;
     /* verilator lint_on UNUSEDSIGNAL */
     wire [(`WORD_SIZE - 1):0] dpc_w;
+    /*
+     * tdata1_0_w/tdata1_1_w: same genuinely-partial-usage shape as
+     * dcsr_w just above -- only bits [6]/[4]/[3] (m/s/u priv enables),
+     * [2] (execute), and [15:12] (action) are consumed this milestone
+     * (execute-address-match only), the rest exist for a real,
+     * spec-shaped mcontrol6 register. tdata2_0_w/tdata2_1_w, by
+     * contrast, are fully consumed (the whole value feeds the pc
+     * comparator), so they need no such wrapper.
+     */
+    /* verilator lint_off UNUSEDSIGNAL */
+    wire [(`WORD_SIZE - 1):0] tdata1_0_w, tdata1_1_w;
+    /* verilator lint_on UNUSEDSIGNAL */
+    wire [(`WORD_SIZE - 1):0] tdata2_0_w, tdata2_1_w;
 `ifdef RISCV_FORMAL
     wire [(`WORD_SIZE - 1):0] mcause_w, scause_w;
     wire [(`WORD_SIZE - 1):0] mepc_next_w, sepc_next_w, mcause_next_w, scause_next_w;
@@ -1923,7 +1987,7 @@ module core (
         .i_mret_taken(mret_taken),
         .i_sret_taken(sret_taken),
 
-        .i_debug_entry(debug_ebreak_entry || debug_halt_req_entry),
+        .i_debug_entry(debug_ebreak_entry || debug_halt_req_entry || trigger_debug_entry),
         .i_debug_cause(debug_cause_code),
 
         .o_mtvec(mtvec_w),
@@ -1956,7 +2020,9 @@ module core (
          * pc always_ff's resume arm reads dpc_w -- see the new Debug
          * Mode section below.
          */
-        .o_dcsr(dcsr_w), .o_dpc(dpc_w)
+        .o_dcsr(dcsr_w), .o_dpc(dpc_w),
+        .o_tdata1_0(tdata1_0_w), .o_tdata1_1(tdata1_1_w),
+        .o_tdata2_0(tdata2_0_w), .o_tdata2_1(tdata2_1_w)
 `ifdef RISCV_FORMAL
         ,
         .o_mcause(mcause_w),
@@ -2075,15 +2141,23 @@ module core (
 
     /*
      * debug_cause_code: per spec (dcsr.cause encoding), 1=ebreak,
-     * 3=haltreq, 4=step. resethaltreq(5)/triggermodule(2) don't apply
-     * yet (no reset-halt-request port, no trigger module until a later
-     * milestone). stepping_q is checked before i_debug_halt_req so a
-     * single-step boundary reports cause=step even if an external halt
-     * request happens to be held at the same instant.
+     * 2=triggermodule (Milestone 9), 3=haltreq, 4=step. resethaltreq(5)
+     * still doesn't apply (no reset-halt-request port). trigger_debug_
+     * entry is checked right after debug_ebreak_entry -- both are
+     * commit_now-timed (same-cycle) causes, unlike stepping_q/haltreq's
+     * own commit_now_q-deferred tier. An EBREAK that also happens to sit
+     * at a configured trigger address reports cause=ebreak(1), not
+     * cause=triggermodule(2) -- an arbitrary, documented tie-break, not
+     * a spec requirement (the spec doesn't mandate an order when
+     * multiple causes coincide the same cycle). stepping_q is checked
+     * before i_debug_halt_req so a single-step boundary reports
+     * cause=step even if an external halt request happens to be held at
+     * the same instant.
      */
-    assign debug_cause_code = debug_ebreak_entry ? 3'd1
-                             : stepping_q         ? 3'd4
-                                                   : 3'd3;
+    assign debug_cause_code = debug_ebreak_entry  ? 3'd1
+                             : trigger_debug_entry ? 3'd2
+                             : stepping_q          ? 3'd4
+                                                    : 3'd3;
 
     /*
      * in_debug_mode: real storage now -- Milestone 3 left this hardwired
@@ -2100,7 +2174,7 @@ module core (
     always_ff @(posedge clk) begin
         if (rst) begin
             in_debug_mode <= 1'b0;
-        end else if (debug_ebreak_entry || debug_halt_req_entry) begin
+        end else if (debug_ebreak_entry || debug_halt_req_entry || trigger_debug_entry) begin
             in_debug_mode <= 1'b1;
         end else if (state == S_DEBUG_HALTED && i_debug_resume_req) begin
             in_debug_mode <= 1'b0;
@@ -2108,6 +2182,107 @@ module core (
     end
 
     assign o_debug_mode = in_debug_mode;
+
+    /* --------------------------------------------------------------- *
+     * Trigger Module (Milestone 9 groundwork) -- 2 fixed mcontrol6
+     * comparator slots, execute-address-match only.
+     * --------------------------------------------------------------- */
+
+    wire trig0_priv_en = (current_priv == PRIV_M) ? tdata1_0_w[6]
+                        : (current_priv == PRIV_S) ? tdata1_0_w[4]
+                                                    : tdata1_0_w[3];
+    wire trig1_priv_en = (current_priv == PRIV_M) ? tdata1_1_w[6]
+                        : (current_priv == PRIV_S) ? tdata1_1_w[4]
+                                                    : tdata1_1_w[3];
+
+    /*
+     * pc is stable for an instruction's whole multi-cycle lifetime (only
+     * moves on commit_now's own edge, see pc's own always_ff below) --
+     * same raw, unconditionally-computed treatment csr_priv_violation/
+     * debug_csr_violation already get, gated externally only at each
+     * consumption site below (trap_taken for the exception path,
+     * trigger_debug_entry's own commit_now for the debug-entry path).
+     */
+    wire trig0_match = tdata1_0_w[2] && trig0_priv_en && (pc == tdata2_0_w);
+    wire trig1_match = tdata1_1_w[2] && trig1_priv_en && (pc == tdata2_1_w);
+
+    wire trig0_debug_fire = trig0_match && (tdata1_0_w[15:12] == 4'd1);
+    wire trig1_debug_fire = trig1_match && (tdata1_1_w[15:12] == 4'd1);
+    wire trig0_exc_fire   = trig0_match && (tdata1_0_w[15:12] == 4'd0);
+    wire trig1_exc_fire   = trig1_match && (tdata1_1_w[15:12] == 4'd0);
+
+    /*
+     * trigger_debug_entry: deliberately state==S_EXEC-gated, NOT
+     * commit_now-gated like debug_ebreak_entry above -- a real
+     * correctness requirement, not a style choice, found while designing
+     * this module's own verification plan. commit_now for a load/store/
+     * AMO only ever becomes true once state==S_MEM (wb_ok having
+     * already arrived), by which point that instruction's own bus
+     * transaction has ALREADY completed -- for a STORE specifically,
+     * the write would already be irreversibly landed at the slave
+     * before a commit_now-gated check could ever intercept it, silently
+     * violating the spec's own "for execute, timing must be 0 (fires
+     * BEFORE the instruction takes effect)" requirement this module's
+     * tdata1_execute wiring already commits to. state==S_EXEC, by
+     * contrast, is reached by EVERY instruction (mem_phase_needed's own
+     * S_EXEC->S_MEM decision hasn't happened yet), so checking here and
+     * redirecting straight to S_DEBUG_HALTED -- ahead of, not after,
+     * mem_phase_needed's own ternary in the S_EXEC state-transition arm
+     * below -- means a matched load/store never reaches S_MEM at all,
+     * genuinely preventing its bus transaction (read OR write) from
+     * ever starting, not just suppressing its eventual register/CSR
+     * writeback. !in_debug_mode is the SAME term that already makes
+     * debug_ebreak_entry structurally impossible throughout a Program
+     * Buffer run (in_debug_mode is 1 the entire time) -- no separate
+     * debug_progbuf_active gate needed. See instr_faulted's own updated
+     * comment (this file, near reservation_valid_q) for why reg_write/
+     * csr_we ALSO need trigger_debug_entry added to their shared
+     * suppression gate: for a non-memory instruction (mem_phase_needed
+     * already 0), commit_now and this signal become true on the exact
+     * same S_EXEC edge, so reg_write's own commit_now-gated write would
+     * otherwise still fire that same cycle.
+     */
+    assign trigger_debug_entry = (state == S_EXEC) && !in_debug_mode && (trig0_debug_fire || trig1_debug_fire);
+
+    /*
+     * trigger_exception_match deliberately has NO commit_now of its
+     * own -- trap_taken's own external commit_now (and
+     * !debug_progbuf_active) gate already covers it, exactly mirroring
+     * is_ebreak's own raw-wire treatment in trap_taken's
+     * "(is_ebreak && !ebreak_to_debug)" arm, which has no commit_now
+     * embedded either. The "!(trig0_debug_fire||trig1_debug_fire)"
+     * guard is the direct generalization of that same arm's
+     * "&& !ebreak_to_debug" term -- Debug Mode entry wins any same-cycle
+     * tie against the exception path (a debugger misconfiguring two
+     * slots to the identical address with different actions is the only
+     * way both could coincide; preferring the debug-mode outcome is the
+     * safer default, same reasoning as the action field's own WARL
+     * clamp-to-1 in csr_file.sv).
+     *
+     * KNOWN, DELIBERATELY UNADDRESSED narrower gap (same class as
+     * wb_lock_o's own documented LR/SC-vs-SBA limitation): unlike
+     * trigger_debug_entry above, this path is NOT given the same
+     * state==S_EXEC early-intercept treatment -- trap_taken's shared
+     * commit_now-gated machinery is used by every OTHER synchronous
+     * exception source too, and giving JUST this one term an early,
+     * special-cased intercept would mean restructuring mem_phase_needed's
+     * own S_EXEC->S_MEM transition decision for every exception source,
+     * not just this one. Consequence: for action=0 (raise a Breakpoint
+     * exception rather than enter Debug Mode) matched against a STORE
+     * or an AMO's own write phase specifically, commit_now doesn't
+     * become true until state==S_MEM/S_AMO_WRITE, by which point that
+     * instruction's own bus WRITE has already landed -- the exception
+     * still fires (mcause=3, mtval=the matched address), but the memory
+     * side effect is not actually prevented, unlike a LOAD at the same
+     * address (harmless regardless, since reg_write is still correctly
+     * suppressed via instr_faulted below) or the action=1 path above
+     * (fully protected for every instruction type). A real external
+     * debugger's own common case -- action=1, Debug Mode entry -- is
+     * unaffected; this narrower gap only matters for a
+     * self-hosted/OS-level action=0 watchpoint deliberately placed on a
+     * store's own instruction address, a rarer configuration.
+     */
+    assign trigger_exception_match = !(trig0_debug_fire || trig1_debug_fire) && (trig0_exc_fire || trig1_exc_fire);
 
     /*
      * Branch comparator: NOT routed through alu0. alu_ops.sv has no
@@ -2259,6 +2434,7 @@ module core (
                                              : {{(`WORD_SIZE - `INSTR_SIZE){1'b0}}, instruction})
         : (mem_load_misaligned || mem_store_misaligned) ? mem_paddr
         : (mem_load_access_fault || mem_store_access_fault) ? mem_access_fault_addr
+        : trigger_exception_match ? pc
         : `WORD_SIZE'(0);
 
     /* Store data, pre-shifted into the byte lane(s) it'll land in. */
