@@ -421,18 +421,21 @@ module soc (
     logic [6:0]  dmi_reg_addr;
     logic [31:0] dmi_reg_wdata;
     logic        dmi_reg_we;
+    logic        dmi_reg_re;
     logic [31:0] dmi_reg_rdata;
 
     jtag_tap jtag_tap0 (
         .tck(jtag_tck), .tms(jtag_tms), .tdi(jtag_tdi), .tdo(jtag_tdo), .trst_n(jtag_trst_n),
         .clk(clk), .rst(rst),
         .o_reg_addr(dmi_reg_addr), .o_reg_wdata(dmi_reg_wdata), .o_reg_we(dmi_reg_we),
+        .o_reg_re(dmi_reg_re),
         .i_reg_rdata(dmi_reg_rdata)
     );
 
     dm dm0 (
         .clk(clk), .rst(rst),
         .i_reg_addr(dmi_reg_addr), .i_reg_wdata(dmi_reg_wdata), .i_reg_we(dmi_reg_we),
+        .i_reg_re(dmi_reg_re),
         .o_reg_rdata(dmi_reg_rdata),
         .i_hart_halted(debug_mode),
         .o_debug_halt_req(debug_halt_req), .o_debug_resume_req(debug_resume_req),

@@ -346,6 +346,82 @@ module jtag_dmi_e2e_tb;
             dmi_read_reg(DMI_SBDATA0, rd);
             check("jtag_dmi_e2e: SBA read-back -- sbdata0 == the value written moments ago", rd, 32'hCAFEF00D);
 
+            /*
+             * Milestone 10a: sbreadondata through the REAL transport, not
+             * just dm_tb.sv's own backdoor (which drives i_reg_re
+             * directly). dmi_read_reg's own op=1 DMI read already issues
+             * a genuine read-strobe end to end through dm_dmi.sv's CDC
+             * (o_reg_re, derived from its delay_q FSM) -- this is the one
+             * test that would catch a CDC-timing mistake the backdoor
+             * tests structurally cannot see. Two fresh 32-bit words at
+             * 0x308/0x310 (well past 0x300, already used above).
+             */
+            dmi_write_reg(DMI_SBCS, {11'b0, 1'b0, 3'd2, 1'b0, 1'b0, 15'b0});  // readonaddr=0, access=32-bit
+            dmi_write_reg(DMI_SBADDRESS0, 32'h0000_0308);
+            dmi_write_reg(DMI_SBDATA0, 32'hAAAA_0001);  // triggers the write
+            tries = 0;
+            rd = 32'h0020_0000;
+            while (rd[21]) begin
+                if (tries >= DMI_RETRY_LIMIT) begin
+                    $display("TIMEOUT: jtag_dmi_e2e_tb sbreadondata seed write #1 never cleared sbbusy");
+                    $finish;
+                end
+                dmi_read_reg(DMI_SBCS, rd);
+                tries++;
+            end
+            dmi_write_reg(DMI_SBADDRESS0, 32'h0000_0310);
+            dmi_write_reg(DMI_SBDATA0, 32'hAAAA_0002);
+            tries = 0;
+            rd = 32'h0020_0000;
+            while (rd[21]) begin
+                if (tries >= DMI_RETRY_LIMIT) begin
+                    $display("TIMEOUT: jtag_dmi_e2e_tb sbreadondata seed write #2 never cleared sbbusy");
+                    $finish;
+                end
+                dmi_read_reg(DMI_SBCS, rd);
+                tries++;
+            end
+
+            // sbreadonaddr=1, sbautoincrement=1, sbreadondata=1 -- one
+            // sbaddress0 write triggers word 0's read; a SECOND plain
+            // dmi_read_reg of sbdata0 (a real op=1 DMI transaction, no
+            // explicit re-trigger) must pull word 1.
+            dmi_write_reg(DMI_SBCS, {11'b0, 1'b1, 3'd2, 1'b1, 1'b1, 15'b0});  // readonaddr/autoincrement/readondata=1
+            dmi_write_reg(DMI_SBADDRESS0, 32'h0000_0308);  // triggers word 0's read
+            tries = 0;
+            rd = 32'h0020_0000;
+            while (rd[21]) begin
+                if (tries >= DMI_RETRY_LIMIT) begin
+                    $display("TIMEOUT: jtag_dmi_e2e_tb sbreadondata word 0 read never cleared sbbusy");
+                    $finish;
+                end
+                dmi_read_reg(DMI_SBCS, rd);
+                tries++;
+            end
+            dmi_read_reg(DMI_SBDATA0, rd);
+            check("jtag_dmi_e2e: sbreadondata word 0 == 0xAAAA0001 (via real TAP)", rd, 32'hAAAA_0001);
+
+            dmi_read_reg(DMI_SBDATA0, rd);  // the read ITSELF (through the real transport) triggers word 1's fetch
+            // sbbusy may still be settling relative to this read's own
+            // op=1 DMI transaction (the busy/retry poll inside
+            // dmi_read_reg only guarantees the DMI *transport* op
+            // completed, not that the retriggered SBA bus access has) --
+            // poll sbcs.sbbusy directly, same as every SBA wait above.
+            tries = 0;
+            rd = 32'h0020_0000;
+            while (rd[21]) begin
+                if (tries >= DMI_RETRY_LIMIT) begin
+                    $display("TIMEOUT: jtag_dmi_e2e_tb sbreadondata auto-triggered read never cleared sbbusy");
+                    $finish;
+                end
+                dmi_read_reg(DMI_SBCS, rd);
+                tries++;
+            end
+            dmi_read_reg(DMI_SBDATA0, rd);
+            check("jtag_dmi_e2e: sbreadondata auto-advanced to word 1 == 0xAAAA0002 after one plain read (via real TAP)",
+                rd, 32'hAAAA_0002);
+            dmi_write_reg(DMI_SBCS, {11'b0, 1'b0, 3'd2, 1'b0, 1'b0, 15'b0});  // readonaddr/autoincrement/readondata back to 0, tidy up
+
             // SBA access into the DRAM window (0x0001_8000-0x0001_FFFF).
             // Before this review-fix, soc.sv's own decoder0 instantiation
             // left dram_ack_i/dram_err_i floating (X in simulation); since

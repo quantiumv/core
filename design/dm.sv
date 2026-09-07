@@ -22,7 +22,13 @@
  * sbcs/sbaddress0/sbdata0/sbdata1 registers -- see that section below).
  * Quick Access commands still get register STORAGE only (so their own
  * shape is proven once) but no functional backing -- deferred
- * indefinitely, see the plan file's own scope boundary.
+ * indefinitely, see the plan file's own scope boundary. Milestone 10a
+ * adds a real DMI read-strobe (i_reg_re, sourced from design/dm_dmi.sv's
+ * own transport FSM) and makes sbcs.sbreadondata and
+ * abstractauto.autoexecdata functionally real -- both were previously
+ * storage-only, discovered as genuine gaps while planning Milestone 10's
+ * OpenOCD integration test (a multi-word memory read is the overwhelmingly
+ * common real-world case).
  *
  * NOTE ON SPEC FIDELITY: this repo has no local copy of the RISC-V
  * Debug Specification, but every register's bit layout below (dmcontrol,
@@ -50,6 +56,16 @@
  * i_csr_we) -- i_reg_wdata is only guaranteed valid the same cycle.
  * o_reg_rdata is combinational off i_reg_addr, mirroring csr_file.sv's
  * own o_csr_rdata (flat read-mux, no separate read-enable needed).
+ *
+ * i_reg_re (Milestone 10a): a genuine "a read just happened" strobe,
+ * ANSI-defaulted 1'b0 since every reader before this milestone (this
+ * module's own read-mux, every existing DMI-backdoor testbench) never
+ * needed one -- only soc.sv drives it for real, via design/dm_dmi.sv's
+ * own free derivation off its existing delay_q FSM (see that file's
+ * header). Consumed below by sbcs.sbreadondata and
+ * abstractauto.autoexecdata, the two register fields whose real
+ * semantics depend on a READ (not just a stable address) having
+ * genuinely occurred.
  *
  * Access Register execution is a single clock edge, not a multi-cycle
  * FSM: core0's GPR read port and CSR read port are both combinational
@@ -81,6 +97,7 @@ module dm (
     input  logic [6:0]  i_reg_addr,
     input  logic [31:0] i_reg_wdata,
     input  logic        i_reg_we,
+    input  logic        i_reg_re = 1'b0,
     output logic [31:0] o_reg_rdata,
 
     /*
@@ -342,12 +359,45 @@ module dm (
     logic [31:0] command_q;
     wire cmd_write_now = i_reg_we && (i_reg_addr == ADDR_COMMAND);
 
-    wire [7:0]  cmd_cmdtype   = i_reg_wdata[31:24];
-    wire [2:0]  cmd_aarsize   = i_reg_wdata[22:20];
-    wire        cmd_postexec  = i_reg_wdata[18];
-    wire        cmd_transfer  = i_reg_wdata[17];
-    wire        cmd_write_reg = i_reg_wdata[16];
-    wire [15:0] cmd_regno     = i_reg_wdata[15:0];
+    /*
+     * abstractauto.autoexecdata (Milestone 10a): a data0/data1 access
+     * (read OR write) with the matching abstractauto bit set re-issues
+     * the LAST command (command_q), not a fresh one. cmd_auto_retrigger_q
+     * is forward-declared here (real driving always_ff lives in the
+     * abstractauto_q section further down, once abstractauto_q/
+     * data_access_now exist -- same "declare early, drive later" idiom
+     * this file already uses for progbuf_q) since cmd_trigger_now's own
+     * mux, right below, needs it before that point. It's a one-cycle-
+     * deferred pulse (not combinational off the triggering access) so
+     * that data0_q/data1_q have already latched a just-written value
+     * before the retriggered transfer reads them -- see its own always_ff
+     * for the full reasoning. cmd_write_now and cmd_auto_retrigger_q are
+     * mutually exclusive by construction (one needs i_reg_addr==
+     * ADDR_COMMAND this cycle, the other needs a data0/data1 access one
+     * cycle ago), so cmd_effective_word's mux has no real priority
+     * hazard. Every existing cmd_* decode below (previously sourced
+     * directly off i_reg_wdata) now sources off cmd_effective_word
+     * instead, transparently covering both triggers with no other
+     * change needed at any downstream consumption site.
+     */
+    logic cmd_auto_retrigger_q;
+    wire cmd_trigger_now = cmd_write_now || cmd_auto_retrigger_q;
+    // Bits [23] and [19] (reserved, between cmdtype/aarsize and
+    // aarsize/postexec) are genuinely never consumed below -- true of
+    // the ORIGINAL i_reg_wdata-sourced decode too (no single 32-bit wire
+    // existed there to trigger the warning), not a regression this
+    // refactor introduced. Same "genuinely partial command/CSR bit
+    // usage" precedent as dcsr_w/tdata1_0_w elsewhere in this project.
+    /* verilator lint_off UNUSEDSIGNAL */
+    wire [31:0] cmd_effective_word = cmd_write_now ? i_reg_wdata : command_q;
+    /* verilator lint_on UNUSEDSIGNAL */
+
+    wire [7:0]  cmd_cmdtype   = cmd_effective_word[31:24];
+    wire [2:0]  cmd_aarsize   = cmd_effective_word[22:20];
+    wire        cmd_postexec  = cmd_effective_word[18];
+    wire        cmd_transfer  = cmd_effective_word[17];
+    wire        cmd_write_reg = cmd_effective_word[16];
+    wire [15:0] cmd_regno     = cmd_effective_word[15:0];
 
     // GPR range 0x1000-0x101F (x0-x31); CSR range 0x0000-0x0FFF.
     wire cmd_regno_is_gpr = (cmd_regno[15:5] == 11'h080);
@@ -379,7 +429,10 @@ module dm (
 
     // Legal: hart halted, DM not already mid-command, no sticky error
     // pending, and the requested command is one this milestone supports.
-    wire cmd_legal = cmd_write_now && i_hart_halted && !busy_q
+    // cmd_trigger_now (not bare cmd_write_now) so an abstractauto
+    // retrigger (Milestone 10a) is accepted/executed through exactly
+    // the same legality gate an ordinary command write already is.
+    wire cmd_legal = cmd_trigger_now && i_hart_halted && !busy_q
                    && (cmderr_q == 3'd0) && cmd_supported;
 
     wire cmd_do_gpr = cmd_legal && cmd_transfer && cmd_regno_is_gpr;
@@ -407,18 +460,34 @@ module dm (
      * (non-racing) case at all: i_progbuf_abort is 0 on every cycle a W1C
      * write isn't racing it, so the W1C branch still fires exactly as
      * before.
+     *
+     * Milestone 10a note: cmd_trigger_now's error check is ALSO checked
+     * ahead of the W1C-clear branch now, for the identical reason --
+     * cmd_write_now alone could never coincide with a same-cycle
+     * ADDR_ABSTRACTCS write (same i_reg_addr/i_reg_we port, only one
+     * address at a time), so the original ordering was safe by
+     * construction. cmd_auto_retrigger_q breaks that: it's an
+     * independent, registered pulse (not gated by this cycle's
+     * i_reg_addr at all, same shape as i_progbuf_abort), so a debugger's
+     * W1C-clear of some earlier, unrelated sticky error CAN now land on
+     * the exact same cycle an autoexecdata retrigger detects a fresh
+     * busy/not-supported condition. Reordering closes that race the same
+     * way it was already closed for i_progbuf_abort; it's a no-op for
+     * the ordinary cmd_write_now sub-case (still structurally exclusive
+     * from a same-cycle W1C write, so its own behavior is unchanged).
      */
     always_ff @(posedge clk) begin
         if (rst) begin
             cmderr_q <= 3'd0;
         end else if (i_progbuf_abort && (cmderr_q == 3'd0)) begin
             cmderr_q <= 3'd3;  // exception (Milestone 7) -- see the Program Buffer section below
-        end else if (i_reg_we && (i_reg_addr == ADDR_ABSTRACTCS) && (i_reg_wdata[10:8] != 3'd0)) begin
-            cmderr_q <= 3'd0;
-        end else if (cmd_write_now && (cmderr_q == 3'd0)) begin
+        end else if (cmd_trigger_now && (cmderr_q == 3'd0)
+                     && (!i_hart_halted || busy_q || !cmd_supported)) begin
             if (!i_hart_halted)        cmderr_q <= 3'd4;  // halt/resume
             else if (busy_q)           cmderr_q <= 3'd1;  // busy
             else if (!cmd_supported)   cmderr_q <= 3'd2;  // not supported
+        end else if (i_reg_we && (i_reg_addr == ADDR_ABSTRACTCS) && (i_reg_wdata[10:8] != 3'd0)) begin
+            cmderr_q <= 3'd0;
         end
     end
 
@@ -486,16 +555,43 @@ module dm (
     end
 
     /* ----------------------------------------------------------------- *
-     * abstractauto -- storage only, no functional effect this milestone
-     * (real "auto-execute the last command on every data0/data1
-     * DMI access" behavior is a nice-to-have this milestone's own gate
-     * doesn't require -- the DMI backdoor testbench drives `command`
-     * directly each time instead).
+     * abstractauto.autoexecdata (Milestone 10a): bits [1:0] are real --
+     * a data0/data1 access (read OR write) with the matching bit set
+     * re-issues the last command (command_q) via cmd_auto_retrigger_q,
+     * whose own consumption is entirely in the cmd_effective_word/
+     * cmd_trigger_now machinery above (declared there since it's needed
+     * before this point textually; driven here, once abstractauto_q and
+     * i_reg_re both exist). Bits [11:2] (data2-11) stay storage-only --
+     * spec-legal, since this core only ever transfers via data0/data1.
+     *
+     * cmd_auto_retrigger_q is deliberately ONE CYCLE DEFERRED from the
+     * triggering access, not combinational: for a WRITE-autoexec loop
+     * (debugger staging data0/data1 to push values IN), data0_q/data1_q
+     * only latch the just-written value on THIS edge (see the data0_q/
+     * data1_q always_ff above) -- a combinational same-cycle retrigger
+     * would read the OLD, pre-write value via {data1_q, data0_q}. A
+     * READ-autoexec loop (pulling values OUT) has no equivalent hazard
+     * (o_reg_rdata for the read itself is already combinational off the
+     * PRE-retrigger data0_q/data1_q, unaffected by what this same edge's
+     * retrigger does) -- but using the same one-cycle-deferred shape for
+     * both keeps this a single, uniform mechanism rather than two
+     * differently-timed ones. Same "defer by one cycle so dependent
+     * state has settled" pattern design/core.sv's own interrupt-taking
+     * milestone already established (commit_now_q/interrupt_taken).
      * ----------------------------------------------------------------- */
     logic [31:0] abstractauto_q;
     always_ff @(posedge clk) begin
         if (rst) abstractauto_q <= 32'b0;
         else if (i_reg_we && (i_reg_addr == ADDR_ABSTRACTAUTO)) abstractauto_q <= i_reg_wdata;
+    end
+
+    wire data_access_now = (i_reg_we || i_reg_re)
+                         && ((i_reg_addr == ADDR_DATA0) || (i_reg_addr == ADDR_DATA1));
+    wire autoexec_bit    = (i_reg_addr == ADDR_DATA0) ? abstractauto_q[0] : abstractauto_q[1];
+
+    always_ff @(posedge clk) begin
+        if (rst) cmd_auto_retrigger_q <= 1'b0;
+        else     cmd_auto_retrigger_q <= data_access_now && autoexec_bit;
     end
 
     /* ----------------------------------------------------------------- *
@@ -549,25 +645,23 @@ module dm (
      *    mirroring the Access Register command's own established
      *    "aarsize=3 (64-bit) only" precedent (see cmd_aarsize_ok above).
      *  - sbreadondata (auto-trigger a new read when sbdata0 is READ, per
-     *    spec) is accepted/stored for DMI readback but NOT functionally
-     *    honored: implementing it correctly needs a genuine "this cycle
-     *    is a real read access," which this module's plain register
-     *    interface has never needed before (every other register here is
-     *    a side-effect-free combinational readback off i_reg_addr, with
-     *    no separate read-enable/strobe) -- adding one now would mean
-     *    threading a brand-new i_reg_re/o_reg_re signal through
-     *    design/dm_dmi.sv, design/jtag_tap.sv, this module, soc.sv, and
-     *    every existing DMI-backdoor testbench, for a feature this
-     *    milestone's own gate doesn't require (a debugger can still read
-     *    memory correctly via sbreadonaddr + sbautoincrement + an
-     *    explicit sbdata0 read each time -- just without the "read is
-     *    also a prefetch" pipelining sbreadondata exists to speed up).
-     *    Deferred, not silently dropped -- reconsider if/when a real
-     *    OpenOCD integration test (Milestone 10) demonstrates it's
-     *    actually needed. The same limitation applies to sbdata1's own
-     *    spec text ("accesses [including reads] while busy set
-     *    sbbusyerror") -- only WRITE-while-busy is detected here, for
-     *    the identical "no read-strobe exists" reason.
+     *    spec) is REAL as of Milestone 10a: sba_data_read_now (below)
+     *    is gated on the genuine i_reg_re read-strobe design/dm_dmi.sv
+     *    now derives for free from its own existing transport FSM (see
+     *    that file's header) and threads through design/jtag_tap.sv/
+     *    soc.sv/this module's own new i_reg_re input -- a debugger can
+     *    now read a multi-word memory range via one sbaddress0 write
+     *    followed by N plain sbdata0 reads, with no explicit re-trigger
+     *    between them. sbdata1's own spec text ("accesses [including
+     *    reads] while busy set sbbusyerror") still only detects
+     *    WRITE-while-busy (sba_other_write_while_busy, below) -- a
+     *    genuine read-while-busy collision would need sbdata1 gated the
+     *    same way sba_data_read_now gates sbdata0, which nothing in this
+     *    milestone's own gate (a correctly-sequenced debugger never
+     *    reads sbdata1 while sba_busy_q, since it's waiting on the SAME
+     *    busy flag to clear first) requires -- left as the one remaining
+     *    narrower gap, same class as the SBA module's other documented
+     *    "correctly-behaved debugger never hits this path" simplifications.
      *  - Misaligned accesses (sbaddress0 not naturally aligned to the
      *    current sbaccess width) are rejected instantly with sberror=3,
      *    never attempted on the bus -- a real, cheap correctness check
@@ -578,7 +672,7 @@ module dm (
     logic        sbreadonaddr_q;     // [20]
     logic [2:0]  sbaccess_q;         // [19:17]
     logic        sbautoincrement_q;  // [16]
-    logic        sbreadondata_q;     // [15] -- stored, not functionally honored (see above)
+    logic        sbreadondata_q;     // [15] -- real as of Milestone 10a (see above)
     logic [2:0]  sberror_q;          // [14:12], W1C
     logic [31:0] sbaddress0_q, sbaddress1_q, sbaddress2_q, sbaddress3_q;
     logic [31:0] sbdata0_q, sbdata1_q, sbdata2_q, sbdata3_q;
@@ -614,12 +708,16 @@ module dm (
      * sbaddress0_q's new value on this very edge, in the always_ff
      * below) -- using the stale, about-to-be-overwritten sbaddress0_q
      * here would validate the WRONG address. For an sbdata0-triggered
-     * write, sbaddress0_q is unchanged by this write, so the current,
-     * stored value is exactly right.
+     * write OR a sbreadondata-triggered read (Milestone 10a), sbaddress0_q
+     * is unchanged by either, so the current, stored value is exactly
+     * right -- a read of sbdata0 never itself changes sbaddress0_q.
      */
     wire sba_addr_write_now = i_reg_we && (i_reg_addr == ADDR_SBADDRESS0);
     wire sba_data_write_now = i_reg_we && (i_reg_addr == ADDR_SBDATA0);
-    wire sba_new_op_requested = (sba_addr_write_now && sbreadonaddr_q) || sba_data_write_now;
+    wire sba_data_read_now  = i_reg_re && (i_reg_addr == ADDR_SBDATA0);  // Milestone 10a
+    wire sba_new_op_requested = (sba_addr_write_now && sbreadonaddr_q)
+                               || sba_data_write_now
+                               || (sba_data_read_now && sbreadondata_q);  // Milestone 10a
 
     wire sba_access_ok = (sbaccess_q <= 3'd3);
     wire [2:0] sba_align_mask = (sbaccess_q == 3'd0) ? 3'b000 :

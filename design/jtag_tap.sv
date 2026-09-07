@@ -68,6 +68,7 @@ module jtag_tap (
     output logic [6:0]  o_reg_addr,
     output logic [31:0] o_reg_wdata,
     output logic        o_reg_we,
+    output logic        o_reg_re,
     input  logic [31:0] i_reg_rdata
 );
 
@@ -271,6 +272,7 @@ module jtag_tap (
         .o_dmistat(dmistat_w),
         .clk(clk), .rst(rst),
         .o_reg_addr(o_reg_addr), .o_reg_wdata(o_reg_wdata), .o_reg_we(o_reg_we),
+        .o_reg_re(o_reg_re),
         .i_reg_rdata(i_reg_rdata)
     );
 

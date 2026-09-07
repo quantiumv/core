@@ -159,11 +159,12 @@ module dm_tb;
     logic [6:0]  reg_addr_progbuf;
     logic [31:0] reg_wdata_progbuf;
     logic        reg_we_progbuf = 1'b0;
+    logic        reg_re_progbuf = 1'b0;  // Milestone 10a -- real read-strobe backdoor
     logic [31:0] reg_rdata_progbuf;
     dm_core_harness #(.NUM_WORDS(32)) dut_progbuf (
         .clk(clk), .rst(rst_progbuf),
         .i_reg_addr(reg_addr_progbuf), .i_reg_wdata(reg_wdata_progbuf),
-        .i_reg_we(reg_we_progbuf), .o_reg_rdata(reg_rdata_progbuf)
+        .i_reg_we(reg_we_progbuf), .i_reg_re(reg_re_progbuf), .o_reg_rdata(reg_rdata_progbuf)
     );
 
     task automatic progbuf_dmi_write(input [6:0] addr, input [31:0] wdata);
@@ -178,6 +179,17 @@ module dm_tb;
         reg_addr_progbuf = addr;
         #1;
         rdata = reg_rdata_progbuf;
+    endtask
+
+    // Milestone 10a -- mirrors sba_dmi_read_re's own shape exactly (see
+    // that task's comment for the real-transport timing this emulates).
+    task automatic progbuf_dmi_read_re(input [6:0] addr, output [31:0] rdata);
+        reg_addr_progbuf = addr;
+        #1;
+        rdata = reg_rdata_progbuf;
+        reg_re_progbuf = 1'b1;
+        @(posedge clk); #1;
+        reg_re_progbuf = 1'b0;
     endtask
 
     localparam int PROGBUF_BUSY_RETRY_LIMIT = 100;
@@ -221,11 +233,12 @@ module dm_tb;
     logic [6:0]  reg_addr_sba;
     logic [31:0] reg_wdata_sba;
     logic        reg_we_sba = 1'b0;
+    logic        reg_re_sba = 1'b0;  // Milestone 10a -- real read-strobe backdoor
     logic [31:0] reg_rdata_sba;
     dm_core_harness #(.NUM_WORDS(64)) dut_sba (
         .clk(clk), .rst(rst_sba),
         .i_reg_addr(reg_addr_sba), .i_reg_wdata(reg_wdata_sba),
-        .i_reg_we(reg_we_sba), .o_reg_rdata(reg_rdata_sba)
+        .i_reg_we(reg_we_sba), .i_reg_re(reg_re_sba), .o_reg_rdata(reg_rdata_sba)
     );
 
     // Mirrors basic_commit_count above -- used to catch x1's value at
@@ -253,6 +266,20 @@ module dm_tb;
         reg_addr_sba = addr;
         #1;
         rdata = reg_rdata_sba;
+    endtask
+
+    // Milestone 10a: a real read-strobe, mirroring design/dm_dmi.sv's own
+    // o_reg_re timing (address held stable, then i_reg_re presented for
+    // exactly one clock edge). Returns the PRE-retrigger value (matching
+    // real hardware: o_reg_rdata for the read itself is combinational off
+    // the value BEFORE this edge's own retrigger effect, if any, lands).
+    task automatic sba_dmi_read_re(input [6:0] addr, output [31:0] rdata);
+        reg_addr_sba = addr;
+        #1;
+        rdata = reg_rdata_sba;
+        reg_re_sba = 1'b1;
+        @(posedge clk); #1;
+        reg_re_sba = 1'b0;
     endtask
 
     localparam int SBA_BUSY_RETRY_LIMIT = 100;
@@ -411,16 +438,24 @@ module dm_tb;
             check("dut_basic: dmcontrol.dmactive == 1 after a plain DMI write", rd, 32'h0000_0001);
         end
 
-        // abstractauto -- storage-only, no functional effect (see dm.sv's
-        // own header), but its plain DMI write/read round trip still
-        // deserves proof: a hidden address-decode bug here (e.g. aliasing
-        // ADDR_COMMAND or ADDR_PROGBUF_LO) would otherwise ship silently.
-        basic_dmi_write(DMI_ABSTRACTAUTO, 32'hCAFE_0001);
+        // abstractauto's own plain DMI write/read round trip still
+        // deserves proof independent of its Milestone 10a functional bits
+        // (a hidden address-decode bug here, e.g. aliasing ADDR_COMMAND or
+        // ADDR_PROGBUF_LO, would otherwise ship silently): 0xCAFE_0000, not
+        // 0xCAFE_0001 -- bits [1:0] (autoexecdata for data0/data1) are now
+        // REAL (Milestone 10a), and dut_basic's own later Access Register
+        // WRITE/CSR-round-trip tests below stage values through data0/
+        // data1 too -- leaving bit 0 armed here would spuriously retrigger
+        // this cycle's OWN stale command_q on every one of those later,
+        // functionally-unrelated data0 accesses. The dedicated autoexecdata
+        // functional tests (see the new section below) exercise bits [1:0]
+        // deliberately, in isolation, then explicitly disarm them again.
+        basic_dmi_write(DMI_ABSTRACTAUTO, 32'hCAFE_0000);
         begin
             logic [31:0] rd;
             basic_dmi_read(DMI_ABSTRACTAUTO, rd);
             check("dut_basic: abstractauto round trips through a plain DMI write/read",
-                rd, 32'hCAFE_0001);
+                rd, 32'hCAFE_0000);
         end
 
         // sbcs's access-width capability bits (real spec position,
@@ -911,6 +946,106 @@ module dm_tb;
             dut_progbuf.core0.regfile0.gp_registers[9], 64'd15);
 
         /* ----------------------------------------------------------- *
+         * Test J (Milestone 10a): abstractauto.autoexecdata bulk GPR
+         * read -- a real per-access re-execution of the last command,
+         * not just a storage bit. x20 (untouched by every earlier test
+         * in this file) starts at 200; progbuf0/1 (overwriting Test I's
+         * own content, safely -- nothing reads it again) hold
+         * `addi x20,x20,1` + a trailing ebreak; the command combines a
+         * READ transfer of x20 with postexec. Test F above already
+         * proved a combined READ+postexec command captures the PRE-run
+         * value into data0, so successive retriggers of THIS command
+         * must read back a strictly increasing sequence (200, 201, 202)
+         * if and only if each plain data0 read genuinely re-executes the
+         * whole command again, not just re-reads stale storage.
+         * ----------------------------------------------------------- */
+        progbuf_dmi_write(DMI_DATA0, 32'd200);
+        progbuf_dmi_write(DMI_DATA1, 32'd0);
+        // transfer=1, write=1, postexec=0, regno=0x1014 (x20)
+        progbuf_dmi_write(DMI_COMMAND, {8'h00, 1'b0, 3'd3, 1'b0, 1'b0, 1'b1, 1'b1, 16'h1014});
+        progbuf_wait_done();
+
+        progbuf_dmi_write(DMI_PROGBUF0, encode_i(32'sd1, 5'd20, 3'b000, 5'd20, `OPC_OP_IMM));  // addi x20,x20,1
+        progbuf_dmi_write(DMI_PROGBUF1, {11'b0, 1'b1, 13'b0, `OPC_SYSTEM});                    // ebreak
+        progbuf_dmi_write(DMI_ABSTRACTAUTO, 32'h0000_0001);  // arm autoexecdata for data0
+
+        // transfer=1, write=0 (READ), postexec=1, regno=0x1014 (x20) --
+        // issued once explicitly; every subsequent data0 read below
+        // retriggers this exact same command_q again.
+        progbuf_dmi_write(DMI_COMMAND, {8'h00, 1'b0, 3'd3, 1'b0, 1'b1, 1'b1, 1'b0, 16'h1014});
+        progbuf_wait_done();
+        begin
+            logic [31:0] rd, unused;
+            progbuf_dmi_read(DMI_DATA0, rd);
+            check("dut_progbuf: Test J -- autoexecdata read #1 == 200 (pre-run snapshot)", {32'b0, rd}, 64'd200);
+            progbuf_dmi_read_re(DMI_DATA0, unused);  // this READ retriggers the command again
+        end
+        progbuf_wait_done();
+        begin
+            logic [31:0] rd, unused;
+            progbuf_dmi_read(DMI_DATA0, rd);
+            check("dut_progbuf: Test J -- autoexecdata read #2 == 201 (reflects x20 mutated by the 1st retrigger)",
+                {32'b0, rd}, 64'd201);
+            progbuf_dmi_read_re(DMI_DATA0, unused);  // a SECOND, independent retrigger -- not a one-shot
+        end
+        progbuf_wait_done();
+        begin
+            logic [31:0] rd;
+            progbuf_dmi_read(DMI_DATA0, rd);
+            check("dut_progbuf: Test J -- autoexecdata read #3 == 202 (reflects the 2nd retrigger)",
+                {32'b0, rd}, 64'd202);
+        end
+        check("dut_progbuf: Test J -- x20 == 203 (3 total command executions: 1 explicit + 2 retriggers)",
+            dut_progbuf.core0.regfile0.gp_registers[20], 64'd203);
+
+        /* ----------------------------------------------------------- *
+         * Test K (Milestone 10a): a retrigger landing while a PRIOR
+         * postexec run is still in flight must be refused exactly like
+         * an ordinary command write would be (cmderr=1, busy) --
+         * proving cmd_trigger_now shares cmd_legal's/cmderr_q's gate
+         * uniformly, not a separate, unguarded path. Reprograms
+         * progbuf0-8 with 9 straight-line addi's (instead of Test J's
+         * single instruction) specifically to widen the busy window --
+         * a postexec run can't finish in fewer clk cycles than it has
+         * instructions to retire, giving the retrigger below a
+         * deterministic (not raced) window to land in.
+         * ----------------------------------------------------------- */
+        for (int i = 0; i < 9; i++) begin
+            progbuf_dmi_write(7'(DMI_PROGBUF0 + i[6:0]),
+                encode_i(32'sd1, 5'd20, 3'b000, 5'd20, `OPC_OP_IMM));  // addi x20,x20,1
+        end
+        progbuf_dmi_write(7'(DMI_PROGBUF0 + 7'd9), {11'b0, 1'b1, 13'b0, `OPC_SYSTEM});  // progbuf9 = ebreak
+        // transfer=0 (no register transfer this time -- isolates the
+        // busy-collision check from any transfer-related side effect),
+        // postexec=1 -- starts a real, ~9-instruction-long run.
+        progbuf_dmi_write(DMI_COMMAND, {8'h00, 1'b0, 3'd3, 1'b0, 1'b1, 1'b0, 1'b0, 16'h0000});
+        // Do NOT wait for it to finish -- read data0 (a retrigger, since
+        // abstractauto is still armed from Test J) WHILE busy_q is
+        // guaranteed still 1 (the run needs >= 9 more commit_now edges).
+        begin
+            logic [31:0] unused;
+            progbuf_dmi_read_re(DMI_DATA0, unused);
+        end
+        // cmd_auto_retrigger_q's own effect on cmd_trigger_now (hence
+        // cmderr_q/busy_q) is visible starting the CYCLE AFTER the read
+        // strobe, not the same edge (standard NBA-update timing -- the
+        // always_ff driving cmd_auto_retrigger_q and the one driving
+        // cmderr_q both evaluate off cmd_auto_retrigger_q's OLD value at
+        // the strobe's own edge). One extra edge here gives that a
+        // chance to settle before checking -- still comfortably inside
+        // the busy window established above.
+        @(posedge clk); #1;
+        begin
+            logic [31:0] acs;
+            progbuf_dmi_read(DMI_ABSTRACTCS, acs);
+            check("dut_progbuf: Test K -- cmderr == 1 (busy) -- a retrigger while a prior run is still in flight is refused",
+                {61'b0, acs[10:8]}, 64'd1);
+        end
+        progbuf_wait_done();  // let the original (non-retriggered) run finish
+        progbuf_dmi_write(DMI_ABSTRACTCS, 32'h0000_0100);  // W1C-clear cmderr
+        progbuf_dmi_write(DMI_ABSTRACTAUTO, 32'h0000_0000);  // disarm -- required hygiene, see dm_tb.sv's own dut_basic note
+
+        /* ----------------------------------------------------------- *
          * dut_sba
          * ----------------------------------------------------------- */
 
@@ -1172,6 +1307,77 @@ module dm_tb;
         // harmless -- nothing else in this file reads dut_sba's sbcs
         // again -- but cleaned up here rather than left dangling).
         sba_dmi_write(DMI_SBCS, 32'h0040_3000);
+
+        /* ----------------------------------------------------------- *
+         * Test M/N (Milestone 10a): sbreadondata -- a real auto-
+         * triggered read on every plain sbdata0 READ, not just a
+         * storage/readback bit. 3 fresh dwords (0x1C0/0x1C8/0x1D0 --
+         * every earlier dut_sba test above tops out at 0x1B0) so there's
+         * no risk of colliding with earlier test state.
+         * ----------------------------------------------------------- */
+        // Address staged FIRST, then data1, then data0 (which triggers)
+        // -- matches Test A's own established order exactly. Getting
+        // this backwards (data0 before the address) would trigger the
+        // write against whatever STALE address happened to be in
+        // sbaddress0_q already, not the intended one.
+        sba_dmi_write(DMI_SBCS, sba_cfg(1'b0, 3'd3, 1'b0, 1'b0));  // plain address stage, 64-bit, no auto-read
+        sba_dmi_write(DMI_SBADDRESS0, 32'h0000_01C0);
+        sba_dmi_write(DMI_SBDATA1, 32'h0000_0000);
+        sba_dmi_write(DMI_SBDATA0, 32'h1111_1111);  // triggers the write
+        sba_wait_done();
+        sba_dmi_write(DMI_SBADDRESS0, 32'h0000_01C8);
+        sba_dmi_write(DMI_SBDATA1, 32'h0000_0000);
+        sba_dmi_write(DMI_SBDATA0, 32'h2222_2222);
+        sba_wait_done();
+        sba_dmi_write(DMI_SBADDRESS0, 32'h0000_01D0);
+        sba_dmi_write(DMI_SBDATA1, 32'h0000_0000);
+        sba_dmi_write(DMI_SBDATA0, 32'h3333_3333);
+        sba_wait_done();
+
+        // Test M: sbreadonaddr=1, sbautoincrement=1, sbreadondata=1,
+        // 64-bit -- one sbaddress0 write triggers word 0's read; 2 plain
+        // sbdata0 READS (via the new real read-strobe) pull words 1 and
+        // 2 with NO explicit re-trigger in between -- the direct proof
+        // multi-word SBA reads now work.
+        sba_dmi_write(DMI_SBCS, sba_cfg(1'b1, 3'd3, 1'b1, 1'b1));
+        sba_dmi_write(DMI_SBADDRESS0, 32'h0000_01C0);  // triggers word 0's read
+        sba_wait_done();
+        begin
+            logic [31:0] rd, unused;
+            sba_dmi_read(DMI_SBDATA0, rd);
+            check("dut_sba: Test M -- sbreadondata word 0 == 0x11111111", {32'b0, rd}, 64'h1111_1111);
+            sba_dmi_read_re(DMI_SBDATA0, unused);  // the read ITSELF triggers word 1's fetch
+        end
+        sba_wait_done();
+        begin
+            logic [31:0] rd, unused;
+            sba_dmi_read(DMI_SBDATA0, rd);
+            check("dut_sba: Test M -- sbreadondata auto-advanced to word 1 == 0x22222222 after one plain read",
+                {32'b0, rd}, 64'h2222_2222);
+            sba_dmi_read_re(DMI_SBDATA0, unused);
+        end
+        sba_wait_done();
+        begin
+            logic [31:0] rd;
+            sba_dmi_read(DMI_SBDATA0, rd);
+            check("dut_sba: Test M -- sbreadondata auto-advanced to word 2 == 0x33333333 after a second plain read",
+                {32'b0, rd}, 64'h3333_3333);
+        end
+
+        // Test N (regression): sbreadondata==0 -- a plain sbdata0 read
+        // (still through the real i_reg_re strobe, proving the strobe
+        // itself is harmless when the gate is off, not just that the
+        // feature works when it's on) must NOT auto-advance.
+        sba_dmi_write(DMI_SBCS, sba_cfg(1'b1, 3'd3, 1'b1, 1'b0));  // sbreadondata=0 now
+        sba_dmi_write(DMI_SBADDRESS0, 32'h0000_01C0);  // re-trigger word 0's read
+        sba_wait_done();
+        begin
+            logic [31:0] rd, unused;
+            sba_dmi_read_re(DMI_SBDATA0, unused);
+            sba_dmi_read(DMI_SBDATA0, rd);
+            check("dut_sba: Test N -- sbreadondata==0 -- a plain sbdata0 read does not auto-advance",
+                {32'b0, rd}, 64'h1111_1111);
+        end
 
         // Test SBA-G (the milestone's own core gate): confirm core0
         // reached its own, correct final state -- x1 == 50, exactly its

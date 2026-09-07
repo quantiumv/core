@@ -19,12 +19,14 @@
  * matching core_wb4_sram_harness.sv's own precedent, and System Bus
  * Access doesn't need it to prove arbitration correctness). The
  * DMI-facing side is dm0's own plain register interface (i_reg_addr/
- * i_reg_wdata/i_reg_we/o_reg_rdata, see design/dm.sv's own header for
- * why this isn't the literal 41-bit DMI protocol) -- exposed straight
- * through so a testbench can drive it directly with no DMI transport
- * FSM in the way (that's design/dm_dmi.sv, a separate Milestone 6
- * concern, exercised for real by jtag_dmi_e2e_tb.sv instead of this
- * harness).
+ * i_reg_wdata/i_reg_we/i_reg_re/o_reg_rdata, see design/dm.sv's own
+ * header for why this isn't the literal 41-bit DMI protocol) -- exposed
+ * straight through so a testbench can drive it directly with no DMI
+ * transport FSM in the way (that's design/dm_dmi.sv, a separate
+ * Milestone 6 concern, exercised for real by jtag_dmi_e2e_tb.sv instead
+ * of this harness). i_reg_re (Milestone 10a) is ANSI-defaulted 1'b0, same
+ * as on dm.sv's own port, so every pre-existing test driving this
+ * harness without knowing it exists is unaffected.
  *
  * NUM_WORDS defaults to 4096, same precedent as core_wb4_sram_harness.sv.
  */
@@ -37,6 +39,7 @@ module dm_core_harness #(
     input  logic [6:0]  i_reg_addr,
     input  logic [31:0] i_reg_wdata,
     input  logic        i_reg_we,
+    input  logic        i_reg_re = 1'b0,
     output logic [31:0] o_reg_rdata
 );
 
@@ -106,6 +109,7 @@ module dm_core_harness #(
     dm dm0 (
         .clk(clk), .rst(rst),
         .i_reg_addr(i_reg_addr), .i_reg_wdata(i_reg_wdata), .i_reg_we(i_reg_we),
+        .i_reg_re(i_reg_re),
         .o_reg_rdata(o_reg_rdata),
         .i_hart_halted(o_debug_mode),
         .o_debug_halt_req(debug_halt_req), .o_debug_resume_req(debug_resume_req),

@@ -23,6 +23,14 @@
  * on TCK) and TDI only while its own IR register selects DMI; this module
  * has no idea what IR value that corresponds to.
  *
+ * o_reg_re (Milestone 10a): a genuine "this cycle is a real read of
+ * dm.sv's plain register interface" strobe, needed so dm.sv can tell a
+ * READ access to a register apart from the side-effect-free combinational
+ * reads it has always assumed (sbcs.sbreadondata/abstractauto.autoexecdata
+ * both need to know a read genuinely happened, not just what the current
+ * i_reg_addr is). Derived for free from delay_q/pending_we_q below, which
+ * already exist for o_reg_we's own sake -- no new state.
+ *
  * DMI register layout (spec-fixed, 41 bits): address[6:0] at bits
  * [40:34], data[31:0] at bits [33:2], op[1:0] at bits [1:0]. Shifted
  * LSB-first (matches jtag_tap.sv's own shift-register convention exactly
@@ -95,6 +103,7 @@ module dm_dmi (
     output logic [6:0]  o_reg_addr,
     output logic [31:0] o_reg_wdata,
     output logic        o_reg_we,
+    output logic        o_reg_re,
     input  logic [31:0] i_reg_rdata
 );
 
@@ -231,6 +240,17 @@ module dm_dmi (
     wire req_pulse = req_sync_q[2] ^ req_sync_q[1];
 
     logic [1:0] delay_q;  // 0=idle/wait-for-req, 1=addr/wdata posted, 2=we asserted + rdata captured next edge
+
+    // o_reg_re: a genuine "a read just happened" strobe (Milestone 10a),
+    // derived for free from state that already exists for o_reg_we's own
+    // sake -- no new register needed. delay_q==2'd1 is the exact cycle
+    // o_reg_we is (conditionally) pulsed from pending_we_q; this is the
+    // complementary pulse for the read case (pending_we_q==0), mutually
+    // exclusive with o_reg_we by construction. Plain continuous assign,
+    // not registered like o_reg_we -- it only needs to be valid for this
+    // one delay_q==2'd1 cycle, which the combinational form already
+    // guarantees.
+    assign o_reg_re = (delay_q == 2'd1) && !pending_we_q;
 
     always_ff @(posedge clk) begin
         if (clk_domain_rst) begin
