@@ -24,11 +24,13 @@ module uart_rx_tb;
     logic [63:0] dat_i, dat_o;
     logic [7:0]  sel;
     logic        ack, err, cyc, stb, we;
+    logic        rx_irq;
 
     uart_rx dut (
         .clk(clk), .rst(rst),
         .addr_i(addr), .dat_i(dat_i), .dat_o(dat_o), .sel_i(sel),
-        .ack_o(ack), .err_o(err), .cyc_i(cyc), .stb_i(stb), .we_i(we)
+        .ack_o(ack), .err_o(err), .cyc_i(cyc), .stb_i(stb), .we_i(we),
+        .o_rx_irq(rx_irq)
     );
 
     int pass_count = 0;
@@ -45,6 +47,7 @@ module uart_rx_tb;
         // RX_STATUS reads not-ready before anything has been pushed.
         wb_cycle(32'h8018, 64'h0, 8'h00, 1'b0);
         check("RX_STATUS reads not-ready (0) when empty", dat_o, 64'h0);
+        check("o_rx_irq low when empty (PMP+PLIC plan Milestone 6)", {63'b0, rx_irq}, 64'd0);
 
         // RX_DATA reads 0 (not stale, not X) when empty.
         wb_cycle(32'h8010, 64'h0, 8'h01, 1'b0);
@@ -58,6 +61,7 @@ module uart_rx_tb;
 
         wb_cycle(32'h8018, 64'h0, 8'h00, 1'b0);
         check("RX_STATUS reads ready (1) after push", dat_o, 64'h1);
+        check("o_rx_irq asserts once the queue is non-empty", {63'b0, rx_irq}, 64'd1);
 
         // Pop all three back out over the real bus, in order (FIFO).
         wb_cycle(32'h8010, 64'h0, 8'h01, 1'b0);
@@ -71,6 +75,7 @@ module uart_rx_tb;
         // without underflowing.
         wb_cycle(32'h8018, 64'h0, 8'h00, 1'b0);
         check("RX_STATUS reads not-ready (0) after drain", dat_o, 64'h0);
+        check("o_rx_irq drops once the queue is drained", {63'b0, rx_irq}, 64'd0);
         wb_cycle(32'h8010, 64'h0, 8'h01, 1'b0);
         check("RX_DATA reads 0 after drain (no underflow)", dat_o, 64'h0);
 

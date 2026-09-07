@@ -83,17 +83,15 @@
  * below.
  *
  * plic0 (design/plic.sv, Milestone 4 of the PMP+PLIC staged plan) hangs
- * off the decoder's new fifth slave port, addr_i[22]'s own 4MB window
- * (see wb_addr_decoder.sv's own header). Two of its ports stay
- * deliberately unconnected THIS milestone (bus wiring only, Milestone 5
- * of that plan): i_uart_rx_irq is tied to a constant 1'b0 (uart_rx0's
- * own o_rx_irq doesn't exist as a port yet -- Milestone 6 adds it and
- * wires it here), and o_meip/o_seip are left as free-standing wires
- * with no core0 consumer (core0.i_meip/i_seip, added by that plan's own
- * Milestone 3, stay unconnected on core0's own instantiation until that
- * same later milestone). This mirrors clint0's own Milestone 4-to-6
- * staging precedent exactly (mtip_o existed and was real one milestone
- * before core0.i_mtip was ever wired to it).
+ * off the decoder's fifth slave port, addr_i[22]'s own 4MB window (see
+ * wb_addr_decoder.sv's own header). As of Milestone 6 (this milestone,
+ * the final one of that plan) it is wired for real end to end:
+ * uart_rx0.o_rx_irq -> plic0.i_uart_rx_irq, and plic0.o_meip/o_seip ->
+ * core0.i_meip/i_seip (both added by that plan's own Milestone 3, left
+ * deliberately unconnected on core0's own instantiation until now) --
+ * mirroring clint0's own Milestone 4-to-6 staging precedent exactly
+ * (mtip_o existed and was real one milestone before core0.i_mtip was
+ * ever wired to it).
  *
  * No UART pin exists at this level (or anywhere in this design) -- see
  * uart_tx.sv's header for why: this milestone's UART "transmits" via
@@ -154,6 +152,14 @@ module soc (
     logic        wb_lock;
     logic        icache_flush;
     logic        clint_mtip;
+    // plic_meip/plic_seip: forward-declared here (not near plic0's own
+    // instantiation further down) -- core0's own instantiation, right
+    // below, needs them at i_meip/i_seip, but plic0 itself (which drives
+    // them) is only instantiated much later in this file. Same
+    // "declare early, drive late" split this codebase already uses
+    // throughout core.sv for the identical Icarus declared-before-used
+    // reason.
+    logic        plic_meip, plic_seip;
     logic        arb_grant;
 
     /*
@@ -183,6 +189,7 @@ module soc (
         .wb_ack_i(core_wb_ack), .wb_err_i(core_wb_err), .wb_ifetch_o(wb_ifetch),
         .wb_lock_o(wb_lock),
         .icache_flush_o(icache_flush), .i_mtip(clint_mtip),
+        .i_meip(plic_meip), .i_seip(plic_seip),
 
         /*
          * Milestone 4 (core.sv halt/resume FSM) added real
@@ -236,13 +243,6 @@ module soc (
     logic        clint_we, clint_cyc, clint_stb, clint_ack, clint_err;
     logic        plic_we, plic_cyc, plic_stb, plic_ack, plic_err;
     logic        uart_rx_irq;
-    // plic_meip/plic_seip: no consumer yet -- core0.i_meip/i_seip stay
-    // unconnected until Milestone 6 of the PMP+PLIC plan (see this
-    // file's own header) -- same genuinely-unused-for-now situation
-    // clint_mtip was in between that plan's own Milestones 4 and 6.
-    /* verilator lint_off UNUSEDSIGNAL */
-    logic        plic_meip, plic_seip;
-    /* verilator lint_on UNUSEDSIGNAL */
 
     // See decoder0's own dram_* port comment below for the full reasoning.
     // Declared ahead of decoder0's instantiation -- Icarus requires a
@@ -424,7 +424,8 @@ module soc (
     uart_rx uart_rx0 (
         .clk(clk), .rst(rst),
         .addr_i(uart_addr), .dat_i(uart_dat_o), .dat_o(uart_rx_dat_o), .sel_i(uart_sel),
-        .ack_o(uart_rx_ack), .err_o(uart_rx_err), .cyc_i(uart_rx_cyc), .stb_i(uart_rx_stb), .we_i(uart_we)
+        .ack_o(uart_rx_ack), .err_o(uart_rx_err), .cyc_i(uart_rx_cyc), .stb_i(uart_rx_stb), .we_i(uart_we),
+        .o_rx_irq(uart_rx_irq)
     );
 
     clint clint0 (
@@ -433,11 +434,6 @@ module soc (
         .ack_o(clint_ack), .err_o(clint_err), .cyc_i(clint_cyc), .stb_i(clint_stb), .we_i(clint_we),
         .mtip_o(clint_mtip)
     );
-
-    // uart_rx_irq/plic_meip/plic_seip: see this file's own header for why
-    // these stay unconnected to a real UART RX level / to core0 this
-    // milestone (PMP+PLIC plan Milestone 5, bus wiring only).
-    assign uart_rx_irq = 1'b0;
 
     plic plic0 (
         .clk(clk), .rst(rst),

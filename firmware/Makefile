@@ -56,6 +56,14 @@ CFLAGS_C  = -march=rv64imac -mabi=lp64 -mno-relax -ffreestanding -nostdlib -O0 -
 #   self-documenting reason PRIV_ASFLAGS is.
 INTERRUPT_ASFLAGS = -march=rv64i_zicsr -mabi=lp64 -mno-relax
 
+# uart_plic_meip_test.s/uart_plic_seip_test.s (PMP+PLIC plan Milestone 6)
+#   use real CSR mnemonics (csrw), mret/sret, and plain lw/sw against the
+#   PLIC/UART MMIO windows -- same rv64i_zicsr requirement as
+#   INTERRUPT_ASFLAGS/PRIV_ASFLAGS above (sret needs no separate
+#   "privileged" march string either), kept as its own named variable for
+#   the same self-documenting reason.
+UART_PLIC_ASFLAGS = -march=rv64i_zicsr -mabi=lp64 -mno-relax
+
 all:
 	riscv64-unknown-elf-as $(ASFLAGS) crt0.s -o crt0.o
 	riscv64-unknown-elf-gcc $(CFLAGS) -c hello.c -o hello.o
@@ -184,6 +192,26 @@ interrupt_test:
 	riscv64-unknown-elf-ld -T link.ld -o interrupt_test.elf crt0.o interrupt_test.o
 	riscv64-unknown-elf-objdump -d interrupt_test.elf
 	riscv64-unknown-elf-objcopy -O verilog -j .text -j .rodata -j .data --verilog-data-width=8 interrupt_test.elf interrupt_test.hex
+
+# PMP+PLIC plan Milestone 6 (final): real-toolchain-encoded end-to-end
+#   UART-RX-through-PLIC tests, linked against the SAME crt0.o/link.ld as
+#   every other target above -- rebuilt here rather than assumed to
+#   already exist, so each target works standalone. Produce DISTINCT
+#   uart_plic_meip_test.hex/uart_plic_seip_test.hex -- every other
+#   target's hex output is untouched either way.
+uart_plic_meip_test:
+	riscv64-unknown-elf-as $(ASFLAGS) crt0.s -o crt0.o
+	riscv64-unknown-elf-as $(UART_PLIC_ASFLAGS) uart_plic_meip_test.s -o uart_plic_meip_test.o
+	riscv64-unknown-elf-ld -T link.ld -o uart_plic_meip_test.elf crt0.o uart_plic_meip_test.o
+	riscv64-unknown-elf-objdump -d uart_plic_meip_test.elf
+	riscv64-unknown-elf-objcopy -O verilog -j .text -j .rodata -j .data --verilog-data-width=8 uart_plic_meip_test.elf uart_plic_meip_test.hex
+
+uart_plic_seip_test:
+	riscv64-unknown-elf-as $(ASFLAGS) crt0.s -o crt0.o
+	riscv64-unknown-elf-as $(UART_PLIC_ASFLAGS) uart_plic_seip_test.s -o uart_plic_seip_test.o
+	riscv64-unknown-elf-ld -T link.ld -o uart_plic_seip_test.elf crt0.o uart_plic_seip_test.o
+	riscv64-unknown-elf-objdump -d uart_plic_seip_test.elf
+	riscv64-unknown-elf-objcopy -O verilog -j .text -j .rodata -j .data --verilog-data-width=8 uart_plic_seip_test.elf uart_plic_seip_test.hex
 
 # Milestone 10b (EBREAK/JTAG staged plan, full-stack OpenOCD integration):
 #   the acceptance-test program (firmware/m10_debug_test.s), linked

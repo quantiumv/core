@@ -39,6 +39,10 @@
  *                      underflowing. write: ignored.
  *   0x8018  RX_STATUS  read-only. bit 0 = RX_DATA_READY (1 when the
  *                      queue is non-empty). write: ignored.
+ *
+ * o_rx_irq (PMP+PLIC plan Milestone 6): a genuinely new output port,
+ * asserted whenever the queue is non-empty -- see its own port comment
+ * below.
  */
 module uart_rx (
     input logic clk,
@@ -64,7 +68,17 @@ module uart_rx (
     output logic err_o,
     input  logic cyc_i,
     input  logic stb_i,
-    input  logic we_i
+    input  logic we_i,
+
+    /*
+     * o_rx_irq: a continuously-valid level (same shape as clint.sv's own
+     * mtip_o, not a pulse), asserted whenever the RX queue is non-empty
+     * -- the real value already exists as rx_count, wired straight
+     * through, matching the existing RX_STATUS read-mux's own "rx_count
+     * > 0" test exactly. Feeds design/plic.sv's own gateway (PMP+PLIC
+     * plan Milestone 6, see soc.sv).
+     */
+    output logic o_rx_irq
 );
     localparam RX_DATA_SEL   = 1'b0;
     localparam RX_STATUS_SEL = 1'b1;
@@ -92,6 +106,8 @@ module uart_rx (
      * uart_tx.sv's own tx_history_count.
      */
     logic [$clog2(RX_QUEUE_DEPTH):0] rx_count;
+
+    assign o_rx_irq = (rx_count > 0);
 
     /*
      * push_byte: simulation-only backdoor a testbench calls to enqueue a
