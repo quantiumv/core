@@ -77,6 +77,7 @@ module dm_tb;
     localparam [6:0] DMI_SBDATA1      = 7'h3D;
 
     localparam [11:0] CSR_DSCRATCH0 = 12'h7B2;
+    localparam [11:0] CSR_DCSR      = 12'h7B0;
 
     /* ------------------------------------------------------------- *
      * dut_basic
@@ -522,6 +523,63 @@ module dm_tb;
             check("dut_basic: dmstatus.anyrunning == 0 while halted", {63'b0, rd[10]}, 64'd0);
             check("dut_basic: dmstatus.allresumeack == 0 while halted", {63'b0, rd[17]}, 64'd0);
         end
+
+        /* ----------------------------------------------------------- *
+         * Milestone 10b fix regression: dmstatus.allresumeack must
+         * survive a genuinely fast resume-then-immediate-rehalt, not
+         * just an ordinary sustained resume -- a real OpenOCD
+         * integration test discovered its own `step` command failing
+         * with "unable to resume hart 0" even though the step itself
+         * executed correctly, because a single-step's own re-halt
+         * completes faster than any external DMI poll can observe a
+         * transient "running" window. Reproduced here via dcsr.step=1:
+         * once the hart has genuinely re-halted (o_debug_mode polled
+         * directly, matching this file's own established white-box
+         * idiom), resumeack must STILL read 1 -- a live "!i_hart_halted"
+         * approximation could never do that, by construction, the
+         * instant halted reads 1 again.
+         * ----------------------------------------------------------- */
+        begin
+            logic [31:0] dcsr_rd0, dcsr_rd1;
+            basic_dmi_write(DMI_COMMAND, {8'h00, 1'b0, 3'd3, 1'b0, 1'b0, 1'b1, 1'b0, 4'b0, CSR_DCSR});
+            basic_dmi_read(DMI_DATA0, dcsr_rd0);
+            basic_dmi_read(DMI_DATA1, dcsr_rd1);
+            basic_dmi_write(DMI_DATA0, dcsr_rd0 | 32'h4);  // dcsr.step (bit 2)
+            basic_dmi_write(DMI_DATA1, dcsr_rd1);
+            basic_dmi_write(DMI_COMMAND, {8'h00, 1'b0, 3'd3, 1'b0, 1'b0, 1'b1, 1'b1, 4'b0, CSR_DCSR});
+        end
+
+        basic_dmi_write(DMI_DMCONTROL, 32'h4000_0001);  // resumereq=1, dmactive=1
+        for (int w = 0; w < 100 && !dut_basic.o_debug_mode; w++) begin
+            @(posedge clk); #1;
+        end
+        check("dut_basic: Milestone 10b fix -- hart genuinely re-halted (real single-step completed)",
+            {63'b0, dut_basic.o_debug_mode}, 64'd1);
+        begin
+            logic [31:0] rd;
+            basic_dmi_read(DMI_DMSTATUS, rd);
+            check("dut_basic: Milestone 10b fix -- allresumeack == 1 despite already being re-halted",
+                {63'b0, rd[17]}, 64'd1);
+        end
+        // Clear dcsr.step and disarm -- required so the rest of
+        // dut_basic's own sequence (a plain sustained resume to
+        // completion, further below) isn't accidentally left in
+        // single-step mode.
+        begin
+            logic [31:0] dcsr_rd0, dcsr_rd1;
+            basic_dmi_write(DMI_COMMAND, {8'h00, 1'b0, 3'd3, 1'b0, 1'b0, 1'b1, 1'b0, 4'b0, CSR_DCSR});
+            basic_dmi_read(DMI_DATA0, dcsr_rd0);
+            basic_dmi_read(DMI_DATA1, dcsr_rd1);
+            basic_dmi_write(DMI_DATA0, dcsr_rd0 & ~32'h4);
+            basic_dmi_write(DMI_DATA1, dcsr_rd1);
+            basic_dmi_write(DMI_COMMAND, {8'h00, 1'b0, 3'd3, 1'b0, 1'b0, 1'b1, 1'b1, 4'b0, CSR_DCSR});
+        end
+        // Settle: this command's own busy_q pulse (set the same edge it
+        // was accepted) is still 1 for exactly one more edge -- without
+        // this, the very next test below would find cmd_legal blocked
+        // by !busy_q and misreport cmderr as busy (1) instead of its own
+        // intended not-supported (2).
+        @(posedge clk); #1;
 
         // cmderr == 2 (not supported): a command with aarsize=2 (32-bit)
         // while genuinely halted -- design/dm.sv only ever accepts

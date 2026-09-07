@@ -184,3 +184,18 @@ interrupt_test:
 	riscv64-unknown-elf-ld -T link.ld -o interrupt_test.elf crt0.o interrupt_test.o
 	riscv64-unknown-elf-objdump -d interrupt_test.elf
 	riscv64-unknown-elf-objcopy -O verilog -j .text -j .rodata -j .data --verilog-data-width=8 interrupt_test.elf interrupt_test.hex
+
+# Milestone 10b (EBREAK/JTAG staged plan, full-stack OpenOCD integration):
+#   the acceptance-test program (firmware/m10_debug_test.s), linked
+#   against the SAME crt0.o/link.ld as every other target above --
+#   rebuilt here (plain -march=rv64i, unchanged) rather than assumed to
+#   already exist, so this target works standalone. Produces a DISTINCT
+#   m10_debug_test.hex -- every other target's hex output is untouched
+#   either way. verification/openocd/sim_soc_top.sv reads THIS hex file
+#   directly (not crt0.hex).
+m10_debug_test:
+	riscv64-unknown-elf-as $(ASFLAGS) crt0.s -o crt0.o
+	riscv64-unknown-elf-as $(ASFLAGS) m10_debug_test.s -o m10_debug_test.o
+	riscv64-unknown-elf-ld -T link.ld -o m10_debug_test.elf crt0.o m10_debug_test.o
+	riscv64-unknown-elf-objdump -d m10_debug_test.elf
+	riscv64-unknown-elf-objcopy -O verilog -j .text -j .rodata -j .data --verilog-data-width=8 m10_debug_test.elf m10_debug_test.hex

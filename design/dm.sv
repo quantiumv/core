@@ -255,16 +255,51 @@ module dm (
      * (Milestone 7) never auto-appends an implicit ebreak after a run --
      * the debugger's own trailing EBREAK is required, so a debugger must
      * not assume one is implied; hasresethaltreq/confstrptrvalid read 0
-     * because neither is implemented. allresumeack/anyresumeack are a documented
-     * approximation (dmstatus_resumeack, below) -- this core's resume is
-     * effectively synchronous with no separate ack-tracking state worth
-     * modeling this milestone, so they just mirror "currently running".
+     * because neither is implemented.
+     *
+     * allresumeack/anyresumeack (Milestone 10b fix -- was a documented
+     * "= !i_hart_halted" approximation until a real OpenOCD integration
+     * test discovered it breaks the single-step operation for real):
+     * OpenOCD's own `step` implementation issues resumereq, then POLLS
+     * dmstatus waiting for allresumeack==1 BEFORE it will even check for
+     * the step's own following auto-re-halt. A single-step's whole
+     * resume-execute-one-instruction-rehalt cycle completes in a
+     * handful of clk edges -- reliably FASTER than one DMI round trip
+     * through design/dm_dmi.sv's own CDC (~6+ clk edges) plus the real
+     * JTAG bit-banging on top of that -- so a live "!i_hart_halted"
+     * reads "still halted" for the entire step, every single time a
+     * debugger polls it: the transient "running" window is real, but no
+     * external poll can ever land inside it. Real spec text: "This bit
+     * is 0 after resumereq is written until the hart resumes, at which
+     * point it goes to 1 and remains set" -- i.e. it must survive an
+     * arbitrarily fast subsequent re-halt, clearing only on the NEXT
+     * debugger-initiated haltreq/resumereq request, not on the hart
+     * re-halting per se (which, for single-step, is the step's own
+     * intended, immediate outcome -- not something that should erase
+     * the very ack the debugger is still waiting to observe).
      * ----------------------------------------------------------------- */
     wire dmstatus_allhalted  = i_hart_halted;
     wire dmstatus_anyhalted  = i_hart_halted;
     wire dmstatus_allrunning = !i_hart_halted;
     wire dmstatus_anyrunning = !i_hart_halted;
-    wire dmstatus_resumeack  = !i_hart_halted;
+
+    logic resumeack_q;
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            resumeack_q <= 1'b0;
+        end else if (o_debug_resume_req) begin
+            resumeack_q <= 1'b1;
+        end else if (dmcontrol_write_now && (i_reg_wdata[31] || i_reg_wdata[30])) begin
+            // A fresh haltreq OR resumereq write clears the PREVIOUS
+            // resume's own stale ack. Mutually exclusive with the
+            // o_debug_resume_req branch above by construction (same
+            // dmcontrol_write_now && wdata[30] condition would hit that
+            // branch first), so a fresh resumereq itself still correctly
+            // sets resumeack_q<=1, not this clear.
+            resumeack_q <= 1'b0;
+        end
+    end
+    wire dmstatus_resumeack = resumeack_q;
     wire [31:0] dmstatus_real = {
         7'b0,                                     // [31:25] reserved
         1'b0,                                     // [24] ndmresetpending
