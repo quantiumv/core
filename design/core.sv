@@ -1047,19 +1047,19 @@ module core (
      * csr_file0's own Sv39 control-plane exports (Sv39 staged plan,
      * Milestone 1) -- declared here alongside the PMP group above for the
      * same reason (a forward reference to a csr_file0 output, needed by
-     * this file's own connection list further down). Zero functional
-     * consumption yet: satp_w's first real reader is Milestone 3's own
-     * page-table walker; mstatus_sum_w/mstatus_mxr_w's first real reader
-     * is Milestone 4's mem-side permission check; mstatus_tvm_w's first
-     * real reader is this very plan's own next milestone (Milestone 2,
-     * SFENCE.VMA/TVM classification). All four wrapped together, same
-     * "genuinely unused until a later milestone" precedent pmpcfg0_w's
-     * own group established above.
+     * this file's own connection list further down). satp_w's first real
+     * reader is Milestone 3's own page-table walker; mstatus_sum_w/
+     * mstatus_mxr_w's first real reader is Milestone 4's mem-side
+     * permission check -- all three still genuinely unused, wrapped
+     * together, same precedent pmpcfg0_w's own group established above.
+     * mstatus_tvm_w is NOT wrapped: Milestone 2 (tvm_violation, below)
+     * is already its real consumer.
      */
     /* verilator lint_off UNUSEDSIGNAL */
     wire [(`WORD_SIZE - 1):0] satp_w;
-    wire mstatus_sum_w, mstatus_mxr_w, mstatus_tvm_w;
+    wire mstatus_sum_w, mstatus_mxr_w;
     /* verilator lint_on UNUSEDSIGNAL */
+    wire mstatus_tvm_w;
 
     /* verilator lint_off UNUSEDSIGNAL */
     wire [(`WORD_SIZE - 1):0] fetch_paddr = pc;
@@ -1727,6 +1727,16 @@ module core (
 
     wire is_mret = (decoded_instruction == `INSTR_CODE(MRET));
     wire is_sret = (decoded_instruction == `INSTR_CODE(SRET));
+    /*
+     * Sv39 staged plan, Milestone 2: SFENCE.VMA already fully decodes
+     * (decoder.sv/instructions_and_masks.sv/instruction_codes.sv, since
+     * before this plan existed) and has always been on reg_write's own
+     * no-write list -- this milestone is purely about classifying it for
+     * the TVM check below, not about giving it new decode/execute
+     * behavior. It stays an ordinary retiring no-op (no TLB exists until
+     * Milestone 5) whenever it isn't trapped.
+     */
+    wire is_sfence_vma = (decoded_instruction == `INSTR_CODE(SFENCE_VMA));
 
     /*
      * Illegal-instruction sources this milestone: a genuinely
@@ -1757,12 +1767,21 @@ module core (
      * depend on -- that subtest is retired now that the real trap
      * exists; see core_csr_readonly_trap_tb.sv for its replacement).
      *
-     * Still NOT covered: SFENCE.VMA from U-mode (spec-should-trap, but
-     * decoded as an unconditional NOP this milestone -- see its own
-     * comment in instructions_and_masks.sv) and TVM/TW (mstatus's other
-     * two "trap on privileged op" bits, same "real storage, not
-     * enforced" status TSR had before its own fix -- SFENCE.VMA-under-
-     * TVM and WFI-under-TW remain a separate, not-yet-exercised gap).
+     * TVM (mstatus's other "trap on privileged op" bit, same "real
+     * storage, not enforced" status TSR had before its own fix) is now
+     * real too, as of the Sv39 staged plan's own Milestone 2: per spec,
+     * an S-mode SATP CSR access or SFENCE.VMA execution while
+     * mstatus.TVM=1 traps as illegal-instruction (see tvm_violation
+     * below). SFENCE.VMA itself is deliberately left LEGAL from U-mode --
+     * a fresh, targeted fetch of the real spec text (supervisor.adoc)
+     * found no normative statement requiring a U-mode trap (an earlier,
+     * stale version of this comment had assumed one); SFENCE.VMA has no
+     * architecturally observable effect beyond invalidating the executing
+     * hart's own translation caches, so there's no correctness reason to
+     * gate it by privilege absent an explicit spec mandate. TW (WFI-under-
+     * TW) remains a separate, not-yet-exercised gap -- WFI has no real
+     * stall behavior in this core to begin with (spec-legal as a no-op),
+     * so TW has no real operation to guard yet.
      */
     // Declared here (ahead of csr_file0's instantiation further down)
     // purely because Icarus's single-pass elaborator wants a net's
@@ -1816,6 +1835,18 @@ module core (
     wire sret_priv_violation = is_sret && ((current_priv == PRIV_U)
                               || (current_priv == PRIV_S && mstatus_tsr_w));
     /*
+     * TVM (Sv39 staged plan, Milestone 2): a bare literal 12'h180 for
+     * satp's own address, matching debug_csr_violation/
+     * trigger_csr_violation's own bare-literal style above rather than
+     * importing a csr_file.sv localparam -- this file has never imported
+     * CSR-address localparams, always re-derives the bit pattern locally.
+     * Exact same shape as sret_priv_violation's own TSR check immediately
+     * above -- itself a real, previously-shipped fix for an inert-bit-
+     * becomes-real gap of this identical kind.
+     */
+    wire is_satp_csr = is_csr && (imm_2[11:0] == 12'h180);
+    wire tvm_violation = mstatus_tvm_w && (current_priv == PRIV_S) && (is_satp_csr || is_sfence_vma);
+    /*
      * C extension: a reserved/unassigned compressed encoding is also
      * illegal-instruction -- c_expand_illegal is only meaningful when
      * is_compressed (it's a pure combinational function of first_hw,
@@ -1826,7 +1857,7 @@ module core (
      */
     wire is_illegal_instr = is_invalid_instr || csr_priv_violation || csr_readonly_violation
                           || debug_csr_violation || trigger_csr_violation
-                          || mret_priv_violation || sret_priv_violation
+                          || mret_priv_violation || sret_priv_violation || tvm_violation
                           || (is_compressed && c_expand_illegal);
     wire is_ecall = (decoded_instruction == `INSTR_CODE(ECALL));
     /*
