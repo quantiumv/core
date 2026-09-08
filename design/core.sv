@@ -497,6 +497,16 @@ module core (
     logic progbuf_ebreak_done;
     logic progbuf_abort;
     /*
+     * is_sfence_vma -- forward-declared here (bare, "declare early, drive
+     * late") because Sv39 Milestone 5's own TLB-flush logic, inside the
+     * walker progression always_ff (textually early, same reason every
+     * other signal in this block is forward-declared), needs it. Its
+     * real assign stays at its original Milestone 2 site (near
+     * is_mret/is_sret, in Decode), which needs decoded_instruction --
+     * not available this early.
+     */
+    logic is_sfence_vma;
+    /*
      * Sv39 (Milestone 3 of the Sv39 staged plan) -- forward-declared here
      * (bare/undriven) because the state-transition always_ff and
      * wb_master_drive (both textually early, same reason debug_progbuf_active
@@ -521,8 +531,10 @@ module core (
      * trusted and structurally can't afford S_PTW's multi-cycle latency
      * inside S_FETCH's existing single-combinational-cycle progbuf arm).
      *
-     * No TLB exists yet (Milestone 5) -- every translated fetch
-     * genuinely walks, every time. ptw_level_q/ptw_base_q/ptw_vaddr_q/
+     * Milestone 5 adds a 4-entry TLB ahead of the walker (a hit skips
+     * S_PTW entirely, via the redirect conditions' own "&& !tlb_hit"
+     * gating) -- a miss still genuinely walks, every time.
+     * ptw_level_q/ptw_base_q/ptw_vaddr_q/
      * ptw_reason_q are pure per-walk scratch (no reset needed, always
      * freshly written the cycle a walk starts, before ever being read --
      * same convention instr_line_q/crossed_q already establish).
@@ -604,6 +616,85 @@ module core (
                                   // already-decoded load/store still needing its own real
                                   // is_load/is_store classification at the commit edge).
     logic [63:0] mem_resolved_paddr_q;
+    /*
+     * Sv39 Milestone 5: the TLB -- 4 entries, flat/individually-named
+     * (decision 5 of the staged plan, mirroring PMP's own 4-region
+     * precedent), fully associative, unified (serves fetch-lo/fetch-hi/
+     * mem lookups alike -- this core issues at most one memory-system
+     * transaction per cycle, the exact same reasoning cache_complex.sv's
+     * own header already gives for needing no icache0/dcache0 arbiter),
+     * round-robin replacement. No G-bit or ASID field (decision 2 --
+     * ASIDLEN=0 makes both irrelevant). r/w/x/u/d are cached (NOT just
+     * r/w/x/u as the plan's own original decision 2 sketch listed -- a
+     * real correctness gap found while implementing this milestone: a
+     * page cached via a LOAD (D never checked at fill time) could later
+     * be WRITTEN through the SAME cached entry, and Svade's own D-bit
+     * check must still apply to that write; hardwiring D=1 the way A=1
+     * safely can be [A is unconditionally required for ANY successful
+     * fill, by construction] would have silently skipped a real,
+     * spec-required fault). Declared here (bare, alongside the other
+     * early Sv39 registers) because tlb_hit/tlb_hit_active gate the
+     * state-transition always_ff's own S_FETCH/S_FETCH_HI/S_MEM redirect
+     * arms -- the per-entry FIELD selection (which hit entry's own ppn/
+     * permission bits) stays declared where it's consumed, in the "Sv39
+     * Page-Table Walker" section below, same "declare early only what's
+     * needed early" discipline this file already applies throughout.
+     */
+    logic        tlb0_valid_q, tlb1_valid_q, tlb2_valid_q, tlb3_valid_q;
+    logic [1:0]  tlb0_level_q, tlb1_level_q, tlb2_level_q, tlb3_level_q;
+    logic [26:0] tlb0_vpn_q,   tlb1_vpn_q,   tlb2_vpn_q,   tlb3_vpn_q;
+    logic [25:0] tlb0_ppn2_q,  tlb1_ppn2_q,  tlb2_ppn2_q,  tlb3_ppn2_q;
+    logic [8:0]  tlb0_ppn1_q,  tlb1_ppn1_q,  tlb2_ppn1_q,  tlb3_ppn1_q;
+    logic [8:0]  tlb0_ppn0_q,  tlb1_ppn0_q,  tlb2_ppn0_q,  tlb3_ppn0_q;
+    logic        tlb0_r_q, tlb1_r_q, tlb2_r_q, tlb3_r_q;
+    logic        tlb0_w_q, tlb1_w_q, tlb2_w_q, tlb3_w_q;
+    logic        tlb0_x_q, tlb1_x_q, tlb2_x_q, tlb3_x_q;
+    logic        tlb0_u_q, tlb1_u_q, tlb2_u_q, tlb3_u_q;
+    logic        tlb0_d_q, tlb1_d_q, tlb2_d_q, tlb3_d_q;
+    logic [1:0]  tlb_replace_q;
+
+    /*
+     * Current VA being looked up: pc while redirecting from S_FETCH,
+     * fetch_hi_vaddr from S_FETCH_HI, alu_result (mem's own pre-
+     * translation VA, same source the walker's own MEM-reason walk-start
+     * already uses) otherwise -- these three states are the only ones
+     * that ever consult tlb_hit/tlb_hit_active at all, so a plain
+     * state-keyed mux (rather than a separate per-stream hit signal) is
+     * sufficient and avoids tripling the match logic below.
+     */
+    wire [(`WORD_SIZE-1):0] tlb_lookup_vaddr = (state == S_FETCH) ? pc
+                                              : (state == S_FETCH_HI) ? fetch_hi_vaddr
+                                              : alu_result;
+    wire [26:0] tlb_lookup_vpn = tlb_lookup_vaddr[38:12];
+
+    // Superpage-aware partial-tag match: compare only the VPN segments
+    // AT OR ABOVE the entry's own cached level (a gigapage entry only
+    // ever compares vpn2; a megapage compares vpn2:vpn1; an ordinary
+    // page compares all three) -- the CVA6-derived technique the staged
+    // plan's own design section cites.
+    wire tlb0_hit = tlb0_valid_q && ((tlb0_level_q == 2'd2) ? (tlb_lookup_vpn[26:18] == tlb0_vpn_q[26:18])
+                                    : (tlb0_level_q == 2'd1) ? (tlb_lookup_vpn[26:9]  == tlb0_vpn_q[26:9])
+                                    :                          (tlb_lookup_vpn         == tlb0_vpn_q));
+    wire tlb1_hit = tlb1_valid_q && ((tlb1_level_q == 2'd2) ? (tlb_lookup_vpn[26:18] == tlb1_vpn_q[26:18])
+                                    : (tlb1_level_q == 2'd1) ? (tlb_lookup_vpn[26:9]  == tlb1_vpn_q[26:9])
+                                    :                          (tlb_lookup_vpn         == tlb1_vpn_q));
+    wire tlb2_hit = tlb2_valid_q && ((tlb2_level_q == 2'd2) ? (tlb_lookup_vpn[26:18] == tlb2_vpn_q[26:18])
+                                    : (tlb2_level_q == 2'd1) ? (tlb_lookup_vpn[26:9]  == tlb2_vpn_q[26:9])
+                                    :                          (tlb_lookup_vpn         == tlb2_vpn_q));
+    wire tlb3_hit = tlb3_valid_q && ((tlb3_level_q == 2'd2) ? (tlb_lookup_vpn[26:18] == tlb3_vpn_q[26:18])
+                                    : (tlb3_level_q == 2'd1) ? (tlb_lookup_vpn[26:9]  == tlb3_vpn_q[26:9])
+                                    :                          (tlb_lookup_vpn         == tlb3_vpn_q));
+    wire tlb_hit = tlb0_hit || tlb1_hit || tlb2_hit || tlb3_hit;
+
+    // Only meaningful (and only ever consulted) at the exact same three
+    // redirect points fetch_translate_active/mem_translate_active's own
+    // "!resolved" checks already gate -- a hit outside that window
+    // (impossible by construction, since tlb_hit is otherwise unused)
+    // must never be mistaken for "resolve now".
+    wire tlb_hit_active = tlb_hit && (
+        (state == S_FETCH    && fetch_translate_active && !fetch_lo_resolved_q) ||
+        (state == S_FETCH_HI && fetch_translate_active && !fetch_hi_resolved_q) ||
+        (state == S_MEM       && mem_translate_active   && !mem_resolved_q));
     /*
      * dm_access_active: gates every DM Access-Register mux (regfile0's
      * read/write ports below, csr_file0's addr/we/wdata below) between
@@ -842,21 +933,30 @@ module core (
                              else if (debug_halt_req_entry) state <= S_DEBUG_HALTED;
                              /*
                               * Sv39 (Milestone 3): translation needed and not
-                              * yet resolved for THIS fetch -- redirect to the
-                              * walker instead of ever consulting pmp_fetchlo_fault
-                              * or wb_done this cycle. fetch_paddr (hence
+                              * yet resolved for THIS fetch -- MUST win top
+                              * priority over both checks below, unconditionally,
+                              * regardless of hit or miss: fetch_paddr (hence
                               * pmp_fetchlo_fault, computed off it) is stale/
-                              * meaningless until fetch_lo_resolved_q is set, so
-                              * this MUST win priority over both checks below --
+                              * meaningless until fetch_lo_resolved_q is set,
                               * mirrors debug_progbuf_active/debug_halt_req_entry's
                               * own "redirect before the ordinary path" shape.
-                              * Once the walk resolves, S_PTW's own arm sends us
-                              * right back here with fetch_lo_resolved_q now set,
-                              * at which point this check is false and the
-                              * ordinary path below runs against the now-valid
-                              * translated fetch_paddr.
+                              * Sv39 (Milestone 5): a MISS redirects to the real
+                              * walker (S_PTW); a HIT stays right here in
+                              * S_FETCH for exactly one more cycle instead --
+                              * resolved combinationally-then-registered by the
+                              * walker progression always_ff's own
+                              * tlb_hit_active branch this same cycle, taking
+                              * effect next cycle. Either way, fetch_lo_resolved_q
+                              * (and, for a hit, fetch_lo_paddr_q too) is
+                              * guaranteed valid by the time this outer
+                              * condition next reads false -- the same
+                              * invariant a real walk's own S_PTW-then-back-
+                              * here sequencing already relied on, now shared
+                              * by both resolution paths.
                               */
-                             else if (fetch_translate_active && !fetch_lo_resolved_q) state <= S_PTW;
+                             else if (fetch_translate_active && !fetch_lo_resolved_q) begin
+                                 if (!tlb_hit) state <= S_PTW;
+                             end
                              /*
                               * pmp_fetchlo_fault (PMP+PLIC plan, Milestone 2):
                               * known combinationally off fetch_paddr before
@@ -883,8 +983,9 @@ module core (
                  * INDEPENDENT walk rather than reusing the lo half's own
                  * resolved address.
                  */
-                S_FETCH_HI:  if (fetch_translate_active && !fetch_hi_resolved_q) state <= S_PTW;
-                             else if (wb_done) state <= S_EXEC;
+                S_FETCH_HI:  if (fetch_translate_active && !fetch_hi_resolved_q) begin
+                                 if (!tlb_hit) state <= S_PTW;
+                             end else if (wb_done) state <= S_EXEC;
                 /*
                  * Sv39 (Milestone 3): the walker itself. ptw_pmp_fault is
                  * known combinationally off ptw_pte_addr before this
@@ -967,8 +1068,9 @@ module core (
                  * than the fetch-side equivalent since mem_paddr itself
                  * isn't resolved until partway through S_MEM.
                  */
-                S_MEM:       if (mem_translate_active && !mem_resolved_q) state <= S_PTW;
-                             else if (pmp_load_fault || pmp_store_fault) state <= S_EXEC;
+                S_MEM:       if (mem_translate_active && !mem_resolved_q) begin
+                                 if (!tlb_hit) state <= S_PTW;
+                             end else if (pmp_load_fault || pmp_store_fault) state <= S_EXEC;
                              else if (wb_done) state <= state_t'(progbuf_abort ? S_DEBUG_HALTED
                                     : ((wb_ok && is_amo_rmw) ? S_AMO_WRITE : S_FETCH));
                 S_AMO_WRITE: if (wb_done) state <= state_t'(progbuf_abort ? S_DEBUG_HALTED : S_FETCH);
@@ -1459,8 +1561,9 @@ module core (
      * reuses every piece of this walker unchanged except its own
      * requester tag and permission-check specialization.
      *
-     * No TLB exists yet (Milestone 5) -- every translated fetch
-     * genuinely walks, every time. Reuses the existing single Wishbone
+     * Milestone 5 adds a 4-entry TLB ahead of this walker (a hit skips
+     * S_PTW entirely) -- a miss still genuinely walks, every time.
+     * Reuses the existing single Wishbone
      * master via ONE new state_t value (S_PTW) rather than a second
      * arbitrated master -- this core is single-issue/non-pipelined, so
      * nothing can ever need to interrupt an in-flight walk the way a
@@ -1484,7 +1587,11 @@ module core (
     wire [8:0] ptw_vpn0 = ptw_vaddr_q[20:12];
     wire [8:0] ptw_vpn_current = (ptw_level_q == 2'd2) ? ptw_vpn2
                                 : (ptw_level_q == 2'd1) ? ptw_vpn1 : ptw_vpn0;
-    wire ptw_va_noncanonical = ptw_vaddr_q[63:39] != {25{ptw_vaddr_q[38]}};
+    // ptw_va_noncanonical is defined further down, alongside
+    // ptw_vaddr_active (Sv39 Milestone 5) -- it needs to be re-checked
+    // against the LIVE lookup VA on a TLB hit, not the (not-yet-valid-
+    // this-early) ptw_vaddr_q alone; declaring it here would force a
+    // premature choice between the two.
 
     // This level's PTE address: table base + vpn[level]*8 (dword-sized
     // entries) -- an ordinary dword read, same shape S_MEM's own reads.
@@ -1532,22 +1639,99 @@ module core (
     assign ptw_pmp_fault = !(ptw_pmp_matched && ptw_pmp_r);
 
     /*
-     * PTE field decode (spec-fixed bit layout), valid only while
-     * state==S_PTW and wb_dat_i is this level's own live response.
+     * Sv39 Milestone 5: which TLB entry hit (if any) and its own cached
+     * fields -- selected here (not in the early forward-declare block)
+     * since nothing needs them before this point; tlb_hit itself
+     * (early-declared) is all the state-transition/wb_master_drive logic
+     * ever needed.
      */
-    wire        ptw_pte_v        = wb_dat_i[0];
-    wire        ptw_pte_r        = wb_dat_i[1];
-    wire        ptw_pte_w        = wb_dat_i[2];
-    wire        ptw_pte_x        = wb_dat_i[3];
-    wire        ptw_pte_u        = wb_dat_i[4];
-    wire        ptw_pte_a        = wb_dat_i[6];
-    wire        ptw_pte_d        = wb_dat_i[7];   // Sv39 M4: mem-side writes also need D=1 (Svade)
-    wire [8:0]  ptw_pte_ppn0     = wb_dat_i[18:10];
-    wire [8:0]  ptw_pte_ppn1     = wb_dat_i[27:19];
-    wire [25:0] ptw_pte_ppn2     = wb_dat_i[53:28];
-    wire [6:0]  ptw_pte_reserved = wb_dat_i[60:54];
-    wire [1:0]  ptw_pte_pbmt     = wb_dat_i[62:61];
-    wire        ptw_pte_n        = wb_dat_i[63];
+    wire [1:0]  tlb_hit_level = tlb0_hit ? tlb0_level_q : tlb1_hit ? tlb1_level_q : tlb2_hit ? tlb2_level_q : tlb3_level_q;
+    wire [25:0] tlb_hit_ppn2  = tlb0_hit ? tlb0_ppn2_q  : tlb1_hit ? tlb1_ppn2_q  : tlb2_hit ? tlb2_ppn2_q  : tlb3_ppn2_q;
+    wire [8:0]  tlb_hit_ppn1  = tlb0_hit ? tlb0_ppn1_q  : tlb1_hit ? tlb1_ppn1_q  : tlb2_hit ? tlb2_ppn1_q  : tlb3_ppn1_q;
+    wire [8:0]  tlb_hit_ppn0  = tlb0_hit ? tlb0_ppn0_q  : tlb1_hit ? tlb1_ppn0_q  : tlb2_hit ? tlb2_ppn0_q  : tlb3_ppn0_q;
+    wire        tlb_hit_r     = tlb0_hit ? tlb0_r_q     : tlb1_hit ? tlb1_r_q     : tlb2_hit ? tlb2_r_q     : tlb3_r_q;
+    wire        tlb_hit_w     = tlb0_hit ? tlb0_w_q     : tlb1_hit ? tlb1_w_q     : tlb2_hit ? tlb2_w_q     : tlb3_w_q;
+    wire        tlb_hit_x     = tlb0_hit ? tlb0_x_q     : tlb1_hit ? tlb1_x_q     : tlb2_hit ? tlb2_x_q     : tlb3_x_q;
+    wire        tlb_hit_u     = tlb0_hit ? tlb0_u_q     : tlb1_hit ? tlb1_u_q     : tlb2_hit ? tlb2_u_q     : tlb3_u_q;
+    wire        tlb_hit_d     = tlb0_hit ? tlb0_d_q     : tlb1_hit ? tlb1_d_q     : tlb2_hit ? tlb2_d_q     : tlb3_d_q;
+
+    /*
+     * PTE field decode (spec-fixed bit layout). ptw_pte_source is
+     * Milestone 5's own seam: wb_dat_i, this level's own live response,
+     * whenever a real walk is in flight (state==S_PTW); OR, on a TLB
+     * hit (tlb_hit_active), a SYNTHESIZED PTE built from the cached
+     * entry's own r/w/x/u/d bits, feeding this EXACT SAME downstream
+     * permission-check/reconstruction logic with ZERO duplicated
+     * formula (decision 13 of the staged plan's own stated goal) --
+     * V/A are hardwired 1 (both are unconditionally required for ANY
+     * successful fill in the first place, by construction; re-deriving
+     * them from a live PTE read a hit deliberately never performs would
+     * be meaningless), G/RSW/reserved/PBMT/N are hardwired 0 (never
+     * cached, never meaningful for a hit -- a real walk's own
+     * malformed/superpage checks against these bits can never re-fire
+     * for an already-validated cached entry).
+     */
+    // RSW[9:8] and G[5] are hardwired 0 in the synthesized (TLB-hit) case
+    // above and, on the real (wb_dat_i) side, were never extracted into
+    // any named wire even before this milestone -- neither field is ever
+    // meaningful to this walker's own logic (RSW is reserved for
+    // software; G is moot under ASIDLEN=0, decision 2). Genuinely unused
+    // on both sides of the mux, not an oversight -- only became a real
+    // (rather than silently-absorbed-into-a-port) UNUSEDSIGNAL warning
+    // once ptw_pte_source became an internal wire this milestone.
+    /* verilator lint_off UNUSEDSIGNAL */
+    wire [(`WORD_SIZE-1):0] ptw_pte_source = tlb_hit_active
+        ? {1'b0, 2'b0, 7'b0, tlb_hit_ppn2, tlb_hit_ppn1, tlb_hit_ppn0, 2'b0,
+           tlb_hit_d, 1'b1 /*A*/, 1'b0 /*G*/, tlb_hit_u, tlb_hit_x, tlb_hit_w, tlb_hit_r, 1'b1 /*V*/}
+        : wb_dat_i;
+    /* verilator lint_on UNUSEDSIGNAL */
+    wire        ptw_pte_v        = ptw_pte_source[0];
+    wire        ptw_pte_r        = ptw_pte_source[1];
+    wire        ptw_pte_w        = ptw_pte_source[2];
+    wire        ptw_pte_x        = ptw_pte_source[3];
+    wire        ptw_pte_u        = ptw_pte_source[4];
+    wire        ptw_pte_a        = ptw_pte_source[6];
+    wire        ptw_pte_d        = ptw_pte_source[7];   // Sv39 M4: mem-side writes also need D=1 (Svade)
+    wire [8:0]  ptw_pte_ppn0     = ptw_pte_source[18:10];
+    wire [8:0]  ptw_pte_ppn1     = ptw_pte_source[27:19];
+    wire [25:0] ptw_pte_ppn2     = ptw_pte_source[53:28];
+    wire [6:0]  ptw_pte_reserved = ptw_pte_source[60:54];
+    wire [1:0]  ptw_pte_pbmt     = ptw_pte_source[62:61];
+    wire        ptw_pte_n        = ptw_pte_source[63];
+
+    /*
+     * Sv39 Milestone 5: ptw_level_active/ptw_vaddr_active -- the SAME
+     * "declare early, drive late" mux idea applied to the two OTHER
+     * inputs the shared permission-check/reconstruction logic below
+     * needs: ptw_level_q/ptw_vaddr_q during a real walk, or the hit
+     * entry's own cached level / the LIVE lookup VA during a hit (NOT a
+     * cached VA -- re-checking ptw_va_noncanonical against the live
+     * tlb_lookup_vaddr, not a stale tag, is deliberate: two different
+     * accesses can share the same 27-bit VPN tag while differing in
+     * their own upper, non-tag bits[63:39], so canonical-ness must be
+     * re-verified per-access, not assumed from the cached entry).
+     * ptw_vpn_current (the WALKER's own next-level PTE address
+     * selector, further below) deliberately stays wired to raw
+     * ptw_vaddr_q -- it's only ever consulted during a real walk, never
+     * during a hit, so it needs no such mux.
+     */
+    wire [1:0]  ptw_level_active = tlb_hit_active ? tlb_hit_level : ptw_level_q;
+    // bits[37:30] (VPN2's own range, short one bit of bit38's separate
+    // canonical-check use) are genuinely never read from THIS wire --
+    // VPN2 is only ever needed to index the L2 table at the START of a
+    // real walk, which reads it from raw ptw_vaddr_q instead (see
+    // ptw_vpn_current's own comment above); a hit never starts a walk,
+    // so ptw_vaddr_active's own copy of those bits has no consumer.
+    /* verilator lint_off UNUSEDSIGNAL */
+    wire [(`WORD_SIZE-1):0] ptw_vaddr_active = tlb_hit_active ? tlb_lookup_vaddr : ptw_vaddr_q;
+    /* verilator lint_on UNUSEDSIGNAL */
+    wire [8:0]  ptw_vpn1_active = ptw_vaddr_active[29:21];
+    wire [8:0]  ptw_vpn0_active = ptw_vaddr_active[20:12];
+    // Canonical-address check (bits[63:39] must all equal bit 38) --
+    // moved here (was originally computed off bare ptw_vaddr_q, right
+    // after the VPN-extraction block above) so a TLB hit re-verifies it
+    // against the LIVE lookup VA -- see ptw_vaddr_active's own comment.
+    wire ptw_va_noncanonical = ptw_vaddr_active[63:39] != {25{ptw_vaddr_active[38]}};
 
     assign ptw_pte_leaf    = ptw_pte_r || ptw_pte_x;
     wire ptw_pte_malformed = !ptw_pte_v || (!ptw_pte_r && ptw_pte_w)
@@ -1555,10 +1739,16 @@ module core (
     // Superpage misalignment (algorithm step 6): a level-2 leaf's own
     // PPN[1:0] must be all-0 (gigapage); a level-1 leaf's PPN[0] must be
     // all-0 (megapage). Level 0 can never be superpage-misaligned.
-    wire ptw_superpage_misaligned = ptw_pte_leaf && (ptw_level_q != 2'd0)
-        && ((ptw_level_q == 2'd2) ? (|{ptw_pte_ppn1, ptw_pte_ppn0}) : (|ptw_pte_ppn0));
-    // A non-leaf (pointer) PTE with nowhere further to descend to.
-    wire ptw_no_more_levels = !ptw_pte_leaf && (ptw_level_q == 2'd0);
+    // ptw_level_active, not raw ptw_level_q, Sv39 M5 -- harmless-but-
+    // trivially-true for a hit either way (ptw_pte_leaf is always true
+    // there, and a cached entry's own ppn1/ppn0 are already guaranteed
+    // 0 at whatever level it was validly cached), but correct either way
+    // costs nothing and keeps this formula uniform with its own siblings.
+    wire ptw_superpage_misaligned = ptw_pte_leaf && (ptw_level_active != 2'd0)
+        && ((ptw_level_active == 2'd2) ? (|{ptw_pte_ppn1, ptw_pte_ppn0}) : (|ptw_pte_ppn0));
+    // A non-leaf (pointer) PTE with nowhere further to descend to --
+    // structurally false for a hit (only leaves are ever cached).
+    wire ptw_no_more_levels = !ptw_pte_leaf && (ptw_level_active == 2'd0);
     /*
      * Sv39 M4: permission checks generalized to cover the mem stream
      * (ptw_reason_q==PTW_REASON_MEM) alongside fetch, sharing this one
@@ -1616,11 +1806,16 @@ module core (
      * class caught by re-deriving this from the spec's own field-range
      * notation rather than guessing).
      */
+    // ptw_level_active/ptw_vpn1_active/ptw_vpn0_active, not the raw
+    // ptw_level_q/ptw_vpn1/ptw_vpn0 -- Sv39 M5: a TLB hit's own synthesized
+    // ptw_pte_source (whose ppn1/ppn0 are hardwired 0 for a genuine
+    // superpage entry, per the TLB fill logic) still needs the VA's own
+    // low VPN segments passed through correctly, exactly like a real walk.
     wire [25:0] ptw_resolved_ppn2 = ptw_pte_ppn2;
-    wire [8:0]  ptw_resolved_ppn1 = (ptw_level_q <= 2'd1) ? ptw_pte_ppn1 : ptw_vpn1;
-    wire [8:0]  ptw_resolved_ppn0 = (ptw_level_q == 2'd0) ? ptw_pte_ppn0 : ptw_vpn0;
+    wire [8:0]  ptw_resolved_ppn1 = (ptw_level_active <= 2'd1) ? ptw_pte_ppn1 : ptw_vpn1_active;
+    wire [8:0]  ptw_resolved_ppn0 = (ptw_level_active == 2'd0) ? ptw_pte_ppn0 : ptw_vpn0_active;
     wire [(`WORD_SIZE-1):0] ptw_resolved_paddr =
-        {8'b0, ptw_resolved_ppn2, ptw_resolved_ppn1, ptw_resolved_ppn0, ptw_vaddr_q[11:0]};
+        {8'b0, ptw_resolved_ppn2, ptw_resolved_ppn1, ptw_resolved_ppn0, ptw_vaddr_active[11:0]};
 
     /*
      * Sv39 Page-Table Walker progression -- level descent, leaf
@@ -1655,24 +1850,32 @@ module core (
             mem_resolved_q      <= 1'b0;
             mem_fault_q         <= 1'b0;
             mem_access_fault_q  <= 1'b0;
+            tlb0_valid_q        <= 1'b0;
+            tlb1_valid_q        <= 1'b0;
+            tlb2_valid_q        <= 1'b0;
+            tlb3_valid_q        <= 1'b0;
+            tlb_replace_q       <= 2'b0;
         end else begin
             // Starting a NEW walk -- (re)initialize at the root table,
-            // level 2. No TLB exists yet (Milestone 5), so this fires
-            // every time translation is active, never skipped. Sv39 M4:
+            // level 2. Sv39 M5: gated on !tlb_hit_active too -- a hit
+            // resolves entirely through the dedicated branch below and
+            // must never enter S_PTW, so setting up walk-scratch state
+            // for it here would be dead (harmless, since S_PTW is never
+            // reached to consume it, but skipped for clarity). Sv39 M4:
             // the mem stream joins fetch-lo/fetch-hi here, keyed off
             // S_MEM instead -- no separate "HI" episode for mem (an
             // aligned access can never cross a 4KB page boundary).
-            if (state == S_FETCH && fetch_translate_active && !fetch_lo_resolved_q) begin
+            if (state == S_FETCH && fetch_translate_active && !fetch_lo_resolved_q && !tlb_hit_active) begin
                 ptw_reason_q <= PTW_REASON_LO;
                 ptw_level_q  <= 2'd2;
                 ptw_base_q   <= {8'b0, satp_ppn_w, 12'b0};
                 ptw_vaddr_q  <= pc;
-            end else if (state == S_FETCH_HI && fetch_translate_active && !fetch_hi_resolved_q) begin
+            end else if (state == S_FETCH_HI && fetch_translate_active && !fetch_hi_resolved_q && !tlb_hit_active) begin
                 ptw_reason_q <= PTW_REASON_HI;
                 ptw_level_q  <= 2'd2;
                 ptw_base_q   <= {8'b0, satp_ppn_w, 12'b0};
                 ptw_vaddr_q  <= fetch_hi_vaddr;
-            end else if (state == S_MEM && mem_translate_active && !mem_resolved_q) begin
+            end else if (state == S_MEM && mem_translate_active && !mem_resolved_q && !tlb_hit_active) begin
                 ptw_reason_q <= PTW_REASON_MEM;
                 ptw_level_q  <= 2'd2;
                 ptw_base_q   <= {8'b0, satp_ppn_w, 12'b0};
@@ -1682,6 +1885,45 @@ module core (
                 // next table's base is THIS PTE's own PPN.
                 ptw_level_q <= ptw_level_q - 2'd1;
                 ptw_base_q  <= {8'b0, ptw_pte_ppn2, ptw_pte_ppn1, ptw_pte_ppn0, 12'b0};
+            end
+
+            /*
+             * TLB-hit resolve (Sv39 M5) -- mirrors the S_PTW resolve-
+             * capture case statement below exactly (same fault/resolved/
+             * paddr_q targets, same per-stream split), but fires the SAME
+             * cycle as the hit itself: no walk, no visit to S_PTW at all.
+             * Sound because ptw_pte_leaf/ptw_pte_fault/ptw_resolved_paddr
+             * are already fully, correctly computed for this case --
+             * ptw_pte_source/ptw_level_active/ptw_vaddr_active's own
+             * tlb_hit_active-aware muxing (above) feeds the EXACT SAME
+             * permission-check combinational logic a real walk uses, zero
+             * duplicated logic, per the staged plan's own decision 13.
+             * mem_access_fault_q is always cleared here, never set: a hit
+             * never performs a PTE bus read, so it can never produce a
+             * PMP-on-PTE-read/bus-error access fault (cause 1/5/7) the
+             * way a real walk's own ptw_pmp_fault/wb_err_i paths can --
+             * only a content-level page fault (cause 12/13/15) is
+             * possible from a cached entry.
+             */
+            if (tlb_hit_active) begin
+                case (state)
+                    S_FETCH: begin
+                        fetch_lo_fault_q    <= ptw_pte_fault;
+                        fetch_lo_resolved_q <= !ptw_pte_fault;
+                        if (!ptw_pte_fault) fetch_lo_paddr_q <= ptw_resolved_paddr;
+                    end
+                    S_FETCH_HI: begin
+                        fetch_hi_fault_q    <= ptw_pte_fault;
+                        fetch_hi_resolved_q <= !ptw_pte_fault;
+                        if (!ptw_pte_fault) fetch_hi_paddr_q <= ptw_resolved_paddr;
+                    end
+                    default: begin   // S_MEM
+                        mem_fault_q        <= ptw_pte_fault;
+                        mem_access_fault_q <= 1'b0;
+                        mem_resolved_q     <= !ptw_pte_fault;
+                        if (!ptw_pte_fault) mem_resolved_paddr_q <= ptw_resolved_paddr;
+                    end
+                endcase
             end
 
             // PMP-denied PTE read: ptw_pmp_fault's own cause-1 capture
@@ -1724,6 +1966,82 @@ module core (
                 endcase
             end
 
+            /*
+             * TLB fill (Sv39 M5) -- reason-agnostic: a successful walk
+             * resolution is cached identically whether this cycle's leaf
+             * came from the fetch-lo, fetch-hi, or mem stream. Never
+             * fires on a TLB hit -- a hit skips S_PTW entirely via the
+             * state-transition redirect conditions' own "&& !tlb_hit"
+             * gating -- so this can never re-fill an already-cached
+             * entry from itself. Caches the raw PTE's OWN ppn2/ppn1/ppn0
+             * fields (ptw_pte_ppn2/1/0, sourced from wb_dat_i here since
+             * this is always a genuine walk, never a hit), NOT the
+             * already-VA-reconstructed ptw_resolved_ppn1/0 -- a later
+             * hit's own ptw_pte_source mux feeds these cached fields back
+             * into that exact same reconstruction formula
+             * (ptw_resolved_ppn1/0, upstream), so a superpage's cached
+             * zero low-PPN-segments correctly re-combine with whatever
+             * NEW address's own VPN is being looked up next time, not a
+             * frozen copy of the first address that ever filled it.
+             */
+            if (state == S_PTW && wb_done && wb_ok && ptw_pte_leaf && !ptw_pte_fault) begin
+                case (tlb_replace_q)
+                    2'd0: begin
+                        tlb0_valid_q <= 1'b1;
+                        tlb0_level_q <= ptw_level_q;
+                        tlb0_vpn_q   <= ptw_vaddr_q[38:12];
+                        tlb0_ppn2_q  <= ptw_pte_ppn2;
+                        tlb0_ppn1_q  <= ptw_pte_ppn1;
+                        tlb0_ppn0_q  <= ptw_pte_ppn0;
+                        tlb0_r_q     <= ptw_pte_r;
+                        tlb0_w_q     <= ptw_pte_w;
+                        tlb0_x_q     <= ptw_pte_x;
+                        tlb0_u_q     <= ptw_pte_u;
+                        tlb0_d_q     <= ptw_pte_d;
+                    end
+                    2'd1: begin
+                        tlb1_valid_q <= 1'b1;
+                        tlb1_level_q <= ptw_level_q;
+                        tlb1_vpn_q   <= ptw_vaddr_q[38:12];
+                        tlb1_ppn2_q  <= ptw_pte_ppn2;
+                        tlb1_ppn1_q  <= ptw_pte_ppn1;
+                        tlb1_ppn0_q  <= ptw_pte_ppn0;
+                        tlb1_r_q     <= ptw_pte_r;
+                        tlb1_w_q     <= ptw_pte_w;
+                        tlb1_x_q     <= ptw_pte_x;
+                        tlb1_u_q     <= ptw_pte_u;
+                        tlb1_d_q     <= ptw_pte_d;
+                    end
+                    2'd2: begin
+                        tlb2_valid_q <= 1'b1;
+                        tlb2_level_q <= ptw_level_q;
+                        tlb2_vpn_q   <= ptw_vaddr_q[38:12];
+                        tlb2_ppn2_q  <= ptw_pte_ppn2;
+                        tlb2_ppn1_q  <= ptw_pte_ppn1;
+                        tlb2_ppn0_q  <= ptw_pte_ppn0;
+                        tlb2_r_q     <= ptw_pte_r;
+                        tlb2_w_q     <= ptw_pte_w;
+                        tlb2_x_q     <= ptw_pte_x;
+                        tlb2_u_q     <= ptw_pte_u;
+                        tlb2_d_q     <= ptw_pte_d;
+                    end
+                    default: begin   // 2'd3
+                        tlb3_valid_q <= 1'b1;
+                        tlb3_level_q <= ptw_level_q;
+                        tlb3_vpn_q   <= ptw_vaddr_q[38:12];
+                        tlb3_ppn2_q  <= ptw_pte_ppn2;
+                        tlb3_ppn1_q  <= ptw_pte_ppn1;
+                        tlb3_ppn0_q  <= ptw_pte_ppn0;
+                        tlb3_r_q     <= ptw_pte_r;
+                        tlb3_w_q     <= ptw_pte_w;
+                        tlb3_x_q     <= ptw_pte_x;
+                        tlb3_u_q     <= ptw_pte_u;
+                        tlb3_d_q     <= ptw_pte_d;
+                    end
+                endcase
+                tlb_replace_q <= tlb_replace_q + 2'd1;
+            end
+
             // Sv39 M4: the REAL, post-translation mem access has
             // completed -- mem_resolved_q's own "always freshly written
             // by the next ordinary event" refresh, same reasoning as the
@@ -1760,6 +2078,21 @@ module core (
             if (commit_now) begin
                 mem_fault_q        <= 1'b0;
                 mem_access_fault_q <= 1'b0;
+            end
+
+            // SFENCE.VMA (Sv39 M5, decision 3): unconditional full-TLB
+            // flush, ignoring rs1/rs2 entirely -- same commit_now-timed,
+            // single-cycle-pulse shape FENCE.I's own icache_flush_o
+            // already established (SFENCE.VMA retires purely within
+            // S_EXEC, bus-idle, so this can never coincide with the TLB
+            // fill block above, which only ever fires from S_PTW -- but
+            // placed after it in program order regardless, so a flush
+            // would win any theoretical same-cycle conflict).
+            if (commit_now && is_sfence_vma) begin
+                tlb0_valid_q <= 1'b0;
+                tlb1_valid_q <= 1'b0;
+                tlb2_valid_q <= 1'b0;
+                tlb3_valid_q <= 1'b0;
             end
 
             // The REAL, post-translation fetch (using the now-resolved
@@ -2314,7 +2647,7 @@ module core (
      * behavior. It stays an ordinary retiring no-op (no TLB exists until
      * Milestone 5) whenever it isn't trapped.
      */
-    wire is_sfence_vma = (decoded_instruction == `INSTR_CODE(SFENCE_VMA));
+    assign is_sfence_vma = (decoded_instruction == `INSTR_CODE(SFENCE_VMA));
 
     /*
      * Illegal-instruction sources this milestone: a genuinely
