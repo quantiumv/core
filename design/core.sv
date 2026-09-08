@@ -1043,6 +1043,24 @@ module core (
     /* verilator lint_on UNUSEDSIGNAL */
     wire mstatus_mprv_w;
 
+    /*
+     * csr_file0's own Sv39 control-plane exports (Sv39 staged plan,
+     * Milestone 1) -- declared here alongside the PMP group above for the
+     * same reason (a forward reference to a csr_file0 output, needed by
+     * this file's own connection list further down). Zero functional
+     * consumption yet: satp_w's first real reader is Milestone 3's own
+     * page-table walker; mstatus_sum_w/mstatus_mxr_w's first real reader
+     * is Milestone 4's mem-side permission check; mstatus_tvm_w's first
+     * real reader is this very plan's own next milestone (Milestone 2,
+     * SFENCE.VMA/TVM classification). All four wrapped together, same
+     * "genuinely unused until a later milestone" precedent pmpcfg0_w's
+     * own group established above.
+     */
+    /* verilator lint_off UNUSEDSIGNAL */
+    wire [(`WORD_SIZE - 1):0] satp_w;
+    wire mstatus_sum_w, mstatus_mxr_w, mstatus_tvm_w;
+    /* verilator lint_on UNUSEDSIGNAL */
+
     /* verilator lint_off UNUSEDSIGNAL */
     wire [(`WORD_SIZE - 1):0] fetch_paddr = pc;
     /* verilator lint_on UNUSEDSIGNAL */
@@ -2303,7 +2321,16 @@ module core (
         .o_pmpcfg0(pmpcfg0_w),
         .o_pmpaddr0(pmpaddr0_w), .o_pmpaddr1(pmpaddr1_w),
         .o_pmpaddr2(pmpaddr2_w), .o_pmpaddr3(pmpaddr3_w),
-        .o_mstatus_mprv(mstatus_mprv_w)
+        .o_mstatus_mprv(mstatus_mprv_w),
+
+        /*
+         * Milestone 1 of the Sv39 staged plan (csr_file.sv side) added
+         * these 4 outputs; later Sv39 milestones are their real consumer
+         * -- same deferred-consumer precedent the PMP group immediately
+         * above already established.
+         */
+        .o_satp(satp_w),
+        .o_mstatus_sum(mstatus_sum_w), .o_mstatus_mxr(mstatus_mxr_w), .o_mstatus_tvm(mstatus_tvm_w)
 `ifdef RISCV_FORMAL
         ,
         .o_mcause(mcause_w),

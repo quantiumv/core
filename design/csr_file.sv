@@ -129,6 +129,14 @@
  *    PMP-enforcement milestone in core.sv (unused/unconnected until
  *    then, same deferred-consumer precedent every other control-plane
  *    export group above already established).
+ *  o_satp/o_mstatus_sum/o_mstatus_mxr/o_mstatus_tvm: control-plane exports
+ *    for the Sv39 staged plan (unused/unconnected in core.sv until the
+ *    later milestones that actually walk page tables and enforce
+ *    SUM/MXR/TVM -- same deferred-consumer precedent every other
+ *    control-plane export group above already established). o_satp
+ *    exports the whole real-WARL'd register (see satp_q's own always_ff
+ *    below); o_mstatus_sum/o_mstatus_mxr/o_mstatus_tvm are single-bit
+ *    taps of already-existing storage, same precedent as o_mstatus_mprv.
  */
 module csr_file (
     input  logic i_clk,
@@ -202,7 +210,19 @@ module csr_file (
     output logic [(`WORD_SIZE - 1):0]     o_pmpaddr1,
     output logic [(`WORD_SIZE - 1):0]     o_pmpaddr2,
     output logic [(`WORD_SIZE - 1):0]     o_pmpaddr3,
-    output logic                          o_mstatus_mprv
+    output logic                          o_mstatus_mprv,
+
+    /*
+     * Sv39 (Milestone 1 of the Sv39 staged plan): the real, WARL'd satp
+     * register (see satp_q's own always_ff for the WARL/MODE semantics)
+     * and single-bit taps of already-existing mstatus storage -- same
+     * "export the whole register, let the consumer pick bits" precedent
+     * as o_pmpcfg0/o_dcsr above.
+     */
+    output logic [(`WORD_SIZE - 1):0]     o_satp,
+    output logic                          o_mstatus_sum,
+    output logic                          o_mstatus_mxr,
+    output logic                          o_mstatus_tvm
 `ifdef RISCV_FORMAL
     /*
      * mcause/scause: no real core.sv control logic needs these today (unlike
@@ -451,11 +471,29 @@ module csr_file (
         if (i_rst) sscratch_q <= '0;
         else if (i_csr_we && (i_csr_addr == CSR_ADDR_SSCRATCH)) sscratch_q <= i_csr_wdata;
     end
+    localparam logic [3:0] SATP_MODE_BARE = 4'd0;
+    localparam logic [3:0] SATP_MODE_SV39 = 4'd8;
+
     always_ff @(posedge i_clk) begin
-        /* satp: real storage, zero page-table-walker consumer yet --
-         * deliberately, this is the Sv39 milestone's own seam. */
-        if (i_rst) satp_q <= '0;
-        else if (i_csr_we && (i_csr_addr == CSR_ADDR_SATP)) satp_q <= i_csr_wdata;
+        /* satp: real WARL now (Sv39 Milestone 1) -- zero page-table-walker
+         * consumer yet in core.sv (Milestone 3), deliberately. Per spec, a
+         * write with an unsupported MODE leaves the ENTIRE register
+         * unchanged, not partially updated -- the missing else-branch
+         * below is a genuine "hold prior value" no-op, not an omission.
+         * ASID (bits[59:44]) is forced to 0 in STORAGE on every accepted
+         * write, matching mip_q's own "never let a stale/foreign bit
+         * resurface" masking precedent -- this core implements ASIDLEN=0
+         * (spec-legal), so nothing must ever make this field read back
+         * nonzero. PPN (bits[43:0]) is stored verbatim, unclamped -- a PPN
+         * pointing outside real backing memory simply produces a real
+         * wb_err_i on the walker's own read (a later milestone's job to
+         * turn into an access fault), not this register's WARL concern. */
+        if (i_rst) begin
+            satp_q <= '0;   // MODE=Bare -- translation inactive at reset, spec-legal
+        end else if (i_csr_we && (i_csr_addr == CSR_ADDR_SATP)
+                     && ((i_csr_wdata[63:60] == SATP_MODE_BARE) || (i_csr_wdata[63:60] == SATP_MODE_SV39))) begin
+            satp_q <= {i_csr_wdata[63:60], 16'b0, i_csr_wdata[43:0]};
+        end
     end
     always_ff @(posedge i_clk) begin
         /* medeleg: real storage AND enforced -- core.sv's trap-entry
@@ -610,10 +648,10 @@ module csr_file (
     localparam int MSTATUS_SPP_BIT  = 8;
     localparam int MSTATUS_MPP_LSB  = 11;
     localparam int MSTATUS_MPP_MSB  = 12;
-    localparam int MSTATUS_MPRV_BIT = 17;   // real storage, inert -- Sv39 seam
-    localparam int MSTATUS_SUM_BIT  = 18;   // real storage, inert -- Sv39 seam
-    localparam int MSTATUS_MXR_BIT  = 19;   // real storage, inert -- Sv39 seam
-    localparam int MSTATUS_TVM_BIT  = 20;   // real storage, not enforced
+    localparam int MSTATUS_MPRV_BIT = 17;   // real storage; consumed by PMP's mem_effective_priv (core.sv)
+    localparam int MSTATUS_SUM_BIT  = 18;   // real storage, inert until Sv39 Milestone 4 (mem-side permission check)
+    localparam int MSTATUS_MXR_BIT  = 19;   // real storage, inert until Sv39 Milestone 4 (mem-side permission check)
+    localparam int MSTATUS_TVM_BIT  = 20;   // real storage; core.sv's tvm_violation check (Sv39 Milestone 2) is its first consumer
     localparam int MSTATUS_TW_BIT   = 21;   // real storage, not enforced
     localparam int MSTATUS_TSR_BIT  = 22;   // real storage, not enforced
 
@@ -1023,6 +1061,10 @@ module csr_file (
     assign o_pmpaddr2     = pmpaddr2_q;
     assign o_pmpaddr3     = pmpaddr3_q;
     assign o_mstatus_mprv = mstatus_q[MSTATUS_MPRV_BIT];
+    assign o_satp          = satp_q;
+    assign o_mstatus_sum   = mstatus_q[MSTATUS_SUM_BIT];
+    assign o_mstatus_mxr   = mstatus_q[MSTATUS_MXR_BIT];
+    assign o_mstatus_tvm   = mstatus_q[MSTATUS_TVM_BIT];
 `ifdef RISCV_FORMAL
     assign o_mcause      = mcause_q;
     assign o_scause      = scause_q;
