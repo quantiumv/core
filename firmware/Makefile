@@ -213,6 +213,25 @@ uart_plic_seip_test:
 	riscv64-unknown-elf-objdump -d uart_plic_seip_test.elf
 	riscv64-unknown-elf-objcopy -O verilog -j .text -j .rodata -j .data --verilog-data-width=8 uart_plic_seip_test.elf uart_plic_seip_test.hex
 
+# First real-toolchain-compiled Sv39 test (firmware/sv39_real_test.s),
+#   linked against the SAME crt0.o/link.ld as every other target above --
+#   rebuilt here (plain -march=rv64i, unchanged) rather than assumed to
+#   already exist, so this target works standalone. Produces a DISTINCT
+#   sv39_real_test.hex -- every other target's hex output is untouched
+#   either way. sv39_real_test.s itself confirmed empirically (see that
+#   file's own header) that mret/csrw/csrr/sfence.vma and the CSR name
+#   "satp" all assemble under the SAME rv64i_zicsr requirement every
+#   other CSR/privileged-mode target above already uses -- no separate
+#   "Sv39" march string is needed by this toolchain, so this reuses that
+#   same value rather than introducing a new one.
+SV39_ASFLAGS = -march=rv64i_zicsr -mabi=lp64 -mno-relax
+sv39_real_test:
+	riscv64-unknown-elf-as $(ASFLAGS) crt0.s -o crt0.o
+	riscv64-unknown-elf-as $(SV39_ASFLAGS) sv39_real_test.s -o sv39_real_test.o
+	riscv64-unknown-elf-ld -T link.ld -o sv39_real_test.elf crt0.o sv39_real_test.o
+	riscv64-unknown-elf-objdump -d sv39_real_test.elf
+	riscv64-unknown-elf-objcopy -O verilog -j .text -j .rodata -j .data --verilog-data-width=8 sv39_real_test.elf sv39_real_test.hex
+
 # Milestone 10b (EBREAK/JTAG staged plan, full-stack OpenOCD integration):
 #   the acceptance-test program (firmware/m10_debug_test.s), linked
 #   against the SAME crt0.o/link.ld as every other target above --
