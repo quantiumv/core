@@ -546,13 +546,64 @@ module core (
     logic         ptw_pmp_fault;
     logic         ptw_pte_fault;   // real assign lives in the "Sv39 Page-Table Walker" section
     logic         ptw_pte_leaf;    // (needs the PTE-decode wires, only available there)
-    logic         ptw_reason_q;     // 0 = serving the LO fetch, 1 = serving HI
+    localparam logic [1:0] PTW_REASON_LO  = 2'd0;
+    localparam logic [1:0] PTW_REASON_HI  = 2'd1;
+    localparam logic [1:0] PTW_REASON_MEM = 2'd2;   // Sv39 M4
+    logic [1:0]   ptw_reason_q;     // LO/HI fetch stream, or MEM (M4) -- widened from 1 bit
     logic [1:0]   ptw_level_q;      // 2 -> 1 -> 0
     logic [63:0]  ptw_base_q;       // current level's table, BYTE address
     logic [63:0]  ptw_vaddr_q;      // the VA being translated this walk
     logic [63:0]  fetch_lo_paddr_q, fetch_hi_paddr_q;
     logic         fetch_lo_resolved_q, fetch_hi_resolved_q;
     logic         fetch_lo_fault_q, fetch_hi_fault_q;
+    /*
+     * Sv39 M4 (mem-side translation) -- forward-declared here for the
+     * identical reason as the fetch-side group above: mem_translate_active
+     * gates S_MEM's own state-transition arm (textually early), and
+     * mem_resolved_q/mem_fault_q/mem_resolved_paddr_q are the mem
+     * stream's own single-episode registers (no LO/HI split needed here
+     * -- an aligned load/store/AMO is at most 8 bytes, which can never
+     * cross a 4KB page boundary, so mem access only ever needs ONE walk).
+     *
+     * mem_effective_priv's own bare declaration moves HERE from its
+     * original (still-correct, unchanged) `assign` site in the Memory
+     * section -- that assign only needs mstatus_mprv_w/mstatus_mpp_w/
+     * current_priv, all already available there, but mem_translate_active
+     * (needed early) and the walker's own ptw_check_priv (Sv39 Page-
+     * Table Walker section) both need the DECLARATION this early. Same
+     * split ptw_pmp_fault above already uses.
+     *
+     * mem_op_needs_write needs is_sc, not declared until well after
+     * Decode -- forward-declared bare here, real assign lives right next
+     * to is_sc's own declaration.
+     */
+    priv_t mem_effective_priv;
+    wire mem_translate_active = !debug_progbuf_active
+                               && (mem_effective_priv != PRIV_M)
+                               && (satp_mode_w == 4'd8);
+    // alu_result: bare declaration moved here (real drive stays an
+    // instantiation port connection at its own original site, in
+    // Execute) -- the mem-side walk-start branch below (walker
+    // progression always_ff) needs it as the pre-translation VA, well
+    // before Execute's own textual position.
+    logic [(`WORD_SIZE - 1):0] alu_result;
+    wire ptw_is_mem = (ptw_reason_q == PTW_REASON_MEM);
+    logic mem_op_needs_write;    // is_store||is_sc||is_amo_rmw -- excludes is_lr (read-only);
+                                  // used for the walker's own R/W permission check AND the
+                                  // page-fault (13 vs 15) cause split.
+    logic mem_op_is_load_class;  // is_load&&!is_lr&&!is_amo_rmw -- matches the EXISTING
+                                  // mem_load_access_fault/mem_store_access_fault convention
+                                  // (LR groups with store/AMO for ACCESS-fault classification,
+                                  // a pre-existing, deliberately different split from the one
+                                  // above); used for mem_access_fault_q's own 5-vs-7 split.
+    logic mem_resolved_q, mem_fault_q;
+    logic mem_access_fault_q;    // PMP-denied or bus-errored PTE READ -- cause 5/7 (access
+                                  // fault of the original type), NEVER routed through
+                                  // fetch_fault_q (that would wrongly substitute `instruction`
+                                  // with the inert placeholder for what is really an ordinary,
+                                  // already-decoded load/store still needing its own real
+                                  // is_load/is_store classification at the commit edge).
+    logic [63:0] mem_resolved_paddr_q;
     /*
      * dm_access_active: gates every DM Access-Register mux (regfile0's
      * read/write ports below, csr_file0's addr/we/wdata below) between
@@ -674,8 +725,16 @@ module core (
      * bus-error one (which reacts to a real wb_err_i that already came
      * back from a real slave).
      */
+    // Sv39 (Milestone 4): mem_fault_q/mem_access_fault_q join the
+    // NOT-list for the identical reason pmp_load_fault/pmp_store_fault
+    // already are -- once either is set (discovered mid-S_MEM, after
+    // bailing back to S_EXEC), mem_phase_needed must stop re-requesting
+    // S_MEM for this same instruction, or S_EXEC's own state-transition
+    // (mem_phase_needed ? S_MEM : ...) would loop forever instead of
+    // ever letting commit_now fire.
     wire mem_phase_needed = (is_load || is_store)
-                          && !(mem_load_misaligned || mem_store_misaligned || pmp_load_fault || pmp_store_fault);
+                          && !(mem_load_misaligned || mem_store_misaligned || pmp_load_fault || pmp_store_fault
+                            || mem_fault_q || mem_access_fault_q);
 
     /*
      * wb_done/wb_ok: wb4_sram.sv (the real leaf memory) keeps ack/err
@@ -847,7 +906,9 @@ module core (
                              else if (wb_done) begin
                                  if (wb_err_i) state <= S_EXEC;
                                  else if (ptw_pte_fault) state <= S_EXEC;
-                                 else if (ptw_pte_leaf) state <= state_t'(ptw_reason_q ? S_FETCH_HI : S_FETCH);
+                                 else if (ptw_pte_leaf) state <= state_t'((ptw_reason_q == PTW_REASON_HI) ? S_FETCH_HI
+                                                                        : (ptw_reason_q == PTW_REASON_MEM) ? S_MEM
+                                                                        : S_FETCH);
                                  else state <= S_PTW;
                              end
                 /*
@@ -889,7 +950,26 @@ module core (
                  * state-gated to S_MEM, and S_AMO_WRITE's own AMO-write-
                  * phase fault arm).
                  */
-                S_MEM:       if (wb_done) state <= state_t'(progbuf_abort ? S_DEBUG_HALTED
+                /*
+                 * Sv39 (Milestone 4): same redirect shape as S_FETCH's
+                 * own -- translation needed and not yet resolved wins
+                 * top priority, before ever consulting wb_done. Once
+                 * resolved, pmp_load_fault/pmp_store_fault (now correctly
+                 * evaluating against the JUST-RESOLVED, translated
+                 * mem_paddr -- see their own generalized gate) can ALSO
+                 * fire at this exact point, checked next: the FINAL,
+                 * translated physical address must still pass the
+                 * existing, unmodified PMP mem-side check before the
+                 * real target access is ever issued (decision 10's own
+                 * two-tier ordering) -- mirrors pmp_fetchlo_fault's own
+                 * "known combinationally before the bus phase, bail
+                 * straight to S_EXEC" shape exactly, just one state later
+                 * than the fetch-side equivalent since mem_paddr itself
+                 * isn't resolved until partway through S_MEM.
+                 */
+                S_MEM:       if (mem_translate_active && !mem_resolved_q) state <= S_PTW;
+                             else if (pmp_load_fault || pmp_store_fault) state <= S_EXEC;
+                             else if (wb_done) state <= state_t'(progbuf_abort ? S_DEBUG_HALTED
                                     : ((wb_ok && is_amo_rmw) ? S_AMO_WRITE : S_FETCH));
                 S_AMO_WRITE: if (wb_done) state <= state_t'(progbuf_abort ? S_DEBUG_HALTED : S_FETCH);
                 /*
@@ -1005,9 +1085,9 @@ module core (
          * 12) does NOT set fetch_fault_q -- see fetch_lo_fault_q/
          * fetch_hi_fault_q's own always_ff below instead.
          */
-        if (state == S_PTW && ptw_pmp_fault) begin
+        if (state == S_PTW && ptw_pmp_fault && !ptw_is_mem) begin
             fetch_fault_q <= 1'b1;
-        end else if (state == S_PTW && wb_done) begin
+        end else if (state == S_PTW && wb_done && !ptw_is_mem) begin
             fetch_fault_q <= wb_err_i;
         end
     end
@@ -1461,6 +1541,7 @@ module core (
     wire        ptw_pte_x        = wb_dat_i[3];
     wire        ptw_pte_u        = wb_dat_i[4];
     wire        ptw_pte_a        = wb_dat_i[6];
+    wire        ptw_pte_d        = wb_dat_i[7];   // Sv39 M4: mem-side writes also need D=1 (Svade)
     wire [8:0]  ptw_pte_ppn0     = wb_dat_i[18:10];
     wire [8:0]  ptw_pte_ppn1     = wb_dat_i[27:19];
     wire [25:0] ptw_pte_ppn2     = wb_dat_i[53:28];
@@ -1478,19 +1559,49 @@ module core (
         && ((ptw_level_q == 2'd2) ? (|{ptw_pte_ppn1, ptw_pte_ppn0}) : (|ptw_pte_ppn0));
     // A non-leaf (pointer) PTE with nowhere further to descend to.
     wire ptw_no_more_levels = !ptw_pte_leaf && (ptw_level_q == 2'd0);
-    // U-bit, fetch stream: S-mode NEVER executes from a U page, regardless
-    // of SUM (SUM only ever affects DATA accesses, never fetch, per
-    // spec); U-mode always needs U=1. Svade (decision 1 of the staged
-    // plan): a leaf with A=0 is ALSO a page fault -- software sets A
-    // itself and retries, no hardware auto-set, the "simple
-    // implementation" the spec's own step-9 NOTE explicitly sanctions.
-    wire ptw_u_violation_fetch = ptw_pte_leaf
-        && (ptw_pte_u ? (current_priv == PRIV_S) : (current_priv == PRIV_U));
-    wire ptw_x_violation = ptw_pte_leaf && !ptw_pte_x;
-    wire ptw_ad_fault    = ptw_pte_leaf && !ptw_pte_a;
+    /*
+     * Sv39 M4: permission checks generalized to cover the mem stream
+     * (ptw_reason_q==PTW_REASON_MEM) alongside fetch, sharing this one
+     * combinational block rather than duplicating it -- ptw_is_mem/
+     * ptw_check_priv (mem_effective_priv when serving mem, plain
+     * current_priv for fetch, mirroring the fetch-side PMP check's own
+     * "MPRV never affects fetch" rule) pick the right source per-stream.
+     *
+     * U-bit: fetch stream is NEVER SUM-aware (S can NEVER execute
+     * instructions from a U page, regardless of SUM -- SUM only ever
+     * affects DATA accesses, per spec); the mem stream IS SUM-aware (S
+     * may access a U page's DATA when mstatus.SUM=1). Both streams share
+     * the same "U-mode always needs U=1" half.
+     *
+     * Permission: fetch needs X; mem needs W (a write) or R-or-(MXR&&X)
+     * (a read) -- MXR only ever applies to the mem stream's own reads,
+     * never to fetch or to a write, per spec.
+     *
+     * A/D (Svade, decision 1 of the staged plan): a leaf with A=0 is
+     * ALWAYS a page fault regardless of stream -- software sets A itself
+     * and retries, no hardware auto-set, the "simple implementation" the
+     * spec's own step-9 NOTE explicitly sanctions. The mem stream's own
+     * WRITES additionally need D=1 (fetch/mem-reads never need D).
+     * (ptw_is_mem itself is declared early -- see the Sv39 forward-
+     * declare block alongside mem_translate_active.)
+     */
+    // priv_t'(...) outer cast, not a bare ternary -- SystemVerilog doesn't
+    // preserve enum typing across a ?: otherwise (the exact class of bug
+    // mem_effective_priv's own width/type fix, PMP Milestone 2, already
+    // found the hard way: a bare ternary silently inferred a 1-bit net).
+    priv_t ptw_check_priv;
+    assign ptw_check_priv = priv_t'(ptw_is_mem ? mem_effective_priv : current_priv);
+    wire ptw_u_violation = ptw_pte_leaf
+        && (ptw_pte_u ? (ptw_is_mem ? !((ptw_check_priv == PRIV_U) || (ptw_check_priv == PRIV_S && mstatus_sum_w))
+                                    : (ptw_check_priv == PRIV_S))
+                      : (ptw_check_priv == PRIV_U));
+    wire ptw_read_ok = ptw_pte_r || (mstatus_mxr_w && ptw_pte_x);
+    wire ptw_perm_violation = ptw_pte_leaf
+        && (ptw_is_mem ? (mem_op_needs_write ? !ptw_pte_w : !ptw_read_ok) : !ptw_pte_x);
+    wire ptw_ad_fault = ptw_pte_leaf && (!ptw_pte_a || (ptw_is_mem && mem_op_needs_write && !ptw_pte_d));
     assign ptw_pte_fault = ptw_va_noncanonical || ptw_pte_malformed || ptw_superpage_misaligned
                         || ptw_no_more_levels
-                        || (ptw_pte_leaf && (ptw_u_violation_fetch || ptw_x_violation || ptw_ad_fault));
+                        || (ptw_pte_leaf && (ptw_u_violation || ptw_perm_violation || ptw_ad_fault));
 
     /*
      * Superpage reconstruction (algorithm step 10), re-derived by hand
@@ -1541,20 +1652,31 @@ module core (
             fetch_hi_resolved_q <= 1'b0;
             fetch_lo_fault_q    <= 1'b0;
             fetch_hi_fault_q    <= 1'b0;
+            mem_resolved_q      <= 1'b0;
+            mem_fault_q         <= 1'b0;
+            mem_access_fault_q  <= 1'b0;
         end else begin
             // Starting a NEW walk -- (re)initialize at the root table,
             // level 2. No TLB exists yet (Milestone 5), so this fires
-            // every time translation is active, never skipped.
+            // every time translation is active, never skipped. Sv39 M4:
+            // the mem stream joins fetch-lo/fetch-hi here, keyed off
+            // S_MEM instead -- no separate "HI" episode for mem (an
+            // aligned access can never cross a 4KB page boundary).
             if (state == S_FETCH && fetch_translate_active && !fetch_lo_resolved_q) begin
-                ptw_reason_q <= 1'b0;
+                ptw_reason_q <= PTW_REASON_LO;
                 ptw_level_q  <= 2'd2;
                 ptw_base_q   <= {8'b0, satp_ppn_w, 12'b0};
                 ptw_vaddr_q  <= pc;
             end else if (state == S_FETCH_HI && fetch_translate_active && !fetch_hi_resolved_q) begin
-                ptw_reason_q <= 1'b1;
+                ptw_reason_q <= PTW_REASON_HI;
                 ptw_level_q  <= 2'd2;
                 ptw_base_q   <= {8'b0, satp_ppn_w, 12'b0};
                 ptw_vaddr_q  <= fetch_hi_vaddr;
+            end else if (state == S_MEM && mem_translate_active && !mem_resolved_q) begin
+                ptw_reason_q <= PTW_REASON_MEM;
+                ptw_level_q  <= 2'd2;
+                ptw_base_q   <= {8'b0, satp_ppn_w, 12'b0};
+                ptw_vaddr_q  <= alu_result;   // mem's own pre-translation VA
             end else if (state == S_PTW && wb_done && wb_ok && !ptw_pte_fault && !ptw_pte_leaf) begin
                 // Clean, non-leaf (pointer) PTE -- descend one level; the
                 // next table's base is THIS PTE's own PPN.
@@ -1563,22 +1685,81 @@ module core (
             end
 
             // PMP-denied PTE read: ptw_pmp_fault's own cause-1 capture
-            // lives in fetch_fault_q's always_ff (Fetch section above) --
-            // this side only needs to make sure the SAME-reason cause-12
+            // (fetch reason) lives in fetch_fault_q's own always_ff
+            // (Fetch section above); its cause-5/7 capture (mem reason,
+            // mem_access_fault_q) is written right here instead, alongside
+            // every other mem-reason register this always_ff already owns
+            // (needs an explicit reset, unlike fetch_fault_q -- see
+            // mem_access_fault_q's own declaration comment). Either way,
+            // this branch ALSO makes sure the SAME-reason cause-12/13/15
             // flag doesn't carry a stale value forward into the trap this
             // cycle takes.
             if (state == S_PTW && ptw_pmp_fault) begin
-                if (ptw_reason_q == 1'b0) fetch_lo_fault_q <= 1'b0; else fetch_hi_fault_q <= 1'b0;
+                case (ptw_reason_q)
+                    PTW_REASON_LO:  fetch_lo_fault_q <= 1'b0;
+                    PTW_REASON_HI:  fetch_hi_fault_q <= 1'b0;
+                    default: begin   // PTW_REASON_MEM
+                        mem_fault_q        <= 1'b0;
+                        mem_access_fault_q <= 1'b1;
+                    end
+                endcase
             end else if (state == S_PTW && wb_done) begin
-                if (ptw_reason_q == 1'b0) begin
-                    fetch_lo_fault_q    <= !wb_err_i && ptw_pte_fault;
-                    fetch_lo_resolved_q <= wb_ok && ptw_pte_leaf && !ptw_pte_fault;
-                    if (wb_ok && ptw_pte_leaf && !ptw_pte_fault) fetch_lo_paddr_q <= ptw_resolved_paddr;
-                end else begin
-                    fetch_hi_fault_q    <= !wb_err_i && ptw_pte_fault;
-                    fetch_hi_resolved_q <= wb_ok && ptw_pte_leaf && !ptw_pte_fault;
-                    if (wb_ok && ptw_pte_leaf && !ptw_pte_fault) fetch_hi_paddr_q <= ptw_resolved_paddr;
-                end
+                case (ptw_reason_q)
+                    PTW_REASON_LO: begin
+                        fetch_lo_fault_q    <= !wb_err_i && ptw_pte_fault;
+                        fetch_lo_resolved_q <= wb_ok && ptw_pte_leaf && !ptw_pte_fault;
+                        if (wb_ok && ptw_pte_leaf && !ptw_pte_fault) fetch_lo_paddr_q <= ptw_resolved_paddr;
+                    end
+                    PTW_REASON_HI: begin
+                        fetch_hi_fault_q    <= !wb_err_i && ptw_pte_fault;
+                        fetch_hi_resolved_q <= wb_ok && ptw_pte_leaf && !ptw_pte_fault;
+                        if (wb_ok && ptw_pte_leaf && !ptw_pte_fault) fetch_hi_paddr_q <= ptw_resolved_paddr;
+                    end
+                    default: begin   // PTW_REASON_MEM
+                        mem_fault_q        <= !wb_err_i && ptw_pte_fault;
+                        mem_access_fault_q <= wb_err_i;
+                        mem_resolved_q     <= wb_ok && ptw_pte_leaf && !ptw_pte_fault;
+                        if (wb_ok && ptw_pte_leaf && !ptw_pte_fault) mem_resolved_paddr_q <= ptw_resolved_paddr;
+                    end
+                endcase
+            end
+
+            // Sv39 M4: the REAL, post-translation mem access has
+            // completed -- mem_resolved_q's own "always freshly written
+            // by the next ordinary event" refresh, same reasoning as the
+            // fetch streams get below.
+            if (state == S_MEM && wb_done) begin
+                mem_resolved_q <= 1'b0;
+            end
+
+            /*
+             * mem_fault_q/mem_access_fault_q need a DIFFERENT refresh
+             * than fetch_lo_fault_q/fetch_hi_fault_q's own "next ordinary
+             * fetch" clear above -- a real, empirically-caught bug fixed
+             * here, not a hypothetical: unlike fetch (every instruction
+             * always fetches, so "the next fetch" always arrives soon),
+             * the NEXT instruction after a mem-side trap is typically the
+             * trap HANDLER's own first instruction, which is very often
+             * NOT itself a memory access (e.g. `csrrs x20, mcause, x0`) --
+             * "clear on the next S_MEM completion" could then wait
+             * indefinitely, leaving the flag stuck at 1 and re-triggering
+             * trap_taken on every subsequent commit regardless of
+             * instruction type, an infinite re-trap loop caught by this
+             * milestone's own new mem-side walker test hanging instead of
+             * ever reaching its trap handler's own ebreak. Fixed by
+             * clearing unconditionally on the VERY NEXT commit_now
+             * instead (any instruction, any state) -- safe because
+             * commit_now is structurally false during S_PTW itself (only
+             * S_EXEC/S_MEM/S_AMO_WRITE ever commit), so this can never
+             * race the same-cycle SET above; the clear queues for the
+             * cycle AFTER the one that consumed the flag via trap_taken,
+             * exactly matching fetch_fault_q's own "always freshly
+             * written before its next real use" property, just achieved
+             * through a different, mem-appropriate trigger.
+             */
+            if (commit_now) begin
+                mem_fault_q        <= 1'b0;
+                mem_access_fault_q <= 1'b0;
             end
 
             // The REAL, post-translation fetch (using the now-resolved
@@ -2290,8 +2471,22 @@ module core (
                            (is_ecall && current_priv == PRIV_M)  ? 4'd11 :
                            mem_load_misaligned                   ? 4'd4  :
                            mem_store_misaligned                  ? 4'd6  :
-                           (mem_load_access_fault || pmp_load_fault)   ? 4'd5  :
-                           (mem_store_access_fault || pmp_store_fault) ? 4'd7  :
+                           // Sv39 M4: mem-side PTE-content page fault --
+                           // spec's own explicit AMO rule (never a load
+                           // page fault, always store) falls out of
+                           // mem_op_needs_write's own is_lr exclusion.
+                           (mem_fault_q && mem_op_needs_write)    ? 4'd15 :
+                           mem_fault_q                            ? 4'd13 :
+                           // Sv39 M4: a PMP-denied/bus-errored PTE read
+                           // (mem_access_fault_q) is an access fault of
+                           // the ORIGINAL type -- same causes 5/7 as the
+                           // real-target-access checks it joins here,
+                           // classified by the SAME is_load-based split
+                           // those already use (mem_op_is_load_class).
+                           (mem_load_access_fault || pmp_load_fault || (mem_access_fault_q && mem_op_is_load_class))
+                                                                   ? 4'd5  :
+                           (mem_store_access_fault || pmp_store_fault || (mem_access_fault_q && !mem_op_is_load_class))
+                                                                   ? 4'd7  :
                                                                     4'd0; // don't-care, gated by trap_taken
 
     /*
@@ -2310,7 +2505,8 @@ module core (
                                    || (is_ebreak && !ebreak_to_debug) || trigger_exception_match || is_ecall
                                    || mem_load_misaligned || mem_store_misaligned
                                    || mem_load_access_fault || mem_store_access_fault
-                                   || pmp_load_fault || pmp_store_fault);
+                                   || pmp_load_fault || pmp_store_fault
+                                   || mem_fault_q || mem_access_fault_q);
     /* An M-mode trap never delegates, regardless of medeleg -- falls out
      * naturally here since current_priv==M forces this wire to 0. */
     wire trap_to_s  = trap_taken && (current_priv != PRIV_M) && medeleg_w[6'(exc_code)];
@@ -2585,7 +2781,10 @@ module core (
                                                is_csr_rw                 ? `WORD_SIZE'(0) :
                                                                             imm_2;
 
-    logic [(`WORD_SIZE - 1):0] alu_result;
+    // alu_result's bare declaration moved to the early Sv39 forward-declare
+    // block (mem-side walk-start needs it there); this instantiation,
+    // driving it via a port connection, is unaffected by where the bare
+    // declaration lives.
     alu alu0 (
         .i_operand_A(alu_operand_a),
         .i_operation(alu_op),
@@ -3115,8 +3314,25 @@ module core (
      * only bits[31:0] are consumed today, same reasoning as fetch_paddr
      * above.
      */
+    /*
+     * Sv39 (Milestone 4): the seam this wire's own header always
+     * promised. Gated on mem_resolved_q too, NOT just mem_translate_active
+     * -- load-bearing, not defensive: mem_misaligned/mem_phase_needed
+     * (both below) consult mem_paddr's own LOW bits at S_EXEC time,
+     * BEFORE any walk for this instruction has even started. Since a
+     * VA's low 12 bits (page offset) are always identity-mapped, even
+     * under translation, falling back to alu_result (the VA) whenever
+     * !mem_resolved_q gives EXACTLY the right low-bits answer for those
+     * checks without needing mem_resolved_paddr_q to exist yet -- unlike
+     * fetch_paddr's own equivalent mux, which has no analogous pre-
+     * resolution consumer with this same hazard (pmp_fetchlo_fault's own
+     * stale-value read during the redirect cycle is masked by the state-
+     * transition always_ff's own top-priority redirect check instead;
+     * mem_phase_needed has no such masking, so the mux itself must be
+     * the one place this gets resolved correctly).
+     */
     /* verilator lint_off UNUSEDSIGNAL */
-    wire [(`WORD_SIZE - 1):0] mem_paddr = alu_result;
+    wire [(`WORD_SIZE - 1):0] mem_paddr = (mem_translate_active && mem_resolved_q) ? mem_resolved_paddr_q : alu_result;
     /* verilator lint_on UNUSEDSIGNAL */
     wire [7:0] mem_sel = mem_size_mask << mem_paddr[2:0];
 
@@ -3193,9 +3409,10 @@ module core (
      * already exists, reused from MRET's own current_priv restoration
      * arm; mstatus_mprv_w is Milestone 1's own new export). Instruction
      * fetch never uses this (see the fetch-side check above) -- MPRV
-     * never affects fetch, per the same citation.
+     * never affects fetch, per the same citation. (Bare declaration
+     * moved to the early Sv39 forward-declare block, alongside
+     * mem_translate_active/ptw_pmp_fault -- this assign is unchanged.)
      */
-    priv_t mem_effective_priv;
     assign mem_effective_priv = priv_t'((mstatus_mprv_w && current_priv == PRIV_M)
                                ? mstatus_mpp_w : current_priv);
 
@@ -3250,11 +3467,26 @@ module core (
      * either (trap_taken's own top-level !debug_progbuf_active gate
      * would suppress that) -- a real silent-data-loss hazard, not just
      * an inconsistency.
+     *
+     * Sv39 (Milestone 4): the timing gate widens from bare "state==S_EXEC"
+     * to a real two-way OR. mem_paddr at S_EXEC time is the VIRTUAL
+     * address whenever translation is active (mem_resolved_paddr_q isn't
+     * valid until the walk actually runs, inside S_MEM) -- checking PMP
+     * against a VA would be wrong (PMP governs the PHYSICAL address), so
+     * the untranslated S_EXEC-time check is gated OFF while translating,
+     * and a second arm re-checks once state==S_MEM && mem_resolved_q --
+     * the first cycle mem_paddr genuinely holds the translated PA. This
+     * is decision 10's own two-tier ordering: the walker's separate,
+     * hardwired-S PMP-on-PTE-read check (ptw_pmp_fault) already covers
+     * the PTE reads themselves; THIS check covers the FINAL, resolved
+     * physical address, reusing this exact same, otherwise-unmodified
+     * logic (pmp_mem_read_ok/pmp_mem_write_ok) for both the translated
+     * and untranslated cases alike.
      */
-    assign pmp_load_fault  = (state == S_EXEC) && !debug_progbuf_active
-                            && is_load && !is_lr && !is_amo_rmw && !pmp_mem_read_ok;
-    assign pmp_store_fault = (state == S_EXEC) && !debug_progbuf_active
-                            && (is_store || is_sc || is_lr || is_amo_rmw) && !pmp_mem_write_ok;
+    assign pmp_load_fault  = !debug_progbuf_active && is_load && !is_lr && !is_amo_rmw && !pmp_mem_read_ok
+                            && ((state == S_EXEC && !mem_translate_active) || (state == S_MEM && mem_resolved_q));
+    assign pmp_store_fault = !debug_progbuf_active && (is_store || is_sc || is_lr || is_amo_rmw) && !pmp_mem_write_ok
+                            && ((state == S_EXEC && !mem_translate_active) || (state == S_MEM && mem_resolved_q));
 
     /*
      * mem_load_access_fault/mem_store_access_fault: same is_load/is_lr/
@@ -3275,17 +3507,46 @@ module core (
                                   || ((state == S_AMO_WRITE) && wb_err_i);
 
     /*
-     * mem_access_fault_addr: the one place mem_paddr vs. amo_addr_q
+     * Sv39 (Milestone 4): mem_op_needs_write/mem_op_is_load_class --
+     * forward-declared early (alongside mem_translate_active), real
+     * assigns live here since both need is_lr/is_sc, not available until
+     * well after Decode. TWO DELIBERATELY DIFFERENT splits, not one:
+     * mem_op_needs_write EXCLUDES is_lr (LR only ever needs READ
+     * permission -- used by the walker's own R/W check and the page-
+     * fault 13-vs-15 split, per spec's own explicit AMO rule: "AMOs
+     * never raise load page-fault exceptions... always raises a store
+     * page-fault"). mem_op_is_load_class matches the EXISTING mem_load_
+     * access_fault/mem_store_access_fault convention exactly (LR groups
+     * with store/AMO there, a separate, pre-existing, deliberately
+     * different classification) -- used for mem_access_fault_q's own
+     * 5-vs-7 split below, so it composes with that existing convention
+     * instead of introducing a second, inconsistent one.
+     */
+    assign mem_op_needs_write   = is_store || is_sc || is_amo_rmw;
+    assign mem_op_is_load_class = is_load && !is_lr && !is_amo_rmw;
+
+    /*
+     * mem_access_fault_vaddr (Sv39 Milestone 4 -- renamed+widened from
+     * mem_access_fault_addr): the one place mem_paddr vs. amo_addr_q
      * genuinely matters for trap_val below. mem_paddr is live/correct
      * during S_MEM, but gets REPURPOSED to the AMO modify value the
      * instant S_AMO_WRITE begins (the same hazard the AMO RVFI tap
      * already works around) -- an AMO write-phase fault must use
-     * amo_addr_q instead, or mtval reports garbage. Named separately so
-     * trap_val's own chain stays a flat, single-level ternary matching
-     * every sibling arm, rather than growing a nested one just for this
-     * case.
+     * amo_addr_q instead, or mtval reports garbage.
+     *
+     * Per spec's own mtval/stval convention, once paging is active mtval
+     * reports the faulting VIRTUAL address "even for physical-memory
+     * access-fault exceptions" (decision 8 of the staged plan) -- so the
+     * translated case reports ptw_vaddr_q (the VA captured at this
+     * instruction's own walk-start; stable through S_AMO_WRITE too,
+     * since the write phase never walks again) instead of mem_paddr/
+     * amo_addr_q (both PA once translated). Untranslated case is
+     * value-identical to the old wire's own behavior (VA==PA), just
+     * renamed for the new consumer (pmp_load_fault/pmp_store_fault,
+     * folded into trap_val below) alongside the pre-existing ones.
      */
-    wire [(`WORD_SIZE - 1):0] mem_access_fault_addr = (state == S_AMO_WRITE) ? amo_addr_q : mem_paddr;
+    wire [(`WORD_SIZE - 1):0] mem_access_fault_vaddr = mem_translate_active ? ptw_vaddr_q
+        : (state == S_AMO_WRITE) ? amo_addr_q : mem_paddr;
 
     /* trap_val, continued from its forward declaration above: the
      * misaligned-access and access-fault causes report the faulting
@@ -3303,12 +3564,15 @@ module core (
         : is_illegal_instr ? (is_compressed ? {48'b0, first_hw}
                                              : {{(`WORD_SIZE - `INSTR_SIZE){1'b0}}, instruction})
         : (mem_load_misaligned || mem_store_misaligned) ? mem_paddr
-        // pmp_load_fault/pmp_store_fault reuse mem_access_fault_addr's
-        // own state==S_AMO_WRITE-vs-mem_paddr mux even though a PMP
-        // fault can never actually fire from S_AMO_WRITE (both are
-        // S_EXEC-gated) -- it's already exactly the right address
-        // (mem_paddr) in that case, no separate wire needed.
-        : (mem_load_access_fault || mem_store_access_fault || pmp_load_fault || pmp_store_fault) ? mem_access_fault_addr
+        // Sv39 M4: mem-side PTE-content page fault (cause 13/15) --
+        // ptw_vaddr_q, same reasoning as the fetch-side arm above.
+        : mem_fault_q ? ptw_vaddr_q
+        // pmp_load_fault/pmp_store_fault (and, as of M4, mem_access_fault_q
+        // -- a PMP-denied/bus-errored PTE read) all reuse
+        // mem_access_fault_vaddr's own mem_translate_active/
+        // state==S_AMO_WRITE-vs-mem_paddr mux.
+        : (mem_load_access_fault || mem_store_access_fault || pmp_load_fault || pmp_store_fault || mem_access_fault_q)
+            ? mem_access_fault_vaddr
         : trigger_exception_match ? pc
         : `WORD_SIZE'(0);
 
@@ -3535,7 +3799,16 @@ module core (
                 end
             end
             S_MEM: begin
-                if (!wb_done) begin
+                // Sv39 (Milestone 4): suppressed while translation is
+                // needed and not yet resolved (mem_addr/mem_sel are
+                // stale/meaningless until the walker resolves mem_paddr
+                // -- mirrors S_FETCH's own identical suppression), and
+                // suppressed again if the just-resolved, translated
+                // address is PMP-denied (the real target access must
+                // never be issued at all -- mirrors pmp_fetchlo_fault's
+                // own S_FETCH suppression).
+                if (!wb_done && !(mem_translate_active && !mem_resolved_q)
+                        && !pmp_load_fault && !pmp_store_fault) begin
                     wb_cyc_o  = 1'b1;
                     wb_stb_o  = 1'b1;
                     wb_we_o   = is_store;
