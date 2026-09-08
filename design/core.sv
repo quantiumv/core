@@ -966,16 +966,42 @@ module core (
                               * falls straight through to S_EXEC with no
                               * wb_done to wait for, same shape as
                               * debug_progbuf_active immediately above, for
-                              * an unrelated reason. pmp_fetchhi_fault
-                              * (the SECOND dword's own permission, only
-                              * ever meaningful once fetch_hi_taken is
-                              * already known) is checked alongside
-                              * fetch_hi_taken itself below, not here -- see
-                              * pmp_fetchhi_fault's own forward-declaration
-                              * comment for why it can't be known this early.
+                              * an unrelated reason.
+                              *
+                              * pmp_fetchhi_fault -- Sv39 real bug, found and
+                              * fixed post-M6 by this session's own independent
+                              * adversarial re-review: the pre-Sv39 comment this
+                              * replaces claimed pmp_fetchhi_fault is "known
+                              * combinationally... the SECOND dword's own
+                              * permission, only ever meaningful once
+                              * fetch_hi_taken is already known" -- true ONLY
+                              * when fetch_paddr_hi is the untranslated
+                              * fetch_paddr+8 (this arm's own original,
+                              * pre-Sv39 shape). Once Sv39 M3 made
+                              * fetch_paddr_hi read fetch_hi_paddr_q whenever
+                              * fetch_translate_active, that register is NOT
+                              * yet resolved for THIS instruction at this exact
+                              * point -- it's whatever the PREVIOUS crossing
+                              * fetch happened to leave there (fetch_lo_paddr_q/
+                              * fetch_hi_paddr_q have no reset at all). Checking
+                              * pmp_fetchhi_fault here while translating would
+                              * silently bypass PMP execute-protection (a stale-
+                              * but-permitted address lets S_FETCH_HI's own real
+                              * walk proceed unchecked once it resolves -- see
+                              * that state's own new arm below) or spuriously
+                              * fault a legitimate instruction (a stale-but-
+                              * denied address). Fix: while translating, ALWAYS
+                              * enter S_FETCH_HI when fetch_hi_taken -- the real
+                              * PMP check is deferred to S_FETCH_HI's own new
+                              * arm below, evaluated only once fetch_hi_paddr_q
+                              * has genuinely resolved for this instruction.
+                              * The untranslated case is completely unchanged
+                              * (pmp_fetchhi_fault is genuinely valid here then,
+                              * exactly as the original comment described).
                               */
                              else if (pmp_fetchlo_fault) state <= S_EXEC;
-                             else if (wb_done) state <= state_t'((fetch_hi_taken && !pmp_fetchhi_fault) ? S_FETCH_HI : S_EXEC);
+                             else if (wb_done) state <= state_t'(fetch_hi_taken
+                                 && (fetch_translate_active || !pmp_fetchhi_fault) ? S_FETCH_HI : S_EXEC);
                 /*
                  * Sv39 (Milestone 3): same redirect, same reason, for the
                  * second (crossing) dword -- fetch_paddr_hi/fetch_hi_vaddr's
@@ -985,7 +1011,27 @@ module core (
                  */
                 S_FETCH_HI:  if (fetch_translate_active && !fetch_hi_resolved_q) begin
                                  if (!tlb_hit) state <= S_PTW;
-                             end else if (wb_done) state <= S_EXEC;
+                             end
+                             /*
+                              * Sv39 real bug fix (post-M6 independent
+                              * re-review): pmp_fetchhi_fault is only ever
+                              * meaningful once fetch_hi_paddr_q has resolved
+                              * for THIS instruction -- which, having fallen
+                              * through the arm above, it now has (either via
+                              * a completed walk or a TLB hit). Mirrors
+                              * pmp_fetchlo_fault's own S_FETCH treatment:
+                              * falls straight to S_EXEC with no wb_done to
+                              * wait for, since wb_master_drive's own
+                              * S_FETCH_HI arm suppresses the real bus
+                              * request in lockstep (see that arm's own
+                              * comment). For the untranslated case this arm
+                              * is dead code by construction -- S_FETCH's own
+                              * transition into S_FETCH_HI already required
+                              * !pmp_fetchhi_fault then, so it can never read
+                              * true here.
+                              */
+                             else if (pmp_fetchhi_fault) state <= S_EXEC;
+                             else if (wb_done) state <= S_EXEC;
                 /*
                  * Sv39 (Milestone 3): the walker itself. ptw_pmp_fault is
                  * known combinationally off ptw_pte_addr before this
@@ -1159,23 +1205,41 @@ module core (
             fetch_fault_q <= 1'b1;
         end else if (state == S_FETCH && wb_done) begin
             instr_line_q  <= wb_dat_i;
-            crossed_q     <= fetch_hi_taken && !pmp_fetchhi_fault;
-            // A real bus error on the low half is a fault regardless of
-            // the high half; a CLEAN low half whose own second dword
-            // (fetch_hi_taken) is PMP-denied is ALSO a fault, discovered
-            // right here rather than after a second (never-issued) bus
-            // request -- see pmp_fetchhi_fault's own assign for why it's
-            // only meaningful once fetch_hi_taken is known, exactly this
-            // edge.
-            fetch_fault_q <= wb_err_i || (fetch_hi_taken && pmp_fetchhi_fault);
+            // pmp_fetchhi_fault is only consulted here for the UNTRANSLATED
+            // case -- Sv39 real bug fix (post-M6 independent re-review): see
+            // the state-transition always_ff's own matching comment for why
+            // it's not yet meaningful here while translating (fetch_hi_paddr_q
+            // hasn't resolved for this instruction yet). While translating,
+            // crossed_q/fetch_fault_q both stay as if the HI half is clean --
+            // S_FETCH_HI's own new arms (state-transition + this always_ff's
+            // own S_FETCH_HI block below) capture the REAL, resolved
+            // pmp_fetchhi_fault result once it's actually valid.
+            crossed_q     <= fetch_hi_taken && (fetch_translate_active || !pmp_fetchhi_fault);
+            fetch_fault_q <= wb_err_i || (fetch_hi_taken && !fetch_translate_active && pmp_fetchhi_fault);
         end
-        if (state == S_FETCH_HI && wb_done) begin
+        /*
+         * Sv39 real bug fix (post-M6 independent re-review): the ORIGINAL
+         * comment here ("fetch_fault_q is guaranteed 0 walking into
+         * S_FETCH_HI") was only true because pmp_fetchhi_fault used to be
+         * fully resolved before ever entering S_FETCH_HI (the untranslated
+         * case still has this property, by construction -- see above). Once
+         * translating, the state-transition always_ff's own new
+         * "pmp_fetchhi_fault ? S_EXEC" arm means a translated, PMP-denied
+         * HI half never reaches this wb_done arm at all (wb_master_drive's
+         * own S_FETCH_HI suppression prevents the real request from ever
+         * being issued) -- so this plain overwrite is still safe, just for
+         * a different reason than the stale comment gave.
+         */
+        if (state == S_FETCH_HI && fetch_translate_active && fetch_hi_resolved_q && pmp_fetchhi_fault) begin
+            // The real, resolved HI-half PMP check, denied -- checked
+            // ahead of wb_done below, mirroring pmp_fetchlo_fault's own
+            // S_FETCH priority ordering. No bus request was ever issued
+            // for it (wb_master_drive's own suppression), so there's no
+            // wb_dat_i to capture.
+            fetch_fault_q <= 1'b1;
+        end else if (state == S_FETCH_HI && wb_done) begin
             instr_hi_q    <= wb_dat_i[15:0];
-            fetch_fault_q <= wb_err_i;  // plain overwrite, not an OR-latch: S_FETCH_HI is
-                                         // only ever reached when S_FETCH's own crossed_q
-                                         // (== wb_ok && !pmp_fetchhi_fault) was set, so
-                                         // fetch_fault_q is guaranteed 0 walking into
-                                         // S_FETCH_HI.
+            fetch_fault_q <= wb_err_i;
         end
         /*
          * Sv39 (Milestone 3): a PMP-denied or bus-errored PTE read is an
@@ -2108,7 +2172,19 @@ module core (
             // fill block above, which only ever fires from S_PTW -- but
             // placed after it in program order regardless, so a flush
             // would win any theoretical same-cycle conflict).
-            if (commit_now && is_sfence_vma) begin
+            //
+            // !instr_faulted -- real bug fix (post-M6 independent
+            // re-review): is_sfence_vma is a raw decode signal, true
+            // regardless of whether the instruction is actually legal.
+            // Every OTHER commit-time side effect in this file (csr_we,
+            // reg_write) correctly suppresses itself on instr_faulted
+            // (trap_taken || progbuf_abort || trigger_debug_entry) -- this
+            // flush was the one write that didn't, so an S-mode SFENCE.VMA
+            // that traps as illegal (mstatus.TVM=1) or gets intercepted by
+            // a debug trigger on its own PC still unconditionally wiped
+            // the entire TLB, even though the instruction architecturally
+            // never executed -- a precise-exception violation.
+            if (commit_now && is_sfence_vma && !instr_faulted) begin
                 tlb0_valid_q <= 1'b0;
                 tlb1_valid_q <= 1'b0;
                 tlb2_valid_q <= 1'b0;
@@ -2123,9 +2199,7 @@ module core (
             // flags already 0).
             //
             // fetch_lo_fault_q/fetch_hi_fault_q are ALSO cleared here --
-            // load-bearing, not just tidiness: unlike fetch_lo_resolved_q
-            // (only ever consulted by the redirect check, itself gated
-            // on fetch_translate_active), these two flags feed the
+            // load-bearing, not just tidiness: these two flags feed the
             // `instruction` substitution mux and trap_taken UNCONDITIONALLY,
             // every cycle, regardless of state. Without this clear, a page
             // fault taken while translation was active would leave the
@@ -2145,6 +2219,37 @@ module core (
             if (state == S_FETCH && wb_done) begin
                 fetch_lo_resolved_q <= 1'b0;
                 fetch_lo_fault_q    <= 1'b0;
+                /*
+                 * fetch_hi_resolved_q/fetch_hi_fault_q, HERE TOO -- a
+                 * real bug found post-M6 by simulation (not caught by
+                 * the independent adversarial review's own static
+                 * reading, nor by the pmp_fetchhi_fault ordering fix
+                 * this same session already made): unlike
+                 * fetch_lo_resolved_q, which every S_FETCH visits (so
+                 * its own clear right above already refreshes it for
+                 * EVERY instruction), fetch_hi_resolved_q's own clear
+                 * used to live ONLY in the S_FETCH_HI arm below --
+                 * meaning it was NEVER refreshed for a non-crossing
+                 * instruction. A crossing instruction sets it (via the
+                 * TLB-hit or S_PTW resolve paths); every ORDINARY,
+                 * non-crossing instruction afterward leaves it
+                 * completely untouched, stuck at whatever the LAST
+                 * crossing instruction left it at, for as many
+                 * instructions as it takes to reach the NEXT crossing
+                 * one. That next crossing instruction's own S_FETCH_HI
+                 * arm then reads this STALE "already resolved" flag as
+                 * true and skips straight to checking pmp_fetchhi_fault
+                 * against the PREVIOUS crossing instruction's own
+                 * stale fetch_hi_paddr_q -- silently reintroducing the
+                 * exact staleness hazard the ordering fix was meant to
+                 * close, just one level removed. Clearing here too
+                 * guarantees fetch_hi_resolved_q is fresh (0) at the
+                 * start of EVERY instruction's own fetch, translated or
+                 * not, crossing or not -- mirroring fetch_lo_resolved_q's
+                 * own "every S_FETCH refreshes it" property exactly.
+                 */
+                fetch_hi_resolved_q <= 1'b0;
+                fetch_hi_fault_q    <= 1'b0;
             end
             if (state == S_FETCH_HI && wb_done) begin
                 fetch_hi_resolved_q <= 1'b0;
@@ -4156,7 +4261,15 @@ module core (
              * translation-not-yet-resolved suppression as S_FETCH above.
              */
             S_FETCH_HI: begin
-                if (!wb_done && !(fetch_translate_active && !fetch_hi_resolved_q)) begin
+                // Sv39 real bug fix (post-M6 independent re-review): the
+                // extra !pmp_fetchhi_fault term is new -- once
+                // fetch_hi_paddr_q has genuinely resolved and PMP denies
+                // it, the real bus request must never be issued at all,
+                // mirroring S_MEM's own !pmp_load_fault && !pmp_store_fault
+                // suppression. For the untranslated case this term is dead
+                // code by construction (S_FETCH's own transition into
+                // S_FETCH_HI already required !pmp_fetchhi_fault then).
+                if (!wb_done && !(fetch_translate_active && !fetch_hi_resolved_q) && !pmp_fetchhi_fault) begin
                     wb_cyc_o  = 1'b1;
                     wb_stb_o  = 1'b1;
                     wb_addr_o = fetch_addr_hi;
