@@ -40,13 +40,25 @@
  *   D. a PMP-denied PTE read -- proves decision 10's two-tier ordering:
  *      this is cause 1 (access fault, the ORIGINAL access's type), never
  *      cause 12, even though the trigger is discovered mid-walk.
- * Deliberately deferred to a later pass: the remaining individual fault
- * sub-categories (reserved-bits-set, R=0/W=1 malformed, misaligned
- * superpage, U-mode privilege violation, X=0, A=0/Svade, walking past
- * level 0, a noncanonical VA) -- ptw_pte_fault's own OR-list construction
- * makes each of those a cheap, mechanical variation of test C's exact
- * shape, not a new mechanism, so they're lower-value to write by hand
- * right now than they'll be to add later.
+ * Originally deferred, later closed by a directed post-plan coverage
+ * pass (adversarial-audit follow-up): the remaining individual
+ * malformed/A-D/noncanonical fault sub-categories on the FETCH stream --
+ * each a cheap, mechanical variation of test C's exact shape, reusing
+ * its own page-table/handler pattern verbatim:
+ *   F. PBMT[62:61] set alone (malformed) -- distinguished from N/reserved.
+ *   G. N[63] set alone (malformed).
+ *   H. reserved[60:54] set alone (malformed).
+ *   I. A=0 on a FETCH-stream leaf specifically (Svade, cause 12).
+ *   J/K. a noncanonical VA, two independent patterns (an extra high bit
+ *      set above bit38; bit38 itself set with the rest of the upper
+ *      bits clear) -- both re-walk a table that IS otherwise real and
+ *      valid, so a missing/buggy canonical check would show up as a
+ *      spurious SUCCESS, not merely an untested code path.
+ * (U-mode privilege violation on the FETCH stream is already exercised
+ * indirectly by core_sv39_tlb_tb.sv's own U=0 page-table construction;
+ * R=0/W=1 malformed, walking past level 0, and X=0 remain mechanical
+ * variations of test C's same shape, still deliberately deferred as
+ * genuinely lower-value.)
  *
  *   E. the dword-crossing independent-HI-walk case, under active
  *      translation, with the LO and HI halves in DIFFERENT PMP regions --
@@ -208,6 +220,110 @@ module core_sv39_fetch_tb;
         mcause_e   <= dut_e.core0.regfile0.gp_registers[20];
         mtval_e    <= dut_e.core0.regfile0.gp_registers[21];
     end
+
+    /* ----------------------------------------------------------------
+     * Tests F/G/H: ptw_pte_malformed's three independent OR-arms above
+     * V (already covered by test C) -- PBMT[62:61], N[63], and
+     * reserved[60:54] -- each set ALONE against an otherwise-fully-valid
+     * leaf (V=R=W=X=A=D=1, PPN=4, same shape as test A's own real leaf),
+     * so a bug that dropped one arm from the OR (or conflated it with
+     * another) would show up as a spurious SUCCESS (leaf code reached)
+     * instead of the required cause-12 page fault. Same page-table
+     * shape/M-mode-setup/real capture handler as test C throughout --
+     * only L0 entry3's own PTE differs per test.
+     * ---------------------------------------------------------------- */
+    core_wb4_sram_harness #(.NUM_WORDS(4096)) dut_f (.clk(clk), .rst(rst));
+    logic halted_f = 1'b0;
+    always @(posedge clk) if (dut_f.core0.trap_taken && dut_f.core0.is_ebreak) halted_f <= 1'b1;
+    logic [63:0] mcause_f, mtval_f;
+    logic        captured_f = 1'b0;
+    always @(posedge clk) if (!captured_f && dut_f.core0.commit_now && dut_f.core0.pc == 64'h108) begin
+        captured_f <= 1'b1;
+        mcause_f   <= dut_f.core0.regfile0.gp_registers[20];
+        mtval_f    <= dut_f.core0.regfile0.gp_registers[21];
+    end
+
+    core_wb4_sram_harness #(.NUM_WORDS(4096)) dut_g (.clk(clk), .rst(rst));
+    logic halted_g = 1'b0;
+    always @(posedge clk) if (dut_g.core0.trap_taken && dut_g.core0.is_ebreak) halted_g <= 1'b1;
+    logic [63:0] mcause_g, mtval_g;
+    logic        captured_g = 1'b0;
+    always @(posedge clk) if (!captured_g && dut_g.core0.commit_now && dut_g.core0.pc == 64'h108) begin
+        captured_g <= 1'b1;
+        mcause_g   <= dut_g.core0.regfile0.gp_registers[20];
+        mtval_g    <= dut_g.core0.regfile0.gp_registers[21];
+    end
+
+    core_wb4_sram_harness #(.NUM_WORDS(4096)) dut_h (.clk(clk), .rst(rst));
+    logic halted_h = 1'b0;
+    always @(posedge clk) if (dut_h.core0.trap_taken && dut_h.core0.is_ebreak) halted_h <= 1'b1;
+    logic [63:0] mcause_h, mtval_h;
+    logic        captured_h = 1'b0;
+    always @(posedge clk) if (!captured_h && dut_h.core0.commit_now && dut_h.core0.pc == 64'h108) begin
+        captured_h <= 1'b1;
+        mcause_h   <= dut_h.core0.regfile0.gp_registers[20];
+        mtval_h    <= dut_h.core0.regfile0.gp_registers[21];
+    end
+
+    /* ----------------------------------------------------------------
+     * Test I: A=0 on a FETCH-stream leaf specifically (V=R=W=X=D=1,
+     * A=0) -- proves ptw_ad_fault's own !ptw_pte_a arm fires for fetch
+     * too, independent of the mem-only D-check half of that same
+     * expression (D stays don't-care/1 here on purpose, so a bug that
+     * conflated the two conditions can't hide behind a coincidentally-
+     * also-failing D check).
+     * ---------------------------------------------------------------- */
+    core_wb4_sram_harness #(.NUM_WORDS(4096)) dut_i (.clk(clk), .rst(rst));
+    logic halted_i = 1'b0;
+    always @(posedge clk) if (dut_i.core0.trap_taken && dut_i.core0.is_ebreak) halted_i <= 1'b1;
+    logic [63:0] mcause_i, mtval_i;
+    logic        captured_i = 1'b0;
+    always @(posedge clk) if (!captured_i && dut_i.core0.commit_now && dut_i.core0.pc == 64'h108) begin
+        captured_i <= 1'b1;
+        mcause_i   <= dut_i.core0.regfile0.gp_registers[20];
+        mtval_i    <= dut_i.core0.regfile0.gp_registers[21];
+    end
+
+    /* ----------------------------------------------------------------
+     * Test J: noncanonical VA, variant 1 -- an extra high bit (bit40)
+     * set beyond bit38, while the VA's own low 39 bits are IDENTICAL to
+     * test A's real, fully valid mapping (vpn2=1,vpn1=2,vpn0=3,off=0).
+     * Reusing test A's own exact page table (L0 entry3 IS a real, valid
+     * leaf) is the whole point of this isolation: if ptw_va_noncanonical
+     * were missing or buggy, this walk would SUCCEED and the leaf code
+     * would execute (x30 would become 1), exactly as in test A -- it
+     * must instead fault, cause 12, before ever reaching the leaf.
+     * ---------------------------------------------------------------- */
+    core_wb4_sram_harness #(.NUM_WORDS(4096)) dut_j (.clk(clk), .rst(rst));
+    logic halted_j = 1'b0;
+    always @(posedge clk) if (dut_j.core0.trap_taken && dut_j.core0.is_ebreak) halted_j <= 1'b1;
+    logic [63:0] mcause_j, mtval_j;
+    logic        captured_j = 1'b0;
+    always @(posedge clk) if (!captured_j && dut_j.core0.commit_now && dut_j.core0.pc == 64'h108) begin
+        captured_j <= 1'b1;
+        mcause_j   <= dut_j.core0.regfile0.gp_registers[20];
+        mtval_j    <= dut_j.core0.regfile0.gp_registers[21];
+    end
+
+    /* ----------------------------------------------------------------
+     * Test K: noncanonical VA, variant 2 -- the "all-clear-but-bit38"
+     * pattern (bit38 itself set, bits[63:39] all 0 -- canonical would
+     * require them all 1 to match bit38's own sign). vpn2 becomes 256
+     * (bit38 is vpn2's own MSB), so this indexes an entirely different,
+     * otherwise-still-real-and-valid 3-level mapping (same technique as
+     * test J: a bug here would let the walk silently SUCCEED instead of
+     * faulting).
+     * ---------------------------------------------------------------- */
+    core_wb4_sram_harness #(.NUM_WORDS(4096)) dut_k (.clk(clk), .rst(rst));
+    logic halted_k = 1'b0;
+    always @(posedge clk) if (dut_k.core0.trap_taken && dut_k.core0.is_ebreak) halted_k <= 1'b1;
+    logic [63:0] mcause_k, mtval_k;
+    logic        captured_k = 1'b0;
+    always @(posedge clk) if (!captured_k && dut_k.core0.commit_now && dut_k.core0.pc == 64'h108) begin
+        captured_k <= 1'b1;
+        mcause_k   <= dut_k.core0.regfile0.gp_registers[20];
+        mtval_k    <= dut_k.core0.regfile0.gp_registers[21];
+    end
     logic [31:0] setup_e[0:29];
     logic [31:0] handler_e[0:7];
     logic [15:0] hw_e7[0:3];   // vpn0=7's own last dword: 3x c.nop + crossing_1 LOW16
@@ -217,7 +333,8 @@ module core_sv39_fetch_tb;
     logic [31:0] crossing1, crossing2;
     int i; // shared packing-loop index, Test E only
 
-    wire halted = halted_a && halted_b && halted_c && halted_d && halted_e;
+    wire halted = halted_a && halted_b && halted_c && halted_d && halted_e
+               && halted_f && halted_g && halted_h && halted_i && halted_j && halted_k;
     `include "halt_wait.sv"
 
 
@@ -437,6 +554,116 @@ module core_sv39_fetch_tb;
         dut_e.sram0.memory[1536 + 7] = 64'h0000_0000_0000_1CCF; // L0[7] -> leaf PPN=7  (PA 0x7000, vpn0=7, full RWX)
         dut_e.sram0.memory[1536 + 8] = 64'h0000_0000_0000_24CF; // L0[8] -> leaf PPN=9  (PA 0x9000, vpn0=8, full RWX -- PTE itself is VALID; PMP alone denies)
 
+        /*
+         * ---- Tests F/G/H: same shape as test C, but L0 entry3 is a
+         * fully valid leaf (V=R=W=X=A=D=1, PPN=4) with one extra
+         * malformed-arm bit set. ----
+         */
+        dut_f.sram0.memory[0] = {enc_slli(5'd1,5'd1,6'd60), enc_addi(5'd1,5'd0,8)};
+        dut_f.sram0.memory[1] = {enc_or(5'd1,5'd1,5'd2), enc_addi(5'd2,5'd0,1)};
+        dut_f.sram0.memory[2] = {enc_addi(5'd3,5'd0,1), enc_csrrw(`CSR_SATP,5'd1)};
+        dut_f.sram0.memory[3] = {enc_csrrw(`CSR_MSTATUS,5'd3), enc_slli(5'd3,5'd3,6'd11)};
+        dut_f.sram0.memory[4] = {enc_slli(5'd4,5'd4,6'd20), enc_addi(5'd4,5'd0,1028)};
+        dut_f.sram0.memory[5] = {enc_slli(5'd5,5'd5,6'd12), enc_addi(5'd5,5'd0,3)};
+        dut_f.sram0.memory[6] = {enc_csrrw(`CSR_MEPC,5'd4), enc_or(5'd4,5'd4,5'd5)};
+        dut_f.sram0.memory[7] = {enc_csrrw(`CSR_MTVEC,5'd6), enc_addi(5'd6,5'd0,256)};
+        dut_f.sram0.memory[8] = {NOP_INSN, `INSTR_HEX_MRET};
+        dut_f.sram0.memory[32] = {enc_csrrs(`CSR_MTVAL,5'd21), enc_csrrs(`CSR_MCAUSE,5'd20)};
+        dut_f.sram0.memory[33] = {NOP_INSN, EBREAK_INSN};
+        dut_f.sram0.memory[512 + 1] = 64'h0000_0000_0000_0801;
+        dut_f.sram0.memory[1024 + 2] = 64'h0000_0000_0000_0C01;
+        dut_f.sram0.memory[1536 + 3] = 64'h6000_0000_0000_10CF; // PBMT[62:61]=2'b11 set alone
+
+        dut_g.sram0.memory[0] = {enc_slli(5'd1,5'd1,6'd60), enc_addi(5'd1,5'd0,8)};
+        dut_g.sram0.memory[1] = {enc_or(5'd1,5'd1,5'd2), enc_addi(5'd2,5'd0,1)};
+        dut_g.sram0.memory[2] = {enc_addi(5'd3,5'd0,1), enc_csrrw(`CSR_SATP,5'd1)};
+        dut_g.sram0.memory[3] = {enc_csrrw(`CSR_MSTATUS,5'd3), enc_slli(5'd3,5'd3,6'd11)};
+        dut_g.sram0.memory[4] = {enc_slli(5'd4,5'd4,6'd20), enc_addi(5'd4,5'd0,1028)};
+        dut_g.sram0.memory[5] = {enc_slli(5'd5,5'd5,6'd12), enc_addi(5'd5,5'd0,3)};
+        dut_g.sram0.memory[6] = {enc_csrrw(`CSR_MEPC,5'd4), enc_or(5'd4,5'd4,5'd5)};
+        dut_g.sram0.memory[7] = {enc_csrrw(`CSR_MTVEC,5'd6), enc_addi(5'd6,5'd0,256)};
+        dut_g.sram0.memory[8] = {NOP_INSN, `INSTR_HEX_MRET};
+        dut_g.sram0.memory[32] = {enc_csrrs(`CSR_MTVAL,5'd21), enc_csrrs(`CSR_MCAUSE,5'd20)};
+        dut_g.sram0.memory[33] = {NOP_INSN, EBREAK_INSN};
+        dut_g.sram0.memory[512 + 1] = 64'h0000_0000_0000_0801;
+        dut_g.sram0.memory[1024 + 2] = 64'h0000_0000_0000_0C01;
+        dut_g.sram0.memory[1536 + 3] = 64'h8000_0000_0000_10CF; // N[63]=1 set alone
+
+        dut_h.sram0.memory[0] = {enc_slli(5'd1,5'd1,6'd60), enc_addi(5'd1,5'd0,8)};
+        dut_h.sram0.memory[1] = {enc_or(5'd1,5'd1,5'd2), enc_addi(5'd2,5'd0,1)};
+        dut_h.sram0.memory[2] = {enc_addi(5'd3,5'd0,1), enc_csrrw(`CSR_SATP,5'd1)};
+        dut_h.sram0.memory[3] = {enc_csrrw(`CSR_MSTATUS,5'd3), enc_slli(5'd3,5'd3,6'd11)};
+        dut_h.sram0.memory[4] = {enc_slli(5'd4,5'd4,6'd20), enc_addi(5'd4,5'd0,1028)};
+        dut_h.sram0.memory[5] = {enc_slli(5'd5,5'd5,6'd12), enc_addi(5'd5,5'd0,3)};
+        dut_h.sram0.memory[6] = {enc_csrrw(`CSR_MEPC,5'd4), enc_or(5'd4,5'd4,5'd5)};
+        dut_h.sram0.memory[7] = {enc_csrrw(`CSR_MTVEC,5'd6), enc_addi(5'd6,5'd0,256)};
+        dut_h.sram0.memory[8] = {NOP_INSN, `INSTR_HEX_MRET};
+        dut_h.sram0.memory[32] = {enc_csrrs(`CSR_MTVAL,5'd21), enc_csrrs(`CSR_MCAUSE,5'd20)};
+        dut_h.sram0.memory[33] = {NOP_INSN, EBREAK_INSN};
+        dut_h.sram0.memory[512 + 1] = 64'h0000_0000_0000_0801;
+        dut_h.sram0.memory[1024 + 2] = 64'h0000_0000_0000_0C01;
+        dut_h.sram0.memory[1536 + 3] = 64'h1FC0_0000_0000_10CF; // reserved[60:54]=7'h7F set alone
+
+        /*
+         * ---- Test I: same shape, L0 entry3 = V=R=W=X=D=1, A=0. ----
+         */
+        dut_i.sram0.memory[0] = {enc_slli(5'd1,5'd1,6'd60), enc_addi(5'd1,5'd0,8)};
+        dut_i.sram0.memory[1] = {enc_or(5'd1,5'd1,5'd2), enc_addi(5'd2,5'd0,1)};
+        dut_i.sram0.memory[2] = {enc_addi(5'd3,5'd0,1), enc_csrrw(`CSR_SATP,5'd1)};
+        dut_i.sram0.memory[3] = {enc_csrrw(`CSR_MSTATUS,5'd3), enc_slli(5'd3,5'd3,6'd11)};
+        dut_i.sram0.memory[4] = {enc_slli(5'd4,5'd4,6'd20), enc_addi(5'd4,5'd0,1028)};
+        dut_i.sram0.memory[5] = {enc_slli(5'd5,5'd5,6'd12), enc_addi(5'd5,5'd0,3)};
+        dut_i.sram0.memory[6] = {enc_csrrw(`CSR_MEPC,5'd4), enc_or(5'd4,5'd4,5'd5)};
+        dut_i.sram0.memory[7] = {enc_csrrw(`CSR_MTVEC,5'd6), enc_addi(5'd6,5'd0,256)};
+        dut_i.sram0.memory[8] = {NOP_INSN, `INSTR_HEX_MRET};
+        dut_i.sram0.memory[32] = {enc_csrrs(`CSR_MTVAL,5'd21), enc_csrrs(`CSR_MCAUSE,5'd20)};
+        dut_i.sram0.memory[33] = {NOP_INSN, EBREAK_INSN};
+        dut_i.sram0.memory[512 + 1] = 64'h0000_0000_0000_0801;
+        dut_i.sram0.memory[1024 + 2] = 64'h0000_0000_0000_0C01;
+        dut_i.sram0.memory[1536 + 3] = 64'h0000_0000_0000_108F; // V=R=W=X=D=1, A=0
+
+        /*
+         * ---- Test J: noncanonical VA variant 1 -- reuses test A's own
+         * real 3-level table verbatim; only the M-mode setup differs
+         * (an extra x7=1<<40 OR'd into x4 before csrrw mepc). ----
+         */
+        dut_j.sram0.memory[0] = {enc_slli(5'd1,5'd1,6'd60), enc_addi(5'd1,5'd0,8)};
+        dut_j.sram0.memory[1] = {enc_or(5'd1,5'd1,5'd2), enc_addi(5'd2,5'd0,1)};
+        dut_j.sram0.memory[2] = {enc_addi(5'd3,5'd0,1), enc_csrrw(`CSR_SATP,5'd1)};
+        dut_j.sram0.memory[3] = {enc_csrrw(`CSR_MSTATUS,5'd3), enc_slli(5'd3,5'd3,6'd11)};
+        dut_j.sram0.memory[4] = {enc_slli(5'd4,5'd4,6'd20), enc_addi(5'd4,5'd0,1028)};
+        dut_j.sram0.memory[5] = {enc_slli(5'd5,5'd5,6'd12), enc_addi(5'd5,5'd0,3)};
+        dut_j.sram0.memory[6] = {enc_addi(5'd7,5'd0,1), enc_or(5'd4,5'd4,5'd5)};
+        dut_j.sram0.memory[7] = {enc_or(5'd4,5'd4,5'd7), enc_slli(5'd7,5'd7,6'd40)};
+        dut_j.sram0.memory[8] = {enc_csrrw(`CSR_MEPC,5'd4), enc_addi(5'd6,5'd0,256)};
+        dut_j.sram0.memory[9] = {`INSTR_HEX_MRET, enc_csrrw(`CSR_MTVEC,5'd6)};
+        dut_j.sram0.memory[32] = {enc_csrrs(`CSR_MTVAL,5'd21), enc_csrrs(`CSR_MCAUSE,5'd20)};
+        dut_j.sram0.memory[33] = {NOP_INSN, EBREAK_INSN};
+        dut_j.sram0.memory[512 + 1] = 64'h0000_0000_0000_0801; // test A's own real L2 entry1 -> L1@0x2000
+        dut_j.sram0.memory[1024 + 2] = 64'h0000_0000_0000_0C01; // L1 entry2 -> L0@0x3000
+        dut_j.sram0.memory[1536 + 3] = 64'h0000_0000_0000_10CF; // L0 entry3 -> real valid leaf, PPN=4
+        dut_j.sram0.memory[2048] = {EBREAK_INSN, enc_addi(5'd30,5'd0,1)}; // must NEVER be reached
+
+        /*
+         * ---- Test K: noncanonical VA variant 2 -- VA = 1<<38 exactly
+         * (vpn2=256, vpn1=0, vpn0=0, off=0); own real, valid 3-level
+         * table at the SAME indices, reachable only if the noncanonical
+         * check is bypassed. ----
+         */
+        dut_k.sram0.memory[0] = {enc_slli(5'd1,5'd1,6'd60), enc_addi(5'd1,5'd0,8)};
+        dut_k.sram0.memory[1] = {enc_or(5'd1,5'd1,5'd2), enc_addi(5'd2,5'd0,1)};
+        dut_k.sram0.memory[2] = {enc_addi(5'd3,5'd0,1), enc_csrrw(`CSR_SATP,5'd1)};
+        dut_k.sram0.memory[3] = {enc_csrrw(`CSR_MSTATUS,5'd3), enc_slli(5'd3,5'd3,6'd11)};
+        dut_k.sram0.memory[4] = {enc_slli(5'd4,5'd4,6'd38), enc_addi(5'd4,5'd0,1)};
+        dut_k.sram0.memory[5] = {enc_csrrw(`CSR_MEPC,5'd4), enc_addi(5'd6,5'd0,256)};
+        dut_k.sram0.memory[6] = {`INSTR_HEX_MRET, enc_csrrw(`CSR_MTVEC,5'd6)};
+        dut_k.sram0.memory[32] = {enc_csrrs(`CSR_MTVAL,5'd21), enc_csrrs(`CSR_MCAUSE,5'd20)};
+        dut_k.sram0.memory[33] = {NOP_INSN, EBREAK_INSN};
+        dut_k.sram0.memory[512 + 256] = 64'h0000_0000_0000_0801; // L2 entry256 (vpn2=1<<8) -> L1@0x2000
+        dut_k.sram0.memory[1024 + 0] = 64'h0000_0000_0000_0C01;  // L1 entry0 -> L0@0x3000
+        dut_k.sram0.memory[1536 + 0] = 64'h0000_0000_0000_10CF; // L0 entry0 -> real valid leaf, PPN=4
+        dut_k.sram0.memory[2048] = {EBREAK_INSN, enc_addi(5'd30,5'd0,1)}; // must NEVER be reached
+
         @(posedge clk); #1;
         rst = 0;
 
@@ -466,6 +693,28 @@ module core_sv39_fetch_tb;
             "bug this fixes, instr2 would ALSO have spuriously faulted, reusing instr1's ",
             "own stale, denied fetch_hi_paddr_q instead of resolving its own real address"},
             dut_e.core0.regfile0.gp_registers[14], 64'd555);
+
+        check("F: PBMT bits[62:61] set alone -> malformed, mcause==12", mcause_f, 64'd12);
+        check("F: mtval == the faulting VA", mtval_f, 64'h40403000);
+
+        check("G: N bit[63] set alone -> malformed, mcause==12", mcause_g, 64'd12);
+        check("G: mtval == the faulting VA", mtval_g, 64'h40403000);
+
+        check("H: reserved bits[60:54] set alone -> malformed, mcause==12", mcause_h, 64'd12);
+        check("H: mtval == the faulting VA", mtval_h, 64'h40403000);
+
+        check("I: A=0 on a FETCH-stream leaf -> instruction page fault, mcause==12", mcause_i, 64'd12);
+        check("I: mtval == the faulting VA", mtval_i, 64'h40403000);
+
+        check("J: noncanonical VA (extra bit above bit38 set) faults, mcause==12", mcause_j, 64'd12);
+        check("J: mtval == the full noncanonical VA actually used (not the truncated canonical form)",
+              mtval_j, 64'h0000_0100_4040_3000);
+        check("J: leaf code never executed (x30==0) -- proves the walk did NOT silently succeed despite reusing test A's own real, valid table",
+              dut_j.core0.regfile0.gp_registers[30], 64'd0);
+
+        check("K: noncanonical VA (bit38 set, upper bits clear) faults, mcause==12", mcause_k, 64'd12);
+        check("K: mtval == the full noncanonical VA actually used", mtval_k, 64'h0000_0040_0000_0000);
+        check("K: leaf code never executed (x30==0)", dut_k.core0.regfile0.gp_registers[30], 64'd0);
 
         $display("");
         $display("core_sv39_fetch_tb: %0d passed, %0d failed", pass_count, fail_count);

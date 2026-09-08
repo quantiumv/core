@@ -36,11 +36,31 @@
  *      the mem stream specifically (core_sv39_fetch_tb.sv's own test D
  *      only ever exercised it via the fetch stream).
  *
- * Deliberately deferred to a later pass, same discipline as the fetch
- * milestone's own test file: SUM=0/1 differentiation, MXR=0/1
- * differentiation, LR/SC through translation, and the AMO-vs-plain-load
- * page-fault classification edge case -- each a cheap, mechanical
- * variation of an already-proven mechanism here, not a new one.
+ * Originally deferred, later closed by a directed post-plan coverage
+ * pass (adversarial-audit follow-up): SUM=0/1 differentiation, MXR=0/1
+ * differentiation, LR through translation, and the AMO-vs-plain-load
+ * page-fault classification edge case, plus the D-vs-W and A-on-a-read
+ * isolations and the level-1 (megapage) misalignment case in isolation.
+ * Tests E-N below (each reusing test A/C's own page-table shape and
+ * M-mode-setup idiom, only the data leaf's own PTE / mem instruction /
+ * an extra mstatus bit differing test to test):
+ *   E. D=0 on a STORE (W=1,A=1) -- isolates the D-check from the
+ *      W-check (a plain W=0 test, test C, can't tell the two apart).
+ *   F. A=0 on a LOAD (R=1) -- proves A is checked on reads too.
+ *   G/H. SUM=0 denies, SUM=1 permits, the SAME S-mode load off a U=1
+ *      data page -- paired, both directions of one condition.
+ *   I/J/K. MXR=0 denies, MXR=1 permits, the SAME S-mode load off an
+ *      X=1,R=0 data page; K additionally FETCHES from that same page
+ *      with MXR=0 -- proving MXR's read-only scope.
+ *   L. an AMO-RMW against an R=1,W=0 page -- must fault cause 15, NOT
+ *      13, direct proof of the mem_op_needs_write classification.
+ *   M. LR.D against that SAME R=1,W=0 page -- must SUCCEED (LR excludes
+ *      is_lr from mem_op_needs_write, unlike SC/AMO-RMW).
+ *   N. a level-1 (megapage) leaf with PPN0 nonzero, PPN1 zero, in
+ *      isolation (not combined with a level-2/gigapage case).
+ * SC through translation remains deliberately deferred -- a mechanical
+ * variation of the already-proven AMO-RMW write-phase mechanism (test B),
+ * not a new one.
  */
 module core_sv39_mem_tb;
 
@@ -73,6 +93,10 @@ module core_sv39_mem_tb;
     endfunction
     function automatic logic [31:0] enc_amoadd_d(input logic [4:0] rd, rs1, rs2);
         return encode_amo(`FUNCT5_AMOADD, 1'b0, 1'b0, rs2, rs1, `FUNCT3_AMO_D, rd, `OPC_AMO);
+    endfunction
+    // LR.D -- rs2 field is architecturally 0 for LR, per spec.
+    function automatic logic [31:0] enc_lr_d(input logic [4:0] rd, rs1);
+        return encode_amo(`FUNCT5_LR, 1'b0, 1'b0, 5'd0, rs1, `FUNCT3_AMO_D, rd, `OPC_AMO);
     endfunction
     localparam logic [31:0] EBREAK_INSN = {11'b0, 1'b1, 13'b0, `OPC_SYSTEM};
     localparam logic [31:0] NOP_INSN    = 32'h00000013;
@@ -122,7 +146,121 @@ module core_sv39_mem_tb;
         mtval_d    <= dut_d.core0.regfile0.gp_registers[21];
     end
 
-    wire halted = halted_a && halted_b && halted_c && halted_d;
+    /* ----------------------------------------------------------------
+     * Tests E-N: fault-taxonomy coverage closed by a directed post-plan
+     * pass (adversarial-audit follow-up). All share test A/C's own
+     * page-table shape (code leaf at vpn0=3/PA 0x4000, RWX=1; a SEPARATE
+     * data leaf at vpn0=4/PA 0x5000 whose own PTE differs per test) and
+     * M-mode-setup idiom throughout -- only the data leaf's own PTE, the
+     * mem instruction under test, and (for the SUM/MXR pairs) an extra
+     * mstatus bit differ test to test.
+     *   E. D=0 on a STORE with A=1,W=1 -- isolates the D-check from the
+     *      W-check (a plain W=0 test, already covered by test C, can't
+     *      tell a "needs W" bug from a "needs D" bug apart; this can).
+     *   F. A=0 on a LOAD (R=1) -- proves A is checked on reads too, not
+     *      only on writes (test C/E only ever exercise it via a write).
+     *   G/H. SUM=0 denies, SUM=1 permits, the SAME S-mode load off a
+     *      U=1 data page -- paired, both directions of one condition.
+     *   I/J/K. MXR=0 denies, MXR=1 permits, the SAME S-mode load off an
+     *      X=1,R=0 data page; K additionally FETCHES from that same
+     *      page with MXR=0 -- proving MXR's read-only scope.
+     *   L. an AMO-RMW against an R=1,W=0 page -- must fault cause 15,
+     *      NOT 13, direct proof of the mem_op_needs_write classification.
+     *   M. LR.D against that SAME R=1,W=0 page -- must SUCCEED (LR
+     *      excludes is_lr from mem_op_needs_write, unlike SC/AMO-RMW).
+     *   N. a level-1 (megapage) leaf with PPN0 nonzero, PPN1 zero, in
+     *      isolation (not combined with a level-2/gigapage case).
+     * ---------------------------------------------------------------- */
+    core_wb4_sram_harness #(.NUM_WORDS(4096)) dut_e (.clk(clk), .rst(rst));
+    logic halted_e = 1'b0;
+    always @(posedge clk) if (dut_e.core0.trap_taken && dut_e.core0.is_ebreak) halted_e <= 1'b1;
+    logic [63:0] mcause_e, mtval_e;
+    logic        captured_e = 1'b0;
+    always @(posedge clk) if (!captured_e && dut_e.core0.commit_now && dut_e.core0.pc == 64'h108) begin
+        captured_e <= 1'b1;
+        mcause_e   <= dut_e.core0.regfile0.gp_registers[20];
+        mtval_e    <= dut_e.core0.regfile0.gp_registers[21];
+    end
+
+    core_wb4_sram_harness #(.NUM_WORDS(4096)) dut_f (.clk(clk), .rst(rst));
+    logic halted_f = 1'b0;
+    always @(posedge clk) if (dut_f.core0.trap_taken && dut_f.core0.is_ebreak) halted_f <= 1'b1;
+    logic [63:0] mcause_f, mtval_f;
+    logic        captured_f = 1'b0;
+    always @(posedge clk) if (!captured_f && dut_f.core0.commit_now && dut_f.core0.pc == 64'h108) begin
+        captured_f <= 1'b1;
+        mcause_f   <= dut_f.core0.regfile0.gp_registers[20];
+        mtval_f    <= dut_f.core0.regfile0.gp_registers[21];
+    end
+
+    core_wb4_sram_harness #(.NUM_WORDS(4096)) dut_g (.clk(clk), .rst(rst));
+    logic halted_g = 1'b0;
+    always @(posedge clk) if (dut_g.core0.trap_taken && dut_g.core0.is_ebreak) halted_g <= 1'b1;
+    logic [63:0] mcause_g, mtval_g;
+    logic        captured_g = 1'b0;
+    always @(posedge clk) if (!captured_g && dut_g.core0.commit_now && dut_g.core0.pc == 64'h108) begin
+        captured_g <= 1'b1;
+        mcause_g   <= dut_g.core0.regfile0.gp_registers[20];
+        mtval_g    <= dut_g.core0.regfile0.gp_registers[21];
+    end
+
+    // H (SUM=1 permit) never traps -- no capture logic needed, just the
+    // defensive fallback handler at word32 (mirrors fetch_tb's test A/B).
+    core_wb4_sram_harness #(.NUM_WORDS(4096)) dut_h (.clk(clk), .rst(rst));
+    logic halted_h = 1'b0;
+    always @(posedge clk) if (dut_h.core0.trap_taken && dut_h.core0.is_ebreak) halted_h <= 1'b1;
+
+    core_wb4_sram_harness #(.NUM_WORDS(4096)) dut_i (.clk(clk), .rst(rst));
+    logic halted_i = 1'b0;
+    always @(posedge clk) if (dut_i.core0.trap_taken && dut_i.core0.is_ebreak) halted_i <= 1'b1;
+    logic [63:0] mcause_i, mtval_i;
+    logic        captured_i = 1'b0;
+    always @(posedge clk) if (!captured_i && dut_i.core0.commit_now && dut_i.core0.pc == 64'h108) begin
+        captured_i <= 1'b1;
+        mcause_i   <= dut_i.core0.regfile0.gp_registers[20];
+        mtval_i    <= dut_i.core0.regfile0.gp_registers[21];
+    end
+
+    // J (MXR=1 permit) and K (fetch, MXR=0) never trap -- defensive
+    // fallback handler only, same as H above.
+    core_wb4_sram_harness #(.NUM_WORDS(4096)) dut_j (.clk(clk), .rst(rst));
+    logic halted_j = 1'b0;
+    always @(posedge clk) if (dut_j.core0.trap_taken && dut_j.core0.is_ebreak) halted_j <= 1'b1;
+
+    core_wb4_sram_harness #(.NUM_WORDS(4096)) dut_k (.clk(clk), .rst(rst));
+    logic halted_k = 1'b0;
+    always @(posedge clk) if (dut_k.core0.trap_taken && dut_k.core0.is_ebreak) halted_k <= 1'b1;
+
+    core_wb4_sram_harness #(.NUM_WORDS(4096)) dut_l (.clk(clk), .rst(rst));
+    logic halted_l = 1'b0;
+    always @(posedge clk) if (dut_l.core0.trap_taken && dut_l.core0.is_ebreak) halted_l <= 1'b1;
+    logic [63:0] mcause_l, mtval_l;
+    logic        captured_l = 1'b0;
+    always @(posedge clk) if (!captured_l && dut_l.core0.commit_now && dut_l.core0.pc == 64'h108) begin
+        captured_l <= 1'b1;
+        mcause_l   <= dut_l.core0.regfile0.gp_registers[20];
+        mtval_l    <= dut_l.core0.regfile0.gp_registers[21];
+    end
+
+    // M (LR succeeds) never traps -- defensive fallback handler only.
+    core_wb4_sram_harness #(.NUM_WORDS(4096)) dut_m (.clk(clk), .rst(rst));
+    logic halted_m = 1'b0;
+    always @(posedge clk) if (dut_m.core0.trap_taken && dut_m.core0.is_ebreak) halted_m <= 1'b1;
+
+    core_wb4_sram_harness #(.NUM_WORDS(4096)) dut_n (.clk(clk), .rst(rst));
+    logic halted_n = 1'b0;
+    always @(posedge clk) if (dut_n.core0.trap_taken && dut_n.core0.is_ebreak) halted_n <= 1'b1;
+    logic [63:0] mcause_n, mtval_n;
+    logic        captured_n = 1'b0;
+    always @(posedge clk) if (!captured_n && dut_n.core0.commit_now && dut_n.core0.pc == 64'h108) begin
+        captured_n <= 1'b1;
+        mcause_n   <= dut_n.core0.regfile0.gp_registers[20];
+        mtval_n    <= dut_n.core0.regfile0.gp_registers[21];
+    end
+
+    wire halted = halted_a && halted_b && halted_c && halted_d
+               && halted_e && halted_f && halted_g && halted_h && halted_i
+               && halted_j && halted_k && halted_l && halted_m && halted_n;
     `include "halt_wait.sv"
 
     initial begin
@@ -262,6 +400,253 @@ module core_sv39_mem_tb;
         dut_d.sram0.memory[32] = {enc_csrrs(`CSR_MTVAL,5'd21), enc_csrrs(`CSR_MCAUSE,5'd20)};
         dut_d.sram0.memory[33] = {NOP_INSN, EBREAK_INSN};
 
+        /*
+         * ---- Test E: D=0 on a STORE (W=1,A=1) -- isolates the D-check
+         * from the W-check. Same word0-10 M-mode setup as test C (builds
+         * BOTH x13=VA_data=0x40404000 and x4=VA_code=0x40403000). L0
+         * entry4 = V=R=W=A=1, D=0, PPN=5. S-code: sd x0,0(x13) (same
+         * store test C already uses, target page differs only in D).
+         */
+        dut_e.sram0.memory[0] = {enc_slli(5'd1,5'd1,6'd60), enc_addi(5'd1,5'd0,8)};
+        dut_e.sram0.memory[1] = {enc_or(5'd1,5'd1,5'd2), enc_addi(5'd2,5'd0,1)};
+        dut_e.sram0.memory[2] = {enc_addi(5'd3,5'd0,1), enc_csrrw(`CSR_SATP,5'd1)};
+        dut_e.sram0.memory[3] = {enc_csrrw(`CSR_MSTATUS,5'd3), enc_slli(5'd3,5'd3,6'd11)};
+        dut_e.sram0.memory[4] = {enc_slli(5'd13,5'd13,6'd20), enc_addi(5'd13,5'd0,1028)};
+        dut_e.sram0.memory[5] = {enc_slli(5'd14,5'd14,6'd12), enc_addi(5'd14,5'd0,4)};
+        dut_e.sram0.memory[6] = {enc_addi(5'd4,5'd0,1028), enc_or(5'd13,5'd13,5'd14)};
+        dut_e.sram0.memory[7] = {enc_addi(5'd5,5'd0,3), enc_slli(5'd4,5'd4,6'd20)};
+        dut_e.sram0.memory[8] = {enc_or(5'd4,5'd4,5'd5), enc_slli(5'd5,5'd5,6'd12)};
+        dut_e.sram0.memory[9] = {enc_addi(5'd6,5'd0,256), enc_csrrw(`CSR_MEPC,5'd4)};
+        dut_e.sram0.memory[10] = {`INSTR_HEX_MRET, enc_csrrw(`CSR_MTVEC,5'd6)};
+        dut_e.sram0.memory[512 + 1] = 64'h0000_0000_0000_0801;
+        dut_e.sram0.memory[1024 + 2] = 64'h0000_0000_0000_0C01;
+        dut_e.sram0.memory[1536 + 3] = 64'h0000_0000_0000_10CF; // code leaf, PPN=4
+        dut_e.sram0.memory[1536 + 4] = 64'h0000_0000_0000_1447; // data leaf: V=R=W=A=1, D=0, PPN=5
+        dut_e.sram0.memory[2048] = {EBREAK_INSN, enc_sd(5'd0,5'd13,0)};
+        dut_e.sram0.memory[32] = {enc_csrrs(`CSR_MTVAL,5'd21), enc_csrrs(`CSR_MCAUSE,5'd20)};
+        dut_e.sram0.memory[33] = {NOP_INSN, EBREAK_INSN};
+
+        /*
+         * ---- Test F: A=0 on a LOAD (R=1) -- proves A is checked on
+         * reads too, independent of D/write-ness. Same setup shape as
+         * test E; L0 entry4 = V=R=1 only (A=0, D=0, W=0, X=0). S-code:
+         * ld x30,0(x13).
+         */
+        dut_f.sram0.memory[0] = {enc_slli(5'd1,5'd1,6'd60), enc_addi(5'd1,5'd0,8)};
+        dut_f.sram0.memory[1] = {enc_or(5'd1,5'd1,5'd2), enc_addi(5'd2,5'd0,1)};
+        dut_f.sram0.memory[2] = {enc_addi(5'd3,5'd0,1), enc_csrrw(`CSR_SATP,5'd1)};
+        dut_f.sram0.memory[3] = {enc_csrrw(`CSR_MSTATUS,5'd3), enc_slli(5'd3,5'd3,6'd11)};
+        dut_f.sram0.memory[4] = {enc_slli(5'd13,5'd13,6'd20), enc_addi(5'd13,5'd0,1028)};
+        dut_f.sram0.memory[5] = {enc_slli(5'd14,5'd14,6'd12), enc_addi(5'd14,5'd0,4)};
+        dut_f.sram0.memory[6] = {enc_addi(5'd4,5'd0,1028), enc_or(5'd13,5'd13,5'd14)};
+        dut_f.sram0.memory[7] = {enc_addi(5'd5,5'd0,3), enc_slli(5'd4,5'd4,6'd20)};
+        dut_f.sram0.memory[8] = {enc_or(5'd4,5'd4,5'd5), enc_slli(5'd5,5'd5,6'd12)};
+        dut_f.sram0.memory[9] = {enc_addi(5'd6,5'd0,256), enc_csrrw(`CSR_MEPC,5'd4)};
+        dut_f.sram0.memory[10] = {`INSTR_HEX_MRET, enc_csrrw(`CSR_MTVEC,5'd6)};
+        dut_f.sram0.memory[512 + 1] = 64'h0000_0000_0000_0801;
+        dut_f.sram0.memory[1024 + 2] = 64'h0000_0000_0000_0C01;
+        dut_f.sram0.memory[1536 + 3] = 64'h0000_0000_0000_10CF;
+        dut_f.sram0.memory[1536 + 4] = 64'h0000_0000_0000_1403; // data leaf: V=R=1 only, A=0, PPN=5
+        dut_f.sram0.memory[2048] = {EBREAK_INSN, enc_ld(5'd30,5'd13,0)};
+        dut_f.sram0.memory[32] = {enc_csrrs(`CSR_MTVAL,5'd21), enc_csrrs(`CSR_MCAUSE,5'd20)};
+        dut_f.sram0.memory[33] = {NOP_INSN, EBREAK_INSN};
+
+        /*
+         * ---- Test G: SUM=0 denies an S-mode load off a U=1 data page
+         * (V=R=W=U=A=D=1, PPN=5). Same setup shape as test E/F, mstatus
+         * only ever sets MPP=S (SUM stays 0). S-code: ld x30,0(x13).
+         */
+        dut_g.sram0.memory[0] = {enc_slli(5'd1,5'd1,6'd60), enc_addi(5'd1,5'd0,8)};
+        dut_g.sram0.memory[1] = {enc_or(5'd1,5'd1,5'd2), enc_addi(5'd2,5'd0,1)};
+        dut_g.sram0.memory[2] = {enc_addi(5'd3,5'd0,1), enc_csrrw(`CSR_SATP,5'd1)};
+        dut_g.sram0.memory[3] = {enc_csrrw(`CSR_MSTATUS,5'd3), enc_slli(5'd3,5'd3,6'd11)};
+        dut_g.sram0.memory[4] = {enc_slli(5'd13,5'd13,6'd20), enc_addi(5'd13,5'd0,1028)};
+        dut_g.sram0.memory[5] = {enc_slli(5'd14,5'd14,6'd12), enc_addi(5'd14,5'd0,4)};
+        dut_g.sram0.memory[6] = {enc_addi(5'd4,5'd0,1028), enc_or(5'd13,5'd13,5'd14)};
+        dut_g.sram0.memory[7] = {enc_addi(5'd5,5'd0,3), enc_slli(5'd4,5'd4,6'd20)};
+        dut_g.sram0.memory[8] = {enc_or(5'd4,5'd4,5'd5), enc_slli(5'd5,5'd5,6'd12)};
+        dut_g.sram0.memory[9] = {enc_addi(5'd6,5'd0,256), enc_csrrw(`CSR_MEPC,5'd4)};
+        dut_g.sram0.memory[10] = {`INSTR_HEX_MRET, enc_csrrw(`CSR_MTVEC,5'd6)};
+        dut_g.sram0.memory[512 + 1] = 64'h0000_0000_0000_0801;
+        dut_g.sram0.memory[1024 + 2] = 64'h0000_0000_0000_0C01;
+        dut_g.sram0.memory[1536 + 3] = 64'h0000_0000_0000_10CF;
+        dut_g.sram0.memory[1536 + 4] = 64'h0000_0000_0000_14D7; // data leaf: V=R=W=U=A=D=1, PPN=5
+        dut_g.sram0.memory[2048] = {EBREAK_INSN, enc_ld(5'd30,5'd13,0)};
+        dut_g.sram0.memory[32] = {enc_csrrs(`CSR_MTVAL,5'd21), enc_csrrs(`CSR_MCAUSE,5'd20)};
+        dut_g.sram0.memory[33] = {NOP_INSN, EBREAK_INSN};
+
+        /*
+         * ---- Test H: SUM=1 permits the IDENTICAL access (companion to
+         * G). Same U=1 data leaf; mstatus additionally ORs in SUM (bit
+         * 18) via x8 before the mstatus write. Never traps -- x30 is
+         * loaded from a preseeded sentinel (777) at PA 0x5000.
+         */
+        dut_h.sram0.memory[0] = {enc_slli(5'd1,5'd1,6'd60), enc_addi(5'd1,5'd0,8)};
+        dut_h.sram0.memory[1] = {enc_or(5'd1,5'd1,5'd2), enc_addi(5'd2,5'd0,1)};
+        dut_h.sram0.memory[2] = {enc_addi(5'd3,5'd0,1), enc_csrrw(`CSR_SATP,5'd1)};
+        dut_h.sram0.memory[3] = {enc_addi(5'd8,5'd0,1), enc_slli(5'd3,5'd3,6'd11)};
+        dut_h.sram0.memory[4] = {enc_or(5'd3,5'd3,5'd8), enc_slli(5'd8,5'd8,6'd18)};
+        dut_h.sram0.memory[5] = {enc_addi(5'd13,5'd0,1028), enc_csrrw(`CSR_MSTATUS,5'd3)};
+        dut_h.sram0.memory[6] = {enc_addi(5'd14,5'd0,4), enc_slli(5'd13,5'd13,6'd20)};
+        dut_h.sram0.memory[7] = {enc_or(5'd13,5'd13,5'd14), enc_slli(5'd14,5'd14,6'd12)};
+        dut_h.sram0.memory[8] = {enc_slli(5'd4,5'd4,6'd20), enc_addi(5'd4,5'd0,1028)};
+        dut_h.sram0.memory[9] = {enc_slli(5'd5,5'd5,6'd12), enc_addi(5'd5,5'd0,3)};
+        dut_h.sram0.memory[10] = {enc_addi(5'd6,5'd0,256), enc_or(5'd4,5'd4,5'd5)};
+        dut_h.sram0.memory[11] = {enc_csrrw(`CSR_MTVEC,5'd6), enc_csrrw(`CSR_MEPC,5'd4)};
+        dut_h.sram0.memory[12] = {NOP_INSN, `INSTR_HEX_MRET};
+        dut_h.sram0.memory[512 + 1] = 64'h0000_0000_0000_0801;
+        dut_h.sram0.memory[1024 + 2] = 64'h0000_0000_0000_0C01;
+        dut_h.sram0.memory[1536 + 3] = 64'h0000_0000_0000_10CF;
+        dut_h.sram0.memory[1536 + 4] = 64'h0000_0000_0000_14D7; // same U=1 data leaf as test G
+        dut_h.sram0.memory[2048] = {EBREAK_INSN, enc_ld(5'd30,5'd13,0)};
+        dut_h.sram0.memory[2560] = 64'd777; // PA 0x5000 (word = 0x5000/8) -- sentinel the load must return
+
+        /*
+         * ---- Test I: MXR=0 denies a load from an X=1,R=0 data leaf
+         * (V=X=A=D=1, PPN=5). Same setup shape as test E/F/G. S-code:
+         * ld x30,0(x13).
+         */
+        dut_i.sram0.memory[0] = {enc_slli(5'd1,5'd1,6'd60), enc_addi(5'd1,5'd0,8)};
+        dut_i.sram0.memory[1] = {enc_or(5'd1,5'd1,5'd2), enc_addi(5'd2,5'd0,1)};
+        dut_i.sram0.memory[2] = {enc_addi(5'd3,5'd0,1), enc_csrrw(`CSR_SATP,5'd1)};
+        dut_i.sram0.memory[3] = {enc_csrrw(`CSR_MSTATUS,5'd3), enc_slli(5'd3,5'd3,6'd11)};
+        dut_i.sram0.memory[4] = {enc_slli(5'd13,5'd13,6'd20), enc_addi(5'd13,5'd0,1028)};
+        dut_i.sram0.memory[5] = {enc_slli(5'd14,5'd14,6'd12), enc_addi(5'd14,5'd0,4)};
+        dut_i.sram0.memory[6] = {enc_addi(5'd4,5'd0,1028), enc_or(5'd13,5'd13,5'd14)};
+        dut_i.sram0.memory[7] = {enc_addi(5'd5,5'd0,3), enc_slli(5'd4,5'd4,6'd20)};
+        dut_i.sram0.memory[8] = {enc_or(5'd4,5'd4,5'd5), enc_slli(5'd5,5'd5,6'd12)};
+        dut_i.sram0.memory[9] = {enc_addi(5'd6,5'd0,256), enc_csrrw(`CSR_MEPC,5'd4)};
+        dut_i.sram0.memory[10] = {`INSTR_HEX_MRET, enc_csrrw(`CSR_MTVEC,5'd6)};
+        dut_i.sram0.memory[512 + 1] = 64'h0000_0000_0000_0801;
+        dut_i.sram0.memory[1024 + 2] = 64'h0000_0000_0000_0C01;
+        dut_i.sram0.memory[1536 + 3] = 64'h0000_0000_0000_10CF;
+        dut_i.sram0.memory[1536 + 4] = 64'h0000_0000_0000_14C9; // data leaf: V=X=A=D=1, R=0, PPN=5
+        dut_i.sram0.memory[2048] = {EBREAK_INSN, enc_ld(5'd30,5'd13,0)};
+        dut_i.sram0.memory[32] = {enc_csrrs(`CSR_MTVAL,5'd21), enc_csrrs(`CSR_MCAUSE,5'd20)};
+        dut_i.sram0.memory[33] = {NOP_INSN, EBREAK_INSN};
+
+        /*
+         * ---- Test J: MXR=1 permits the IDENTICAL load (companion to
+         * I) -- same X=1,R=0 leaf; mstatus additionally ORs in MXR (bit
+         * 19). Never traps -- x30 loaded from a preseeded sentinel (888).
+         */
+        dut_j.sram0.memory[0] = {enc_slli(5'd1,5'd1,6'd60), enc_addi(5'd1,5'd0,8)};
+        dut_j.sram0.memory[1] = {enc_or(5'd1,5'd1,5'd2), enc_addi(5'd2,5'd0,1)};
+        dut_j.sram0.memory[2] = {enc_addi(5'd3,5'd0,1), enc_csrrw(`CSR_SATP,5'd1)};
+        dut_j.sram0.memory[3] = {enc_addi(5'd8,5'd0,1), enc_slli(5'd3,5'd3,6'd11)};
+        dut_j.sram0.memory[4] = {enc_or(5'd3,5'd3,5'd8), enc_slli(5'd8,5'd8,6'd19)};
+        dut_j.sram0.memory[5] = {enc_addi(5'd13,5'd0,1028), enc_csrrw(`CSR_MSTATUS,5'd3)};
+        dut_j.sram0.memory[6] = {enc_addi(5'd14,5'd0,4), enc_slli(5'd13,5'd13,6'd20)};
+        dut_j.sram0.memory[7] = {enc_or(5'd13,5'd13,5'd14), enc_slli(5'd14,5'd14,6'd12)};
+        dut_j.sram0.memory[8] = {enc_slli(5'd4,5'd4,6'd20), enc_addi(5'd4,5'd0,1028)};
+        dut_j.sram0.memory[9] = {enc_slli(5'd5,5'd5,6'd12), enc_addi(5'd5,5'd0,3)};
+        dut_j.sram0.memory[10] = {enc_addi(5'd6,5'd0,256), enc_or(5'd4,5'd4,5'd5)};
+        dut_j.sram0.memory[11] = {enc_csrrw(`CSR_MTVEC,5'd6), enc_csrrw(`CSR_MEPC,5'd4)};
+        dut_j.sram0.memory[12] = {NOP_INSN, `INSTR_HEX_MRET};
+        dut_j.sram0.memory[512 + 1] = 64'h0000_0000_0000_0801;
+        dut_j.sram0.memory[1024 + 2] = 64'h0000_0000_0000_0C01;
+        dut_j.sram0.memory[1536 + 3] = 64'h0000_0000_0000_10CF;
+        dut_j.sram0.memory[1536 + 4] = 64'h0000_0000_0000_14C9; // same X=1,R=0 data leaf as test I
+        dut_j.sram0.memory[2048] = {EBREAK_INSN, enc_ld(5'd30,5'd13,0)};
+        dut_j.sram0.memory[2560] = 64'd888; // PA 0x5000 (word = 0x5000/8) -- sentinel the load must return
+
+        /*
+         * ---- Test K: a FETCH from that SAME X=1,R=0 leaf succeeds
+         * regardless of MXR (stays 0 here) -- proves MXR's read-only
+         * scope. No code page at all: mepc is set DIRECTLY to the data
+         * VA (0x40404000), so the CPU fetches from PA 0x5000, where a
+         * real instruction sequence is placed (addi x30,x0,999; ebreak).
+         */
+        dut_k.sram0.memory[0] = {enc_slli(5'd1,5'd1,6'd60), enc_addi(5'd1,5'd0,8)};
+        dut_k.sram0.memory[1] = {enc_or(5'd1,5'd1,5'd2), enc_addi(5'd2,5'd0,1)};
+        dut_k.sram0.memory[2] = {enc_addi(5'd3,5'd0,1), enc_csrrw(`CSR_SATP,5'd1)};
+        dut_k.sram0.memory[3] = {enc_csrrw(`CSR_MSTATUS,5'd3), enc_slli(5'd3,5'd3,6'd11)};
+        dut_k.sram0.memory[4] = {enc_slli(5'd4,5'd4,6'd20), enc_addi(5'd4,5'd0,1028)};
+        dut_k.sram0.memory[5] = {enc_slli(5'd5,5'd5,6'd12), enc_addi(5'd5,5'd0,4)};
+        dut_k.sram0.memory[6] = {enc_addi(5'd6,5'd0,256), enc_or(5'd4,5'd4,5'd5)};
+        dut_k.sram0.memory[7] = {enc_csrrw(`CSR_MTVEC,5'd6), enc_csrrw(`CSR_MEPC,5'd4)};
+        dut_k.sram0.memory[8] = {NOP_INSN, `INSTR_HEX_MRET};
+        dut_k.sram0.memory[512 + 1] = 64'h0000_0000_0000_0801;
+        dut_k.sram0.memory[1024 + 2] = 64'h0000_0000_0000_0C01;
+        dut_k.sram0.memory[1536 + 4] = 64'h0000_0000_0000_14C9; // data/fetch leaf: V=X=A=D=1, R=0, PPN=5
+        dut_k.sram0.memory[2560] = {EBREAK_INSN, enc_addi(5'd30,5'd0,999)}; // PA 0x5000/0x5004 (word = 0x5000/8)
+
+        /*
+         * ---- Test L: an AMO-RMW (AMOADD.D) against an R=1,W=0 leaf
+         * must fault cause 15 (store/AMO page fault), NOT 13 -- direct
+         * proof of the mem_op_needs_write-based classification (is_amo_rmw
+         * is included, unlike is_lr). Same setup shape as test E/F/G/I.
+         */
+        dut_l.sram0.memory[0] = {enc_slli(5'd1,5'd1,6'd60), enc_addi(5'd1,5'd0,8)};
+        dut_l.sram0.memory[1] = {enc_or(5'd1,5'd1,5'd2), enc_addi(5'd2,5'd0,1)};
+        dut_l.sram0.memory[2] = {enc_addi(5'd3,5'd0,1), enc_csrrw(`CSR_SATP,5'd1)};
+        dut_l.sram0.memory[3] = {enc_csrrw(`CSR_MSTATUS,5'd3), enc_slli(5'd3,5'd3,6'd11)};
+        dut_l.sram0.memory[4] = {enc_slli(5'd13,5'd13,6'd20), enc_addi(5'd13,5'd0,1028)};
+        dut_l.sram0.memory[5] = {enc_slli(5'd14,5'd14,6'd12), enc_addi(5'd14,5'd0,4)};
+        dut_l.sram0.memory[6] = {enc_addi(5'd4,5'd0,1028), enc_or(5'd13,5'd13,5'd14)};
+        dut_l.sram0.memory[7] = {enc_addi(5'd5,5'd0,3), enc_slli(5'd4,5'd4,6'd20)};
+        dut_l.sram0.memory[8] = {enc_or(5'd4,5'd4,5'd5), enc_slli(5'd5,5'd5,6'd12)};
+        dut_l.sram0.memory[9] = {enc_addi(5'd6,5'd0,256), enc_csrrw(`CSR_MEPC,5'd4)};
+        dut_l.sram0.memory[10] = {`INSTR_HEX_MRET, enc_csrrw(`CSR_MTVEC,5'd6)};
+        dut_l.sram0.memory[512 + 1] = 64'h0000_0000_0000_0801;
+        dut_l.sram0.memory[1024 + 2] = 64'h0000_0000_0000_0C01;
+        dut_l.sram0.memory[1536 + 3] = 64'h0000_0000_0000_10CF;
+        dut_l.sram0.memory[1536 + 4] = 64'h0000_0000_0000_14C3; // data leaf: V=R=A=D=1, W=0, PPN=5
+        dut_l.sram0.memory[2048] = {enc_amoadd_d(5'd9,5'd13,5'd11), enc_addi(5'd11,5'd0,50)};
+        dut_l.sram0.memory[2049] = {NOP_INSN, EBREAK_INSN};
+        dut_l.sram0.memory[32] = {enc_csrrs(`CSR_MTVAL,5'd21), enc_csrrs(`CSR_MCAUSE,5'd20)};
+        dut_l.sram0.memory[33] = {NOP_INSN, EBREAK_INSN};
+
+        /*
+         * ---- Test M: LR.D against the SAME R=1,W=0 leaf SUCCEEDS
+         * (companion to L) -- LR excludes is_lr from mem_op_needs_write,
+         * so it only ever needs R, unlike SC/AMO-RMW. Never traps -- x30
+         * is loaded from a preseeded sentinel (555) at PA 0x5000.
+         */
+        dut_m.sram0.memory[0] = {enc_slli(5'd1,5'd1,6'd60), enc_addi(5'd1,5'd0,8)};
+        dut_m.sram0.memory[1] = {enc_or(5'd1,5'd1,5'd2), enc_addi(5'd2,5'd0,1)};
+        dut_m.sram0.memory[2] = {enc_addi(5'd3,5'd0,1), enc_csrrw(`CSR_SATP,5'd1)};
+        dut_m.sram0.memory[3] = {enc_csrrw(`CSR_MSTATUS,5'd3), enc_slli(5'd3,5'd3,6'd11)};
+        dut_m.sram0.memory[4] = {enc_slli(5'd13,5'd13,6'd20), enc_addi(5'd13,5'd0,1028)};
+        dut_m.sram0.memory[5] = {enc_slli(5'd14,5'd14,6'd12), enc_addi(5'd14,5'd0,4)};
+        dut_m.sram0.memory[6] = {enc_addi(5'd4,5'd0,1028), enc_or(5'd13,5'd13,5'd14)};
+        dut_m.sram0.memory[7] = {enc_addi(5'd5,5'd0,3), enc_slli(5'd4,5'd4,6'd20)};
+        dut_m.sram0.memory[8] = {enc_or(5'd4,5'd4,5'd5), enc_slli(5'd5,5'd5,6'd12)};
+        dut_m.sram0.memory[9] = {enc_addi(5'd6,5'd0,256), enc_csrrw(`CSR_MEPC,5'd4)};
+        dut_m.sram0.memory[10] = {`INSTR_HEX_MRET, enc_csrrw(`CSR_MTVEC,5'd6)};
+        dut_m.sram0.memory[512 + 1] = 64'h0000_0000_0000_0801;
+        dut_m.sram0.memory[1024 + 2] = 64'h0000_0000_0000_0C01;
+        dut_m.sram0.memory[1536 + 3] = 64'h0000_0000_0000_10CF;
+        dut_m.sram0.memory[1536 + 4] = 64'h0000_0000_0000_14C3; // same R=1,W=0 data leaf as test L
+        dut_m.sram0.memory[2048] = {EBREAK_INSN, enc_lr_d(5'd30,5'd13)};
+        dut_m.sram0.memory[2560] = 64'd555; // PA 0x5000 (word = 0x5000/8) -- sentinel LR.D must return
+
+        /*
+         * ---- Test N: a level-1 (megapage) leaf with PPN0=1 (nonzero),
+         * PPN1=0 -- misaligned in isolation, not combined with a
+         * level-2/gigapage case. L1 entry2 (vpn1=2) IS the leaf itself
+         * (V=R=W=X=A=D=1, misaligned PPN0=1); a SEPARATE L1 entry5
+         * (vpn1=5) still points down to a real, valid 4KB code page, so
+         * the CODE's own fetch (a DIFFERENT vpn1 index) is unaffected --
+         * code VA=0x40A00000 (vpn2=1,vpn1=5,vpn0=0); target/faulting VA
+         * =0x40400000 (vpn2=1,vpn1=2,vpn0=0,off=0), same L2/L1 table.
+         */
+        dut_n.sram0.memory[0] = {enc_slli(5'd1,5'd1,6'd60), enc_addi(5'd1,5'd0,8)};
+        dut_n.sram0.memory[1] = {enc_or(5'd1,5'd1,5'd2), enc_addi(5'd2,5'd0,1)};
+        dut_n.sram0.memory[2] = {enc_addi(5'd3,5'd0,1), enc_csrrw(`CSR_SATP,5'd1)};
+        dut_n.sram0.memory[3] = {enc_csrrw(`CSR_MSTATUS,5'd3), enc_slli(5'd3,5'd3,6'd11)};
+        dut_n.sram0.memory[4] = {enc_slli(5'd13,5'd13,6'd20), enc_addi(5'd13,5'd0,1028)};
+        dut_n.sram0.memory[5] = {enc_slli(5'd4,5'd4,6'd20), enc_addi(5'd4,5'd0,1034)};
+        dut_n.sram0.memory[6] = {enc_csrrw(`CSR_MEPC,5'd4), enc_addi(5'd6,5'd0,256)};
+        dut_n.sram0.memory[7] = {`INSTR_HEX_MRET, enc_csrrw(`CSR_MTVEC,5'd6)};
+        dut_n.sram0.memory[512 + 1] = 64'h0000_0000_0000_0801;  // L2 entry1 -> L1@0x2000
+        dut_n.sram0.memory[1024 + 2] = 64'h0000_0000_0000_04CF; // L1 entry2 IS the leaf: PPN0=1 (misaligned), PPN1=0
+        dut_n.sram0.memory[1024 + 5] = 64'h0000_0000_0000_0C01; // L1 entry5 -> L0@0x3000 (code, unaffected)
+        dut_n.sram0.memory[1536 + 0] = 64'h0000_0000_0000_10CF; // L0 entry0 -> code leaf, PPN=4
+        dut_n.sram0.memory[2048] = {EBREAK_INSN, enc_ld(5'd30,5'd13,0)};
+        dut_n.sram0.memory[32] = {enc_csrrs(`CSR_MTVAL,5'd21), enc_csrrs(`CSR_MCAUSE,5'd20)};
+        dut_n.sram0.memory[33] = {NOP_INSN, EBREAK_INSN};
+
         @(posedge clk); #1;
         rst = 0;
 
@@ -280,6 +665,37 @@ module core_sv39_mem_tb;
         check("D: PMP-denied PTE read (mem stream) produces mcause==5 (load access fault), NOT 13",
               mcause_d, 64'd5);
         check("D: mtval == the faulting instruction's own VA (not the PTE's PA)", mtval_d, 64'h40400000);
+
+        check("E: D=0 on a store (W=1,A=1) produces mcause==15, isolated from the W-check", mcause_e, 64'd15);
+        check("E: mtval == the faulting VIRTUAL address", mtval_e, 64'h40404000);
+
+        check("F: A=0 on a load (R=1) produces mcause==13, checked independent of D/write-ness", mcause_f, 64'd13);
+        check("F: mtval == the faulting VIRTUAL address", mtval_f, 64'h40404000);
+
+        check("G: SUM=0 denies an S-mode load off a U=1 page, mcause==13", mcause_g, 64'd13);
+        check("G: mtval == the faulting VIRTUAL address", mtval_g, 64'h40404000);
+
+        check("H: SUM=1 permits the IDENTICAL access (x30==777, no trap)",
+              dut_h.core0.regfile0.gp_registers[30], 64'd777);
+
+        check("I: MXR=0 denies a load from an X=1,R=0 page, mcause==13", mcause_i, 64'd13);
+        check("I: mtval == the faulting VIRTUAL address", mtval_i, 64'h40404000);
+
+        check("J: MXR=1 permits the IDENTICAL load (x30==888, no trap)",
+              dut_j.core0.regfile0.gp_registers[30], 64'd888);
+
+        check("K: a FETCH from that SAME X=1,R=0 page succeeds regardless of MXR (x30==999, no trap) -- proves MXR's load-only scope",
+              dut_k.core0.regfile0.gp_registers[30], 64'd999);
+
+        check("L: an AMO-RMW against an R=1,W=0 page produces mcause==15, NOT 13 -- proves the mem_op_needs_write classification", mcause_l, 64'd15);
+        check("L: mtval == the faulting VIRTUAL address", mtval_l, 64'h40404000);
+        check("L: AMO dest register unchanged (no writeback -- faulted before commit)", dut_l.core0.regfile0.gp_registers[9], 64'd0);
+
+        check("M: LR.D against that SAME R=1,W=0 page SUCCEEDS (x30==555, no trap) -- LR excludes is_lr from mem_op_needs_write",
+              dut_m.core0.regfile0.gp_registers[30], 64'd555);
+
+        check("N: a level-1 (megapage) leaf with PPN0 nonzero, PPN1 zero, in isolation faults, mcause==13", mcause_n, 64'd13);
+        check("N: mtval == the faulting VIRTUAL address", mtval_n, 64'h40400000);
 
         $display("");
         $display("core_sv39_mem_tb: %0d passed, %0d failed", pass_count, fail_count);
