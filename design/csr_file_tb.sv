@@ -70,6 +70,10 @@ module csr_file_tb;
     logic [(`WORD_SIZE - 1):0]     pmpcfg0_w, pmpaddr0_w, pmpaddr1_w, pmpaddr2_w, pmpaddr3_w;
     logic                          mstatus_mprv_w;
 
+    /* Sv39 (Milestone 1 of the Sv39 staged plan): control-plane exports. */
+    logic [(`WORD_SIZE - 1):0]     satp_w;
+    logic                          mstatus_sum_w, mstatus_mxr_w, mstatus_tvm_w;
+
     csr_file dut (
         .i_clk(clk),
         .i_rst(rst),
@@ -117,7 +121,12 @@ module csr_file_tb;
         .o_pmpaddr1(pmpaddr1_w),
         .o_pmpaddr2(pmpaddr2_w),
         .o_pmpaddr3(pmpaddr3_w),
-        .o_mstatus_mprv(mstatus_mprv_w)
+        .o_mstatus_mprv(mstatus_mprv_w),
+
+        .o_satp(satp_w),
+        .o_mstatus_sum(mstatus_sum_w),
+        .o_mstatus_mxr(mstatus_mxr_w),
+        .o_mstatus_tvm(mstatus_tvm_w)
     );
 
     /* Local mirrors of csr_file.sv's address map -- this testbench drives
@@ -1124,6 +1133,74 @@ module csr_file_tb;
         check("mip all-1s software write: bits 9/11 read back as i_seip/i_meip (0), not 1",
               `WORD_SIZE'({rdata[11], rdata[9]}), `WORD_SIZE'(0));
         write_csr(CSR_ADDR_MIP, `WORD_SIZE'(0));  // clean up
+
+        /*
+         * ===================================================================
+         * Sv39 staged plan, Milestone 1: satp's real WARL/MODE structuring
+         * and the new o_satp/o_mstatus_sum/o_mstatus_mxr/o_mstatus_tvm
+         * control-plane exports. No page-table walker exists yet in
+         * core.sv (Milestone 3) -- this section proves the CSR-side
+         * storage/export shape alone, same "prove the plumbing before the
+         * consumer exists" precedent every earlier CSR-first-half
+         * milestone (mip's MTIP/MEIP/SEIP splice, PMP's pmpcfg0/pmpaddr)
+         * already established.
+         * ===================================================================
+         */
+
+        // 1. Reset: satp reads 0 (MODE=Bare) after a fresh reset.
+        rst = 1; @(posedge clk); #1; @(posedge clk); #1; rst = 0;
+        read_csr(CSR_ADDR_SATP, rdata);
+        check("Sv39: satp reads 0 (MODE=Bare) after reset", rdata, `WORD_SIZE'(0));
+
+        // 2. Plain WARL round trip with MODE=Sv39 (8): PPN lands verbatim,
+        //    ASID (bits[59:44]) is forced to 0 in storage even though the
+        //    write attempts to set every ASID bit.
+        write_csr(CSR_ADDR_SATP, {4'd8, 16'hFFFF, 44'h0_0000_1234});
+        read_csr(CSR_ADDR_SATP, rdata);
+        check("Sv39: satp MODE=Sv39 write lands, PPN verbatim", rdata[43:0], 44'h0_0000_1234);
+        check("Sv39: satp MODE reads back 8 (Sv39)", rdata[63:60], 4'd8);
+        check("Sv39: satp ASID forced to 0 in storage despite an all-1s ASID write",
+              rdata[59:44], 16'b0);
+
+        // 3. MODE=Bare (0) round trip -- the other legal value.
+        write_csr(CSR_ADDR_SATP, {4'd0, 16'b0, 44'h0_0000_5678});
+        read_csr(CSR_ADDR_SATP, rdata);
+        check("Sv39: satp MODE=Bare write also lands", rdata, {4'd0, 16'b0, 44'h0_0000_5678});
+
+        // 4. The all-or-nothing property, specifically: a write with an
+        //    unsupported MODE (Sv32=1, a real RISC-V mode this core just
+        //    doesn't implement) must leave satp COMPLETELY unchanged --
+        //    not a per-field clamp that still lets the PPN through. Reuses
+        //    the Sv39 value from step 2's own write as the "before" state,
+        //    re-established here so this check doesn't depend on step 3
+        //    having run first.
+        write_csr(CSR_ADDR_SATP, {4'd8, 16'b0, 44'h0_0000_1234});
+        write_csr(CSR_ADDR_SATP, {4'd1, 16'b0, 44'h0_0000_9999});  // MODE=1 (Sv32) -- unsupported
+        read_csr(CSR_ADDR_SATP, rdata);
+        check("Sv39: unsupported-MODE write leaves satp COMPLETELY unchanged (MODE)",
+              rdata[63:60], 4'd8);
+        check("Sv39: unsupported-MODE write leaves satp COMPLETELY unchanged (PPN, not the new write's value)",
+              rdata[43:0], 44'h0_0000_1234);
+
+        // 5. o_mstatus_sum/o_mstatus_mxr/o_mstatus_tvm each track a direct
+        //    mstatus bit write independently, mirroring o_mstatus_mprv's
+        //    own step-7 precedent above.
+        write_csr(CSR_ADDR_MSTATUS, (`WORD_SIZE'(1) << SUM_BIT));
+        check("Sv39: o_mstatus_sum tracks a direct mstatus.SUM write", mstatus_sum_w, 1'b1);
+        check("Sv39: o_mstatus_mxr stays 0 while only SUM is set", mstatus_mxr_w, 1'b0);
+        check("Sv39: o_mstatus_tvm stays 0 while only SUM is set", mstatus_tvm_w, 1'b0);
+        write_csr(CSR_ADDR_MSTATUS, `WORD_SIZE'(0));
+        check("Sv39: o_mstatus_sum clears when mstatus.SUM is cleared", mstatus_sum_w, 1'b0);
+
+        write_csr(CSR_ADDR_MSTATUS, (`WORD_SIZE'(1) << MXR_BIT));
+        check("Sv39: o_mstatus_mxr tracks a direct mstatus.MXR write", mstatus_mxr_w, 1'b1);
+        write_csr(CSR_ADDR_MSTATUS, `WORD_SIZE'(0));
+        check("Sv39: o_mstatus_mxr clears when mstatus.MXR is cleared", mstatus_mxr_w, 1'b0);
+
+        write_csr(CSR_ADDR_MSTATUS, (`WORD_SIZE'(1) << TVM_BIT));
+        check("Sv39: o_mstatus_tvm tracks a direct mstatus.TVM write", mstatus_tvm_w, 1'b1);
+        write_csr(CSR_ADDR_MSTATUS, `WORD_SIZE'(0));
+        check("Sv39: o_mstatus_tvm clears when mstatus.TVM is cleared", mstatus_tvm_w, 1'b0);
 
         $display("");
         $display("csr_file_tb: %0d passed, %0d failed", pass_count, fail_count);
