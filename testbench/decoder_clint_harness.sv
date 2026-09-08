@@ -30,10 +30,15 @@
  * CPU-facing Wishbone port as its own top-level ports, one-for-one, for
  * an external testbench to drive directly.
  *
- * wb4_sram is instantiated at its default num_words (4096, 32KB), the
- * same real memory-map size soc.sv uses -- see wb_addr_decoder.sv's own
- * header comment for why the RAM/UART address split is derived from
- * that size.
+ * wb4_sram is instantiated at its own default num_words (4096, 32KB) --
+ * a deliberately small, explicit override kept unchanged by the
+ * Linux-boot-readiness RAM-growth change, which only grew soc.sv's own
+ * real sram0 instance (now 8388608 words, 64MB; see soc.sv's own header).
+ * This harness's UART/CLINT addresses still shift with the rest of the
+ * peripheral map (addr_i[26]/sel_periph gates ALL of RAM vs. peripherals
+ * now, not RAM's own size) -- see wb_addr_decoder.sv's own header comment
+ * for the full new address map and why sel_ram is no longer derived from
+ * whatever num_words a given RAM instance happens to use.
  */
 module decoder_clint_harness (
     input logic clk,

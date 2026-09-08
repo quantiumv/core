@@ -422,18 +422,23 @@ module jtag_dmi_e2e_tb;
                 rd, 32'hAAAA_0002);
             dmi_write_reg(DMI_SBCS, {11'b0, 1'b0, 3'd2, 1'b0, 1'b0, 15'b0});  // readonaddr/autoincrement/readondata back to 0, tidy up
 
-            // SBA access into the DRAM window (0x0001_8000-0x0001_FFFF).
-            // Before this review-fix, soc.sv's own decoder0 instantiation
-            // left dram_ack_i/dram_err_i floating (X in simulation); since
-            // `if (i_sba_ack || i_sba_err)` on an X operand evaluates
-            // false per IEEE 1800, this access would have hung dm.sv's
-            // own SBA busy FSM forever (Finding #6). Confirms the fix: a
-            // real, deterministic sberror==2 (bus error), not a hang --
-            // the DMI_RETRY_LIMIT-bounded loop below is itself part of
-            // the proof (an unfixed regression here means this testbench
-            // times out and $finish's early, not just a wrong check).
+            // SBA access into the DRAM window (0x0401_8000-0x0401_FFFF --
+            // shifted up from the original 0x0001_8000-0x0001_FFFF by the
+            // Linux-boot-readiness RAM-growth change, see design/
+            // wb_addr_decoder.sv's own header; the OLD address now falls
+            // inside real RAM instead, since RAM grew to cover it).
+            // Before the original review-fix this address targeted, soc.sv's
+            // own decoder0 instantiation left dram_ack_i/dram_err_i floating
+            // (X in simulation); since `if (i_sba_ack || i_sba_err)` on an X
+            // operand evaluates false per IEEE 1800, this access would have
+            // hung dm.sv's own SBA busy FSM forever (Finding #6). Confirms
+            // the fix still holds at the new address: a real, deterministic
+            // sberror==2 (bus error), not a hang -- the DMI_RETRY_LIMIT-
+            // bounded loop below is itself part of the proof (an unfixed
+            // regression here means this testbench times out and $finish's
+            // early, not just a wrong check).
             dmi_write_reg(DMI_SBCS, {11'b0, 1'b0, 3'd2, 1'b0, 1'b0, 15'b0});  // readonaddr=0, access=32-bit
-            dmi_write_reg(DMI_SBADDRESS0, 32'h0001_8000);
+            dmi_write_reg(DMI_SBADDRESS0, 32'h0401_8000);
             dmi_write_reg(DMI_SBDATA0, 32'hDEAD_BEEF);  // triggers the write -- would hang pre-fix
             tries = 0;
             rd = 32'h0020_0000;

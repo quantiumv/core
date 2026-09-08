@@ -18,9 +18,9 @@
  * directly, in isolation), this instantiates the real top-level
  * design/soc.sv and runs real firmware through core0, proving the new
  * addr_i[4] TX/RX split introduced in soc.sv (see that file's header)
- * is wired correctly end-to-end -- a real load instruction to 0x8010/
- * 0x8018 must actually reach uart_rx0, not uart0, and a real store to
- * 0x8000 must still reach uart0 unperturbed. Bytes are injected via
+ * is wired correctly end-to-end -- a real load instruction to
+ * 0x0400_8010/0x0400_8018 must actually reach uart_rx0, not uart0, and a
+ * real store to 0x0400_8000 must still reach uart0 unperturbed. Bytes are injected via
  * uart_rx0's push_byte backdoor (dut.uart_rx0.push_byte), the same
  * mechanism design/uart_rx_tb.sv uses, just reached one level deeper
  * through soc.sv's hierarchy.
@@ -51,11 +51,11 @@ module soc_uart_rx_tb;
 
         /*
          * addr  idx  instruction                    notes
-         *  0x00   0  lui  x8,0x8                     x8 = 0x8000
-         *  0x04   1  addi x8,x8,0x10                 x8 = 0x8010 (RX_DATA)
-         *  0x08   2  lui  x9,0x8                     x9 = 0x8000
-         *  0x0C   3  addi x9,x9,0x18                 x9 = 0x8018 (RX_STATUS)
-         *  0x10   4  lui  x10,0x8                    x10 = 0x8000 (TX_DATA)
+         *  0x00   0  lui  x8,0x4008                  x8 = 0x04008000
+         *  0x04   1  addi x8,x8,0x10                 x8 = 0x04008010 (RX_DATA)
+         *  0x08   2  lui  x9,0x4008                  x9 = 0x04008000
+         *  0x0C   3  addi x9,x9,0x18                 x9 = 0x04008018 (RX_STATUS)
+         *  0x10   4  lui  x10,0x4008                 x10 = 0x04008000 (TX_DATA)
          *  0x14   5  lw   x4,0(x9)                   x4 = RX_STATUS before drain (expect 1)
          *  0x18   6  lw   x1,0(x8)                   x1 = RX_DATA pop 1 (expect 'A')
          *  0x1C   7  lw   x2,0(x8)                   x2 = RX_DATA pop 2 (expect 'B')
@@ -63,18 +63,18 @@ module soc_uart_rx_tb;
          *  0x24   9  lw   x5,0(x9)                   x5 = RX_STATUS after drain (expect 0)
          *  0x28  10  addi x6,x0,72                   x6 = 'H' (0x48)
          *  0x2C  11  sw   x6,0(x10)                  TX_DATA <- 'H' -- proves TX still works
-         *  0x30  12  lw   x11,8(x10)                 x11 = TX_STATUS (0x8008) through the real
+         *  0x30  12  lw   x11,8(x10)                 x11 = TX_STATUS (0x04008008) through the real
          *                                             soc.sv mux -- proves the uart_tx_ack-true
          *                                             arm of uart_dat_i's mux, never otherwise
          *                                             exercised by a bus-level load in this suite
          *  0x34  13  ebreak
          */
         dut.sram0.memory[0] = {encode_i(32'sh10, 5'd8, 3'b000, 5'd8, `OPC_OP_IMM),
-                                encode_u(20'h8, 5'd8, `OPC_LUI)};
+                                encode_u(20'h4008, 5'd8, `OPC_LUI)};
         dut.sram0.memory[1] = {encode_i(32'sh18, 5'd9, 3'b000, 5'd9, `OPC_OP_IMM),
-                                encode_u(20'h8, 5'd9, `OPC_LUI)};
+                                encode_u(20'h4008, 5'd9, `OPC_LUI)};
         dut.sram0.memory[2] = {encode_i(32'sd0, 5'd9, 3'b010, 5'd4, `OPC_LOAD),
-                                encode_u(20'h8, 5'd10, `OPC_LUI)};
+                                encode_u(20'h4008, 5'd10, `OPC_LUI)};
         dut.sram0.memory[3] = {encode_i(32'sd0, 5'd8, 3'b010, 5'd2, `OPC_LOAD),
                                 encode_i(32'sd0, 5'd8, 3'b010, 5'd1, `OPC_LOAD)};
         dut.sram0.memory[4] = {encode_i(32'sd0, 5'd9, 3'b010, 5'd5, `OPC_LOAD),
@@ -101,9 +101,9 @@ module soc_uart_rx_tb;
 
         wait_halted_or_timeout(`TIMEOUT_CYCLES_TINY, "EBREAK trap never fired");
 
-        check("x8 (RX_DATA address)",              dut.core0.regfile0.gp_registers[8],  64'h8010);
-        check("x9 (RX_STATUS address)",             dut.core0.regfile0.gp_registers[9],  64'h8018);
-        check("x10 (TX_DATA address)",              dut.core0.regfile0.gp_registers[10], 64'h8000);
+        check("x8 (RX_DATA address)",              dut.core0.regfile0.gp_registers[8],  64'h04008010);
+        check("x9 (RX_STATUS address)",             dut.core0.regfile0.gp_registers[9],  64'h04008018);
+        check("x10 (TX_DATA address)",              dut.core0.regfile0.gp_registers[10], 64'h04008000);
         check("x4 (RX_STATUS before drain, ready)", dut.core0.regfile0.gp_registers[4],  64'd1);
         check("x1 (RX_DATA pop 1, real bus route to uart_rx0)", dut.core0.regfile0.gp_registers[1], 64'h41);
         check("x2 (RX_DATA pop 2)",                 dut.core0.regfile0.gp_registers[2],  64'h42);

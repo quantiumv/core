@@ -1,14 +1,18 @@
 /*
  * Linker script for the minimal SoC (design/soc.sv).
  *
- * RAM spans 0x0000-0x7FFF -- wb4_sram.sv's default 4096 x 8-byte words
- * = 32KB, and the exact boundary design/wb_addr_decoder.sv routes on
- * (addr bit 15): anything at or past 0x8000 lands on the UART instead
- * of memory, not an error, just silently the wrong device. .text is
- * placed first so it starts at 0x0, matching core.sv's reset vector
- * (pc resets to 0) -- crt0.o must be the first object passed to `ld`
- * for its _start to actually land there; this script alone doesn't
- * guarantee input-file order.
+ * RAM spans 0x0000-0x7FFF -- a conservative 32KB program-size ceiling
+ * this script itself chooses, not a hard hardware boundary: since the
+ * Linux-boot-readiness RAM-growth change, soc.sv's own real sram0
+ * instance is 64MB (addresses 0x0000_0000-0x03FF_FFFF all land on real
+ * RAM; every peripheral -- UART/CLINT/DRAM/PLIC -- now lives well above
+ * that, starting at 0x0400_8000, see design/wb_addr_decoder.sv's own
+ * header) -- this project's own tiny test firmware simply has never
+ * needed more than 32KB, so this script never grew LENGTH to match RAM's
+ * real capacity. .text is placed first so it starts at 0x0, matching
+ * core.sv's reset vector (pc resets to 0) -- crt0.o must be the first
+ * object passed to `ld` for its _start to actually land there; this
+ * script alone doesn't guarantee input-file order.
  *
  * The stack starts at the very top of RAM and grows down. For this
  * milestone's tiny C programs it will never collide with

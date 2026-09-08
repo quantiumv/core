@@ -41,7 +41,7 @@
 #   6. m_trap_handler: claims (PLIC_BASE+0x200004, context 0's own
 #      claim/complete register -- a real read there both returns
 #      source 1's own ID AND atomically clears the gateway's pending
-#      state), pops the real byte from UART RX_DATA (0x8010), completes
+#      state), pops the real byte from UART RX_DATA (0x0400_8010), completes
 #      (writes the claimed ID back to the same claim/complete address),
 #      marks s1=1 (proves the real interrupt fired end to end, through
 #      the real UART/PLIC/decoder/core path, not a synthetic i_meip
@@ -61,11 +61,11 @@ main:
     la      t0, m_trap_handler
     csrw    mtvec, t0
 
-    li      t0, 0x400004            # PLIC priority, source 1 (PLIC_BASE+0x0, high32)
+    li      t0, 0x04400004          # PLIC priority, source 1 (PLIC_BASE+0x0, high32)
     li      t1, 1
     sw      t1, 0(t0)
 
-    li      t0, 0x402000            # PLIC enable, context 0 (PLIC_BASE+0x2000, low32)
+    li      t0, 0x04402000          # PLIC enable, context 0 (PLIC_BASE+0x2000, low32)
     li      t1, 2                   # bit 1 = source 1
     sw      t1, 0(t0)
 
@@ -85,13 +85,13 @@ busy_done:
     ret
 
 m_trap_handler:
-    li      t0, 0x600004            # PLIC claim/complete, context 0 (PLIC_BASE+0x200004, high32)
+    li      t0, 0x04600004          # PLIC claim/complete, context 0 (PLIC_BASE+0x200004, high32)
     lw      s3, 0(t0)               # claim -- returns source 1's real ID, clears pending
 
-    li      t0, 0x8010              # UART RX_DATA
+    li      t0, 0x04008010          # UART RX_DATA
     lw      s4, 0(t0)               # pop the real byte the testbench pushed
 
-    li      t0, 0x600004
+    li      t0, 0x04600004
     sw      s3, 0(t0)               # complete (write back the claimed ID)
 
     li      s1, 1                   # marker: the real MEI fired end-to-end

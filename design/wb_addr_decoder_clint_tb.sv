@@ -52,8 +52,8 @@ module wb_addr_decoder_clint_tb;
     `include "check_lib.sv"
     `include "wb_driver.sv"
 
-    localparam logic [31:0] CLINT_MTIME    = 32'h0001_0000;
-    localparam logic [31:0] CLINT_MTIMECMP = 32'h0001_0008;
+    localparam logic [31:0] CLINT_MTIME    = 32'h0401_0000;
+    localparam logic [31:0] CLINT_MTIMECMP = 32'h0401_0008;
 
     logic [63:0] mtime_first, mtime_second;
 
@@ -75,10 +75,10 @@ module wb_addr_decoder_clint_tb;
          * UART round trip through the real fabric -- TX_DATA write then
          * TX_STATUS poll, same pattern design/uart_tx_tb.sv itself uses.
          */
-        wb_cycle(32'h0000_8000, 64'h48, 8'h01, 1'b1); // 'H'
+        wb_cycle(32'h0400_8000, 64'h48, 8'h01, 1'b1); // 'H'
         check("UART: one character captured", {55'b0, dut.uart0.tx_history_count}, 64'd1);
         check("UART: history[0] == 'H'", {56'b0, dut.uart0.tx_history[0]}, 64'h48);
-        wb_cycle(32'h0000_8008, 64'h0, 8'h00, 1'b0);
+        wb_cycle(32'h0400_8008, 64'h0, 8'h00, 1'b0);
         check("UART: TX_STATUS reads ready", dat_o, 64'h1);
 
         /*
@@ -113,7 +113,7 @@ module wb_addr_decoder_clint_tb;
         wb_cycle(32'h0000_0200, 64'h0, 8'hFF, 1'b0);
         check("RAM round trip (post-CLINT traffic, unaffected)", dat_o, 64'h1122_3344_5566_7788);
 
-        wb_cycle(32'h0000_8000, 64'h69, 8'h01, 1'b1); // 'i'
+        wb_cycle(32'h0400_8000, 64'h69, 8'h01, 1'b1); // 'i'
         check("UART: second character captured (post-CLINT traffic, unaffected)",
               {55'b0, dut.uart0.tx_history_count}, 64'd2);
 

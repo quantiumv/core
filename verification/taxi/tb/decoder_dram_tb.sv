@@ -52,11 +52,11 @@ module decoder_dram_tb;
     `include "check_lib.sv"
     `include "wb_driver.sv"
 
-    localparam logic [31:0] CLINT_MTIME    = 32'h0001_0000;
-    localparam logic [31:0] CLINT_MTIMECMP = 32'h0001_0008;
-    localparam logic [31:0] CLINT_TOP      = 32'h0001_7FFF; // top of CLINT's narrowed window
-    localparam logic [31:0] DRAM_BASE      = 32'h0001_8000;
-    localparam logic [31:0] DRAM_SECOND    = 32'h0001_8100;
+    localparam logic [31:0] CLINT_MTIME    = 32'h0401_0000;
+    localparam logic [31:0] CLINT_MTIMECMP = 32'h0401_0008;
+    localparam logic [31:0] CLINT_TOP      = 32'h0401_7FFF; // top of CLINT's narrowed window
+    localparam logic [31:0] DRAM_BASE      = 32'h0401_8000;
+    localparam logic [31:0] DRAM_SECOND    = 32'h0401_8100;
 
     logic [63:0] mtime_first, mtime_second;
 
@@ -71,10 +71,10 @@ module decoder_dram_tb;
         check("RAM round trip (pre-DRAM traffic)", dat_o, 64'hDEADBEEF_CAFEF00D);
 
         /* UART round trip. */
-        wb_cycle(32'h0000_8000, 64'h48, 8'h01, 1'b1); // 'H'
+        wb_cycle(32'h0400_8000, 64'h48, 8'h01, 1'b1); // 'H'
         check("UART: one character captured", {55'b0, dut.uart0.tx_history_count}, 64'd1);
         check("UART: history[0] == 'H'", {56'b0, dut.uart0.tx_history[0]}, 64'h48);
-        wb_cycle(32'h0000_8008, 64'h0, 8'h00, 1'b0);
+        wb_cycle(32'h0400_8008, 64'h0, 8'h00, 1'b0);
         check("UART: TX_STATUS reads ready", dat_o, 64'h1);
 
         /* CLINT mtime: real free-running counter, strict-increase check. */
@@ -120,7 +120,7 @@ module decoder_dram_tb;
         wb_cycle(32'h0000_0200, 64'h0, 8'hFF, 1'b0);
         check("RAM round trip (post-DRAM traffic, unaffected)", dat_o, 64'h1122_3344_5566_7788);
 
-        wb_cycle(32'h0000_8000, 64'h69, 8'h01, 1'b1); // 'i'
+        wb_cycle(32'h0400_8000, 64'h69, 8'h01, 1'b1); // 'i'
         check("UART: second character captured (post-DRAM traffic, unaffected)",
               {55'b0, dut.uart0.tx_history_count}, 64'd2);
 

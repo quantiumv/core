@@ -27,10 +27,14 @@
  * four modules a second time -- this file's own wiring used to be
  * byte-identical to soc.sv's body (soc.sv was originally extracted from
  * it), so `soc dut (...)` below is the same circuit, not a new one. One
- * side effect: sram0 now sizes at soc.sv's real 4096-word default rather
- * than this file's old deliberately-small 64-word override -- harmless,
- * since wb_addr_decoder's RAM/UART split is a fixed address-bit test
- * (addr_i[15]), independent of wb4_sram's num_words.
+ * side effect: sram0 now sizes at soc.sv's real num_words override
+ * (8388608, 64MB, since the Linux-boot-readiness RAM-growth change)
+ * rather than this file's old deliberately-small 64-word override --
+ * harmless, since wb_addr_decoder's RAM/peripheral split is a fixed
+ * address-bit test (addr_i[26], sel_periph), independent of wb4_sram's
+ * own num_words. UART now lives at 0x0400_8000 (was 0x8000) since that
+ * same change shifted every peripheral up by 0x0400_0000 -- see
+ * wb_addr_decoder.sv's own header for the full new address map.
  *
  * Instructions are packed two-per-64-bit-word directly into the SRAM's
  * memory[] array (hierarchical poke, same spirit as the old imem0 pokes)
@@ -45,7 +49,7 @@
  * the simulator happened to start first. Without this, the poke could
  * race wb4_sram's own init and get silently overwritten.
  *
- * Data addresses (0x100, 0x8000) are deliberately clear of the program's
+ * Data addresses (0x100, 0x04008000) are deliberately clear of the program's
  * own instruction footprint (0x00-0x2C) -- this is a shared Von Neumann
  * memory with no protection, so a data write to an address the program
  * still occupies would self-modify code that's already been fetched
@@ -83,7 +87,7 @@ module core_wb_tb;
          *  0x18   6  beq  x3,x4,8      -> 0x20        taken (15==15)
          *  0x1C   7  addi x5,x0,999                  SKIPPED -- proves the taken branch really skips
          *  0x20   8  addi x6,x0,72                   x6 = 'H' (0x48)
-         *  0x24   9  lui  x7,0x8                     x7 = 0x8000 (UART TX_DATA)
+         *  0x24   9  lui  x7,0x4008                  x7 = 0x04008000 (UART TX_DATA)
          *  0x28  10  sw   x6,0(x7)                   mem-mapped write -> routes to UART, prints 'H'
          *  0x2C  11  ebreak
          */
@@ -95,7 +99,7 @@ module core_wb_tb;
                             encode_s(32'sd0, 5'd3, 5'd8, 3'b010, `OPC_STORE)};
         dut.sram0.memory[3] = {encode_i(32'sd999, 5'd0, 3'b000, 5'd5, `OPC_OP_IMM),
                             encode_b(32'sd8, 5'd4, 5'd3, 3'b000, `OPC_BRANCH)};
-        dut.sram0.memory[4] = {encode_u(20'h8, 5'd7, `OPC_LUI),
+        dut.sram0.memory[4] = {encode_u(20'h4008, 5'd7, `OPC_LUI),
                             encode_i(32'sd72, 5'd0, 3'b000, 5'd6, `OPC_OP_IMM)};
         dut.sram0.memory[5] = {{11'b0, 1'b1, 13'b0, `OPC_SYSTEM},          // idx11: ebreak (0x2C)
                             encode_s(32'sd0, 5'd6, 5'd7, 3'b010, `OPC_STORE)}; // idx10: sw x6,0(x7) (0x28)
@@ -111,7 +115,7 @@ module core_wb_tb;
         check("x4 (lw, RAM round trip over bus)", dut.core0.regfile0.gp_registers[4], 64'd15);
         check("x5 (skipped by taken beq)",     dut.core0.regfile0.gp_registers[5], 64'd0);
         check("x6 (addi, UART payload)",       dut.core0.regfile0.gp_registers[6], 64'd72);
-        check("x7 (lui, UART base address)",   dut.core0.regfile0.gp_registers[7], 64'h8000);
+        check("x7 (lui, UART base address)",   dut.core0.regfile0.gp_registers[7], 64'h04008000);
         check("x8 (addi, RAM base address)",   dut.core0.regfile0.gp_registers[8], 64'h100);
         check("RAM contents at 0x100",         {32'b0, dut.sram0.memory[32][31:0]}, 64'd15);
         check("UART received exactly one byte", {55'b0, dut.uart0.tx_history_count}, 64'd1);

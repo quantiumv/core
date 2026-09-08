@@ -120,7 +120,7 @@ module wb_addr_decoder_tb;
 
         // UART-range address: only uart_cyc_o should assert.
         @(negedge clk);
-        addr = 32'h0000_8000; cyc = 1; stb = 1;
+        addr = 32'h0400_8000; cyc = 1; stb = 1;
         #1;
         check("UART address: uart_cyc_o asserted", {63'b0, uart_cyc_o}, 64'd1);
         check("UART address: ram_cyc_o stays low", {63'b0, ram_cyc_o}, 64'd0);
@@ -131,7 +131,7 @@ module wb_addr_decoder_tb;
 
         // CLINT-range address: only clint_cyc_o should assert.
         @(negedge clk);
-        addr = 32'h0001_0000; cyc = 1; stb = 1;
+        addr = 32'h0401_0000; cyc = 1; stb = 1;
         #1;
         check("CLINT address: clint_cyc_o asserted", {63'b0, clint_cyc_o}, 64'd1);
         check("CLINT address: ram_cyc_o stays low", {63'b0, ram_cyc_o}, 64'd0);
@@ -144,9 +144,12 @@ module wb_addr_decoder_tb;
         // (addr_i[16]==1, addr_i[15]==1) used to alias into CLINT's old
         // 64KB window (bit 16 alone decided CLINT, regardless of bit 15);
         // under the current 4-way map, bit 15 is a real, tested select
-        // bit, and 0x1_8000 is DRAM's own base.
+        // bit, and 0x0401_8000 is DRAM's own base (shifted up by
+        // 0x0400_0000 from the pre-RAM-growth 0x0001_8000, along with
+        // every other peripheral, once addr_i[26]/sel_periph gates the
+        // whole peripheral sub-decode -- see wb_addr_decoder.sv's header).
         @(negedge clk);
-        addr = 32'h0001_8000; cyc = 1; stb = 1;
+        addr = 32'h0401_8000; cyc = 1; stb = 1;
         #1;
         check("DRAM address (formerly CLINT's over-wide window): dram_cyc_o asserted", {63'b0, dram_cyc_o}, 64'd1);
         check("DRAM address: uart_cyc_o stays low", {63'b0, uart_cyc_o}, 64'd0);
@@ -160,9 +163,14 @@ module wb_addr_decoder_tb;
         // actually catch an off-by-one the way they would against a real
         // range compare -- but they're cheap, and a future rewrite to a
         // comparator-based decode would be exactly the kind of change
-        // these should catch a regression in.
+        // these should catch a regression in. RAM's own top-of-window
+        // moved from 0x0000_7FFF (32KB) to 0x03FF_FFFF (64MB) with the
+        // Linux-boot-readiness RAM-growth change -- addr_i[26]/sel_periph
+        // is RAM's real boundary now, not addr_i[15]; the UART/CLINT/DRAM
+        // top-of-window addresses simply carry the same +0x0400_0000 shift
+        // as their own base addresses above.
         @(negedge clk);
-        addr = 32'h0000_7FFF; cyc = 1; stb = 1;  // top of RAM's window
+        addr = 32'h03FF_FFFF; cyc = 1; stb = 1;  // top of RAM's (now 64MB) window
         #1;
         check("RAM top-of-window address: ram_cyc_o asserted", {63'b0, ram_cyc_o}, 64'd1);
         check("RAM top-of-window address: uart_cyc_o stays low", {63'b0, uart_cyc_o}, 64'd0);
@@ -172,7 +180,7 @@ module wb_addr_decoder_tb;
         @(negedge clk);
 
         @(negedge clk);
-        addr = 32'h0000_FFFF; cyc = 1; stb = 1;  // top of UART's window
+        addr = 32'h0400_FFFF; cyc = 1; stb = 1;  // top of UART's window
         #1;
         check("UART top-of-window address: uart_cyc_o asserted", {63'b0, uart_cyc_o}, 64'd1);
         check("UART top-of-window address: ram_cyc_o stays low", {63'b0, ram_cyc_o}, 64'd0);
@@ -182,7 +190,7 @@ module wb_addr_decoder_tb;
         @(negedge clk);
 
         @(negedge clk);
-        addr = 32'h0001_7FFF; cyc = 1; stb = 1;  // top of CLINT's narrowed window
+        addr = 32'h0401_7FFF; cyc = 1; stb = 1;  // top of CLINT's narrowed window
         #1;
         check("CLINT top-of-window address: clint_cyc_o asserted", {63'b0, clint_cyc_o}, 64'd1);
         check("CLINT top-of-window address: ram_cyc_o stays low", {63'b0, ram_cyc_o}, 64'd0);
@@ -192,7 +200,7 @@ module wb_addr_decoder_tb;
         @(negedge clk);
 
         @(negedge clk);
-        addr = 32'h0001_FFFF; cyc = 1; stb = 1;  // top of DRAM's window
+        addr = 32'h0401_FFFF; cyc = 1; stb = 1;  // top of DRAM's window
         #1;
         check("DRAM top-of-window address: dram_cyc_o asserted", {63'b0, dram_cyc_o}, 64'd1);
         check("DRAM top-of-window address: ram_cyc_o stays low", {63'b0, ram_cyc_o}, 64'd0);
@@ -207,7 +215,7 @@ module wb_addr_decoder_tb;
         wb_cycle(32'h0000_0200, 64'h0, 8'hFF, 1'b0);
         check("response routed from RAM", dat_o, 64'hAAAAAAAA_AAAAAAAA);
 
-        wb_cycle(32'h0000_8008, 64'h0, 8'hFF, 1'b0);
+        wb_cycle(32'h0400_8008, 64'h0, 8'hFF, 1'b0);
         check("response routed from UART (latch updated, not stuck on RAM)", dat_o, 64'hBBBBBBBB_BBBBBBBB);
 
         wb_cycle(32'h0000_0300, 64'h0, 8'hFF, 1'b0);
@@ -219,10 +227,10 @@ module wb_addr_decoder_tb;
         wb_cycle(32'h0000_0400, 64'h0, 8'hFF, 1'b0);
         check("3-way: response routed from RAM", dat_o, 64'hAAAAAAAA_AAAAAAAA);
 
-        wb_cycle(32'h0000_8010, 64'h0, 8'hFF, 1'b0);
+        wb_cycle(32'h0400_8010, 64'h0, 8'hFF, 1'b0);
         check("3-way: response routed from UART", dat_o, 64'hBBBBBBBB_BBBBBBBB);
 
-        wb_cycle(32'h0001_0008, 64'h0, 8'hFF, 1'b0);
+        wb_cycle(32'h0401_0008, 64'h0, 8'hFF, 1'b0);
         check("3-way: response routed from CLINT", dat_o, 64'hCCCCCCCC_CCCCCCCC);
 
         wb_cycle(32'h0000_0500, 64'h0, 8'hFF, 1'b0);
@@ -231,10 +239,10 @@ module wb_addr_decoder_tb;
         // Close the loop: the sequence above never exercises RAM -> CLINT
         // or CLINT -> UART directly (only CLINT -> RAM and UART -> CLINT
         // were hit). All 6 ordered target-pair transitions are now covered.
-        wb_cycle(32'h0001_0010, 64'h0, 8'hFF, 1'b0);
+        wb_cycle(32'h0401_0010, 64'h0, 8'hFF, 1'b0);
         check("closing the loop: response routed RAM -> CLINT", dat_o, 64'hCCCCCCCC_CCCCCCCC);
 
-        wb_cycle(32'h0000_8018, 64'h0, 8'hFF, 1'b0);
+        wb_cycle(32'h0400_8018, 64'h0, 8'hFF, 1'b0);
         check("closing the loop: response routed CLINT -> UART", dat_o, 64'hBBBBBBBB_BBBBBBBB);
 
         // DRAM is the 4th target -- extend "closing the loop" to cover
@@ -251,22 +259,22 @@ module wb_addr_decoder_tb;
         // previous section's end state (UART) so every DRAM-involving
         // pair is hit exactly once, giving full 12/12 ordered-pair
         // coverage across the file.
-        wb_cycle(32'h0001_8010, 64'h0, 8'hFF, 1'b0);
+        wb_cycle(32'h0401_8010, 64'h0, 8'hFF, 1'b0);
         check("DRAM pairs: response routed UART -> DRAM", dat_o, 64'hDDDDDDDD_DDDDDDDD);
 
         wb_cycle(32'h0000_0600, 64'h0, 8'hFF, 1'b0);
         check("DRAM pairs: response routed DRAM -> RAM", dat_o, 64'hAAAAAAAA_AAAAAAAA);
 
-        wb_cycle(32'h0001_8018, 64'h0, 8'hFF, 1'b0);
+        wb_cycle(32'h0401_8018, 64'h0, 8'hFF, 1'b0);
         check("DRAM pairs: response routed RAM -> DRAM", dat_o, 64'hDDDDDDDD_DDDDDDDD);
 
-        wb_cycle(32'h0001_0018, 64'h0, 8'hFF, 1'b0);
+        wb_cycle(32'h0401_0018, 64'h0, 8'hFF, 1'b0);
         check("DRAM pairs: response routed DRAM -> CLINT", dat_o, 64'hCCCCCCCC_CCCCCCCC);
 
-        wb_cycle(32'h0001_8020, 64'h0, 8'hFF, 1'b0);
+        wb_cycle(32'h0401_8020, 64'h0, 8'hFF, 1'b0);
         check("DRAM pairs: response routed CLINT -> DRAM", dat_o, 64'hDDDDDDDD_DDDDDDDD);
 
-        wb_cycle(32'h0000_8020, 64'h0, 8'hFF, 1'b0);
+        wb_cycle(32'h0400_8020, 64'h0, 8'hFF, 1'b0);
         check("DRAM pairs: response routed DRAM -> UART", dat_o, 64'hBBBBBBBB_BBBBBBBB);
 
         $display("");

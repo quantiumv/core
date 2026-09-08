@@ -44,14 +44,16 @@ module wb_addr_decoder_plic_tb;
     `include "check_lib.sv"
     `include "wb_driver.sv"
 
-    localparam logic [31:0] CLINT_MTIME    = 32'h0001_0000;
-    localparam logic [31:0] CLINT_MTIMECMP = 32'h0001_0008;
+    localparam logic [31:0] CLINT_MTIME    = 32'h0401_0000;
+    localparam logic [31:0] CLINT_MTIMECMP = 32'h0401_0008;
 
     // Real PLIC spec byte offsets (independently transcribed, matching
     // plic.sv's own internal localparams, not read from that file's
     // internals) plus the new PLIC_BASE this milestone's own addr_i[22]
-    // split assigns.
-    localparam logic [31:0] PLIC_BASE      = 32'h0040_0000;
+    // split assigns (shifted up by 0x0400_0000 from 0x0040_0000, along
+    // with every other peripheral, by the Linux-boot-readiness RAM-growth
+    // change's new addr_i[26]/sel_periph outer gate).
+    localparam logic [31:0] PLIC_BASE      = 32'h0440_0000;
     localparam logic [31:0] PLIC_PRIORITY  = PLIC_BASE + 32'h00_0000; // source1's field: HIGH 32 bits
     localparam logic [31:0] PLIC_THRESH0   = PLIC_BASE + 32'h20_0000; // threshold: LOW 32 bits
 
@@ -68,9 +70,9 @@ module wb_addr_decoder_plic_tb;
         check("RAM round trip (pre-PLIC traffic)", dat_o, 64'hDEADBEEF_CAFEF00D);
 
         /* UART round trip. */
-        wb_cycle(32'h0000_8000, 64'h48, 8'h01, 1'b1); // 'H'
+        wb_cycle(32'h0400_8000, 64'h48, 8'h01, 1'b1); // 'H'
         check("UART: one character captured", {55'b0, dut.uart0.tx_history_count}, 64'd1);
-        wb_cycle(32'h0000_8008, 64'h0, 8'h00, 1'b0);
+        wb_cycle(32'h0400_8008, 64'h0, 8'h00, 1'b0);
         check("UART: TX_STATUS reads ready", dat_o, 64'h1);
 
         /* CLINT: mtime sane (real free-running counter), mtimecmp round trip. */
@@ -119,7 +121,7 @@ module wb_addr_decoder_plic_tb;
         wb_cycle(32'h0000_0200, 64'h0, 8'hFF, 1'b0);
         check("RAM round trip (post-PLIC traffic, unaffected)", dat_o, 64'h1122_3344_5566_7788);
 
-        wb_cycle(32'h0000_8000, 64'h69, 8'h01, 1'b1); // 'i'
+        wb_cycle(32'h0400_8000, 64'h69, 8'h01, 1'b1); // 'i'
         check("UART: second character captured (post-PLIC traffic, unaffected)",
               {55'b0, dut.uart0.tx_history_count}, 64'd2);
 

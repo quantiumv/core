@@ -28,7 +28,10 @@
  * design/soc.sv's own header comment for why it can't).
  *
  * dram0's ADDR_W(15) must exactly match wb_addr_decoder.sv's 32KB DRAM
- * window (0x0001_8000-0x0001_FFFF) -- all other dram_model parameters
+ * window (0x0401_8000-0x0401_FFFF, shifted up by 0x0400_0000 from the
+ * pre-RAM-growth 0x0001_8000-0x0001_FFFF by the Linux-boot-readiness
+ * RAM-growth change's new addr_i[26]/sel_periph outer gate -- see
+ * wb_addr_decoder.sv's own header) -- all other dram_model parameters
  * are left at their real defaults (ACCESS_LATENCY_CYCLES=4,
  * REFRESH_INTERVAL_CYCLES=256, REFRESH_BUSY_CYCLES=16), since this
  * harness's own testbench (decoder_dram_tb.sv) is testing ROUTING

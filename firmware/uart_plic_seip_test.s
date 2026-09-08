@@ -41,11 +41,11 @@ main:
     la      t0, m_trap_handler
     csrw    mtvec, t0
 
-    li      t0, 0x400004            # PLIC priority, source 1
+    li      t0, 0x04400004          # PLIC priority, source 1
     li      t1, 1
     sw      t1, 0(t0)
 
-    li      t0, 0x402080            # PLIC enable, context 1 (PLIC_BASE+0x2080, low32)
+    li      t0, 0x04402080          # PLIC enable, context 1 (PLIC_BASE+0x2080, low32)
     li      t1, 2                   # bit 1 = source 1
     sw      t1, 0(t0)
 
@@ -85,13 +85,13 @@ m_trap_handler:
     mret
 
 s_trap_handler:
-    li      t0, 0x601004            # PLIC claim/complete, context 1 (PLIC_BASE+0x201004, high32)
+    li      t0, 0x04601004          # PLIC claim/complete, context 1 (PLIC_BASE+0x201004, high32)
     lw      s3, 0(t0)               # claim -- returns source 1's real ID, clears pending
 
-    li      t0, 0x8010              # UART RX_DATA
+    li      t0, 0x04008010          # UART RX_DATA
     lw      s4, 0(t0)               # pop the real byte the testbench pushed
 
-    li      t0, 0x601004
+    li      t0, 0x04601004
     sw      s3, 0(t0)               # complete (write back the claimed ID)
 
     li      s1, 1                   # marker: the real SEI fired, routed to S
