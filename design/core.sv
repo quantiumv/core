@@ -81,10 +81,11 @@
  * C instruction -- the second dword's low halfword).
  *
  * Scope: full RV64IMAC base ISA + Zicsr + full U/S/M privilege modes,
- * plus machine-timer interrupts (CLINT mtime/mtimecmp, see i_mtip below
- * and the Interrupts section near csr_file0's instantiation). No Sv39,
- * no external/PLIC interrupts, no IPI/msip -- later milestones (a
- * different teammate's work for Sv39). Misaligned DATA access (loads/stores) traps cleanly (see
+ * machine-timer + external (PLIC) interrupts, PMP, and (as of the Sv39
+ * staged plan, in progress) Sv39 fetch-side translation -- see satp_w/
+ * fetch_translate_active and the "Sv39 Page-Table Walker" section below.
+ * Mem-side translation (Milestone 4), a TLB (Milestone 5), and IPI/msip
+ * remain later milestones. Misaligned DATA access (loads/stores) traps cleanly (see
  * mem_load_misaligned/mem_store_misaligned below) rather than being
  * handled in hardware -- actual misaligned load/store SUPPORT stays
  * deferred to a later milestone alongside Sv39, but silently truncating
@@ -359,7 +360,10 @@ module core (
         S_MEM,
         S_AMO_WRITE,
         S_FETCH_HI,
-        S_DEBUG_HALTED
+        S_DEBUG_HALTED,
+        S_PTW           // Sv39 Milestone 3 -- appended LAST, same "preserve every
+                        // existing numeric value" discipline S_FETCH_HI's own
+                        // comment above already explains; 3'd7 stays reserved.
     } state_t;
 
     state_t state;
@@ -492,6 +496,63 @@ module core (
     logic debug_progbuf_active;
     logic progbuf_ebreak_done;
     logic progbuf_abort;
+    /*
+     * Sv39 (Milestone 3 of the Sv39 staged plan) -- forward-declared here
+     * (bare/undriven) because the state-transition always_ff and
+     * wb_master_drive (both textually early, same reason debug_progbuf_active
+     * itself is forward-declared here) need fetch_translate_active/
+     * fetch_lo_resolved_q/fetch_hi_resolved_q/ptw_pmp_fault. satp_w is a
+     * plain csr_file0 port-connected wire (its real connection lives at
+     * that instantiation, much further down, same as mip_w/pmpcfg0_w) --
+     * satp_mode_w/satp_ppn_w/fetch_translate_active can be full, real
+     * one-line assigns right here (no further forward-reference needed)
+     * since satp_w/debug_progbuf_active/current_priv are all already
+     * available at this point. ptw_pmp_fault is the one signal here that
+     * DOES need a "declare early, drive late" split (like pmp_fetchlo_fault
+     * itself) -- its real assign lives in the new "Sv39 Page-Table
+     * Walker" section further down, which needs the PMP region-field
+     * wires that aren't available until after fetch_paddr_hi.
+     *
+     * fetch_translate_active is never MPRV-aware (instruction fetch is
+     * never affected by MPRV, per spec -- same reason the fetch-side PMP
+     * check elsewhere always uses raw current_priv, never
+     * mem_effective_priv) and excludes Program Buffer execution
+     * (decision 12 of the staged plan -- a debugger's own access is
+     * trusted and structurally can't afford S_PTW's multi-cycle latency
+     * inside S_FETCH's existing single-combinational-cycle progbuf arm).
+     *
+     * No TLB exists yet (Milestone 5) -- every translated fetch
+     * genuinely walks, every time. ptw_level_q/ptw_base_q/ptw_vaddr_q/
+     * ptw_reason_q are pure per-walk scratch (no reset needed, always
+     * freshly written the cycle a walk starts, before ever being read --
+     * same convention instr_line_q/crossed_q already establish).
+     * fetch_lo_resolved_q/fetch_hi_resolved_q/fetch_lo_fault_q/
+     * fetch_hi_fault_q DO get an explicit reset (defensive -- this is
+     * new, high-risk logic, unlike the well-proven registers that get to
+     * skip one).
+     */
+    /* verilator lint_off UNUSEDSIGNAL */
+    wire [(`WORD_SIZE - 1):0] satp_w;
+    /* verilator lint_on UNUSEDSIGNAL */
+    // ASID (bits[59:44]) is genuinely never read anywhere -- ASIDLEN=0
+    // (decision 2 of the staged plan), forced to 0 in STORAGE by
+    // csr_file.sv itself, so nothing here ever needs to consult it.
+    wire [3:0]  satp_mode_w = satp_w[63:60];
+    wire [43:0] satp_ppn_w  = satp_w[43:0];
+    wire        fetch_translate_active = !debug_progbuf_active
+                                        && (current_priv != PRIV_M)
+                                        && (satp_mode_w == 4'd8);
+    wire [(`WORD_SIZE - 1):0] fetch_hi_vaddr = pc + `WORD_SIZE'(8);
+    logic         ptw_pmp_fault;
+    logic         ptw_pte_fault;   // real assign lives in the "Sv39 Page-Table Walker" section
+    logic         ptw_pte_leaf;    // (needs the PTE-decode wires, only available there)
+    logic         ptw_reason_q;     // 0 = serving the LO fetch, 1 = serving HI
+    logic [1:0]   ptw_level_q;      // 2 -> 1 -> 0
+    logic [63:0]  ptw_base_q;       // current level's table, BYTE address
+    logic [63:0]  ptw_vaddr_q;      // the VA being translated this walk
+    logic [63:0]  fetch_lo_paddr_q, fetch_hi_paddr_q;
+    logic         fetch_lo_resolved_q, fetch_hi_resolved_q;
+    logic         fetch_lo_fault_q, fetch_hi_fault_q;
     /*
      * dm_access_active: gates every DM Access-Register mux (regfile0's
      * read/write ports below, csr_file0's addr/we/wdata below) between
@@ -721,6 +782,23 @@ module core (
                 S_FETCH:     if (debug_progbuf_active) state <= S_EXEC;
                              else if (debug_halt_req_entry) state <= S_DEBUG_HALTED;
                              /*
+                              * Sv39 (Milestone 3): translation needed and not
+                              * yet resolved for THIS fetch -- redirect to the
+                              * walker instead of ever consulting pmp_fetchlo_fault
+                              * or wb_done this cycle. fetch_paddr (hence
+                              * pmp_fetchlo_fault, computed off it) is stale/
+                              * meaningless until fetch_lo_resolved_q is set, so
+                              * this MUST win priority over both checks below --
+                              * mirrors debug_progbuf_active/debug_halt_req_entry's
+                              * own "redirect before the ordinary path" shape.
+                              * Once the walk resolves, S_PTW's own arm sends us
+                              * right back here with fetch_lo_resolved_q now set,
+                              * at which point this check is false and the
+                              * ordinary path below runs against the now-valid
+                              * translated fetch_paddr.
+                              */
+                             else if (fetch_translate_active && !fetch_lo_resolved_q) state <= S_PTW;
+                             /*
                               * pmp_fetchlo_fault (PMP+PLIC plan, Milestone 2):
                               * known combinationally off fetch_paddr before
                               * any bus request for this fetch is ever issued
@@ -739,7 +817,39 @@ module core (
                               */
                              else if (pmp_fetchlo_fault) state <= S_EXEC;
                              else if (wb_done) state <= state_t'((fetch_hi_taken && !pmp_fetchhi_fault) ? S_FETCH_HI : S_EXEC);
-                S_FETCH_HI:  if (wb_done) state <= S_EXEC;
+                /*
+                 * Sv39 (Milestone 3): same redirect, same reason, for the
+                 * second (crossing) dword -- fetch_paddr_hi/fetch_hi_vaddr's
+                 * own header comments explain why this needs an
+                 * INDEPENDENT walk rather than reusing the lo half's own
+                 * resolved address.
+                 */
+                S_FETCH_HI:  if (fetch_translate_active && !fetch_hi_resolved_q) state <= S_PTW;
+                             else if (wb_done) state <= S_EXEC;
+                /*
+                 * Sv39 (Milestone 3): the walker itself. ptw_pmp_fault is
+                 * known combinationally off ptw_pte_addr before this
+                 * level's own read is ever issued (wb_master_drive's own
+                 * S_PTW arm suppresses it in lockstep) -- falls straight
+                 * to S_EXEC with fetch_fault_q capturing cause 1, same
+                 * "checked before the bus phase" shape pmp_fetchlo_fault
+                 * itself already uses. Otherwise: a real bus error reading
+                 * the PTE is ALSO cause 1 (fetch_fault_q); a PTE-content
+                 * fault (malformed/misaligned/permission/A-bit) is cause
+                 * 12 (fetch_lo_fault_q/fetch_hi_fault_q, see the walker's
+                 * own progression always_ff below); a resolved leaf sends
+                 * us back to whichever stream requested this walk, now
+                 * with fetch_lo_paddr_q/fetch_hi_paddr_q valid; anything
+                 * else (a clean non-leaf pointer PTE) descends one level
+                 * by looping on this same state.
+                 */
+                S_PTW:       if (ptw_pmp_fault) state <= S_EXEC;
+                             else if (wb_done) begin
+                                 if (wb_err_i) state <= S_EXEC;
+                                 else if (ptw_pte_fault) state <= S_EXEC;
+                                 else if (ptw_pte_leaf) state <= state_t'(ptw_reason_q ? S_FETCH_HI : S_FETCH);
+                                 else state <= S_PTW;
+                             end
                 /*
                  * debug_ebreak_entry redirects the same commit_now edge
                  * that would otherwise send an ordinary EBREAK back to
@@ -845,7 +955,15 @@ module core (
      */
     logic        fetch_fault_q;
     always_ff @(posedge clk) begin
-        if (state == S_FETCH && pmp_fetchlo_fault) begin
+        if (state == S_FETCH && fetch_translate_active && !fetch_lo_resolved_q) begin
+            // Sv39 (Milestone 3): redirecting to S_PTW this cycle --
+            // fetch_paddr (hence pmp_fetchlo_fault, computed off it) is
+            // not yet resolved, so its transient value must not be
+            // captured as a fault. The walk hasn't even started; nothing
+            // to latch here. Must be checked FIRST, ahead of the
+            // pmp_fetchlo_fault arm below, mirroring the state-transition
+            // always_ff's own identical priority requirement.
+        end else if (state == S_FETCH && pmp_fetchlo_fault) begin
             // Low half denied -- known combinationally, no real bus
             // request was ever issued (wb_master_drive's own S_FETCH arm
             // suppressed it), so there's no wb_dat_i to capture at all;
@@ -876,6 +994,21 @@ module core (
                                          // (== wb_ok && !pmp_fetchhi_fault) was set, so
                                          // fetch_fault_q is guaranteed 0 walking into
                                          // S_FETCH_HI.
+        end
+        /*
+         * Sv39 (Milestone 3): a PMP-denied or bus-errored PTE read is an
+         * access fault of the ORIGINAL access type (cause 1), per
+         * norm:pmp_check_pagetable_access + spec step 2 -- reuses this
+         * SAME fetch_fault_q register, the same "already the canonical,
+         * sufficient capture" reasoning its own header comment above
+         * already establishes. A genuine PTE-content page fault (cause
+         * 12) does NOT set fetch_fault_q -- see fetch_lo_fault_q/
+         * fetch_hi_fault_q's own always_ff below instead.
+         */
+        if (state == S_PTW && ptw_pmp_fault) begin
+            fetch_fault_q <= 1'b1;
+        end else if (state == S_PTW && wb_done) begin
+            fetch_fault_q <= wb_err_i;
         end
     end
 
@@ -959,17 +1092,21 @@ module core (
                              compressed encoding, it would just decode
                              wrong, so this is a real, documented
                              restriction, not an oversight). */
-        : fetch_fault_q
+        : (fetch_fault_q || fetch_lo_fault_q || fetch_hi_fault_q)
         ? 32'h00000013 /* addi x0,x0,0 -- inert placeholder for a FAULTED fetch
-                           (instr_line_q/instr_hi_q are garbage on wb_err_i).
-                           Same trick as the compressed-illegal placeholder
-                           below, one more reason it's safe to reuse: this
-                           makes every downstream classification (is_load,
-                           is_store, is_ebreak, is_illegal_instr, ...)
-                           harmless ADDI-shaped no-ops, so nothing can act on
-                           the garbage bits before the real trap mechanism
-                           (fetch_fault_q feeding exc_code/trap_taken/trap_val
-                           directly, see below) takes over. */
+                           (instr_line_q/instr_hi_q are garbage on wb_err_i,
+                           or were never even fetched at all on a page
+                           fault -- Sv39 Milestone 3's fetch_lo_fault_q/
+                           fetch_hi_fault_q join fetch_fault_q here, same
+                           placeholder, same reasoning). Same trick as the
+                           compressed-illegal placeholder below, one more
+                           reason it's safe to reuse: this makes every
+                           downstream classification (is_load, is_store,
+                           is_ebreak, is_illegal_instr, ...) harmless
+                           ADDI-shaped no-ops, so nothing can act on the
+                           garbage bits before the real trap mechanism
+                           (feeding exc_code/trap_taken/trap_val directly,
+                           see below) takes over. */
         : is_compressed
             ? (c_expand_illegal ? 32'h00000013 /* addi x0,x0,0 -- inert placeholder
                                                    value only, never the real trap
@@ -1002,15 +1139,18 @@ module core (
      * file.
      */
     /*
-     * fetch_paddr: named indirection point for a future Sv39 MMU stage.
-     * Today a pure passthrough (pc IS the physical address -- no
-     * translation exists yet); when Sv39 lands, only this wire's RHS
-     * needs to change (e.g. to a page-table-walker's translated
-     * output), with no restructuring of the surrounding FSM/bus-driving
-     * logic below. (The halfword-select logic above is deliberately
-     * left keyed on raw pc, not fetch_paddr -- pc[2:1] are page-OFFSET
-     * bits, always identity-mapped even under Sv39, so there's nothing
-     * for translation to ever change there.)
+     * fetch_paddr: named indirection point for the Sv39 MMU stage --
+     * Milestone 3 is its real consumer now. A plain passthrough (pc IS
+     * the physical address) whenever fetch_translate_active is false
+     * (Bare mode, M-mode, or Program Buffer execution); otherwise the
+     * page-table walker's own resolved output, fetch_lo_paddr_q, latched
+     * by the new "Sv39 Page-Table Walker" section further down. No
+     * restructuring of the surrounding FSM/bus-driving logic was needed
+     * to land this -- exactly the seam this wire's own header always
+     * promised. (The halfword-select logic above is deliberately left
+     * keyed on raw pc, not fetch_paddr -- pc[2:1] are page-OFFSET bits,
+     * always identity-mapped even under Sv39, so there's nothing for
+     * translation to ever change there.)
      *
      * Deliberately WORD_SIZE-wide even though only bits[31:3] are
      * consumed today (this core's physical address space is 32 bits) --
@@ -1047,22 +1187,23 @@ module core (
      * csr_file0's own Sv39 control-plane exports (Sv39 staged plan,
      * Milestone 1) -- declared here alongside the PMP group above for the
      * same reason (a forward reference to a csr_file0 output, needed by
-     * this file's own connection list further down). satp_w's first real
-     * reader is Milestone 3's own page-table walker; mstatus_sum_w/
+     * this file's own connection list further down). mstatus_sum_w/
      * mstatus_mxr_w's first real reader is Milestone 4's mem-side
-     * permission check -- all three still genuinely unused, wrapped
-     * together, same precedent pmpcfg0_w's own group established above.
-     * mstatus_tvm_w is NOT wrapped: Milestone 2 (tvm_violation, below)
-     * is already its real consumer.
+     * permission check -- still genuinely unused, wrapped. mstatus_tvm_w
+     * is NOT wrapped: Milestone 2 (tvm_violation) is already its real
+     * consumer. satp_w itself, and everything Milestone 3 derives from it
+     * (satp_mode_w/satp_ppn_w/fetch_translate_active/the PTW registers),
+     * are forward-declared much earlier instead (alongside
+     * debug_progbuf_active) -- the state-transition always_ff needs them
+     * far before this point in the file.
      */
     /* verilator lint_off UNUSEDSIGNAL */
-    wire [(`WORD_SIZE - 1):0] satp_w;
     wire mstatus_sum_w, mstatus_mxr_w;
     /* verilator lint_on UNUSEDSIGNAL */
     wire mstatus_tvm_w;
 
     /* verilator lint_off UNUSEDSIGNAL */
-    wire [(`WORD_SIZE - 1):0] fetch_paddr = pc;
+    wire [(`WORD_SIZE - 1):0] fetch_paddr = fetch_translate_active ? fetch_lo_paddr_q : pc;
     /* verilator lint_on UNUSEDSIGNAL */
     wire [31:0] fetch_addr = {fetch_paddr[31:3], 3'b0};
 
@@ -1070,9 +1211,19 @@ module core (
      * C extension: the second dword a crossing (S_FETCH_HI) fetch
      * needs, one dword past fetch_addr. Only ever driven onto the bus
      * from the S_FETCH_HI arm of wb_master_drive below.
+     *
+     * Sv39 (Milestone 3): fetch_hi_vaddr (forward-declared early,
+     * alongside fetch_translate_active) is the SEPARATE pre-translation
+     * VA source the walker uses for the HI stream -- deliberately NOT
+     * "fetch_paddr + 8" (which, once translation is active, would be
+     * "translated_lo_addr + 8", wrong whenever this dword-crossing pair
+     * straddles a real page boundary; virtual and physical adjacency
+     * only coincide WITHIN a page, never guaranteed across one). Under
+     * translation, fetch_paddr_hi becomes the walker's OWN independently-
+     * resolved fetch_hi_paddr_q, not derived from fetch_paddr at all.
      */
     /* verilator lint_off UNUSEDSIGNAL */
-    wire [(`WORD_SIZE - 1):0] fetch_paddr_hi = fetch_paddr + `WORD_SIZE'(8);
+    wire [(`WORD_SIZE - 1):0] fetch_paddr_hi = fetch_translate_active ? fetch_hi_paddr_q : (fetch_paddr + `WORD_SIZE'(8));
     /* verilator lint_on UNUSEDSIGNAL */
     wire [31:0] fetch_addr_hi = {fetch_paddr_hi[31:3], 3'b0};
 
@@ -1221,6 +1372,252 @@ module core (
 
     assign pmp_fetchlo_fault = !debug_progbuf_active && !pmp_fetchlo_x_ok;
     assign pmp_fetchhi_fault = !debug_progbuf_active && !pmp_fetchhi_x_ok;
+
+    /* --------------------------------------------------------------- *
+     * Sv39 Page-Table Walker (Milestone 3 of the Sv39 staged plan) --
+     * fetch-side only; Milestone 4's mem-side (load/store/AMO) consumer
+     * reuses every piece of this walker unchanged except its own
+     * requester tag and permission-check specialization.
+     *
+     * No TLB exists yet (Milestone 5) -- every translated fetch
+     * genuinely walks, every time. Reuses the existing single Wishbone
+     * master via ONE new state_t value (S_PTW) rather than a second
+     * arbitrated master -- this core is single-issue/non-pipelined, so
+     * nothing can ever need to interrupt an in-flight walk the way a
+     * pipelined design's KILL_REQ/WAIT_RVALID states exist to allow.
+     * PTE reads are deliberately NOT added to wb_ifetch_o's own OR-list
+     * above (S_PTW isn't in it) -- this makes a PTE read present as an
+     * ordinary DATA access to cache_complex.sv's existing ifetch_i-keyed
+     * routing mux, with zero new signal/mux-arm/module-port anywhere;
+     * the same write-through D$ that services an OS's own SD to a PTE
+     * already keeps that line coherent for a walker's later re-read of
+     * the identical address, with no invalidation logic needed.
+     * --------------------------------------------------------------- */
+
+    // VPN extraction (9-bit fields, per spec) and the canonical-address
+    // check (bits[63:39] must all equal bit 38) -- re-checked at every
+    // level (ptw_vaddr_q is invariant across a single walk, so this is a
+    // redundant-but-harmless per-level re-evaluation, not a correctness
+    // issue; a noncanonical VA still faults on schedule, at level 2).
+    wire [8:0] ptw_vpn2 = ptw_vaddr_q[38:30];
+    wire [8:0] ptw_vpn1 = ptw_vaddr_q[29:21];
+    wire [8:0] ptw_vpn0 = ptw_vaddr_q[20:12];
+    wire [8:0] ptw_vpn_current = (ptw_level_q == 2'd2) ? ptw_vpn2
+                                : (ptw_level_q == 2'd1) ? ptw_vpn1 : ptw_vpn0;
+    wire ptw_va_noncanonical = ptw_vaddr_q[63:39] != {25{ptw_vaddr_q[38]}};
+
+    // This level's PTE address: table base + vpn[level]*8 (dword-sized
+    // entries) -- an ordinary dword read, same shape S_MEM's own reads.
+    wire [(`WORD_SIZE-1):0] ptw_pte_addr     = ptw_base_q + {52'b0, ptw_vpn_current, 3'b0};
+    wire [(`WORD_SIZE-1):0] ptw_pte_end_addr = ptw_pte_addr + `WORD_SIZE'(7);
+
+    /*
+     * PMP-on-PTE-read (norm:pmp_check_pagetable_access, fetched fresh
+     * from the real spec during planning): hardwired S privilege,
+     * UNCONDITIONALLY -- regardless of who triggered this walk (U-mode,
+     * S-mode, or a future M-mode-with-MPRV+MPP=U/S access once Milestone
+     * 4 lands), full stop. A PMP violation here is an access fault of
+     * the ORIGINAL access's type (cause 1 for this fetch-side walker),
+     * never a page fault -- captured into fetch_fault_q below, the exact
+     * same register the ordinary fetch-side PMP checks above already
+     * use. Reuses the SAME pmp0..3 region config/bounds/mask wires the
+     * fetch-lo/fetch-hi checks above already declared -- only the
+     * ADDRESS stream being matched (ptw_pte_addr) is new.
+     */
+    wire pmp0_ptw_match = (pmp0_a == 2'b00) ? 1'b0
+        : (pmp0_a == 2'b10) ? (ptw_pte_addr[55:2] == pmpaddr0_w[53:0] && ptw_pte_end_addr[55:2] == pmpaddr0_w[53:0])
+        : (pmp0_a == 2'b01) ? (ptw_pte_end_addr < pmp0_region_base)
+        :                     ((ptw_pte_addr & ~pmp0_napot_mask) == pmp0_napot_base
+                            && (ptw_pte_end_addr & ~pmp0_napot_mask) == pmp0_napot_base);
+    wire pmp1_ptw_match = (pmp1_a == 2'b00) ? 1'b0
+        : (pmp1_a == 2'b10) ? (ptw_pte_addr[55:2] == pmpaddr1_w[53:0] && ptw_pte_end_addr[55:2] == pmpaddr1_w[53:0])
+        : (pmp1_a == 2'b01) ? (ptw_pte_addr >= pmp0_region_base && ptw_pte_end_addr < pmp1_region_base)
+        :                     ((ptw_pte_addr & ~pmp1_napot_mask) == pmp1_napot_base
+                            && (ptw_pte_end_addr & ~pmp1_napot_mask) == pmp1_napot_base);
+    wire pmp2_ptw_match = (pmp2_a == 2'b00) ? 1'b0
+        : (pmp2_a == 2'b10) ? (ptw_pte_addr[55:2] == pmpaddr2_w[53:0] && ptw_pte_end_addr[55:2] == pmpaddr2_w[53:0])
+        : (pmp2_a == 2'b01) ? (ptw_pte_addr >= pmp1_region_base && ptw_pte_end_addr < pmp2_region_base)
+        :                     ((ptw_pte_addr & ~pmp2_napot_mask) == pmp2_napot_base
+                            && (ptw_pte_end_addr & ~pmp2_napot_mask) == pmp2_napot_base);
+    wire pmp3_ptw_match = (pmp3_a == 2'b00) ? 1'b0
+        : (pmp3_a == 2'b10) ? (ptw_pte_addr[55:2] == pmpaddr3_w[53:0] && ptw_pte_end_addr[55:2] == pmpaddr3_w[53:0])
+        : (pmp3_a == 2'b01) ? (ptw_pte_addr >= pmp2_region_base && ptw_pte_end_addr < pmp3_region_base)
+        :                     ((ptw_pte_addr & ~pmp3_napot_mask) == pmp3_napot_base
+                            && (ptw_pte_end_addr & ~pmp3_napot_mask) == pmp3_napot_base);
+    wire ptw_pmp_matched = pmp0_ptw_match || pmp1_ptw_match || pmp2_ptw_match || pmp3_ptw_match;
+    wire ptw_pmp_r       = pmp0_ptw_match ? pmp0_rperm : pmp1_ptw_match ? pmp1_rperm : pmp2_ptw_match ? pmp2_rperm : pmp3_rperm;
+    // norm:pmp_no_entry_match: S/U (always the case for a PTE read) with
+    // no match FAILS (>=1 region always implemented here); L is
+    // irrelevant -- never M-mode-exempt for a page-table access.
+    assign ptw_pmp_fault = !(ptw_pmp_matched && ptw_pmp_r);
+
+    /*
+     * PTE field decode (spec-fixed bit layout), valid only while
+     * state==S_PTW and wb_dat_i is this level's own live response.
+     */
+    wire        ptw_pte_v        = wb_dat_i[0];
+    wire        ptw_pte_r        = wb_dat_i[1];
+    wire        ptw_pte_w        = wb_dat_i[2];
+    wire        ptw_pte_x        = wb_dat_i[3];
+    wire        ptw_pte_u        = wb_dat_i[4];
+    wire        ptw_pte_a        = wb_dat_i[6];
+    wire [8:0]  ptw_pte_ppn0     = wb_dat_i[18:10];
+    wire [8:0]  ptw_pte_ppn1     = wb_dat_i[27:19];
+    wire [25:0] ptw_pte_ppn2     = wb_dat_i[53:28];
+    wire [6:0]  ptw_pte_reserved = wb_dat_i[60:54];
+    wire [1:0]  ptw_pte_pbmt     = wb_dat_i[62:61];
+    wire        ptw_pte_n        = wb_dat_i[63];
+
+    assign ptw_pte_leaf    = ptw_pte_r || ptw_pte_x;
+    wire ptw_pte_malformed = !ptw_pte_v || (!ptw_pte_r && ptw_pte_w)
+                           || (|ptw_pte_reserved) || (|ptw_pte_pbmt) || ptw_pte_n;
+    // Superpage misalignment (algorithm step 6): a level-2 leaf's own
+    // PPN[1:0] must be all-0 (gigapage); a level-1 leaf's PPN[0] must be
+    // all-0 (megapage). Level 0 can never be superpage-misaligned.
+    wire ptw_superpage_misaligned = ptw_pte_leaf && (ptw_level_q != 2'd0)
+        && ((ptw_level_q == 2'd2) ? (|{ptw_pte_ppn1, ptw_pte_ppn0}) : (|ptw_pte_ppn0));
+    // A non-leaf (pointer) PTE with nowhere further to descend to.
+    wire ptw_no_more_levels = !ptw_pte_leaf && (ptw_level_q == 2'd0);
+    // U-bit, fetch stream: S-mode NEVER executes from a U page, regardless
+    // of SUM (SUM only ever affects DATA accesses, never fetch, per
+    // spec); U-mode always needs U=1. Svade (decision 1 of the staged
+    // plan): a leaf with A=0 is ALSO a page fault -- software sets A
+    // itself and retries, no hardware auto-set, the "simple
+    // implementation" the spec's own step-9 NOTE explicitly sanctions.
+    wire ptw_u_violation_fetch = ptw_pte_leaf
+        && (ptw_pte_u ? (current_priv == PRIV_S) : (current_priv == PRIV_U));
+    wire ptw_x_violation = ptw_pte_leaf && !ptw_pte_x;
+    wire ptw_ad_fault    = ptw_pte_leaf && !ptw_pte_a;
+    assign ptw_pte_fault = ptw_va_noncanonical || ptw_pte_malformed || ptw_superpage_misaligned
+                        || ptw_no_more_levels
+                        || (ptw_pte_leaf && (ptw_u_violation_fetch || ptw_x_violation || ptw_ad_fault));
+
+    /*
+     * Superpage reconstruction (algorithm step 10), re-derived by hand
+     * against the real spec text, not assumed: for a leaf found at level
+     * i, pa.ppn[LEVELS-1:i] = pte.ppn[LEVELS-1:i] (always includes ppn2,
+     * since LEVELS-1=2 >= i for any i); pa.ppn[i-1:0] = va.vpn[i-1:0] --
+     * the VA's OWN low segments pass through untouched, NOT the PTE's
+     * (whose own low segments are spec-required to be 0 for a valid
+     * superpage leaf by ptw_superpage_misaligned above, which would
+     * silently zero the resulting address's low bits instead of
+     * preserving the real offset within the superpage -- a genuine bug
+     * class caught by re-deriving this from the spec's own field-range
+     * notation rather than guessing).
+     */
+    wire [25:0] ptw_resolved_ppn2 = ptw_pte_ppn2;
+    wire [8:0]  ptw_resolved_ppn1 = (ptw_level_q <= 2'd1) ? ptw_pte_ppn1 : ptw_vpn1;
+    wire [8:0]  ptw_resolved_ppn0 = (ptw_level_q == 2'd0) ? ptw_pte_ppn0 : ptw_vpn0;
+    wire [(`WORD_SIZE-1):0] ptw_resolved_paddr =
+        {8'b0, ptw_resolved_ppn2, ptw_resolved_ppn1, ptw_resolved_ppn0, ptw_vaddr_q[11:0]};
+
+    /*
+     * Sv39 Page-Table Walker progression -- level descent, leaf
+     * resolution, and page-fault detection. Kept as its own always_ff,
+     * separate from fetch_fault_q's (in the Fetch section above), since
+     * this owns a genuinely distinct register group (the walk's own
+     * scratch state plus the two NEW page-fault captures) rather than
+     * retrofitting an already-dense, well-proven block. Lives HERE
+     * (rather than back in the Fetch section, where fetch_fault_q's own
+     * always_ff is) purely because it needs ptw_pte_leaf/ptw_pte_fault/
+     * ptw_pte_ppn0/ppn1/ppn2/ptw_resolved_paddr, none of which are
+     * available until after this section's own PTE-decode wires above --
+     * same "declare
+     * early (bare, near debug_progbuf_active), drive late" split every
+     * register this always_ff owns already went through.
+     *
+     * Every walk-terminating edge (leaf found, OR a PTE-content fault)
+     * writes fetch_lo_fault_q/fetch_hi_fault_q an explicit 0 or 1 --
+     * never left stale from an earlier, unrelated walk -- mirroring
+     * fetch_fault_q's own "always freshly written" convention. This is
+     * load-bearing: exc_code below checks fetch_fault_q (cause 1) ahead
+     * of fetch_lo_fault_q/fetch_hi_fault_q (cause 12), so a stale cause-
+     * 12 flag left over from a PAST walk could otherwise misreport a
+     * pure PMP/bus-error (cause 1) fault as a page fault instead.
+     */
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            fetch_lo_resolved_q <= 1'b0;
+            fetch_hi_resolved_q <= 1'b0;
+            fetch_lo_fault_q    <= 1'b0;
+            fetch_hi_fault_q    <= 1'b0;
+        end else begin
+            // Starting a NEW walk -- (re)initialize at the root table,
+            // level 2. No TLB exists yet (Milestone 5), so this fires
+            // every time translation is active, never skipped.
+            if (state == S_FETCH && fetch_translate_active && !fetch_lo_resolved_q) begin
+                ptw_reason_q <= 1'b0;
+                ptw_level_q  <= 2'd2;
+                ptw_base_q   <= {8'b0, satp_ppn_w, 12'b0};
+                ptw_vaddr_q  <= pc;
+            end else if (state == S_FETCH_HI && fetch_translate_active && !fetch_hi_resolved_q) begin
+                ptw_reason_q <= 1'b1;
+                ptw_level_q  <= 2'd2;
+                ptw_base_q   <= {8'b0, satp_ppn_w, 12'b0};
+                ptw_vaddr_q  <= fetch_hi_vaddr;
+            end else if (state == S_PTW && wb_done && wb_ok && !ptw_pte_fault && !ptw_pte_leaf) begin
+                // Clean, non-leaf (pointer) PTE -- descend one level; the
+                // next table's base is THIS PTE's own PPN.
+                ptw_level_q <= ptw_level_q - 2'd1;
+                ptw_base_q  <= {8'b0, ptw_pte_ppn2, ptw_pte_ppn1, ptw_pte_ppn0, 12'b0};
+            end
+
+            // PMP-denied PTE read: ptw_pmp_fault's own cause-1 capture
+            // lives in fetch_fault_q's always_ff (Fetch section above) --
+            // this side only needs to make sure the SAME-reason cause-12
+            // flag doesn't carry a stale value forward into the trap this
+            // cycle takes.
+            if (state == S_PTW && ptw_pmp_fault) begin
+                if (ptw_reason_q == 1'b0) fetch_lo_fault_q <= 1'b0; else fetch_hi_fault_q <= 1'b0;
+            end else if (state == S_PTW && wb_done) begin
+                if (ptw_reason_q == 1'b0) begin
+                    fetch_lo_fault_q    <= !wb_err_i && ptw_pte_fault;
+                    fetch_lo_resolved_q <= wb_ok && ptw_pte_leaf && !ptw_pte_fault;
+                    if (wb_ok && ptw_pte_leaf && !ptw_pte_fault) fetch_lo_paddr_q <= ptw_resolved_paddr;
+                end else begin
+                    fetch_hi_fault_q    <= !wb_err_i && ptw_pte_fault;
+                    fetch_hi_resolved_q <= wb_ok && ptw_pte_leaf && !ptw_pte_fault;
+                    if (wb_ok && ptw_pte_leaf && !ptw_pte_fault) fetch_hi_paddr_q <= ptw_resolved_paddr;
+                end
+            end
+
+            // The REAL, post-translation fetch (using the now-resolved
+            // fetch_paddr/fetch_paddr_hi) has completed -- this episode
+            // is over; the NEXT fresh instruction's fetch must re-walk
+            // (no TLB yet), so clear back to the "not yet resolved" state.
+            // Harmless no-op whenever translation was never active (both
+            // flags already 0).
+            //
+            // fetch_lo_fault_q/fetch_hi_fault_q are ALSO cleared here --
+            // load-bearing, not just tidiness: unlike fetch_lo_resolved_q
+            // (only ever consulted by the redirect check, itself gated
+            // on fetch_translate_active), these two flags feed the
+            // `instruction` substitution mux and trap_taken UNCONDITIONALLY,
+            // every cycle, regardless of state. Without this clear, a page
+            // fault taken while translation was active would leave the
+            // flag stuck at 1 forever the instant translation later goes
+            // INACTIVE (e.g. the very next instruction, now running in
+            // M-mode after the trap) -- S_PTW, the only place that was
+            // writing it, would never be entered again to refresh it,
+            // permanently re-triggering trap_taken on every subsequent
+            // ordinary fetch (an infinite re-trap loop, caught empirically
+            // by this milestone's own new fetch-side walker test hanging
+            // instead of ever reaching its trap handler's own ebreak).
+            // fetch_fault_q never had this problem: it's already
+            // unconditionally refreshed by every ordinary S_FETCH/
+            // S_FETCH_HI completion, translated or not -- these two new
+            // registers need that exact same "always freshly written by
+            // the very next ordinary fetch" property explicitly added.
+            if (state == S_FETCH && wb_done) begin
+                fetch_lo_resolved_q <= 1'b0;
+                fetch_lo_fault_q    <= 1'b0;
+            end
+            if (state == S_FETCH_HI && wb_done) begin
+                fetch_hi_resolved_q <= 1'b0;
+                fetch_hi_fault_q    <= 1'b0;
+            end
+        end
+    end
 
     /* --------------------------------------------------------------- *
      * Decode
@@ -1885,6 +2282,7 @@ module core (
      * etc. structurally false whenever it's set), but omitting its own
      * arm would let the fault be silently swallowed as a harmless ADDI. */
     wire [3:0] exc_code = fetch_fault_q                          ? 4'd1  :
+                           (fetch_lo_fault_q || fetch_hi_fault_q) ? 4'd12 : // Sv39 M3: instruction page fault
                            is_illegal_instr                      ? 4'd2  :
                            (is_ebreak || trigger_exception_match) ? 4'd3  :
                            (is_ecall && current_priv == PRIV_U)  ? 4'd8  :
@@ -1907,7 +2305,8 @@ module core (
      * of this exact same exception OR-list, respectively -- see that
      * section for the full reasoning.
      */
-    assign trap_taken = !debug_progbuf_active && commit_now && (fetch_fault_q || is_illegal_instr
+    assign trap_taken = !debug_progbuf_active && commit_now && (fetch_fault_q
+                                   || fetch_lo_fault_q || fetch_hi_fault_q || is_illegal_instr
                                    || (is_ebreak && !ebreak_to_debug) || trigger_exception_match || is_ecall
                                    || mem_load_misaligned || mem_store_misaligned
                                    || mem_load_access_fault || mem_store_access_fault
@@ -2896,6 +3295,11 @@ module core (
      * both spec-correct and sidesteps needing to know whether S_FETCH or
      * S_FETCH_HI was the one that actually faulted. */
     assign trap_val = fetch_fault_q ? pc
+        // Sv39 M3: the faulting VIRTUAL address, per spec's mtval
+        // convention -- ptw_vaddr_q (captured at walk-start from the
+        // pre-translation VA), not pc, since for a crossing fetch whose
+        // SECOND half faults, pc alone can't identify which dword did.
+        : (fetch_lo_fault_q || fetch_hi_fault_q) ? ptw_vaddr_q
         : is_illegal_instr ? (is_compressed ? {48'b0, first_hw}
                                              : {{(`WORD_SIZE - `INSTR_SIZE){1'b0}}, instruction})
         : (mem_load_misaligned || mem_store_misaligned) ? mem_paddr
@@ -3086,8 +3490,15 @@ module core (
                  * way, wb_done must never arrive for this cycle's
                  * would-be request. See the state-transition always_ff's
                  * own S_FETCH arm, which relies on exactly this.
+                 *
+                 * Sv39 (Milestone 3): (fetch_translate_active &&
+                 * !fetch_lo_resolved_q) suppresses it for a fourth reason,
+                 * same class as pmp_fetchlo_fault -- fetch_paddr/fetch_addr
+                 * are stale/meaningless until the walker resolves them, so
+                 * issuing a request against them now would fetch garbage.
                  */
-                if (!wb_done && !debug_halt_req_entry && !debug_progbuf_active && !pmp_fetchlo_fault) begin
+                if (!wb_done && !debug_halt_req_entry && !debug_progbuf_active && !pmp_fetchlo_fault
+                        && !(fetch_translate_active && !fetch_lo_resolved_q)) begin
                     wb_cyc_o  = 1'b1;
                     wb_stb_o  = 1'b1;
                     wb_addr_o = fetch_from_trap_vector ? {trap_vector[31:3], 3'b0} : fetch_addr;
@@ -3097,13 +3508,29 @@ module core (
             /*
              * C extension: the second dword of a crossing fetch --
              * reuses the exact same !wb_done gating discipline as
-             * every other arm here.
+             * every other arm here. Sv39 (Milestone 3): same
+             * translation-not-yet-resolved suppression as S_FETCH above.
              */
             S_FETCH_HI: begin
-                if (!wb_done) begin
+                if (!wb_done && !(fetch_translate_active && !fetch_hi_resolved_q)) begin
                     wb_cyc_o  = 1'b1;
                     wb_stb_o  = 1'b1;
                     wb_addr_o = fetch_addr_hi;
+                    wb_sel_o  = 8'hFF;
+                end
+            end
+            /*
+             * Sv39 (Milestone 3): the walker's own PTE read. Suppressed
+             * entirely on a PMP-denied PTE address, same "checked before
+             * the bus phase" shape as pmp_fetchlo_fault's own S_FETCH
+             * suppression above -- mirrors the state-transition always_ff's
+             * own S_PTW arm, which relies on exactly this.
+             */
+            S_PTW: begin
+                if (!wb_done && !ptw_pmp_fault) begin
+                    wb_cyc_o  = 1'b1;
+                    wb_stb_o  = 1'b1;
+                    wb_addr_o = ptw_pte_addr[31:0];
                     wb_sel_o  = 8'hFF;
                 end
             end
