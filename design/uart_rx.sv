@@ -26,8 +26,12 @@
  * generalized one level: soc.sv has already checked addr_i[4] too by the
  * time cyc_i/stb_i ever reach this instance.
  *
- * Register map (within the RX half of the shared UART window):
- *   0x8010  RX_DATA    read: pops the oldest queued byte (zero-extended)
+ * Register map (within the RX half of the shared UART window). Absolute
+ * addresses below reflect the post-Linux-boot-readiness-RAM-growth
+ * peripheral region (design/wb_addr_decoder.sv's own header) -- this
+ * module itself only ever looks at the low bits, so it needs no code
+ * change when the outer address map moves, only this comment:
+ *   0x0400_8010  RX_DATA    read: pops the oldest queued byte (zero-extended)
  *                      and advances the queue, but ONLY when sel_i[0]
  *                      is asserted (matching uart_tx.sv's own sel_i[0]
  *                      write gate) -- a probe read that doesn't include
@@ -37,7 +41,7 @@
  *                      silently discarding a real received byte.
  *                      Reading an empty queue returns 0 without
  *                      underflowing. write: ignored.
- *   0x8018  RX_STATUS  read-only. bit 0 = RX_DATA_READY (1 when the
+ *   0x0400_8018  RX_STATUS  read-only. bit 0 = RX_DATA_READY (1 when the
  *                      queue is non-empty). write: ignored.
  *
  * o_rx_irq (PMP+PLIC plan Milestone 6): a genuinely new output port,

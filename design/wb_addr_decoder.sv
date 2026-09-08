@@ -13,39 +13,45 @@
  * slaves: hand-written rather than a general N-slave interconnect,
  * since that generality isn't needed here.
  *
- * Address map. RAM/UART/CLINT/DRAM stay decoded off the original 2-bit
- * test ({addr_i[16], addr_i[15]}), now qualified by !addr_i[22] (PLIC's
- * own new top-level select bit, added by the PMP+PLIC plan's own
- * Milestone 5); PLIC claims the whole addr_i[22]=1 half regardless of
- * bits 15/16, a fresh, independently-chosen 4MB window sized for the
- * real PLIC spec's own fixed offsets (context 1's claim/complete alone
- * reaches +0x201004, ~2MB, regardless of how few contexts are
- * implemented) -- dwarfing every other existing 32KB peripheral window,
- * hence a whole new top-level bit rather than a flat re-encoding of the
- * existing 2-bit test:
- *   0xxx -> RAM   0x0000_0000-0x0000_7FFF (wb4_sram.sv's default
- *               num_words=4096 x 8 bytes/word = 32KB)
- *   0xxx -> UART  0x0000_8000-0x0000_FFFF
- *   0xxx -> CLINT 0x0001_0000-0x0001_7FFF (32KB -- narrowed from an
+ * Address map. A new top-level bit, addr_i[26] (sel_periph), was added
+ * by the Linux-boot-readiness RAM-growth change to make room for RAM to
+ * grow from 32KB to 64MB: sel_periph=0 routes to RAM unconditionally
+ * (RAM now claims the ENTIRE 64MB region below addr_i[26], not just a
+ * 32KB slice of it), sel_periph=1 routes to the same UART/CLINT/DRAM/PLIC
+ * sub-decode this module already had, just shifted up by 0x0400_0000 (one
+ * count of addr_i[26]) so it sits directly above the new, larger RAM
+ * window instead of overlapping it. Every peripheral's own INTERNAL
+ * sub-decode (the addr_i[22]/[16]/[15] tests below) is completely
+ * unchanged -- only the outer gate moved:
+ *   sel_periph=0 -> RAM   0x0000_0000-0x03FF_FFFF (wb4_sram.sv's
+ *               num_words=8388608 x 8 bytes/word = 64MB, an explicit
+ *               override on soc.sv's own real sram0 instance -- see
+ *               soc.sv's header; wb4_sram.sv's own module default stays
+ *               4096/32KB, unchanged, for every other instantiation)
+ *   sel_periph=1, then:
+ *     0xxx -> UART  0x0400_8000-0x0400_FFFF
+ *     0xxx -> CLINT 0x0401_0000-0x0401_7FFF (32KB -- narrowed from an
  *               earlier 64KB window that claimed both addr_i[15] values;
  *               see "Known, accepted gap" below for why 32KB still isn't
  *               tight against CLINT's own real register footprint)
- *   0xxx -> DRAM  0x0001_8000-0x0001_FFFF (32KB, the window CLINT's own
+ *     0xxx -> DRAM  0x0401_8000-0x0401_FFFF (32KB, the window CLINT's own
  *               narrowing freed up -- see "DRAM address translation"
  *               below for why dram_addr_o needs special handling)
- *   1xxx -> PLIC  0x0040_0000-0x007F_FFFF (4MB, addr_i[22]=1 regardless
+ *     1xxx -> PLIC  0x0440_0000-0x047F_FFFF (4MB, addr_i[22]=1 regardless
  *               of every other address bit -- room for 2 more real
  *               contexts later at no further decoder cost)
  *
- * The RAM/UART boundary (bit 15) is DERIVED from wb4_sram's num_words
- * parameter, not independent of it -- since RAM's size is a power of two
- * starting at address 0, "address >= 0x8000" and "bit 15 set" are the
- * same condition, a single bit test rather than a shortcut that skips a
- * real range compare. NB: if wb4_sram's default num_words ever changes,
- * this decode bit needs revisiting too. The CLINT/DRAM boundary (bit 16),
- * by contrast, is a fresh, independently-chosen window -- nothing derives
- * it from any slave's own size parameter; it was simply picked to sit
- * right above the existing RAM+UART 64KB region with room to spare.
+ * The RAM/peripheral boundary (bit 26) is DERIVED from wb4_sram's
+ * num_words override on soc.sv's real sram0 instance (8388608, 64MB), not
+ * independent of it -- since RAM's size is a power of two starting at
+ * address 0, "address >= 0x0400_0000" and "bit 26 set" are the same
+ * condition, a single bit test rather than a shortcut that skips a real
+ * range compare. NB: if that override ever changes, this decode bit needs
+ * revisiting too. The UART/CLINT/DRAM/PLIC sub-boundaries (bits 22/16/15),
+ * by contrast, are fresh, independently-chosen windows -- nothing derives
+ * them from any slave's own size parameter; they were simply picked to
+ * sit right above wherever the peripheral region starts, with room to
+ * spare, and slide as a fixed block whenever the outer RAM window resizes.
  *
  * The "remember which slave" problem: all four slaves are registered
  * (1-wait-state-or-more) Wishbone slaves, so a response arrives one or
@@ -59,9 +65,9 @@
  *
  * Known, accepted gap: CLINT's own window is only 3 words wide
  * (mtime/mtimecmp at CLINT_BASE+0x0/+0x8, see clint.sv) but its decoded
- * region is 32KB (bits 17-31 of addr_i are never tested at all, just
+ * region is 32KB (bits 17-25 of addr_i are never tested at all, just
  * like bits above RAM/UART/DRAM's own windows aren't). Every address in
- * 0x0001_0000-0x0001_7FFF that isn't exactly +0x0 or +0x8 still routes
+ * 0x0401_0000-0x0401_7FFF that isn't exactly +0x0 or +0x8 still routes
  * to clint.sv and gets a real ack (clint.sv's own addr_i[3] mux treats
  * any such address as an alias of one of its two real registers -- see
  * that module's header). No corruption risk (clint.sv has no side
@@ -163,11 +169,12 @@ module wb_addr_decoder (
     input  logic        plic_ack_i,
     input  logic        plic_err_i
 );
-    wire sel_plic  =  addr_i[22];
-    wire sel_ram   = !addr_i[22] && !addr_i[16] && !addr_i[15];
-    wire sel_uart  = !addr_i[22] && !addr_i[16] &&  addr_i[15];
-    wire sel_clint = !addr_i[22] &&  addr_i[16] && !addr_i[15];
-    wire sel_dram  = !addr_i[22] &&  addr_i[16] &&  addr_i[15];
+    wire sel_periph =  addr_i[26];
+    wire sel_ram    = !sel_periph;
+    wire sel_plic   =  sel_periph &&  addr_i[22];
+    wire sel_uart   =  sel_periph && !addr_i[22] && !addr_i[16] &&  addr_i[15];
+    wire sel_clint  =  sel_periph && !addr_i[22] &&  addr_i[16] && !addr_i[15];
+    wire sel_dram   =  sel_periph && !addr_i[22] &&  addr_i[16] &&  addr_i[15];
 
     /*
      * Gate cyc/stb per slave; broadcast everything else (addr/dat/sel/we)

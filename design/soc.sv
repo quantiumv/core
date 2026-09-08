@@ -50,11 +50,20 @@
  * happened to get wired, and NOT something a future refactor should
  * "simplify" by routing it through cache_complex alongside RAM.
  *
- * wb4_sram is instantiated at its default num_words (4096, 32KB) --
- * unlike core_wb_tb.sv's deliberately small test instance, this is the
- * real memory map wb_addr_decoder.sv's address split (addr_i[15]) is
- * derived from; see that module's own header comment for why the two
- * aren't independent. cache_complex's own cache size defaults (64 lines x
+ * wb4_sram is instantiated here with an explicit num_words=8388608 (64MB)
+ * override -- NOT the module's own default of 4096 (32KB), which every
+ * other instantiation (core_wb_tb.sv's deliberately small test instance,
+ * core_wb4_sram_harness.sv, and every other harness/testbench that wires
+ * wb4_sram directly with its own explicit override) keeps using unchanged.
+ * 64MB is sized for eventual Linux boot readiness -- tens of MB is the
+ * practical floor for a Linux kernel + initramfs, and 32KB was never going
+ * to get there. This is the real memory map wb_addr_decoder.sv's address
+ * split (addr_i[26], sel_periph) is derived from; see that module's own
+ * header comment for why the two aren't independent. wb4_sram.sv's own
+ * module-level default parameter is deliberately left at 4096 -- changing
+ * it would silently shrink or grow every OTHER test that instantiates the
+ * module without its own override, which is explicitly out of scope here.
+ * cache_complex's own cache size defaults (64 lines x
  * 4 words = 2KB per cache, 4KB combined) are likewise this module's
  * choice to keep, not something wb_addr_decoder.sv or wb4_sram.sv need to
  * know about -- the cache is fully transparent to both.
@@ -371,7 +380,15 @@ module soc (
         .mem_ack_i(mem_ack), .mem_err_i(mem_err)
     );
 
-    wb4_sram sram0 (
+    // num_words=8388608 (x 8 bytes/word = 64MB) -- an explicit override of
+    // wb4_sram.sv's own 4096/32KB module default, sized for Linux-boot
+    // readiness; see this file's own header for the full reasoning, and
+    // wb_addr_decoder.sv's header for the address-map split this drives
+    // (addr_i[26]/sel_periph). wb4_sram.sv itself is NOT modified -- every
+    // other instantiation (testbenches, harnesses) keeps the small default.
+    wb4_sram #(
+        .num_words(8388608)
+    ) sram0 (
         .clk(clk), .rst(rst),
         .addr_i(mem_addr), .dat_i(mem_dat_m2s), .dat_o(mem_dat_s2m), .sel_i(mem_sel),
         .ack_o(mem_ack), .err_o(mem_err), .cyc_i(mem_cyc), .stb_i(mem_stb), .we_i(mem_we)
@@ -381,8 +398,10 @@ module soc (
      * uart_addr[4] sub-decode: soc.sv's own addr_i[4] split of the
      * decoder's single uart_* port group between uart0 (TX, addr_i[4]=0)
      * and uart_rx0 (RX, addr_i[4]=1) -- see design/uart_rx.sv's own
-     * header for the register map this produces (0x8000/0x8008 TX,
-     * 0x8010/0x8018 RX).
+     * header for the register map this produces (0x0400_8000/0x0400_8008
+     * TX, 0x0400_8010/0x0400_8018 RX, since the Linux-boot-readiness
+     * RAM-growth change moved the whole peripheral region -- see
+     * design/wb_addr_decoder.sv's own header for the full address map).
      *
      * uart_cyc/uart_stb are gated combinationally by uart_sel_rx (itself
      * a plain combinational read of uart_addr[4], which the decoder

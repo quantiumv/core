@@ -27,10 +27,14 @@
  *
  * Register map (only addr_i[3] is decoded -- everything routed here by
  * wb_addr_decoder.sv already has addr_i[15] set, nothing else needs
- * checking):
- *   0x8000  TX_DATA    write: low byte is "printed" immediately.
+ * checking). Absolute addresses below reflect the post-Linux-boot-
+ * readiness-RAM-growth peripheral region (design/wb_addr_decoder.sv's
+ * own header) -- this module itself only ever looks at the low bits, so
+ * it needs no code change when the outer address map moves, only this
+ * comment:
+ *   0x0400_8000  TX_DATA    write: low byte is "printed" immediately.
  *                      read: always 0.
- *   0x8008  TX_STATUS  read-only. bit 0 = TX_READY, hardwired 1 -- this
+ *   0x0400_8008  TX_STATUS  read-only. bit 0 = TX_READY, hardwired 1 -- this
  *                      model has no timing, so it's trivially always
  *                      ready. Exists so firmware can use a realistic
  *                      poll-then-write pattern even though polling
