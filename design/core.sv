@@ -2045,7 +2045,9 @@ module core (
             // Sv39 M4: the REAL, post-translation mem access has
             // completed -- mem_resolved_q's own "always freshly written
             // by the next ordinary event" refresh, same reasoning as the
-            // fetch streams get below.
+            // fetch streams get below. Sv39 M6: this alone isn't enough --
+            // see mem_resolved_q's own commit_now clear below, right
+            // alongside mem_fault_q/mem_access_fault_q's own identical fix.
             if (state == S_MEM && wb_done) begin
                 mem_resolved_q <= 1'b0;
             end
@@ -2074,10 +2076,28 @@ module core (
              * exactly matching fetch_fault_q's own "always freshly
              * written before its next real use" property, just achieved
              * through a different, mem-appropriate trigger.
+             *
+             * Sv39 M6: mem_resolved_q joins this same clear, for the exact
+             * same bug class -- a real gap found by the cache-mediated
+             * integration test, not anticipated by M4's own design. A
+             * translated access whose FINAL PA is PMP-denied (pmp_load_
+             * fault/pmp_store_fault) bails from S_MEM straight back to
+             * S_EXEC and NEVER reaches wb_done (wb_master_drive's own
+             * suppression blocks the real bus request from ever being
+             * issued at all) -- so the S_MEM&&wb_done clear above never
+             * fires, and mem_resolved_q/mem_resolved_paddr_q would stay
+             * stuck holding THIS instruction's own (denied) translation
+             * forever, silently skipping the walk for every SUBSEQUENT
+             * translated mem access and reusing the stale, wrong PA
+             * instead. Clearing here is safe for the ordinary (untranslated
+             * or successfully-translated) case too: mem_resolved_q is
+             * already 0 by the time an unrelated or successful instruction
+             * commits, making this an inert no-op there.
              */
             if (commit_now) begin
                 mem_fault_q        <= 1'b0;
                 mem_access_fault_q <= 1'b0;
+                mem_resolved_q     <= 1'b0;
             end
 
             // SFENCE.VMA (Sv39 M5, decision 3): unconditional full-TLB
@@ -3802,7 +3822,7 @@ module core (
      * an inconsistency.
      *
      * Sv39 (Milestone 4): the timing gate widens from bare "state==S_EXEC"
-     * to a real two-way OR. mem_paddr at S_EXEC time is the VIRTUAL
+     * to a real three-way OR. mem_paddr at S_EXEC time is the VIRTUAL
      * address whenever translation is active (mem_resolved_paddr_q isn't
      * valid until the walk actually runs, inside S_MEM) -- checking PMP
      * against a VA would be wrong (PMP governs the PHYSICAL address), so
@@ -3815,11 +3835,38 @@ module core (
      * physical address, reusing this exact same, otherwise-unmodified
      * logic (pmp_mem_read_ok/pmp_mem_write_ok) for both the translated
      * and untranslated cases alike.
+     *
+     * Sv39 (Milestone 6, real bug found by the cache-mediated integration
+     * test -- never exercised by any earlier milestone's own tests, which
+     * only ever combined "PMP denies" with "untranslated" or "PTE read",
+     * never "PMP denies the FINAL PA of a genuinely TRANSLATED access"):
+     * a THIRD arm, state==S_EXEC && mem_translate_active && mem_resolved_q,
+     * is required too. Once a translated access is denied, the S_MEM
+     * arm above redirects straight back to S_EXEC (never reaching
+     * wb_done, since wb_master_drive's own suppression blocks issuing
+     * the real bus request at all) -- but mem_resolved_q, and hence
+     * mem_paddr's own translated value, both remain live and valid at
+     * S_EXEC too (mem_resolved_q is only ever cleared by a real
+     * S_MEM&&wb_done completion or, since this same fix, by the
+     * instruction's own eventual commit -- see mem_resolved_q's own
+     * commit_now clear below). Without this third arm, pmp_load_fault/
+     * pmp_store_fault read 0 the instant state leaves S_MEM -- mem_
+     * phase_needed's own NOT-list (which needs !pmp_load_fault to stay
+     * true right here, at S_EXEC, to ever stop re-requesting S_MEM) sees
+     * a false "not denied" and re-enters S_MEM, re-discovering the SAME
+     * denial, forever: a genuine infinite S_MEM<->S_EXEC oscillation
+     * that never reaches commit_now/trap_taken at all, caught by this
+     * milestone's own dut3 hanging instead of ever reaching its trap
+     * handler's own ebreak.
      */
     assign pmp_load_fault  = !debug_progbuf_active && is_load && !is_lr && !is_amo_rmw && !pmp_mem_read_ok
-                            && ((state == S_EXEC && !mem_translate_active) || (state == S_MEM && mem_resolved_q));
+                            && ((state == S_EXEC && !mem_translate_active)
+                              || (state == S_MEM  && mem_resolved_q)
+                              || (state == S_EXEC && mem_translate_active && mem_resolved_q));
     assign pmp_store_fault = !debug_progbuf_active && (is_store || is_sc || is_lr || is_amo_rmw) && !pmp_mem_write_ok
-                            && ((state == S_EXEC && !mem_translate_active) || (state == S_MEM && mem_resolved_q));
+                            && ((state == S_EXEC && !mem_translate_active)
+                              || (state == S_MEM  && mem_resolved_q)
+                              || (state == S_EXEC && mem_translate_active && mem_resolved_q));
 
     /*
      * mem_load_access_fault/mem_store_access_fault: same is_load/is_lr/
