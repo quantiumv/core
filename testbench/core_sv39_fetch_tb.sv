@@ -40,14 +40,30 @@
  *   D. a PMP-denied PTE read -- proves decision 10's two-tier ordering:
  *      this is cause 1 (access fault, the ORIGINAL access's type), never
  *      cause 12, even though the trigger is discovered mid-walk.
- * Deliberately deferred to a later pass: the dword-crossing independent-
- * HI-walk case, and the remaining individual fault sub-categories
- * (reserved-bits-set, R=0/W=1 malformed, misaligned superpage, U-mode
- * privilege violation, X=0, A=0/Svade, walking past level 0, a
- * noncanonical VA) -- ptw_pte_fault's own OR-list construction makes
- * each of those a cheap, mechanical variation of test C's exact shape,
- * not a new mechanism, so they're lower-value to write by hand right now
- * than they'll be to add later.
+ * Deliberately deferred to a later pass: the remaining individual fault
+ * sub-categories (reserved-bits-set, R=0/W=1 malformed, misaligned
+ * superpage, U-mode privilege violation, X=0, A=0/Svade, walking past
+ * level 0, a noncanonical VA) -- ptw_pte_fault's own OR-list construction
+ * makes each of those a cheap, mechanical variation of test C's exact
+ * shape, not a new mechanism, so they're lower-value to write by hand
+ * right now than they'll be to add later.
+ *
+ *   E. the dword-crossing independent-HI-walk case, under active
+ *      translation, with the LO and HI halves in DIFFERENT PMP regions --
+ *      the regression proof for a real bug found post-Milestone-6 by an
+ *      independent adversarial re-review of the completed Sv39 work:
+ *      pmp_fetchhi_fault used to be checked against fetch_hi_paddr_q
+ *      BEFORE that register had ever resolved for the current
+ *      instruction (it held whatever the PREVIOUS crossing fetch left
+ *      there -- the register has no reset). A first crossing instruction
+ *      whose own HI half is genuinely PMP-denied correctly faults
+ *      (proving decision 10's PMP-after-translation ordering extends to
+ *      the fetch-HI stream, not just LO/mem); a SECOND, unrelated
+ *      crossing instruction whose own HI half is genuinely PMP-PERMITTED
+ *      must still execute correctly afterward -- under the bug, it would
+ *      have spuriously faulted too, since the stale (denied) address
+ *      left over from the FIRST instruction was checked before the
+ *      second instruction's own real address was ever resolved.
  *
  * PTE bit layout used throughout (spec-fixed): V[0] R[1] W[2] X[3] U[4]
  * G[5] A[6] D[7] RSW[9:8] PPN0[18:10] PPN1[27:19] PPN2[53:28].
@@ -144,7 +160,64 @@ module core_sv39_fetch_tb;
         mtval_d    <= dut_d.core0.regfile0.gp_registers[21];
     end
 
-    wire halted = halted_a && halted_b && halted_c && halted_d;
+    /* ----------------------------------------------------------------
+     * Test E: dword-crossing fetch under translation, instruction 1's
+     * HI half PMP-denied, instruction 2's HI half PMP-permitted -- see
+     * this file's own header comment for what this proves.
+     *
+     * PMP: a SINGLE, generous region0 = TOR[0, 0x9000) R+X. Deliberately
+     * NOT a tight boundary immediately after instruction 1's own HI
+     * half: fetch_end_paddr/fetch_hi_end_paddr (core.sv) are computed as
+     * fetch_paddr(_hi) + 7 WITHOUT dword-truncating fetch_paddr(_hi)
+     * first -- a real, pre-existing, unrelated-to-Sv39 conservatism in
+     * the original PMP milestone's own fetch-side region matching
+     * (documented there as deliberate: checking the real, eventual dword
+     * footprint before decode has run rather than predicting instruction
+     * length). Discovered empirically while building this exact test:
+     * a TIGHT boundary placed right after a compressed instruction's own
+     * dword caused an UNRELATED, pre-existing false denial having
+     * nothing to do with the pmp_fetchhi_fault bug this test exists to
+     * catch. Region0's own generous size absorbs that conservatism
+     * harmlessly for every "should succeed" address in this test,
+     * without touching that separate, out-of-scope mechanism.
+     *
+     * Instruction 1: LOW half's own dword is the LAST dword of page
+     * vpn0=7 (VA 0x40407000, PA 0x7000); its HI half (fetch_hi_vaddr =
+     * pc+8) lands in a DIFFERENT page, vpn0=8 (VA 0x40408000, PA
+     * 0x9000) -- a real, VALID leaf PTE (so this is a PMP denial, cause
+     * 1, NOT a page fault, cause 12), but PA 0x9000 sits exactly at
+     * region0's own exclusive upper bound -- outside it, hence denied
+     * by the S-mode no-match-denies fallback (no second, explicit deny
+     * region needed at all).
+     *
+     * Instruction 2: an ordinary, entirely WITHIN-one-page crossing at
+     * vpn0=3 (VA 0x40403000, PA 0x4000, comfortably inside region0) --
+     * reached via the trap handler's own mret after instruction 1
+     * faults. Must execute cleanly; under the bug this test regresses,
+     * it would ALSO have spuriously faulted, since the FSM's decision
+     * to even enter S_FETCH_HI for instruction 2 would have checked
+     * instruction 1's own stale, denied fetch_hi_paddr_q first.
+     * ---------------------------------------------------------------- */
+    core_wb4_sram_harness #(.NUM_WORDS(8192)) dut_e (.clk(clk), .rst(rst));
+    logic halted_e = 1'b0;
+    always @(posedge clk) if (dut_e.core0.trap_taken && dut_e.core0.is_ebreak) halted_e <= 1'b1;
+    logic [63:0] mcause_e, mtval_e;
+    logic        captured_e = 1'b0;
+    always @(posedge clk) if (!captured_e && dut_e.core0.commit_now && dut_e.core0.pc == 64'h108) begin
+        captured_e <= 1'b1;
+        mcause_e   <= dut_e.core0.regfile0.gp_registers[20];
+        mtval_e    <= dut_e.core0.regfile0.gp_registers[21];
+    end
+    logic [31:0] setup_e[0:29];
+    logic [31:0] handler_e[0:7];
+    logic [15:0] hw_e7[0:3];   // vpn0=7's own last dword: 3x c.nop + crossing_1 LOW16
+    logic [15:0] hw_e8[0:3];   // vpn0=8's own first dword: crossing_1 HIGH16 + filler
+    logic [15:0] hw_e3a[0:3];  // vpn0=3, dword0: 3x c.nop + crossing_2 LOW16
+    logic [15:0] hw_e3b[0:3];  // vpn0=3, dword1: crossing_2 HIGH16 + ebreak + filler
+    logic [31:0] crossing1, crossing2;
+    int i; // shared packing-loop index, Test E only
+
+    wire halted = halted_a && halted_b && halted_c && halted_d && halted_e;
     `include "halt_wait.sv"
 
 
@@ -257,6 +330,113 @@ module core_sv39_fetch_tb;
         dut_d.sram0.memory[1024 + 2] = 64'h0000_0000_0000_0C01; // L1 entry2 -> L0@0x3000
         dut_d.sram0.memory[1536 + 3] = 64'h0000_0000_0000_10CF; // L0 entry3 -> real leaf (never reached)
 
+        /*
+         * ---- Test E setup ----
+         * pmpaddr0 = 0x9000>>2 = 9216 (0x2400). HIGH=9216>>12=2,
+         * LOW=9216-8192=1024 -- LOW fits ADDI's own +-2047 range
+         * directly this time (unlike pmpaddr0/1/2 in dut3's own M6
+         * test, which all needed a 3rd addi+or); still built via
+         * addi+slli, not a bare addi, since 9216 itself exceeds 2047.
+         */
+        setup_e[0]  = enc_addi(5'd1,5'd0,8);
+        setup_e[1]  = enc_slli(5'd1,5'd1,6'd60);
+        setup_e[2]  = enc_addi(5'd2,5'd0,1);
+        setup_e[3]  = enc_or(5'd1,5'd1,5'd2);
+        setup_e[4]  = enc_csrrw(`CSR_SATP,5'd1);
+        setup_e[5]  = enc_addi(5'd7,5'd0,2);
+        setup_e[6]  = enc_slli(5'd7,5'd7,6'd12);
+        setup_e[7]  = enc_addi(5'd21,5'd0,1024);
+        setup_e[8]  = enc_or(5'd7,5'd7,5'd21);            // x7 = pmpaddr0 = 9216
+        setup_e[9]  = enc_csrrw(`CSR_PMPADDR0,5'd7);
+        setup_e[10] = enc_addi(5'd10,5'd0,13);             // region0 byte = TOR+R+X
+        setup_e[11] = enc_csrrw(`CSR_PMPCFG0,5'd10);
+        setup_e[12] = enc_addi(5'd3,5'd0,1);
+        setup_e[13] = enc_slli(5'd3,5'd3,6'd11);           // mstatus.MPP = S
+        setup_e[14] = enc_csrrw(`CSR_MSTATUS,5'd3);
+        setup_e[15] = enc_addi(5'd4,5'd0,1028);
+        setup_e[16] = enc_slli(5'd4,5'd4,6'd20);
+        setup_e[17] = enc_addi(5'd5,5'd0,8);
+        setup_e[18] = enc_slli(5'd5,5'd5,6'd12);
+        setup_e[19] = enc_or(5'd4,5'd4,5'd5);               // x4 = VA vpn0=8 base = 0x40408000
+        setup_e[20] = enc_addi(5'd4,5'd4,-8);                // x4 = VA vpn0=8 base - 8 = 0x40407FF8 (vpn0=7's own last dword)
+        setup_e[21] = enc_csrrw(`CSR_MEPC,5'd4);
+        setup_e[22] = enc_addi(5'd6,5'd0,256);
+        setup_e[23] = enc_csrrw(`CSR_MTVEC,5'd6);
+        setup_e[24] = `INSTR_HEX_MRET;
+        setup_e[25] = NOP_INSN; // pad (word count must stay even)
+        for (i = 0; i < 13; i = i + 1)
+            dut_e.sram0.memory[i] = {setup_e[2*i+1], setup_e[2*i]};
+
+        // Handler @0x100 (word 32): capture mcause/mtval, then rebuild
+        // mepc to VA vpn0=3 base (instruction 2's own entry point,
+        // comfortably inside region0) and mret back.
+        dut_e.sram0.memory[32] = {enc_csrrs(`CSR_MTVAL,5'd21), enc_csrrs(`CSR_MCAUSE,5'd20)};
+        handler_e[0] = enc_addi(5'd26,5'd0,1028);
+        handler_e[1] = enc_slli(5'd26,5'd26,6'd20);
+        handler_e[2] = enc_addi(5'd27,5'd0,3);
+        handler_e[3] = enc_slli(5'd27,5'd27,6'd12);
+        handler_e[4] = enc_or(5'd26,5'd26,5'd27);            // x26 = VA vpn0=3 base = 0x40403000
+        handler_e[5] = enc_csrrw(`CSR_MEPC,5'd26);
+        handler_e[6] = `INSTR_HEX_MRET;
+        handler_e[7] = NOP_INSN; // pad
+        for (i = 0; i < 4; i = i + 1)
+            dut_e.sram0.memory[33 + i] = {handler_e[2*i+1], handler_e[2*i]};
+
+        /*
+         * Program bytes, as 16-bit parcels -- built this way, not as
+         * 64-bit words directly, to remove ANY ambiguity about where a
+         * 2-byte compressed instruction or a split 4-byte instruction
+         * half lands relative to an 8-byte dword boundary; the pack
+         * loops below mirror core.sv's own hw0..hw3 =
+         * instr_line_q[15:0]/[31:16]/[47:32]/[63:48] slicing exactly.
+         * crossing_1's own HIGH16 lands at vpn0=8's own dword-truncated
+         * base (offset 0 of that page), NOT at fetch_hi_vaddr's own
+         * raw (pc+8) offset (0x006) -- the real bus read always fetches
+         * whatever dword wb_addr_o's own [31:3] truncation selects, and
+         * instr_hi_q always takes THAT dword's own low 16 bits
+         * (wb_dat_i[15:0]), regardless of fetch_paddr_hi's own exact
+         * non-dword-aligned value.
+         */
+        crossing1 = enc_addi(5'd13,5'd0,444);
+        crossing2 = enc_addi(5'd14,5'd0,555);
+
+        // vpn0=7 (PA 0x7000), last dword (PA 0x7FF8-0x7FFF, word 4095):
+        // off 0xFF8-0xFFD: 3x c.nop. off 0xFFE-0xFFF: crossing_1 LOW16.
+        hw_e7[0] = 16'h0001;
+        hw_e7[1] = 16'h0001;
+        hw_e7[2] = 16'h0001;
+        hw_e7[3] = crossing1[15:0];
+        dut_e.sram0.memory[4095] = {hw_e7[3], hw_e7[2], hw_e7[1], hw_e7[0]};
+
+        // vpn0=8 (PA 0x9000), first dword (word 1152): crossing_1
+        // HIGH16 (never actually fetched -- PMP denies before the real
+        // bus read is ever issued) + 3x filler c.nop.
+        hw_e8[0] = crossing1[31:16];
+        hw_e8[1] = 16'h0001;
+        hw_e8[2] = 16'h0001;
+        hw_e8[3] = 16'h0001;
+        dut_e.sram0.memory[1152] = {hw_e8[3], hw_e8[2], hw_e8[1], hw_e8[0]};
+
+        // vpn0=3 (PA 0x4000), dword0 (word 2048): 3x c.nop + crossing_2
+        // LOW16. dword1 (word 2049): crossing_2 HIGH16 + ebreak (does
+        // not itself cross -- pc[2:1]!=2'b11 there) + 2-byte filler.
+        hw_e3a[0] = 16'h0001;
+        hw_e3a[1] = 16'h0001;
+        hw_e3a[2] = 16'h0001;
+        hw_e3a[3] = crossing2[15:0];
+        dut_e.sram0.memory[2048] = {hw_e3a[3], hw_e3a[2], hw_e3a[1], hw_e3a[0]};
+        hw_e3b[0] = crossing2[31:16];
+        hw_e3b[1] = EBREAK_INSN[15:0];
+        hw_e3b[2] = EBREAK_INSN[31:16];
+        hw_e3b[3] = 16'h0001;
+        dut_e.sram0.memory[2049] = {hw_e3b[3], hw_e3b[2], hw_e3b[1], hw_e3b[0]};
+
+        dut_e.sram0.memory[512 + 1]  = 64'h0000_0000_0000_0801; // L2[1] -> L1@0x2000
+        dut_e.sram0.memory[1024 + 2] = 64'h0000_0000_0000_0C01; // L1[2] -> L0@0x3000
+        dut_e.sram0.memory[1536 + 3] = 64'h0000_0000_0000_10CF; // L0[3] -> leaf PPN=4  (PA 0x4000, vpn0=3, full RWX)
+        dut_e.sram0.memory[1536 + 7] = 64'h0000_0000_0000_1CCF; // L0[7] -> leaf PPN=7  (PA 0x7000, vpn0=7, full RWX)
+        dut_e.sram0.memory[1536 + 8] = 64'h0000_0000_0000_24CF; // L0[8] -> leaf PPN=9  (PA 0x9000, vpn0=8, full RWX -- PTE itself is VALID; PMP alone denies)
+
         @(posedge clk); #1;
         rst = 0;
 
@@ -277,6 +457,15 @@ module core_sv39_fetch_tb;
 
         check("D: PMP-denied PTE read produces mcause==1 (access fault), NOT 12", mcause_d, 64'd1);
         check("D: mtval == the faulting instruction's own VA (not the PTE's PA)", mtval_d, 64'h40403000);
+
+        check("E: crossing instr1 (denied HI half) never executed (x13==0)", dut_e.core0.regfile0.gp_registers[13], 64'd0);
+        check("E: crossing instr1 produces mcause==1 (instruction access fault)", mcause_e, 64'd1);
+        check("E: mtval == crossing instr1's own PC (vpn0=7 base + 0xFFE)", mtval_e, 64'h40407FFE);
+        check({"E: crossing instr2 (permitted HI half, reached via mret after instr1's ",
+            "trap) executed cleanly (x14==555) -- the direct regression proof: under the ",
+            "bug this fixes, instr2 would ALSO have spuriously faulted, reusing instr1's ",
+            "own stale, denied fetch_hi_paddr_q instead of resolving its own real address"},
+            dut_e.core0.regfile0.gp_registers[14], 64'd555);
 
         $display("");
         $display("core_sv39_fetch_tb: %0d passed, %0d failed", pass_count, fail_count);

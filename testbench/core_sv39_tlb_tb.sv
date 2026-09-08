@@ -81,6 +81,9 @@ module core_sv39_tlb_tb;
     function automatic logic [31:0] enc_csrrw(input logic [11:0] csr, input logic [4:0] rs1);
         return encode_csr(csr, rs1, `FUNCT3_CSRRW, 5'd0, `OPC_SYSTEM);
     endfunction
+    function automatic logic [31:0] enc_csrrs(input logic [11:0] csr, input logic [4:0] rd);
+        return encode_csr(csr, 5'd0, `FUNCT3_CSRRS, rd, `OPC_SYSTEM);
+    endfunction
     function automatic logic [31:0] enc_jal(input logic [4:0] rd, input int imm);
         return encode_j(imm, rd, `OPC_JAL);
     endfunction
@@ -232,7 +235,43 @@ module core_sv39_tlb_tb;
         ptw_prev_e <= (dut_e.core0.state == dut_e.core0.S_PTW);
     end
 
-    wire halted = halted_a && halted_b && halted_c && halted_d && halted_e;
+    /* ----------------------------------------------------------------
+     * Test F: SFENCE.VMA that TRAPS must NOT flush the TLB -- the
+     * regression proof for a real bug found post-M6 by an independent
+     * adversarial re-review: the flush write (core.sv, near
+     * "commit_now && is_sfence_vma") was unconditional, omitting the
+     * !instr_faulted guard every OTHER commit-time side effect in that
+     * file (csr_we, reg_write) already applies -- so an S-mode
+     * SFENCE.VMA that traps as illegal (mstatus.TVM=1) still wiped the
+     * whole TLB even though the instruction architecturally never
+     * executed. VA_X=0x40403000 (vpn0=3, PA 0x4000): the leaf dword's
+     * own fetch (walk#1) fills the TLB; SFENCE.VMA's OWN fetch (same
+     * VPN) hits, but its EXECUTION traps (TVM=1, S-mode) instead of
+     * ever flushing. The handler captures mcause, then mret's to
+     * VA_X+0x100 -- a DIFFERENT offset within the SAME 4KB page (same
+     * VPN) -- which must still HIT (ptw_count stays at 1) if the fix
+     * is correct; under the bug, the spurious flush would force a
+     * SECOND walk there (ptw_count becomes 2).
+     * ---------------------------------------------------------------- */
+    core_wb4_sram_harness #(.NUM_WORDS(4096)) dut_f (.clk(clk), .rst(rst));
+    logic halted_f = 1'b0;
+    always @(posedge clk) if (dut_f.core0.trap_taken && dut_f.core0.is_ebreak) halted_f <= 1'b1;
+    logic ptw_prev_f = 1'b0;
+    int ptw_count_f = 0;
+    always @(negedge clk) begin
+        if ((dut_f.core0.state == dut_f.core0.S_PTW) && !ptw_prev_f) ptw_count_f <= ptw_count_f + 1;
+        ptw_prev_f <= (dut_f.core0.state == dut_f.core0.S_PTW);
+    end
+    logic [63:0] mcause_f;
+    logic        captured_f = 1'b0;
+    always @(posedge clk) if (!captured_f && dut_f.core0.commit_now && dut_f.core0.pc == 64'h104) begin
+        captured_f <= 1'b1;
+        mcause_f   <= dut_f.core0.regfile0.gp_registers[20];
+    end
+    logic [31:0] handler_f[0:8];
+    int j; // shared packing-loop index, Test F only
+
+    wire halted = halted_a && halted_b && halted_c && halted_d && halted_e && halted_f;
     `include "halt_wait.sv"
 
 
@@ -365,6 +404,55 @@ module core_sv39_tlb_tb;
         // same megapage entry, VA's own vpn0=6 reconstructed), high=ebreak.
         dut_e.sram0.memory[3072] = {EBREAK_INSN, enc_addi(5'd29,5'd0,2)};
 
+        /* ================= dut_f ================= */
+        // s0=addi x1,0,8(pc0x00) s1=slli x1,x1,60(0x04) s2=addi x2,0,1(0x08)
+        // s3=or x1,x1,x2(0x0C) s4=csrrw satp,x1(0x10) s5=addi x3,0,1(0x14)
+        // s6=slli x3,x3,20(0x18) s7=addi x14,0,1(0x1C) s8=slli x14,x14,11(0x20)
+        // s9=or x3,x3,x14(0x24) s10=csrrw mstatus,x3(0x28) s11=addi x4,0,1028(0x2C)
+        // s12=slli x4,x4,20(0x30) s13=addi x15,0,3(0x34) s14=slli x15,x15,12(0x38)
+        // s15=or x4,x4,x15(0x3C) s16=csrrw mepc,x4(0x40) s17=addi x6,0,256(0x44)
+        // s18=csrrw mtvec,x6(0x48) s19=mret(0x4C). Each word packs
+        // {HIGH(pc+4), LOW(pc+0)}.
+        dut_f.sram0.memory[0] = {enc_slli(5'd1,5'd1,6'd60), enc_addi(5'd1,5'd0,8)};        // {s1,s0}
+        dut_f.sram0.memory[1] = {enc_or(5'd1,5'd1,5'd2), enc_addi(5'd2,5'd0,1)};           // {s3,s2}
+        dut_f.sram0.memory[2] = {enc_addi(5'd3,5'd0,1), enc_csrrw(`CSR_SATP,5'd1)};        // {s5,s4}
+        dut_f.sram0.memory[3] = {enc_addi(5'd14,5'd0,1), enc_slli(5'd3,5'd3,6'd20)};       // {s7,s6}
+        dut_f.sram0.memory[4] = {enc_or(5'd3,5'd3,5'd14), enc_slli(5'd14,5'd14,6'd11)};    // {s9,s8}
+        dut_f.sram0.memory[5] = {enc_addi(5'd4,5'd0,1028), enc_csrrw(`CSR_MSTATUS,5'd3)};  // {s11,s10} mstatus<-TVM=1,MPP=S
+        dut_f.sram0.memory[6] = {enc_addi(5'd15,5'd0,3), enc_slli(5'd4,5'd4,6'd20)};       // {s13,s12}
+        dut_f.sram0.memory[7] = {enc_or(5'd4,5'd4,5'd15), enc_slli(5'd15,5'd15,6'd12)};    // {s15,s14} x4 = VA_X = 0x40403000
+        dut_f.sram0.memory[8] = {enc_addi(5'd6,5'd0,256), enc_csrrw(`CSR_MEPC,5'd4)};      // {s17,s16}
+        dut_f.sram0.memory[9] = {`INSTR_HEX_MRET, enc_csrrw(`CSR_MTVEC,5'd6)};             // {s19,s18}
+
+        // Leaf @0x4000 (word 2048): low=addi x10,x0,111 (walk#1, fills
+        // TLB), high=sfence.vma (its OWN fetch is a HIT -- same VPN --
+        // but its EXECUTION traps: TVM=1, S-mode -- must NOT flush).
+        dut_f.sram0.memory[2048] = {SFENCE_VMA_INSN, enc_addi(5'd10,5'd0,111)};
+
+        // Handler @0x100 (word 32 onward): capture mcause, rebuild mepc
+        // to VA_X+0x100, mret back.
+        handler_f[0] = enc_csrrs(`CSR_MCAUSE,5'd20);
+        handler_f[1] = enc_addi(5'd26,5'd0,1028);
+        handler_f[2] = enc_slli(5'd26,5'd26,6'd20);
+        handler_f[3] = enc_addi(5'd27,5'd0,3);
+        handler_f[4] = enc_slli(5'd27,5'd27,6'd12);
+        handler_f[5] = enc_or(5'd26,5'd26,5'd27);          // x26 = VA_X base
+        handler_f[6] = enc_addi(5'd26,5'd26,256);           // x26 = VA_X + 0x100
+        handler_f[7] = enc_csrrw(`CSR_MEPC,5'd26);
+        handler_f[8] = `INSTR_HEX_MRET;
+        for (j = 0; j < 4; j = j + 1)
+            dut_f.sram0.memory[32 + j] = {handler_f[2*j+1], handler_f[2*j]};
+        dut_f.sram0.memory[32 + 4][31:0] = handler_f[8];
+
+        // Phase 2 @ VA_X+0x100 (PA 0x4100, word 2080 = 0x4100/8): low=addi
+        // x11,x0,222 (marker -- must HIT the still-cached TLB entry if
+        // the fix holds), high=ebreak.
+        dut_f.sram0.memory[2080] = {EBREAK_INSN, enc_addi(5'd11,5'd0,222)};
+
+        dut_f.sram0.memory[512 + 1]  = 64'h0000_0000_0000_0801; // L2[1] -> L1@0x2000
+        dut_f.sram0.memory[1024 + 2] = 64'h0000_0000_0000_0C01; // L1[2] -> L0@0x3000
+        dut_f.sram0.memory[1536 + 3] = 64'h0000_0000_0000_10CF; // L0[3] -> leaf PPN=4 (PA 0x4000), full RWX
+
         @(posedge clk); #1;
         rst = 0;
 
@@ -399,6 +487,15 @@ module core_sv39_tlb_tb;
         check("E: VA_X's own leaf code executed (x30==1)", dut_e.core0.regfile0.gp_registers[30], 64'd1);
         check("E: VA_Y's own leaf code executed (x29==2)", dut_e.core0.regfile0.gp_registers[29], 64'd2);
         check("E: exactly ONE walk -- the whole megapage, both vpn0 values, cached by one entry", ptw_count_e, 64'd1);
+
+        // ---- Test F ----
+        check("F: SFENCE.VMA (TVM=1, S-mode) trapped as illegal instruction (mcause==2)", mcause_f, 64'd2);
+        check("F: walk#1's own leaf marker set (x10==111)", dut_f.core0.regfile0.gp_registers[10], 64'd111);
+        check({"F: phase-2 marker reached after mret (x11==222) -- proves execution resumed cleanly ",
+            "post-trap"}, dut_f.core0.regfile0.gp_registers[11], 64'd222);
+        check({"F: exactly ONE walk total -- the trapped SFENCE.VMA did NOT flush the TLB, so ",
+            "phase-2's own access (same VPN, different offset) correctly HIT instead of re-walking"},
+            ptw_count_f, 64'd1);
 
         $display("");
         $display("core_sv39_tlb_tb: %0d passed, %0d failed", pass_count, fail_count);
