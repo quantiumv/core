@@ -12,13 +12,15 @@
 # Control flow:
 #   1. Point mtvec at m_trap_handler.
 #   2. mie.MTIE = 1 (bit 7).
-#   3. Program the REAL CLINT's mtimecmp (CLINT_BASE+0x8 = 0x0401_0008,
-#      shifted up by 0x0400_0000 from the pre-RAM-growth 0x0001_0008 --
-#      see design/wb_addr_decoder.sv's own header for the full new
-#      address map) to a real, small deadline (800 -- comfortably past
-#      this program's own setup instructions, given every fetch/load in
-#      this milestone's real soc.sv topology is a genuine Wishbone
-#      transaction, but small enough to keep the whole test fast).
+#   3. Program the REAL CLINT's mtimecmp (CLINT_BASE+0x4000 = 0x0401_4000
+#      -- relocated by the CLINT/UART standards-compliance plan's own
+#      Milestone 1, a real SiFive-CLINT-compatible offset, up from this
+#      file's own prior 0x0401_0008; see design/clint.sv's own header
+#      for the full new register map) to a real, small deadline (800 --
+#      comfortably past this program's own setup instructions, given
+#      every fetch/load in this milestone's real soc.sv topology is a
+#      genuine Wishbone transaction, but small enough to keep the whole
+#      test fast).
 #   4. mstatus.MIE = 1 -- arms the interrupt for real.
 #   5. A bounded busy-loop polling the real CLINT's mtime (CLINT_BASE+0x0)
 #      against the deadline -- NOT `wfi` (a documented, deliberate no-op
@@ -53,14 +55,14 @@ main:
     li      t0, 128                  # mie.MTIE (bit 7)
     csrw    mie, t0
 
-    li      a0, 0x04010008           # CLINT_BASE+0x8 (mtimecmp)
+    li      a0, 0x04014000           # CLINT_BASE+0x4000 (mtimecmp)
     li      a1, 800                  # deadline
     sd      a1, 0(a0)
 
     li      t0, 8                    # mstatus.MIE (bit 3)
     csrw    mstatus, t0
 
-    li      a0, 0x04010000           # CLINT_BASE (mtime)
+    li      a0, 0x0401BFF8           # CLINT_BASE+0xBFF8 (mtime)
     li      s2, 0
 busy_loop:
     ld      t1, 0(a0)                # t1 = mtime (real, uncacheable CLINT read)
@@ -75,7 +77,7 @@ busy_done:
 
 m_trap_handler:
     li      s1, 1                    # marker: the real timer interrupt fired
-    li      t0, 0x04010008           # CLINT_BASE+0x8 (mtimecmp)
+    li      t0, 0x04014000           # CLINT_BASE+0x4000 (mtimecmp)
     li      t1, -1                   # all-ones -- disarms mtip.MTIP so MRET's
                                       #   own MIE restoration can't immediately
                                       #   re-trigger the same pending condition
