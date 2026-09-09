@@ -29,14 +29,18 @@
  *               soc.sv's header; wb4_sram.sv's own module default stays
  *               4096/32KB, unchanged, for every other instantiation)
  *   sel_periph=1, then:
- *     0xxx -> UART  0x0400_8000-0x0400_FFFF
- *     0xxx -> CLINT 0x0401_0000-0x0401_7FFF (32KB -- narrowed from an
- *               earlier 64KB window that claimed both addr_i[15] values;
- *               see "Known, accepted gap" below for why 32KB still isn't
- *               tight against CLINT's own real register footprint)
- *     0xxx -> DRAM  0x0401_8000-0x0401_FFFF (32KB, the window CLINT's own
- *               narrowing freed up -- see "DRAM address translation"
- *               below for why dram_addr_o needs special handling)
+ *     0xxx -> DRAM  0x0400_0000-0x0400_7FFF (32KB -- CLINT/UART
+ *               standards-compliance plan Milestone 2: relocated here,
+ *               into the hole CLINT's own widening below freed up, from
+ *               its prior 0x0401_8000 home)
+ *     0xxx -> UART  0x0400_8000-0x0400_FFFF (unchanged base -- a real
+ *               16550's register set is tiny (8 bytes), fits easily in
+ *               this existing 32KB window)
+ *     1xxx -> CLINT 0x0401_0000-0x0401_FFFF (64KB -- widened from a prior
+ *               32KB window by dropping the addr_i[15] qualifier from
+ *               this select entirely, since a real per-hart CLINT needs
+ *               up to +0xBFF8 for mtime; see design/clint.sv's own
+ *               header for the real register offsets this now fits)
  *     1xxx -> PLIC  0x0440_0000-0x047F_FFFF (4MB, addr_i[22]=1 regardless
  *               of every other address bit -- room for 2 more real
  *               contexts later at no further decoder cost)
@@ -63,19 +67,21 @@
  * four real targets, no spare encoding left), not re-derived from addr_i
  * when the response shows up.
  *
- * Known, accepted gap: CLINT's own window is only 3 words wide
- * (mtime/mtimecmp at CLINT_BASE+0x0/+0x8, see clint.sv) but its decoded
- * region is 32KB (bits 17-25 of addr_i are never tested at all, just
- * like bits above RAM/UART/DRAM's own windows aren't). Every address in
- * 0x0401_0000-0x0401_7FFF that isn't exactly +0x0 or +0x8 still routes
- * to clint.sv and gets a real ack (clint.sv's own addr_i[3] mux treats
- * any such address as an alias of one of its two real registers -- see
- * that module's header). No corruption risk (clint.sv has no side
- * effects beyond those two registers either way), just address aliasing
- * -- the same class of gap wb4_sram.sv's own bounds check is the only
- * thing preventing for RAM, left undocumented there too. Not worth a
- * fix without a concrete need (e.g. real device-tree/OpenSBI address
- * decoding) driving one.
+ * Known, accepted gap: CLINT's own real register footprint is only 3
+ * dwords (msip/mtimecmp/mtime at CLINT_BASE+0x0/+0x4000/+0xBFF8, see
+ * clint.sv) but its decoded region is a full 64KB (a real per-hart
+ * CLINT's own real spec footprint, widened from a prior 32KB window by
+ * the CLINT/UART standards-compliance plan's own Milestone 1/2 -- see
+ * clint.sv's own header for why 64KB, not something tighter, is the
+ * real number). Unlike before this milestone, every address in that
+ * window that isn't exactly one of the three real offsets is NOT an
+ * address-aliasing risk any more -- clint.sv itself now does a real
+ * equality decode per register and returns 0/ignores writes for
+ * anything else (see that module's own header), so THIS module's own
+ * bit-level gating (addr_i[16] alone, regardless of addr_i[15:0]) is
+ * simply coarser than clint.sv's own internal decode, not a correctness
+ * gap either module needs to close further without a concrete need
+ * (e.g. real device-tree/OpenSBI address decoding) driving one.
  *
  * DRAM address translation -- the one deliberate exception among the
  * four *_addr_o broadcast assigns below: ram_addr_o/uart_addr_o/
@@ -87,8 +93,11 @@
  * addr_i's upper bits). dram_model.sv is neither of those: it does a
  * real, self-contained bounds check against a ZERO-BASED window
  * (`addr_valid = (addr_i[31:ADDR_W] == '0)`, see that file). Handing it
- * the raw system address (nonzero bits 15/16 for every legitimately-
- * routed DRAM address) would fail that check on every single access,
+ * the raw system address (nonzero bits 22/26 -- sel_periph and the
+ * PLIC-window gate -- for every legitimately-routed DRAM address; bits
+ * 15/16 are now naturally 0 there instead, following DRAM's own
+ * relocation to sit directly above RAM's window, see this file's own
+ * address-map comment above) would fail that check on every single access,
  * permanently and silently breaking DRAM with err_o instead of ack_o --
  * so dram_addr_o is rebased to a window-local address instead
  * (`{17'b0, addr_i[14:0]}`), the one broadcast assign that isn't a bare
@@ -173,8 +182,8 @@ module wb_addr_decoder (
     wire sel_ram    = !sel_periph;
     wire sel_plic   =  sel_periph &&  addr_i[22];
     wire sel_uart   =  sel_periph && !addr_i[22] && !addr_i[16] &&  addr_i[15];
-    wire sel_clint  =  sel_periph && !addr_i[22] &&  addr_i[16] && !addr_i[15];
-    wire sel_dram   =  sel_periph && !addr_i[22] &&  addr_i[16] &&  addr_i[15];
+    wire sel_clint  =  sel_periph && !addr_i[22] &&  addr_i[16];
+    wire sel_dram   =  sel_periph && !addr_i[22] && !addr_i[16] && !addr_i[15];
 
     /*
      * Gate cyc/stb per slave; broadcast everything else (addr/dat/sel/we)

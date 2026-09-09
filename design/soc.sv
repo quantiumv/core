@@ -8,7 +8,7 @@
  *
  * Top-level integration: {core, dm0} (two Wishbone masters, Milestone 8)
  * <-> wb_arbiter2 <-> wb_addr_decoder <-> {cache_complex -> wb4_sram,
- * uart_tx, uart_rx, clint0}. Exactly the wiring already proven in
+ * uart16550, clint0}. Exactly the wiring already proven in
  * testbench/core_wb_tb.sv (for core<->decoder<->{ram,uart}),
  * testbench/core_cache_harness.sv (for core<->cache_complex<->sram), and
  * testbench/decoder_clint_harness.sv (for decoder<->{ram,uart,clint} at
@@ -29,13 +29,13 @@
  *
  * cache_complex sits AFTER wb_addr_decoder, between it and wb4_sram --
  * not before the decoder. This is deliberate, not incidental ordering:
- * uart_tx.sv is a real side-effecting MMIO peripheral (TX_DATA triggers a
- * genuine $write on every store; TX_STATUS is a poll register explicitly
+ * uart16550.sv is a real side-effecting MMIO peripheral (THR triggers a
+ * genuine $write on every store; LSR is a poll register explicitly
  * structured to grow real serial timing later), and placing the cache
  * downstream of the decoder makes UART traffic structurally uncacheable
  * -- cache_complex's ports simply never see it -- rather than requiring
  * the cache to duplicate the decoder's own addr_i[15] test internally,
- * with the real risk of getting it wrong (e.g. a cached TX_STATUS poll
+ * with the real risk of getting it wrong (e.g. a cached LSR poll
  * silently breaking once real timing lands there). See the cache
  * hierarchy's own design notes (project memory: cache-hierarchy-plan) for
  * the full reasoning.
@@ -79,31 +79,33 @@
  * lockstep. See design/core.sv's icache_flush_o port comment and
  * design/icache.sv's flush_i port comment for the full timing proof.
  *
- * uart_rx0 (design/uart_rx.sv, Milestone 2 of the EBREAK/JTAG staged
- * plan) is a new sibling to uart0, NOT a new decoder port -- the two
- * share the decoder's existing single uart_* port group, split by a new
- * addr_i[4] sub-decode introduced in THIS file (0 routes to uart0/TX, 1
- * routes to uart_rx0/RX). This is the first address-decode logic soc.sv
- * itself has ever contained -- every other split (RAM/UART/CLINT/DRAM)
- * lives one level down in wb_addr_decoder.sv, which still only ever
- * sees one opaque "uart" target and has no reason to know it's now
- * backed by two physical instances. See the detailed rationale right
- * where that split is wired, next to the uart0/uart_rx0 instantiations
- * below.
+ * uart0 (design/uart16550.sv, CLINT/UART standards-compliance plan
+ * Milestone 4) is now a SINGLE real 16550-register-compatible instance,
+ * not two separate uart_tx/uart_rx halves -- this milestone RETIRES the
+ * addr_i[4] TX/RX sub-decode that used to live in THIS file (soc.sv's
+ * own first-ever address-decode logic, now gone again) along with
+ * design/uart_tx.sv/design/uart_rx.sv themselves. The decoder's own
+ * single uart_* port group now hangs directly off ONE uart16550
+ * instance, exactly like clint0/plic0 already do off their own ports --
+ * see design/uart16550.sv's own header for the real register map this
+ * produces, and design/wb_addr_decoder.sv's header for why UART's own
+ * base address (0x0400_8000) didn't need to move for this. The
+ * instance is still named `uart0` (not a new name) -- several
+ * testbenches hierarchically reference `dut.uart0.tx_history`/
+ * `tx_history_count`, unchanged by this rewrite; only the RX-specific
+ * `uart_rx0.push_byte`/`rx_count` references (2 files) needed renaming
+ * to `uart0.*`, since uart_rx0 no longer exists as a separate instance.
  *
  * plic0 (design/plic.sv, Milestone 4 of the PMP+PLIC staged plan) hangs
  * off the decoder's fifth slave port, addr_i[22]'s own 4MB window (see
- * wb_addr_decoder.sv's own header). As of Milestone 6 (this milestone,
- * the final one of that plan) it is wired for real end to end:
- * uart_rx0.o_rx_irq -> plic0.i_uart_rx_irq, and plic0.o_meip/o_seip ->
- * core0.i_meip/i_seip (both added by that plan's own Milestone 3, left
- * deliberately unconnected on core0's own instantiation until now) --
- * mirroring clint0's own Milestone 4-to-6 staging precedent exactly
- * (mtip_o existed and was real one milestone before core0.i_mtip was
- * ever wired to it).
+ * wb_addr_decoder.sv's own header). uart0.o_irq -> plic0.i_uart_rx_irq
+ * (renamed from uart_rx0.o_rx_irq by this milestone's own uart16550.sv
+ * rewrite, same LEVEL contract preserved), and plic0.o_meip/o_seip ->
+ * core0.i_meip/i_seip, unchanged from the PMP+PLIC plan's own Milestone
+ * 6 wiring.
  *
  * No UART pin exists at this level (or anywhere in this design) -- see
- * uart_tx.sv's header for why: this milestone's UART "transmits" via
+ * uart16550.sv's header for why: this milestone's UART "transmits" via
  * $write in simulation, not real serial timing, so there is nothing for
  * a top-level pin to carry.
  *
@@ -395,56 +397,20 @@ module soc (
     );
 
     /*
-     * uart_addr[4] sub-decode: soc.sv's own addr_i[4] split of the
-     * decoder's single uart_* port group between uart0 (TX, addr_i[4]=0)
-     * and uart_rx0 (RX, addr_i[4]=1) -- see design/uart_rx.sv's own
-     * header for the register map this produces (0x0400_8000/0x0400_8008
-     * TX, 0x0400_8010/0x0400_8018 RX, since the Linux-boot-readiness
-     * RAM-growth change moved the whole peripheral region -- see
-     * design/wb_addr_decoder.sv's own header for the full address map).
-     *
-     * uart_cyc/uart_stb are gated combinationally by uart_sel_rx (itself
-     * a plain combinational read of uart_addr[4], which the decoder
-     * holds stable for the full duration of a transaction) BEFORE they
-     * ever reach either instance, so exactly one of the two ever sees a
-     * live request on a given cycle -- the other's own `cyc_i && stb_i`
-     * reads false and it correctly holds its own ack_o/err_o low that
-     * cycle (see uart_tx.sv/uart_rx.sv's own always block: the else
-     * branch drives both low). Since at most one instance is ever
-     * asserting ack_o on any given cycle, the two local ack/err/dat_o
-     * triples can simply be OR'd/muxed back together below with no
-     * arbitration needed -- not a coincidence, a direct consequence of
-     * the mutually-exclusive gating above. A future refactor must not
-     * "simplify" this by feeding both instances the same ungated
-     * uart_cyc/uart_stb -- that would make both instances respond to
-     * every UART access, corrupting whichever one wasn't the real
-     * target.
+     * uart0 (design/uart16550.sv): ONE real 16550-register-compatible
+     * instance hanging directly off the decoder's single uart_* port
+     * group -- the addr_i[4] TX/RX sub-decode this file used to do
+     * itself is RETIRED by this milestone (see this file's own header),
+     * since a real 16550 is architecturally one device with all 8
+     * registers packed into ONE dword, addressed purely via sel_i
+     * inside uart16550.sv itself (see that module's own header) -- no
+     * decode of any kind is needed here any more.
      */
-    wire uart_sel_rx = uart_addr[4];
-
-    wire uart_tx_cyc = uart_cyc && !uart_sel_rx;
-    wire uart_tx_stb = uart_stb && !uart_sel_rx;
-    wire uart_rx_cyc = uart_cyc && uart_sel_rx;
-    wire uart_rx_stb = uart_stb && uart_sel_rx;
-
-    logic [63:0] uart_tx_dat_o, uart_rx_dat_o;
-    logic        uart_tx_ack, uart_tx_err, uart_rx_ack, uart_rx_err;
-
-    assign uart_ack   = uart_tx_ack | uart_rx_ack;
-    assign uart_err   = uart_tx_err | uart_rx_err;
-    assign uart_dat_i = uart_tx_ack ? uart_tx_dat_o : uart_rx_dat_o;
-
-    uart_tx uart0 (
+    uart16550 uart0 (
         .clk(clk), .rst(rst),
-        .addr_i(uart_addr), .dat_i(uart_dat_o), .dat_o(uart_tx_dat_o), .sel_i(uart_sel),
-        .ack_o(uart_tx_ack), .err_o(uart_tx_err), .cyc_i(uart_tx_cyc), .stb_i(uart_tx_stb), .we_i(uart_we)
-    );
-
-    uart_rx uart_rx0 (
-        .clk(clk), .rst(rst),
-        .addr_i(uart_addr), .dat_i(uart_dat_o), .dat_o(uart_rx_dat_o), .sel_i(uart_sel),
-        .ack_o(uart_rx_ack), .err_o(uart_rx_err), .cyc_i(uart_rx_cyc), .stb_i(uart_rx_stb), .we_i(uart_we),
-        .o_rx_irq(uart_rx_irq)
+        .addr_i(uart_addr), .dat_i(uart_dat_o), .dat_o(uart_dat_i), .sel_i(uart_sel),
+        .ack_o(uart_ack), .err_o(uart_err), .cyc_i(uart_cyc), .stb_i(uart_stb), .we_i(uart_we),
+        .o_irq(uart_rx_irq)
     );
 
     clint clint0 (
