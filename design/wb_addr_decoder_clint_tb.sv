@@ -11,7 +11,7 @@
  * testbench instead proves the decoder wired to REAL slaves -- especially
  * a real design/clint.sv -- works correctly end-to-end through the actual
  * port wiring soc.sv now uses, via testbench/decoder_clint_harness.sv
- * (real wb_addr_decoder + real wb4_sram + real uart_tx + real clint, no
+ * (real wb_addr_decoder + real wb4_sram + real uart16550 + real clint, no
  * core.sv). This is bus-level, not firmware/instruction-level: raw
  * Wishbone cycles are driven directly at the decoder's CPU-facing port
  * with testbench/wb_driver.sv's wb_cycle() task, the same way
@@ -52,8 +52,8 @@ module wb_addr_decoder_clint_tb;
     `include "check_lib.sv"
     `include "wb_driver.sv"
 
-    localparam logic [31:0] CLINT_MTIME    = 32'h0401_0000;
-    localparam logic [31:0] CLINT_MTIMECMP = 32'h0401_0008;
+    localparam logic [31:0] CLINT_MTIME    = 32'h0401_BFF8;
+    localparam logic [31:0] CLINT_MTIMECMP = 32'h0401_4000;
 
     logic [63:0] mtime_first, mtime_second;
 
@@ -72,14 +72,18 @@ module wb_addr_decoder_clint_tb;
         check("RAM round trip (pre-CLINT traffic)", dat_o, 64'hDEADBEEF_CAFEF00D);
 
         /*
-         * UART round trip through the real fabric -- TX_DATA write then
-         * TX_STATUS poll, same pattern design/uart_tx_tb.sv itself uses.
+         * UART round trip through the real fabric -- a THR write (real
+         * 16550 register model, design/uart16550.sv; the old TX_DATA/
+         * TX_STATUS pair retired with uart_tx.sv/uart_rx.sv, see that
+         * module's own header). sel_i=8'h01 (byte lane 0, real 16550
+         * firmware discipline) rather than the fake-slave testbench's
+         * own sel_i=8'hFF convention.
          */
         wb_cycle(32'h0400_8000, 64'h48, 8'h01, 1'b1); // 'H'
         check("UART: one character captured", {55'b0, dut.uart0.tx_history_count}, 64'd1);
         check("UART: history[0] == 'H'", {56'b0, dut.uart0.tx_history[0]}, 64'h48);
-        wb_cycle(32'h0400_8008, 64'h0, 8'h00, 1'b0);
-        check("UART: TX_STATUS reads ready", dat_o, 64'h1);
+        wb_cycle(32'h0400_8000, 64'h0, 8'h20, 1'b0); // LSR (byte lane 5)
+        check("UART: LSR.THRE/TEMT read ready (hardwired 1)", dat_o[46:45], 64'(2'b11));
 
         /*
          * CLINT mtime: a real, sane free-running counter, not a fixed

@@ -8,7 +8,7 @@
  *
  * Mirrors design/wb_addr_decoder_clint_tb.sv exactly, extended to the 4th
  * real slave -- via verification/taxi/rtl/decoder_dram_harness.sv (real
- * wb_addr_decoder + real wb4_sram + real uart_tx + real clint + real
+ * wb_addr_decoder + real wb4_sram + real uart16550 + real clint + real
  * dram_model, no core.sv). Bus-level, not firmware/instruction-level: raw
  * Wishbone cycles driven directly at the decoder's CPU-facing port with
  * wb_cycle(), same idiom as every other decoder-level testbench.
@@ -52,11 +52,11 @@ module decoder_dram_tb;
     `include "check_lib.sv"
     `include "wb_driver.sv"
 
-    localparam logic [31:0] CLINT_MTIME    = 32'h0401_0000;
-    localparam logic [31:0] CLINT_MTIMECMP = 32'h0401_0008;
-    localparam logic [31:0] CLINT_TOP      = 32'h0401_7FFF; // top of CLINT's narrowed window
-    localparam logic [31:0] DRAM_BASE      = 32'h0401_8000;
-    localparam logic [31:0] DRAM_SECOND    = 32'h0401_8100;
+    localparam logic [31:0] CLINT_MTIME    = 32'h0401_BFF8;
+    localparam logic [31:0] CLINT_MTIMECMP = 32'h0401_4000;
+    localparam logic [31:0] CLINT_TOP      = 32'h0401_FFFF; // top of CLINT's widened (64KB) window
+    localparam logic [31:0] DRAM_BASE      = 32'h0400_0000;
+    localparam logic [31:0] DRAM_SECOND    = 32'h0400_0100;
 
     logic [63:0] mtime_first, mtime_second;
 
@@ -70,12 +70,17 @@ module decoder_dram_tb;
         wb_cycle(32'h0000_0100, 64'h0, 8'hFF, 1'b0);
         check("RAM round trip (pre-DRAM traffic)", dat_o, 64'hDEADBEEF_CAFEF00D);
 
-        /* UART round trip. */
+        /*
+         * UART round trip -- real 16550 register model
+         * (design/uart16550.sv; the old TX_DATA/TX_STATUS pair retired
+         * with uart_tx.sv/uart_rx.sv). sel_i=8'h01 selects THR (byte
+         * lane 0), the real firmware-facing access width.
+         */
         wb_cycle(32'h0400_8000, 64'h48, 8'h01, 1'b1); // 'H'
         check("UART: one character captured", {55'b0, dut.uart0.tx_history_count}, 64'd1);
         check("UART: history[0] == 'H'", {56'b0, dut.uart0.tx_history[0]}, 64'h48);
-        wb_cycle(32'h0400_8008, 64'h0, 8'h00, 1'b0);
-        check("UART: TX_STATUS reads ready", dat_o, 64'h1);
+        wb_cycle(32'h0400_8000, 64'h0, 8'h20, 1'b0); // LSR (byte lane 5)
+        check("UART: LSR.THRE/TEMT read ready (hardwired 1)", dat_o[46:45], 64'(2'b11));
 
         /* CLINT mtime: real free-running counter, strict-increase check. */
         wb_cycle(CLINT_MTIME, 64'h0, 8'hFF, 1'b0);

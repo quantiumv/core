@@ -44,8 +44,8 @@ module wb_addr_decoder_plic_tb;
     `include "check_lib.sv"
     `include "wb_driver.sv"
 
-    localparam logic [31:0] CLINT_MTIME    = 32'h0401_0000;
-    localparam logic [31:0] CLINT_MTIMECMP = 32'h0401_0008;
+    localparam logic [31:0] CLINT_MTIME    = 32'h0401_BFF8;
+    localparam logic [31:0] CLINT_MTIMECMP = 32'h0401_4000;
 
     // Real PLIC spec byte offsets (independently transcribed, matching
     // plic.sv's own internal localparams, not read from that file's
@@ -69,11 +69,16 @@ module wb_addr_decoder_plic_tb;
         wb_cycle(32'h0000_0100, 64'h0, 8'hFF, 1'b0);
         check("RAM round trip (pre-PLIC traffic)", dat_o, 64'hDEADBEEF_CAFEF00D);
 
-        /* UART round trip. */
+        /*
+         * UART round trip -- real 16550 register model
+         * (design/uart16550.sv; the old TX_DATA/TX_STATUS pair retired
+         * with uart_tx.sv/uart_rx.sv). sel_i=8'h01 selects THR (byte
+         * lane 0), the real firmware-facing access width.
+         */
         wb_cycle(32'h0400_8000, 64'h48, 8'h01, 1'b1); // 'H'
         check("UART: one character captured", {55'b0, dut.uart0.tx_history_count}, 64'd1);
-        wb_cycle(32'h0400_8008, 64'h0, 8'h00, 1'b0);
-        check("UART: TX_STATUS reads ready", dat_o, 64'h1);
+        wb_cycle(32'h0400_8000, 64'h0, 8'h20, 1'b0); // LSR (byte lane 5)
+        check("UART: LSR.THRE/TEMT read ready (hardwired 1)", dat_o[46:45], 64'(2'b11));
 
         /* CLINT: mtime sane (real free-running counter), mtimecmp round trip. */
         wb_cycle(CLINT_MTIME, 64'h0, 8'hFF, 1'b0);

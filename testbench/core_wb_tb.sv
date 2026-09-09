@@ -19,7 +19,9 @@
  * private imem0 they were originally written against), this exercises
  * exactly what's NEW in the FSM rewrite: multi-cycle fetch,
  * multi-cycle load/store, and routing through a real wb_addr_decoder to
- * two real slaves (wb4_sram, uart_tx). It deliberately does NOT re-prove
+ * two real slaves (wb4_sram, uart16550 -- the CLINT/UART standards-
+ * compliance plan's own real 16550 module, replacing the old uart_tx).
+ * It deliberately does NOT re-prove
  * individual ALU ops, branch types, or the *W op family -- that datapath logic is
  * unchanged from the single-cycle version and was already proven there.
  *

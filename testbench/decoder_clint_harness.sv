@@ -7,7 +7,7 @@
  * Module: decoder_clint_harness
  *
  * Shared "decoder + real slaves, no core" wiring: a real wb_addr_decoder
- * fanned out to real wb4_sram (RAM), uart_tx (UART), and clint (CLINT)
+ * fanned out to real wb4_sram (RAM), uart16550 (UART), and clint (CLINT)
  * instances. Deliberate omission, not an oversight: this harness is for
  * a bus-level test that drives raw Wishbone cycles directly at the
  * decoder's own CPU-facing port (via testbench/wb_driver.sv's wb_cycle()
@@ -119,10 +119,13 @@ module decoder_clint_harness (
         .ack_o(ram_ack), .err_o(ram_err), .cyc_i(ram_cyc), .stb_i(ram_stb), .we_i(ram_we)
     );
 
-    uart_tx uart0 (
+    uart16550 uart0 (
         .clk(clk), .rst(rst),
         .addr_i(uart_addr), .dat_i(uart_dat_o), .dat_o(uart_dat_i), .sel_i(uart_sel),
-        .ack_o(uart_ack), .err_o(uart_err), .cyc_i(uart_cyc), .stb_i(uart_stb), .we_i(uart_we)
+        .ack_o(uart_ack), .err_o(uart_err), .cyc_i(uart_cyc), .stb_i(uart_stb), .we_i(uart_we),
+        /* verilator lint_off PINCONNECTEMPTY */
+        .o_irq()
+        /* verilator lint_on PINCONNECTEMPTY */
     );
 
     clint clint0 (

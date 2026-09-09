@@ -12,6 +12,12 @@
  * (see each for its required-signal contract) -- resolved via a bare
  * filename plus -I testbench on the iverilog command line, per those
  * files' own headers.
+ *
+ * CLINT/UART standards-compliance plan Milestone 1: register offsets
+ * relocated to the real SiFive-CLINT layout (msip@+0x0, mtimecmp@+0x4000,
+ * mtime@+0xBFF8, see design/clint.sv's own header) -- every address
+ * literal below reflects that, and a new section proves msip's own
+ * plain-RW round trip and its independence from mtimecmp/mtime/mtip_o.
  */
 module clint_tb;
 
@@ -38,6 +44,10 @@ module clint_tb;
     `include "check_lib.sv"
     `include "wb_driver.sv"
 
+    localparam logic [31:0] MSIP     = 32'h0000;
+    localparam logic [31:0] MTIMECMP = 32'h4000;
+    localparam logic [31:0] MTIME    = 32'hBFF8;
+
     initial begin
         cyc = 0; stb = 0; we = 0; addr = 0; dat_i = 0; sel = 8'h00;
         @(posedge clk); #1;
@@ -52,13 +62,13 @@ module clint_tb;
          * mtime_q by -- determined empirically below rather than assumed,
          * per the milestone's own instructions.
          */
-        wb_cycle(32'h0, 64'h0, 8'h00, 1'b0);
+        wb_cycle(MTIME, 64'h0, 8'h00, 1'b0);
         begin
             logic [63:0] mtime_first, mtime_second;
             mtime_first = dat_o;
-            wb_cycle(32'h0, 64'h0, 8'h00, 1'b0);
-            wb_cycle(32'h0, 64'h0, 8'h00, 1'b0);
-            wb_cycle(32'h0, 64'h0, 8'h00, 1'b0);
+            wb_cycle(MTIME, 64'h0, 8'h00, 1'b0);
+            wb_cycle(MTIME, 64'h0, 8'h00, 1'b0);
+            wb_cycle(MTIME, 64'h0, 8'h00, 1'b0);
             mtime_second = dat_o;
             // 3 wb_cycle() calls separate the two reads above; empirically
             // each wb_cycle() advances mtime_q by exactly 1 (one posedge
@@ -73,7 +83,7 @@ module clint_tb;
          * before any write to mtimecmp), so read it now, before this
          * testbench performs its first write, below.
          */
-        wb_cycle(32'h8, 64'h0, 8'h00, 1'b0);
+        wb_cycle(MTIMECMP, 64'h0, 8'h00, 1'b0);
         check("mtimecmp resets to all-ones", dat_o, 64'hFFFF_FFFF_FFFF_FFFF);
 
         /*
@@ -83,27 +93,27 @@ module clint_tb;
          * and confirm lanes 2-7 keep the prior full-word value while
          * lanes 0-1 take the new bytes.
          */
-        wb_cycle(32'h8, 64'hDEADBEEF_CAFEF00D, 8'hFF, 1'b1);
-        wb_cycle(32'h8, 64'h0, 8'h00, 1'b0);
+        wb_cycle(MTIMECMP, 64'hDEADBEEF_CAFEF00D, 8'hFF, 1'b1);
+        wb_cycle(MTIMECMP, 64'h0, 8'h00, 1'b0);
         check("full 8-byte (sel_i=8'hFF) write reads back exactly", dat_o, 64'hDEADBEEF_CAFEF00D);
 
-        wb_cycle(32'h8, 64'h0000_0000_0000_A5A5, 8'h03, 1'b1);
-        wb_cycle(32'h8, 64'h0, 8'h00, 1'b0);
+        wb_cycle(MTIMECMP, 64'h0000_0000_0000_A5A5, 8'h03, 1'b1);
+        wb_cycle(MTIMECMP, 64'h0, 8'h00, 1'b0);
         check("byte-enable write only touches enabled lanes", dat_o, 64'hDEADBEEF_CAFEA5A5);
 
         /*
-         * -- 3b. A write to mtime's own address (0x0) is a no-op --
+         * -- 3b. A write to mtime's own address is a no-op --
          * mtime has no write path at all; confirm a write attempt there
          * neither corrupts mtime_q's free-run nor spuriously asserts
          * err_o, rather than assuming silence means correctness.
          */
         begin
             logic [63:0] mtime_before_noop_write, mtime_after_noop_write;
-            wb_cycle(32'h0, 64'h0, 8'h00, 1'b0);
+            wb_cycle(MTIME, 64'h0, 8'h00, 1'b0);
             mtime_before_noop_write = dat_o;
-            wb_cycle(32'h0, 64'hFFFF_FFFF_FFFF_FFFF, 8'hFF, 1'b1);
+            wb_cycle(MTIME, 64'hFFFF_FFFF_FFFF_FFFF, 8'hFF, 1'b1);
             check("write to mtime's address doesn't assert err_o", {63'b0, err}, 64'd0);
-            wb_cycle(32'h0, 64'h0, 8'h00, 1'b0);
+            wb_cycle(MTIME, 64'h0, 8'h00, 1'b0);
             mtime_after_noop_write = dat_o;
             // The write plus the final read are 2 wb_cycle() calls between
             // the two capture points (mtime_before_noop_write is captured
@@ -127,10 +137,10 @@ module clint_tb;
         begin
             logic [63:0] mtime_now, deadline;
             int          wait_cycles;
-            wb_cycle(32'h0, 64'h0, 8'h00, 1'b0);
+            wb_cycle(MTIME, 64'h0, 8'h00, 1'b0);
             mtime_now = dat_o;
             deadline  = mtime_now + 64'd5;
-            wb_cycle(32'h8, deadline, 8'hFF, 1'b1);
+            wb_cycle(MTIMECMP, deadline, 8'hFF, 1'b1);
             check("mtip_o low before deadline reached", {63'b0, mtip}, 64'd0);
             /*
              * Bounded, not `while (mtip !== 1'b1) @(posedge clk);` --
@@ -166,16 +176,82 @@ module clint_tb;
          */
         begin
             logic [63:0] mtime_now;
-            wb_cycle(32'h0, 64'h0, 8'h00, 1'b0);
+            wb_cycle(MTIME, 64'h0, 8'h00, 1'b0);
             mtime_now = dat_o;
-            wb_cycle(32'h8, mtime_now, 8'hFF, 1'b1);
+            wb_cycle(MTIMECMP, mtime_now, 8'hFF, 1'b1);
             #1;
             check("mtip_o high immediately when mtimecmp is set to an already-passed deadline",
                 {63'b0, mtip}, 64'd1);
         end
 
         /*
-         * -- 5. ack/err timing --
+         * -- 5. msip: plain RW round trip, independent of mtimecmp/mtime/
+         * mtip_o (Milestone 1's own new register) --
+         * Confirm msip resets to 0 (implicit: rst was only ever deasserted
+         * once, above, before any write here), a real write sticks, and
+         * neither mtimecmp's own current value nor mtip_o's own state is
+         * disturbed by msip traffic -- msip drives nothing else in this
+         * single-hart model, so any observed side effect on either would
+         * be a real bug (e.g. a decode overlap between sel_msip and
+         * sel_mtimecmp/sel_mtime).
+         */
+        begin
+            logic [63:0] mtimecmp_before_msip, mtimecmp_after_msip;
+            logic        mtip_before_msip, mtip_after_msip;
+
+            wb_cycle(MSIP, 64'h0, 8'h00, 1'b0);
+            check("msip reads 0 before any write", dat_o, 64'h0);
+
+            wb_cycle(MTIMECMP, 64'h0, 8'h00, 1'b0);
+            mtimecmp_before_msip = dat_o;
+            mtip_before_msip     = mtip;
+
+            wb_cycle(MSIP, 64'hFFFF_FFFF_FFFF_FFFF, 8'hFF, 1'b1);
+            wb_cycle(MSIP, 64'h0, 8'h00, 1'b0);
+            check("msip write sticks (real field is bit 0, read back as 1)", dat_o, 64'h1);
+
+            wb_cycle(MTIMECMP, 64'h0, 8'h00, 1'b0);
+            mtimecmp_after_msip = dat_o;
+            mtip_after_msip     = mtip;
+            check("msip write doesn't disturb mtimecmp's current value",
+                mtimecmp_after_msip, mtimecmp_before_msip);
+            check("msip write doesn't disturb mtip_o",
+                {63'b0, mtip_after_msip}, {63'b0, mtip_before_msip});
+
+            // msip is plain RW, NOT W1C -- a software write of 0 must
+            // genuinely clear it back down (see clint.sv's own header for
+            // why this is the confirmed-correct real spec behavior).
+            wb_cycle(MSIP, 64'h0, 8'hFF, 1'b1);
+            wb_cycle(MSIP, 64'h0, 8'h00, 1'b0);
+            check("msip write of 0 genuinely clears it (plain RW, not W1C)", dat_o, 64'h0);
+        end
+
+        /*
+         * -- 6. Reserved address space: reads 0, ignores writes --
+         * Every address in the 64KB window other than msip/mtimecmp/mtime
+         * is reserved -- confirm one such address (a value that would
+         * have aliased onto a real register under the file's OLD,
+         * narrower single-bit-test decode) reads 0 and a write there
+         * neither asserts err_o nor corrupts any real register.
+         */
+        begin
+            logic [63:0] mtimecmp_before_reserved, mtimecmp_after_reserved;
+            wb_cycle(MTIMECMP, 64'h0, 8'h00, 1'b0);
+            mtimecmp_before_reserved = dat_o;
+
+            wb_cycle(32'h0008, 64'h0, 8'h00, 1'b0);
+            check("reserved address reads 0", dat_o, 64'h0);
+            check("reserved address doesn't assert err_o", {63'b0, err}, 64'd0);
+
+            wb_cycle(32'h0008, 64'hFFFF_FFFF_FFFF_FFFF, 8'hFF, 1'b1);
+            wb_cycle(MTIMECMP, 64'h0, 8'h00, 1'b0);
+            mtimecmp_after_reserved = dat_o;
+            check("a write to a reserved address doesn't corrupt mtimecmp",
+                mtimecmp_after_reserved, mtimecmp_before_reserved);
+        end
+
+        /*
+         * -- 7. ack/err timing --
          * ack_o must NOT assert combinationally in the same cycle
          * cyc_i/stb_i first go high -- it's a registered, 1-wait-state
          * response. Drive the bus signals directly here (bypassing
@@ -197,7 +273,7 @@ module clint_tb;
          */
         while (ack) @(posedge clk);
         @(negedge clk);
-        addr = 32'h0; dat_i = 64'h0; sel = 8'h00; we = 1'b0; cyc = 1'b1; stb = 1'b1;
+        addr = MTIME; dat_i = 64'h0; sel = 8'h00; we = 1'b0; cyc = 1'b1; stb = 1'b1;
         #1;
         check("ack_o not combinational same-cycle as cyc/stb", {63'b0, ack}, 64'd0);
         @(posedge clk); #1;
@@ -208,13 +284,17 @@ module clint_tb;
         // err_o must never assert, for any address/access pattern tried
         // above (already implicitly checked by wb_cycle()'s own
         // !ack && !err wait loop never hanging), plus explicit checks
-        // across both registers and both access directions here.
-        wb_cycle(32'h0, 64'h0, 8'h00, 1'b0);
+        // across all three real registers and both access directions here.
+        wb_cycle(MTIME, 64'h0, 8'h00, 1'b0);
         check("err_o never asserts (mtime read)", {63'b0, err}, 64'd0);
-        wb_cycle(32'h8, 64'h0, 8'h00, 1'b0);
+        wb_cycle(MTIMECMP, 64'h0, 8'h00, 1'b0);
         check("err_o never asserts (mtimecmp read)", {63'b0, err}, 64'd0);
-        wb_cycle(32'h8, 64'hFFFF_FFFF_FFFF_FFFF, 8'hFF, 1'b1);
+        wb_cycle(MTIMECMP, 64'hFFFF_FFFF_FFFF_FFFF, 8'hFF, 1'b1);
         check("err_o never asserts (mtimecmp write)", {63'b0, err}, 64'd0);
+        wb_cycle(MSIP, 64'h0, 8'h00, 1'b0);
+        check("err_o never asserts (msip read)", {63'b0, err}, 64'd0);
+        wb_cycle(MSIP, 64'h1, 8'hFF, 1'b1);
+        check("err_o never asserts (msip write)", {63'b0, err}, 64'd0);
 
         $display("");
         $display("clint_tb: %0d passed, %0d failed", pass_count, fail_count);

@@ -140,18 +140,15 @@ module wb_addr_decoder_tb;
         cyc = 0; stb = 0;
         @(negedge clk);
 
-        // DRAM-range address: only dram_cyc_o should assert. This address
-        // (addr_i[16]==1, addr_i[15]==1) used to alias into CLINT's old
-        // 64KB window (bit 16 alone decided CLINT, regardless of bit 15);
-        // under the current 4-way map, bit 15 is a real, tested select
-        // bit, and 0x0401_8000 is DRAM's own base (shifted up by
-        // 0x0400_0000 from the pre-RAM-growth 0x0001_8000, along with
-        // every other peripheral, once addr_i[26]/sel_periph gates the
-        // whole peripheral sub-decode -- see wb_addr_decoder.sv's header).
+        // DRAM-range address: only dram_cyc_o should assert. 0x0400_0000
+        // is DRAM's own base under the CLINT/UART standards-compliance
+        // plan's new address map (relocated here, into the hole CLINT's
+        // own widening to 64KB freed up, from its prior 0x0401_8000 home
+        // -- see wb_addr_decoder.sv's own header for the full map).
         @(negedge clk);
-        addr = 32'h0401_8000; cyc = 1; stb = 1;
+        addr = 32'h0400_0000; cyc = 1; stb = 1;
         #1;
-        check("DRAM address (formerly CLINT's over-wide window): dram_cyc_o asserted", {63'b0, dram_cyc_o}, 64'd1);
+        check("DRAM address (relocated below UART): dram_cyc_o asserted", {63'b0, dram_cyc_o}, 64'd1);
         check("DRAM address: uart_cyc_o stays low", {63'b0, uart_cyc_o}, 64'd0);
         check("DRAM address: ram_cyc_o stays low", {63'b0, ram_cyc_o}, 64'd0);
         check("DRAM address: clint_cyc_o stays low", {63'b0, clint_cyc_o}, 64'd0);
@@ -190,7 +187,7 @@ module wb_addr_decoder_tb;
         @(negedge clk);
 
         @(negedge clk);
-        addr = 32'h0401_7FFF; cyc = 1; stb = 1;  // top of CLINT's narrowed window
+        addr = 32'h0401_FFFF; cyc = 1; stb = 1;  // top of CLINT's widened (64KB) window
         #1;
         check("CLINT top-of-window address: clint_cyc_o asserted", {63'b0, clint_cyc_o}, 64'd1);
         check("CLINT top-of-window address: ram_cyc_o stays low", {63'b0, ram_cyc_o}, 64'd0);
@@ -200,7 +197,7 @@ module wb_addr_decoder_tb;
         @(negedge clk);
 
         @(negedge clk);
-        addr = 32'h0401_FFFF; cyc = 1; stb = 1;  // top of DRAM's window
+        addr = 32'h0400_7FFF; cyc = 1; stb = 1;  // top of DRAM's (relocated) window
         #1;
         check("DRAM top-of-window address: dram_cyc_o asserted", {63'b0, dram_cyc_o}, 64'd1);
         check("DRAM top-of-window address: ram_cyc_o stays low", {63'b0, ram_cyc_o}, 64'd0);
@@ -259,19 +256,19 @@ module wb_addr_decoder_tb;
         // previous section's end state (UART) so every DRAM-involving
         // pair is hit exactly once, giving full 12/12 ordered-pair
         // coverage across the file.
-        wb_cycle(32'h0401_8010, 64'h0, 8'hFF, 1'b0);
+        wb_cycle(32'h0400_0010, 64'h0, 8'hFF, 1'b0);
         check("DRAM pairs: response routed UART -> DRAM", dat_o, 64'hDDDDDDDD_DDDDDDDD);
 
         wb_cycle(32'h0000_0600, 64'h0, 8'hFF, 1'b0);
         check("DRAM pairs: response routed DRAM -> RAM", dat_o, 64'hAAAAAAAA_AAAAAAAA);
 
-        wb_cycle(32'h0401_8018, 64'h0, 8'hFF, 1'b0);
+        wb_cycle(32'h0400_0018, 64'h0, 8'hFF, 1'b0);
         check("DRAM pairs: response routed RAM -> DRAM", dat_o, 64'hDDDDDDDD_DDDDDDDD);
 
         wb_cycle(32'h0401_0018, 64'h0, 8'hFF, 1'b0);
         check("DRAM pairs: response routed DRAM -> CLINT", dat_o, 64'hCCCCCCCC_CCCCCCCC);
 
-        wb_cycle(32'h0401_8020, 64'h0, 8'hFF, 1'b0);
+        wb_cycle(32'h0400_0020, 64'h0, 8'hFF, 1'b0);
         check("DRAM pairs: response routed CLINT -> DRAM", dat_o, 64'hDDDDDDDD_DDDDDDDD);
 
         wb_cycle(32'h0400_8020, 64'h0, 8'hFF, 1'b0);

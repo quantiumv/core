@@ -422,11 +422,19 @@ module jtag_dmi_e2e_tb;
                 rd, 32'hAAAA_0002);
             dmi_write_reg(DMI_SBCS, {11'b0, 1'b0, 3'd2, 1'b0, 1'b0, 15'b0});  // readonaddr/autoincrement/readondata back to 0, tidy up
 
-            // SBA access into the DRAM window (0x0401_8000-0x0401_FFFF --
-            // shifted up from the original 0x0001_8000-0x0001_FFFF by the
-            // Linux-boot-readiness RAM-growth change, see design/
-            // wb_addr_decoder.sv's own header; the OLD address now falls
-            // inside real RAM instead, since RAM grew to cover it).
+            // SBA access into the DRAM window (0x0400_0000-0x0400_7FFF as
+            // of the CLINT/UART standards-compliance plan's own
+            // Milestone 2 DRAM relocation -- DRAM moved here from its
+            // prior 0x0401_8000 home to make room for CLINT's own
+            // widening to a full 64KB window, see design/
+            // wb_addr_decoder.sv's own header; the OLD 0x0401_8000
+            // address now falls inside CLINT's own widened window
+            // instead and would get a real, harmless ack, not the bus
+            // error this test needs -- found by this exact test failing
+            // non-obviously (sberror==0, not a hang) after that
+            // relocation landed, the same class of stale-DRAM-address
+            // gotcha this project's own history already hit once before
+            // at the Linux-boot-readiness RAM-growth change).
             // Before the original review-fix this address targeted, soc.sv's
             // own decoder0 instantiation left dram_ack_i/dram_err_i floating
             // (X in simulation); since `if (i_sba_ack || i_sba_err)` on an X
@@ -438,7 +446,7 @@ module jtag_dmi_e2e_tb;
             // regression here means this testbench times out and $finish's
             // early, not just a wrong check).
             dmi_write_reg(DMI_SBCS, {11'b0, 1'b0, 3'd2, 1'b0, 1'b0, 15'b0});  // readonaddr=0, access=32-bit
-            dmi_write_reg(DMI_SBADDRESS0, 32'h0401_8000);
+            dmi_write_reg(DMI_SBADDRESS0, 32'h0400_0000);
             dmi_write_reg(DMI_SBDATA0, 32'hDEAD_BEEF);  // triggers the write -- would hang pre-fix
             tries = 0;
             rd = 32'h0020_0000;

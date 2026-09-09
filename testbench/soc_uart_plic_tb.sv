@@ -5,10 +5,12 @@
 
 /*
  * Testbench: end-to-end UART-RX-through-PLIC test against the REAL
- * soc.sv topology (core+decoder+cache+sram+uart_tx+uart_rx+clint+plic)
- * and real toolchain-assembled programs (firmware/uart_plic_meip_test.s,
+ * soc.sv topology (core+decoder+cache+sram+uart16550+clint+plic -- the
+ * CLINT/UART standards-compliance plan's own single real uart0
+ * instance, replacing the old uart_tx+uart_rx pair) and real
+ * toolchain-assembled programs (firmware/uart_plic_meip_test.s,
  * firmware/uart_plic_seip_test.s) -- the final proof of the whole
- * PMP+PLIC staged plan: a real byte arriving at uart_rx0, through a
+ * PMP+PLIC staged plan: a real byte arriving at uart0, through a
  * real plic0 gateway/claim/complete cycle, through csr_file0's real
  * mip.MEIP/SEIP splice, through core0's real interrupt-taking priority
  * mux, actually redirects execution end to end, exactly as wired in
@@ -39,9 +41,11 @@
  * re-prove the same PLIC-internal property already covered, not add
  * meaningfully to the real end-to-end proof this file exists for.
  *
- * The triggering UART byte is injected via dut_*.uart_rx0.push_byte()
- * once, early (right after reset, well before either program's own
- * first instruction could possibly touch RX_DATA/PLIC) -- see
+ * The triggering UART byte is injected via dut_*.uart0.push_byte() (the
+ * design/uart16550.sv instance -- CLINT/UART standards-compliance plan
+ * Milestone 4 retired the separate uart_rx0 instance push_byte used to
+ * live on) once, early (right after reset, well before either program's
+ * own first instruction could possibly touch RBR/PLIC) -- see
  * firmware/uart_plic_meip_test.s's own header for why this avoids any
  * race with the pop each handler does far later.
  *
@@ -92,11 +96,21 @@ module soc_uart_plic_tb;
      * live after that second pass has already happened. Same class of
      * bug (and same fix) testbench/soc_interrupt_tb.sv's own header
      * documents in full for mcause_q there.
+     *
+     * The two hardcoded PC literals below (0xb8/0xf0) are the real
+     * mret/sret addresses in the CURRENT build of
+     * firmware/uart_plic_meip_test.s/uart_plic_seip_test.s -- they moved
+     * (from 0xac/0xe4) when the CLINT/UART standards-compliance plan
+     * added each program's own new IER-arming instructions (see those
+     * files' own headers); re-derive them from a fresh
+     * `riscv64-unknown-elf-objdump -d` of the built .elf whenever either
+     * program's own instruction count changes again, rather than
+     * guessing an offset.
      */
     logic [63:0] meip_s1_snap, meip_s3_snap, meip_s4_snap, meip_mcause_snap;
     logic [1:0]  meip_priv_snap;
     logic        meip_state_captured = 1'b0;
-    always @(posedge clk) if (!meip_state_captured && dut_meip.core0.commit_now && dut_meip.core0.pc == 64'hac) begin
+    always @(posedge clk) if (!meip_state_captured && dut_meip.core0.commit_now && dut_meip.core0.pc == 64'hb8) begin
         meip_state_captured <= 1'b1;
         meip_s1_snap    <= dut_meip.core0.regfile0.gp_registers[9];
         meip_s3_snap    <= dut_meip.core0.regfile0.gp_registers[19];
@@ -108,7 +122,7 @@ module soc_uart_plic_tb;
     logic [63:0] seip_s1_snap, seip_s3_snap, seip_s4_snap, seip_mcause_snap, seip_scause_snap;
     logic [1:0]  seip_priv_snap;
     logic        seip_state_captured = 1'b0;
-    always @(posedge clk) if (!seip_state_captured && dut_seip.core0.commit_now && dut_seip.core0.pc == 64'he4) begin
+    always @(posedge clk) if (!seip_state_captured && dut_seip.core0.commit_now && dut_seip.core0.pc == 64'hf0) begin
         seip_state_captured <= 1'b1;
         seip_s1_snap     <= dut_seip.core0.regfile0.gp_registers[9];
         seip_s3_snap     <= dut_seip.core0.regfile0.gp_registers[19];
@@ -131,8 +145,8 @@ module soc_uart_plic_tb;
         // Inject the triggering byte into each DUT's own UART RX queue
         // -- once, real early, well before either program's own first
         // instruction could reach RX_DATA/PLIC (see header).
-        dut_meip.uart_rx0.push_byte(8'h5A);
-        dut_seip.uart_rx0.push_byte(8'hA5);
+        dut_meip.uart0.push_byte(8'h5A);
+        dut_seip.uart0.push_byte(8'hA5);
 
         wait_halted_or_timeout(TIMEOUT_CYCLES_UART_PLIC, "EBREAK trap never fired -- are the uart_plic_*_test.hex images built?");
 

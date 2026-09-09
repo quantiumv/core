@@ -7,7 +7,10 @@
  * Module: decoder_dram_harness
  *
  * Shared "decoder + real slaves, no core" wiring, mirroring
- * testbench/decoder_clint_harness.sv exactly, but with all FOUR real
+ * testbench/decoder_clint_harness.sv exactly (RAM/uart16550/CLINT/DRAM
+ * -- the UART leg uses design/uart16550.sv, same as that harness, since
+ * the CLINT/UART standards-compliance plan retired uart_tx.sv/
+ * uart_rx.sv), but with all FOUR real
  * slaves this time (RAM/UART/CLINT/DRAM) -- Verilator-only, unlike that
  * file, since dram_model.sv instantiates a SystemVerilog `interface`
  * internally (drives a real taxi_axi_ram over AXI4), which iverilog
@@ -28,10 +31,11 @@
  * design/soc.sv's own header comment for why it can't).
  *
  * dram0's ADDR_W(15) must exactly match wb_addr_decoder.sv's 32KB DRAM
- * window (0x0401_8000-0x0401_FFFF, shifted up by 0x0400_0000 from the
- * pre-RAM-growth 0x0001_8000-0x0001_FFFF by the Linux-boot-readiness
- * RAM-growth change's new addr_i[26]/sel_periph outer gate -- see
- * wb_addr_decoder.sv's own header) -- all other dram_model parameters
+ * window (0x0400_0000-0x0400_7FFF as of the CLINT/UART standards-
+ * compliance plan's Milestone 2 DRAM relocation -- DRAM moved here from
+ * its prior 0x0401_8000 home to make room for CLINT's own widening to a
+ * full 64KB window; see wb_addr_decoder.sv's own header for the full
+ * map) -- all other dram_model parameters
  * are left at their real defaults (ACCESS_LATENCY_CYCLES=4,
  * REFRESH_INTERVAL_CYCLES=256, REFRESH_BUSY_CYCLES=16), since this
  * harness's own testbench (decoder_dram_tb.sv) is testing ROUTING
@@ -85,10 +89,13 @@ module decoder_dram_harness (
         .ack_o(ram_ack), .err_o(ram_err), .cyc_i(ram_cyc), .stb_i(ram_stb), .we_i(ram_we)
     );
 
-    uart_tx uart0 (
+    uart16550 uart0 (
         .clk(clk), .rst(rst),
         .addr_i(uart_addr), .dat_i(uart_dat_o), .dat_o(uart_dat_i), .sel_i(uart_sel),
-        .ack_o(uart_ack), .err_o(uart_err), .cyc_i(uart_cyc), .stb_i(uart_stb), .we_i(uart_we)
+        .ack_o(uart_ack), .err_o(uart_err), .cyc_i(uart_cyc), .stb_i(uart_stb), .we_i(uart_we),
+        /* verilator lint_off PINCONNECTEMPTY */
+        .o_irq()
+        /* verilator lint_on PINCONNECTEMPTY */
     );
 
     clint clint0 (
