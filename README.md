@@ -76,16 +76,21 @@ the hart is running), and Program Buffer download-and-execute.
 - `design/wb_arbiter2.sv` -- a fixed-priority 2-master Wishbone arbiter
   (DM's System Bus Access over `core`'s own bus master), sitting upstream
   of the address decoder so it needs zero changes to arbitrate.
-- `design/wb4_sram.sv`, `design/uart_tx.sv`, `design/uart_rx.sv`,
-  `design/clint.sv`, `design/plic.sv`, `design/wb_addr_decoder.sv` -- the
-  real Wishbone slaves (a flat 64-bit-word memory, 64MB in the real SoC;
-  a simulation-only UART, transmit and receive; an `mtime`/`mtimecmp`
-  timer driving real machine-timer interrupts; a PLIC with 1 real
-  interrupt source -- UART RX -- and 2 real hart contexts, M-mode and
-  delegated S-mode, register-compatible with the real SiFive PLIC-1.0.0
-  layout) plus the address decoder routing between them.
+- `design/wb4_sram.sv`, `design/uart16550.sv`, `design/clint.sv`,
+  `design/plic.sv`, `design/wb_addr_decoder.sv` -- the real Wishbone
+  slaves, all three MMIO-facing ones now genuinely register-compatible
+  with real hardware: a flat 64-bit-word memory (64MB in the real SoC); a
+  real NS16550A-register-model UART (simulation-only transmit/receive
+  mechanism -- `$write`/a testbench backdoor, not real serial timing --
+  but real IER/IIR/LCR/MCR/LSR/MSR/SCR semantics, including a real
+  IER-gated RDA interrupt and a real one-shot THR-empty interrupt); a real
+  SiFive-CLINT-layout `mtime`/`mtimecmp`/`msip` timer driving real
+  machine-timer interrupts; a PLIC with 1 real interrupt source -- UART
+  RX -- and 2 real hart contexts, M-mode and delegated S-mode,
+  register-compatible with the real SiFive PLIC-1.0.0 layout -- plus the
+  address decoder routing between them.
 - `design/soc.sv` -- top-level integration: `core` + cache + `wb_arbiter2`
-  + address decoder + `wb4_sram` + `uart_tx`/`uart_rx` + `clint` + `plic`
+  + address decoder + `wb4_sram` + `uart16550` + `clint` + `plic`
   + `dm`/`jtag_tap`. Its first-ever real external pins are the JTAG
   signals (`jtag_tck`/`tms`/`tdi`/`tdo`/`trst_n`); `clk`/`rst` were
   previously its only ports (no real serial pins exist yet -- the UART
@@ -157,7 +162,7 @@ iverilog -g2012 -I design -I design/defaults -I testbench -o /tmp/soc_tb.out \
   design/clint.sv design/core.sv design/csr_file.sv design/dcache.sv \
   design/divider.sv design/dm.sv design/dm_dmi.sv design/icache.sv \
   design/jtag_tap.sv design/plic.sv design/register_file.sv design/soc.sv \
-  design/uart_rx.sv design/uart_tx.sv design/wb4_sram.sv \
+  design/uart16550.sv design/wb4_sram.sv \
   design/wb_addr_decoder.sv design/wb_arbiter2.sv testbench/soc_tb.sv
 cd design && vvp /tmp/soc_tb.out
 ```
@@ -176,7 +181,7 @@ verilator --lint-only -Wall -Idesign -Idesign/defaults --top-module soc \
   design/clint.sv design/core.sv design/csr_file.sv design/dcache.sv \
   design/divider.sv design/dm.sv design/dm_dmi.sv design/icache.sv \
   design/jtag_tap.sv design/plic.sv design/register_file.sv design/soc.sv \
-  design/uart_rx.sv design/uart_tx.sv design/wb4_sram.sv \
+  design/uart16550.sv design/wb4_sram.sv \
   design/wb_addr_decoder.sv design/wb_arbiter2.sv
 ```
 
@@ -208,20 +213,25 @@ actually true today:
   OS/firmware recipe works at all, fully decoupled from (and much faster
   to iterate on than) the real RTL simulation path, before ever attempting
   the harder problem.
-- `design/plic.sv` is genuinely register-compatible with the real SiFive
-  PLIC-1.0.0 layout, so OpenSBI's/Linux's stock PLIC driver should work
-  against it with zero bespoke code. `design/clint.sv` and the UART are
-  **not** compatible with what OpenSBI's generic platform / Linux's stock
-  drivers expect (a minimal 2-register CLINT rather than the real SiFive/
-  ACLINT offsets; a custom register layout rather than a 16550) --
-  closing either gap is a real, undecided design choice, not done yet.
+- All three of `design/plic.sv`, `design/clint.sv`, and `design/uart16550.sv`
+  are now genuinely register-compatible with real hardware: PLIC matches
+  the real SiFive PLIC-1.0.0 layout, CLINT matches the real SiFive-CLINT/
+  ACLINT offsets (`msip0`@`+0x0000`, `mtimecmp0`@`+0x4000`, `mtime`@
+  `+0xBFF8`), and the UART is a real, spec-faithful NS16550A register model
+  (8 registers packed into one dword, real IER-gated RDA interrupts, a real
+  one-shot THR-empty interrupt). OpenSBI's `platform/generic` and Linux's
+  stock 16550/CLINT/PLIC drivers should all work against `core` with zero
+  bespoke driver code now, once a correct device tree exists to describe it.
 
 Concretely still missing before a real `core`-hosted boot is even
-attemptable: an SBI (OpenSBI or hand-rolled) platform targeting `core`
-specifically, and a device tree describing `core`'s own memory map. Nobody
-has yet attempted running a real boot through cycle-accurate RTL
-simulation either -- that could take an enormous number of simulated
-cycles, genuinely untested territory.
+attemptable: an SBI (OpenSBI's `platform/generic`, now plausible given the
+above, or a hand-rolled bridge) actually pointed at `core`, and a device
+tree describing `core`'s own memory map -- both genuinely required (RISC-V
+Linux's own boot protocol needs a real FDT pointer and an S-mode entry
+regardless of how compatible the peripherals are underneath). Nobody has
+yet attempted running a real boot through cycle-accurate RTL simulation
+either -- that could take an enormous number of simulated cycles, genuinely
+untested territory.
 
 The actual staged plan for all of this, and the concrete next steps, live
 in the separate [`quantiumv/sdk`](https://github.com/quantiumv/sdk)
