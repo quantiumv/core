@@ -901,8 +901,38 @@ module core (
      * pc_fwd_ch0 and pc_bwd_ch0 (the two checks that originally caught
      * this counterexample) both re-run clean against this exact removal.
      */
+    /*
+     * mem_translate_active && !mem_resolved_q[cur_slot] guard on the S_MEM
+     * term (real bug, found via riscv-formal's insn_add_ch0 -- see
+     * checks.cfg's own history for this exact regression): without it,
+     * this term is just "state==S_MEM && (wb_ok||wb_err_i)", with no
+     * requirement that a real bus transaction is actually outstanding.
+     * While translation is still pending, wb_master_drive suppresses the
+     * real request (mirrors the fetch-side precedent) -- but wb_ack_i/
+     * wb_err_i are free, solver-chosen `rvformal_rand_reg`s in this
+     * formal model (see wrapper.sv), not something the RTL itself proves
+     * can never assert without a matching request. The solver can (and,
+     * confirmed via insn_add_ch0's own counterexample, did) pick wb_ok=1
+     * on the very same cycle a load/store first enters S_MEM -- before
+     * mem_translate_active && !mem_resolved_q[cur_slot] has even had a
+     * chance to redirect to S_PTW -- firing commit_now (and everything
+     * gated on it: pc advance, trap_taken, regfile/CSR writes, minstret)
+     * for an instruction that hasn't actually finished. Concretely: pc
+     * advances to pc+4 while instr_line_q[cur_slot] is still frozen on
+     * the original fetch, so first_hw's own pc[2:1]-keyed halfword-select
+     * mux (Decode section above) re-slices those same raw bits as a
+     * DIFFERENT instruction once the real walk eventually completes and
+     * commit_now fires again -- rvfi_insn ends up reporting whatever that
+     * reinterpreted instruction happens to decode as, not the real
+     * load/store that actually owns this S_MEM cycle. Mirrors the state-
+     * transition block's own S_MEM arm (line ~1160 below), which already
+     * gates its wb_done-based transitions behind this exact same
+     * condition via its outer if/else-if structure -- commit_now simply
+     * hadn't been kept in sync with that same priority.
+     */
     wire commit_now = (state == S_EXEC && !mem_phase_needed && !div_stall)
-                    || (state == S_MEM && ((wb_ok && !is_amo_rmw) || wb_err_i))
+                    || (state == S_MEM && !(mem_translate_active && !mem_resolved_q[cur_slot])
+                        && ((wb_ok && !is_amo_rmw) || wb_err_i))
                     || (state == S_AMO_WRITE && wb_done);
 
     /*
@@ -978,6 +1008,19 @@ module core (
                               */
                              else if (fetch_translate_active && !fetch_lo_resolved_q[cur_slot]) begin
                                  if (!tlb_hit) state <= S_PTW;
+                                 /*
+                                  * TLB-hit PTE-content fault: same real gap
+                                  * as S_MEM's own identical arm (see that
+                                  * state's own comment for the full
+                                  * reasoning) -- on a HIT, fetch_lo_resolved_q[cur_slot]
+                                  * stays 0 forever when ptw_pte_fault is set
+                                  * (mirrors mem_resolved_q[cur_slot]'s own
+                                  * "resolved" semantics), so without this
+                                  * arm the outer condition here never reads
+                                  * false and S_FETCH could never otherwise
+                                  * leave for this instruction.
+                                  */
+                                 else if (ptw_pte_fault) state <= S_EXEC;
                              end
                              /*
                               * pmp_fetchlo_fault (PMP+PLIC plan, Milestone 2):
@@ -1033,6 +1076,18 @@ module core (
                  */
                 S_FETCH_HI:  if (fetch_translate_active && !fetch_hi_resolved_q[cur_slot]) begin
                                  if (!tlb_hit) state <= S_PTW;
+                                 /*
+                                  * TLB-hit PTE-content fault: same real gap
+                                  * as S_MEM's own identical arm (see that
+                                  * state's own comment for the full
+                                  * reasoning) -- on a HIT, fetch_hi_resolved_q[cur_slot]
+                                  * stays 0 forever when ptw_pte_fault is set,
+                                  * so without this arm the outer condition
+                                  * here never reads false and S_FETCH_HI
+                                  * could never otherwise leave for this
+                                  * instruction.
+                                  */
+                                 else if (ptw_pte_fault) state <= S_EXEC;
                              end
                              /*
                               * Sv39 real bug fix (post-M6 independent
@@ -1136,8 +1191,35 @@ module core (
                  * than the fetch-side equivalent since mem_paddr itself
                  * isn't resolved until partway through S_MEM.
                  */
+                /*
+                 * TLB-hit PTE-content fault (real bug, found via riscv-
+                 * formal's insn_add_ch0 -- see checks.cfg's own history for
+                 * this exact regression): a MISS correctly redirects to
+                 * S_PTW, whose own S_PTW arm explicitly returns to S_EXEC
+                 * on ptw_pte_fault. A HIT, though, was designed to stay
+                 * right here for one more cycle so mem_resolved_q[cur_slot]/
+                 * mem_fault_q[cur_slot] can register combinationally
+                 * (see tlb_hit_active's own always_ff arm) -- but on a
+                 * FAULT, mem_resolved_q[cur_slot] is deliberately left 0
+                 * (mirrors "resolved" meaning "usable for a real access",
+                 * never true for a faulted PTE), so the outer condition
+                 * above never reads false and this state can never
+                 * otherwise leave S_MEM: tlb_hit itself doesn't change
+                 * cycle to cycle, so every subsequent cycle re-derives
+                 * the identical fault and re-arms mem_fault_q[cur_slot]
+                 * to the same value, forever. ptw_pte_fault is already the
+                 * live, tlb_hit_active-aware combinational signal (via
+                 * ptw_pte_source's own hit-vs-walk mux) the register-update
+                 * always_ff already reads for this exact case -- reusing
+                 * it here (rather than mem_fault_q[cur_slot], not yet
+                 * registered this cycle) exits on the SAME cycle the fault
+                 * is discovered, one cycle earlier than waiting for the
+                 * registered flag would, and mirrors S_PTW's own
+                 * combinational ptw_pte_fault-gated exit exactly.
+                 */
                 S_MEM:       if (mem_translate_active && !mem_resolved_q[cur_slot]) begin
                                  if (!tlb_hit) state <= S_PTW;
+                                 else if (ptw_pte_fault) state <= S_EXEC;
                              end else if (pmp_load_fault || pmp_store_fault) state <= S_EXEC;
                              else if (wb_done) state <= state_t'(progbuf_abort ? S_DEBUG_HALTED
                                     : ((wb_ok && is_amo_rmw) ? S_AMO_WRITE : S_FETCH));
