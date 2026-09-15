@@ -330,7 +330,28 @@ module core (
     output logic [63:0] rvfi_csr_scause_rmask,
     output logic [63:0] rvfi_csr_scause_wmask,
     output logic [63:0] rvfi_csr_scause_rdata,
-    output logic [63:0] rvfi_csr_scause_wdata
+    output logic [63:0] rvfi_csr_scause_wdata,
+    /*
+     * pmpcfg0/pmpaddr0: NOT wired for a csrc_any-style consistency check
+     * (checks.cfg deliberately does not list these in [csrs] -- that would
+     * also generate a new csrc_any_pmpcfg0_ch* check family this project
+     * doesn't need). Their only consumer is checks.cfg's own [assume
+     * !insn_.*_ch0 !c_.*_ch0] block, which needs *some* top-level RVFI
+     * signal it can pin PMP region 0 to its permissive-reset value through
+     * -- see that block's own comment for why. rdata is therefore the only
+     * field that's ever actually read by anything; wdata mirrors rdata
+     * (no real "next" value is tracked for PMP the way mepc_next_w is)
+     * purely so these ports have *a* legal driver, matching the port-list
+     * shape every other rvfi_csr_* port here uses.
+     */
+    output logic [63:0] rvfi_csr_pmpcfg0_rmask,
+    output logic [63:0] rvfi_csr_pmpcfg0_wmask,
+    output logic [63:0] rvfi_csr_pmpcfg0_rdata,
+    output logic [63:0] rvfi_csr_pmpcfg0_wdata,
+    output logic [63:0] rvfi_csr_pmpaddr0_rmask,
+    output logic [63:0] rvfi_csr_pmpaddr0_wmask,
+    output logic [63:0] rvfi_csr_pmpaddr0_rdata,
+    output logic [63:0] rvfi_csr_pmpaddr0_wdata
 `endif
 );
 
@@ -4746,6 +4767,17 @@ module core (
     assign rvfi_csr_scause_wmask = 64'hffff_ffff_ffff_ffff;
     assign rvfi_csr_scause_rdata = scause_w;
     assign rvfi_csr_scause_wdata = scause_next_w;
+    /* pmpcfg0/pmpaddr0: see the port-list comment above -- rdata is the
+     * live control-plane export csr_file0 already drives for real PMP
+     * enforcement (pmpcfg0_w/pmpaddr0_w), wdata just mirrors it. */
+    assign rvfi_csr_pmpcfg0_rmask  = 64'hffff_ffff_ffff_ffff;
+    assign rvfi_csr_pmpcfg0_wmask  = 64'hffff_ffff_ffff_ffff;
+    assign rvfi_csr_pmpcfg0_rdata  = pmpcfg0_w;
+    assign rvfi_csr_pmpcfg0_wdata  = pmpcfg0_w;
+    assign rvfi_csr_pmpaddr0_rmask = 64'hffff_ffff_ffff_ffff;
+    assign rvfi_csr_pmpaddr0_wmask = 64'hffff_ffff_ffff_ffff;
+    assign rvfi_csr_pmpaddr0_rdata = pmpaddr0_w;
+    assign rvfi_csr_pmpaddr0_wdata = pmpaddr0_w;
 `endif
 
 endmodule
