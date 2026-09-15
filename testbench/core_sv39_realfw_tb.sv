@@ -101,7 +101,7 @@ module core_sv39_realfw_tb;
     int ptw_count_mem   = 0;
     always @(negedge clk) begin
         if ((dut.state == dut.S_PTW) && !ptw_prev) begin
-            if (dut.ptw_reason_q == dut.PTW_REASON_MEM) ptw_count_mem   <= ptw_count_mem + 1;
+            if (dut.ptw_reason_q[dut.cur_slot] == dut.PTW_REASON_MEM) ptw_count_mem   <= ptw_count_mem + 1;
             else                                        ptw_count_fetch <= ptw_count_fetch + 1;
         end
         ptw_prev <= (dut.state == dut.S_PTW);
