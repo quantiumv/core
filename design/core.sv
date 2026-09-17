@@ -422,7 +422,34 @@ module core (
      * for the real hardware condition over a derived approximation of it
      * once a derived one proves leaky.
      */
-    output logic rvfi_any_trap_taken
+    output logic rvfi_any_trap_taken,
+    /*
+     * rvfi_any_debug_entry: same "expose the real gating condition
+     * directly" reasoning as rvfi_any_trap_taken immediately above, this
+     * time for reg_ch0's own gap (see checks.cfg's own comment). rvfi_rs2_
+     * rdata (see its own assign below) is a bare combinational tap of
+     * read_gpr_B_data -- the SAME physical wire regfile0's own instantiation
+     * (see that block's own comment) muxes with the Debug Module's Access
+     * Register GPR read port, selected by dm_access_active. Real hardware
+     * argues this is safe by construction ("temporally disjoint" access --
+     * dm.sv never issues an Access Register command until it observes the
+     * hart genuinely halted), but that real interlock lives entirely in
+     * dm.sv, which the riscv-formal wrapper never instantiates -- and the
+     * wrapper's own i_debug_halt_req is modeled fully free every cycle,
+     * contradicting its own documented "level, not a pulse" port contract.
+     * With i_dm_gpr_sel left unconnected in wrapper.sv (floating to its
+     * ANSI default, 5'b0), the solver can flip dm_access_active mid-
+     * instruction and the shared read silently returns gp_registers[0]
+     * (hardwired 0) instead of whatever the checked instruction's own rs2
+     * actually held -- confirmed by direct counterexample replay
+     * (reg_ch0's own trace: rs2_rdata correctly matches the tracked
+     * register right up until dm_access_active goes high, then reads 0).
+     * The OR of every path that can flip dm_access_active mid-instruction
+     * (not dm_access_active alone) closes the one-cycle gap between
+     * debug_halt_req_entry firing and the registered in_debug_mode flop
+     * (which drives dm_access_active) actually rising.
+     */
+    output logic rvfi_any_debug_entry
 `endif
 );
 
@@ -4868,6 +4895,14 @@ module core (
      * input (this instantiation's own .i_trap_taken(...) line), real
      * hardware, not new state. */
     assign rvfi_any_trap_taken     = trap_taken || interrupt_taken;
+    /* rvfi_any_debug_entry: see the port-list comment above -- the OR of
+     * every real path that can flip dm_access_active mid-instruction,
+     * all four already-existing signals (debug_ebreak_entry/trigger_
+     * debug_entry declared near dm_access_active's own forward-declare
+     * block; debug_halt_req_entry/dm_access_active assigned in the Debug
+     * Mode section), not new state. */
+    assign rvfi_any_debug_entry    = debug_ebreak_entry || debug_halt_req_entry
+                                    || trigger_debug_entry || dm_access_active;
 `endif
 
 endmodule

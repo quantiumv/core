@@ -1024,18 +1024,24 @@ Verilog (an unconnected output port is simply left floating).
 async-interrupt/trap gap (see `checks.cfg`'s own comment) needed a bare,
 non-hierarchical `rvfi_any_trap_taken` signal for the same reason `satp`
 needed one above** — one more wire, one more port connection, same file,
-applied on top of the satp patch (not instead of it):
+applied on top of the satp patch (not instead of it). A THIRD addition to
+this same file/patch followed when `reg_ch0`'s own debug-halt/Access-
+Register gap (see `checks.cfg`'s own comment) needed a `rvfi_any_debug_
+entry` signal the identical way — cumulative state, all three additions
+shown together:
 ```sh
 #   `RVFI_WIRES
 #   `RVFI_BUS_WIRES
 #   wire [63:0] rvfi_csr_satp_rdata;
 #   wire rvfi_any_trap_taken;                     // <-- add this line
+#   wire rvfi_any_debug_entry;                    // <-- add this line
 #
 #   rvfi_wrapper wrapper (
 #       .clock (clock),
 #       .reset (reset),
 #       .rvfi_csr_satp_rdata(rvfi_csr_satp_rdata),
 #       .rvfi_any_trap_taken(rvfi_any_trap_taken),   // <-- add this line
+#       .rvfi_any_debug_entry(rvfi_any_debug_entry), // <-- add this line
 #       `RVFI_CONN
 #       `RVFI_BUS_CONN
 #   );
