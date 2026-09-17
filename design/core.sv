@@ -351,7 +351,78 @@ module core (
     output logic [63:0] rvfi_csr_pmpaddr0_rmask,
     output logic [63:0] rvfi_csr_pmpaddr0_wmask,
     output logic [63:0] rvfi_csr_pmpaddr0_rdata,
-    output logic [63:0] rvfi_csr_pmpaddr0_wdata
+    output logic [63:0] rvfi_csr_pmpaddr0_wdata,
+    /*
+     * medeleg: same "assume-scoping needs a bare RVFI signal to reference"
+     * reasoning as pmpcfg0/pmpaddr0 above, this time so checks.cfg can pin
+     * specific delegation bits rather than PMP state -- see that block's
+     * own comment in checks.cfg for why. rdata is medeleg_w, csr_file0's
+     * own already-existing control-plane export (real hardware, not new
+     * state); wdata mirrors it for the same "needs *a* legal driver, never
+     * actually consumed" reason pmpcfg0/pmpaddr0's wdata do.
+     */
+    output logic [63:0] rvfi_csr_medeleg_rmask,
+    output logic [63:0] rvfi_csr_medeleg_wmask,
+    output logic [63:0] rvfi_csr_medeleg_rdata,
+    output logic [63:0] rvfi_csr_medeleg_wdata,
+    /*
+     * satp: same "assume-scoping needs a bare RVFI signal to reference"
+     * reasoning as pmpcfg0/pmpaddr0/medeleg above. rvfi_mem_addr (see its
+     * own assign below) is derived from mem_paddr -- the POST-Sv39-
+     * translation physical address, by this project's own established
+     * naming convention (see Sv39 PTW milestones) -- while every generic
+     * riscv-formal load/store/AMO spec model (insn_lb.v, insn_sw.v,
+     * insn_amoadd_d.v, etc) computes spec_mem_addr from pure
+     * rs1_rdata+imm with zero Sv39 awareness, the
+     * same blind spot PMP already has for fetch/mem access legality. With
+     * satp fully free (as it correctly is for genuine translation
+     * coverage elsewhere), the solver can pick any satp+PTE combination
+     * that maps the checked instruction's virtual address to an
+     * unrelated physical one, trivially breaking rvfi_mem_addr's match
+     * against the spec's untranslated expectation -- confirmed by direct
+     * counterexample replay (insn_lb_ch0's own trace, after the mcause/
+     * medeleg fault-exclusion fixes above got it past its OTHER two
+     * gaps: rvfi_mem_addr's upper bits matched no sane sign-extended
+     * virtual address, and satp/PTE content is the only free source in
+     * this model that could produce that). rdata is satp_w, csr_file0's
+     * own already-existing control-plane export; wdata mirrors it for
+     * the same "needs *a* legal driver, never actually consumed" reason
+     * pmpcfg0/pmpaddr0/medeleg's wdata do.
+     */
+    output logic [63:0] rvfi_csr_satp_rmask,
+    output logic [63:0] rvfi_csr_satp_wmask,
+    output logic [63:0] rvfi_csr_satp_rdata,
+    output logic [63:0] rvfi_csr_satp_wdata,
+    /*
+     * rvfi_any_trap_taken: NOT a CSR trace port (no rmask/wmask/rdata/
+     * wdata quad, no [csrs]/[defines] involvement) -- a single bare bit,
+     * exposed the same "assume-scoping needs a bare RVFI signal to
+     * reference" way as the CSR ports above, this time reaching
+     * trap_taken || interrupt_taken directly (exactly the boolean wired
+     * to csr_file0's own i_trap_taken input just below -- see that
+     * instantiation) rather than going through mepc/sepc/mcause/scause's
+     * own already-exposed rdata/wdata or the universal rvfi_trap/rvfi_intr
+     * ports.
+     *
+     * Needed because csrc_any_mepc_ch0 (see checks.cfg's own comment)
+     * went through TWO rounds of RVFI-level exclusion (!rvfi_trap, then
+     * !rvfi_trap && !rvfi_intr) that each closed one real counterexample
+     * only for a DIFFERENT one to appear -- rvfi_trap and rvfi_intr are
+     * each a downstream, mechanically-DERIVED reflection of this same
+     * underlying event (see rvfi_intr's own comment below for exactly
+     * how it's derived: a retirement-to-retirement PC-discontinuity
+     * check, not a direct reference to trap_taken/interrupt_taken), and
+     * a derived signal is exactly where a subtle pipeline-timing gap
+     * between the DERIVATION and the real event can hide. Exposing the
+     * real gating condition directly and excluding it unconditionally,
+     * every cycle (not gated on rvfi_valid the way rvfi_trap/rvfi_intr
+     * necessarily are, since a retirement-scoped flag can only describe
+     * a retirement-scoped cycle) removes that whole class of gap in one
+     * step, matching this project's own general principle of reaching
+     * for the real hardware condition over a derived approximation of it
+     * once a derived one proves leaky.
+     */
+    output logic rvfi_any_trap_taken
 `endif
 );
 
@@ -4778,6 +4849,25 @@ module core (
     assign rvfi_csr_pmpaddr0_wmask = 64'hffff_ffff_ffff_ffff;
     assign rvfi_csr_pmpaddr0_rdata = pmpaddr0_w;
     assign rvfi_csr_pmpaddr0_wdata = pmpaddr0_w;
+    /* medeleg: see the port-list comment above -- rdata is the live
+     * control-plane export csr_file0 already drives for real trap
+     * delegation (medeleg_w), wdata just mirrors it. */
+    assign rvfi_csr_medeleg_rmask  = 64'hffff_ffff_ffff_ffff;
+    assign rvfi_csr_medeleg_wmask  = 64'hffff_ffff_ffff_ffff;
+    assign rvfi_csr_medeleg_rdata  = medeleg_w;
+    assign rvfi_csr_medeleg_wdata  = medeleg_w;
+    /* satp: see the port-list comment above -- rdata is the live
+     * control-plane export csr_file0 already drives for real Sv39
+     * translation (satp_w), wdata just mirrors it. */
+    assign rvfi_csr_satp_rmask     = 64'hffff_ffff_ffff_ffff;
+    assign rvfi_csr_satp_wmask     = 64'hffff_ffff_ffff_ffff;
+    assign rvfi_csr_satp_rdata     = satp_w;
+    assign rvfi_csr_satp_wdata     = satp_w;
+    /* rvfi_any_trap_taken: see the port-list comment above -- the exact
+     * same expression already wired to csr_file0's own i_trap_taken
+     * input (this instantiation's own .i_trap_taken(...) line), real
+     * hardware, not new state. */
+    assign rvfi_any_trap_taken     = trap_taken || interrupt_taken;
 `endif
 
 endmodule

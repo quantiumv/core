@@ -28,7 +28,28 @@
 module rvfi_wrapper (
     input         clock,
     input         reset,
-    `RVFI_OUTPUTS
+    `RVFI_OUTPUTS,
+    // satp: NOT part of `RVFI_OUTPUTS -- riscv-formal's own macro generator
+    // has zero awareness of "satp" (grepped rvfi_macros.vh directly: no
+    // `rvformal_csr_satp_*` macro family exists at all, unlike mepc/mcause/
+    // medeleg/pmpcfg0/pmpaddr0 which all do), same gap as scause (see
+    // checks.cfg's own fault-exclusion comment for that one). Declared and
+    // connected by hand here instead, mirroring exactly what `RVFI_OUTPUTS/
+    // `RVFI_CONN would generate for a recognized name. See design/core.sv's
+    // own rvfi_csr_satp_* port-list comment for why this is needed at all
+    // (pinning satp to Bare mode for insn_*/c_* checks, so rvfi_mem_addr's
+    // post-Sv39-translation physical address can't diverge from the
+    // generic spec models' untranslated virtual-address expectation).
+    output logic [63:0] rvfi_csr_satp_rmask,
+    output logic [63:0] rvfi_csr_satp_wmask,
+    output logic [63:0] rvfi_csr_satp_rdata,
+    output logic [63:0] rvfi_csr_satp_wdata,
+    // rvfi_any_trap_taken: same hand-declared reasoning as satp above --
+    // see design/core.sv's own port-list comment for the full why (the
+    // real hardware condition gating mepc/sepc/mcause/scause's writes,
+    // exposed directly after two rounds of RVFI-level derived-signal
+    // exclusion each proved leaky).
+    output logic rvfi_any_trap_taken
 );
     (* keep *) wire [31:0] wb_addr;
     (* keep *) wire [63:0] wb_dat_m2s;
@@ -78,6 +99,13 @@ module rvfi_wrapper (
         .i_mtip(i_mtip),
         .i_debug_halt_req(i_debug_halt_req),
         .i_debug_resume_req(i_debug_resume_req),
+
+        // satp: hand-connected, same reason as the port-list declaration above.
+        .rvfi_csr_satp_rmask(rvfi_csr_satp_rmask),
+        .rvfi_csr_satp_wmask(rvfi_csr_satp_wmask),
+        .rvfi_csr_satp_rdata(rvfi_csr_satp_rdata),
+        .rvfi_csr_satp_wdata(rvfi_csr_satp_wdata),
+        .rvfi_any_trap_taken(rvfi_any_trap_taken),
 
         `RVFI_CONN
     );

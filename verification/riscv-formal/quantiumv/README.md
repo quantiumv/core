@@ -973,6 +973,126 @@ the riscv-formal checkout) rather than this repo's own absolute path — the
 `cp` line above is what makes that resolve; re-run it after editing any of
 the 7 listed design files, same as the existing `wrapper.sv`/`checks.cfg`
 copy step.
+
+**One-time hand-patch to riscv-formal's own `checks/rvfi_testbench.sv`**
+(required for every `insn_*`/`c_*` check on this core, added when the
+`satp`-pinning fix landed — see `checks.cfg`'s own `[assume !insn_.*_ch0
+!c_.*_ch0]` comment for `rvfi_csr_satp_*` for the full why). `satp` is not
+a CSR name riscv-formal's own macro generator recognizes at all (confirmed
+by grepping `~/riscv-formal/checks/rvfi_macros.vh` directly: zero
+`` `rvformal_csr_satp_*`` matches, unlike mepc/mcause/medeleg/pmpcfg0/
+pmpaddr0 which all have the full macro family) — same gap `scause` has
+(see the fault-exclusion comment). `` `RVFI_WIRES``/`` `RVFI_CONN`` can
+therefore never declare or wire an `rvfi_csr_satp_*` signal, no matter
+what's `` `define``d in `checks.cfg`, and unlike pmpcfg0/pmpaddr0/medeleg
+this can't be worked around inside `wrapper.sv` alone (already done there
+— see this dir's `wrapper.sv`) because `assume_stmts.vh` is `` `include``d
+into `rvfi_testbench.sv`'s own scope, which can only reference a BARE,
+non-hierarchical wire declared in that same scope — a hierarchical
+reference reaching into `wrapper` (a module the classic `read -sv`
+frontend never itself parsed — see `checks.cfg`'s own PMP comment for the
+full "why" on that constraint) silently resolves to a disconnected
+implicit wire and makes the check PREUNSAT, not a real counterexample.
+This file lives in the shared riscv-formal checkout, not this project's
+own git repo, so the patch below has to be reapplied after every fresh
+`git clone`:
+```sh
+# add a bare wire declaration right after `RVFI_WIRES (inside module
+# rvfi_testbench's own body), and an extra named port connection on the
+# `rvfi_wrapper wrapper (...)` instantiation immediately below it, in
+# ~/riscv-formal/checks/rvfi_testbench.sv:
+#
+#   `RVFI_WIRES
+#   `RVFI_BUS_WIRES
+#   wire [63:0] rvfi_csr_satp_rdata;             // <-- add this line
+#
+#   rvfi_wrapper wrapper (
+#       .clock (clock),
+#       .reset (reset),
+#       .rvfi_csr_satp_rdata(rvfi_csr_satp_rdata),   // <-- add this line
+#       `RVFI_CONN
+#       `RVFI_BUS_CONN
+#   );
+```
+Only `rdata` needs a testbench-scope wire (the only field `checks.cfg`'s
+assume ever reads) — `wrapper.sv`'s own `rvfi_csr_satp_rmask/wmask/wdata`
+ports are declared and driven for symmetry with the other hand-added CSR
+ports but are left unconnected on this instantiation, which is legal
+Verilog (an unconnected output port is simply left floating).
+
+**Third one-time hand-patch, same file, added when `csrc_any_mepc`'s own
+async-interrupt/trap gap (see `checks.cfg`'s own comment) needed a bare,
+non-hierarchical `rvfi_any_trap_taken` signal for the same reason `satp`
+needed one above** — one more wire, one more port connection, same file,
+applied on top of the satp patch (not instead of it):
+```sh
+#   `RVFI_WIRES
+#   `RVFI_BUS_WIRES
+#   wire [63:0] rvfi_csr_satp_rdata;
+#   wire rvfi_any_trap_taken;                     // <-- add this line
+#
+#   rvfi_wrapper wrapper (
+#       .clock (clock),
+#       .reset (reset),
+#       .rvfi_csr_satp_rdata(rvfi_csr_satp_rdata),
+#       .rvfi_any_trap_taken(rvfi_any_trap_taken),   // <-- add this line
+#       `RVFI_CONN
+#       `RVFI_BUS_CONN
+#   );
+```
+
+**Fourth one-time hand-patch, a DIFFERENT shared file this time:
+`~/riscv-formal/checks/rvfi_macros.py`** — needed for `csrc_any_sepc`/
+`csrc_any_scause` specifically (see `checks.cfg`'s own comment on those
+two). Unlike `satp`/`rvfi_any_trap_taken` above (names riscv-formal's
+macro generator has never heard of, worked around by hand-declaring a
+bare wire), `sepc`/`scause` hit a DIFFERENT gap: they're genuinely
+missing from `rvfi_macros.py`'s own `csrs` list (the single source of
+truth for the WHOLE `` `rvformal_csr_<name>_*`` macro family AND the
+`csr_mindex_<name>` localparam the generic `csrc_any` checker's own
+internal `rvfi.csr_<name>_*` struct-field references need) -- confirmed
+via `grep -c 'rvformal_csr_sepc\|rvformal_csr_mepc' rvfi_macros.vh`
+returning `0`/`26`: `mepc` has the full generated macro family, `sepc`
+has none at all, not even a partial/broken one. This is a straightforward
+missing-entry gap, not a design flaw in the generator -- riscv-formal's
+own CSR database apparently never had S-mode trap CSRs added. Fix: add
+two entries to the `csrs` list (around line 228-229, right after the
+existing `mepc`/`mcause` entries, same `Csr("xlen", name, mindex, sindex,
+uindex)` shape -- `sepc`/`scause` are genuinely separate CSRs at their
+own distinct addresses, not S-mode ALIASES of mepc/mcause, so they use
+`mindex` for their own address with `sindex=None`, exactly mirroring how
+mepc/mcause themselves are registered, not the `sindex` field, which is
+for a single logical CSR reachable at different addresses per privilege
+level):
+```python
+# in ~/riscv-formal/checks/rvfi_macros.py's csrs list, add:
+    Csr("xlen", "sepc",              0x141,  None,  None),
+    Csr("xlen", "scause",            0x142,  None,  None),
+```
+then regenerate the checked-in `rvfi_macros.vh` (a plain generated
+artifact -- its own header says `// Generated by rvfi_macros.py`):
+```sh
+cd ~/riscv-formal/checks && python3 rvfi_macros.py > rvfi_macros.vh
+```
+Confirmed purely additive (0 removed/changed lines, only new `sepc`/
+`scause` macro-family blocks) via `diff` against the pre-patch file
+before applying -- safe to regenerate in place, no risk to any
+already-passing check that doesn't reference these two CSRs.
+
+**Second one-time hand-patch, to riscv-formal's own `checks/
+rvfi_csrc_any_check.sv`** (required for `csrc_any_mepc`/`csrc_any_sepc` on
+any XLEN=64 core — see `checks.cfg`'s own `[csrs]` comment for the full
+counterexample and why). This one is a genuine upstream bug, not a
+core-specific workaround: the checker's own `csr_rsval` wire is
+hand-declared `wire [31:0]` instead of `` `RISCV_FORMAL_XLEN-1:0`` like
+every other data-width wire in the same file, silently truncating a
+64-bit register-sourced CSR write before it's ever compared. One-line fix:
+```sh
+# in ~/riscv-formal/checks/rvfi_csrc_any_check.sv, change:
+#   wire [31:0] csr_rsval = rvfi.insn[14] ? rvfi.insn[19:15] : rvfi.rs1_rdata;
+# to:
+#   wire [`RISCV_FORMAL_XLEN-1:0] csr_rsval = rvfi.insn[14] ? rvfi.insn[19:15] : rvfi.rs1_rdata;
+```
 `reg_ch0` specifically needs `boolector`, not the `bitwuzla` every other
 check uses (see its own "Resolved finding" above for why this isn't just
 a `checks.cfg` setting) — swap solvers on its own generated `.sby` file:
