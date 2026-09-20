@@ -49,7 +49,16 @@ module rvfi_wrapper (
     // real hardware condition gating mepc/sepc/mcause/scause's writes,
     // exposed directly after two rounds of RVFI-level derived-signal
     // exclusion each proved leaky).
-    output logic rvfi_any_trap_taken
+    output logic rvfi_any_trap_taken,
+    // rvfi_any_debug_entry: same hand-declared reasoning as satp/
+    // rvfi_any_trap_taken above -- see design/core.sv's own port-list
+    // comment for the full why (reg_ch0's own gap: the Debug Module's
+    // Access Register GPR port shares regfile0's read-B/write port with
+    // the normal decode path, gated on dm_access_active -- safe in real
+    // hardware since dm.sv never issues that access until the hart is
+    // genuinely halted, but dm.sv isn't instantiated in this formal
+    // loop at all, and i_debug_halt_req below is modeled fully free).
+    output logic rvfi_any_debug_entry
 );
     (* keep *) wire [31:0] wb_addr;
     (* keep *) wire [63:0] wb_dat_m2s;
@@ -106,6 +115,7 @@ module rvfi_wrapper (
         .rvfi_csr_satp_rdata(rvfi_csr_satp_rdata),
         .rvfi_csr_satp_wdata(rvfi_csr_satp_wdata),
         .rvfi_any_trap_taken(rvfi_any_trap_taken),
+        .rvfi_any_debug_entry(rvfi_any_debug_entry),
 
         `RVFI_CONN
     );
