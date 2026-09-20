@@ -1,4 +1,4 @@
-# riscv-formal integration (started 2026-08-11, 56/56 isa=rv64i checks PASS; AMO 18/18 and C-extension 30/30 now added, M-extension in progress, first CSR trace ports added, rvfi_intr wired for real 2026-08-19)
+# riscv-formal integration (started 2026-08-11; full 91-check `isa=rv64ic` suite 91/91 PASS as of 2026-09-17, including all CSR trace-port checks — see "Full 91-check sweep" below for the current, authoritative status; M-extension deferred by explicit owner direction, see "Next steps")
 
 Formal verification via [riscv-formal](https://github.com/YosysHQ/riscv-formal)
 (Yosys + SymbiYosys + a SAT/BMC solver), proving ISA correctness exhaustively
@@ -815,20 +815,96 @@ None of these rebuilt artifacts (`~/sby-src`, `~/yosys-slang-src`,
 for the full, updated build recipe for a future environment hitting the
 same nix-store garbage-collection issue.
 
+## Full 91-check sweep (2026-09-17) — 91/91 PASS, first fully clean run since the 2026-08-12 56/56 baseline
+
+**PMP (shipped 2026-09-08) and Sv39 (shipped 2026-09-08, same day) broke
+this suite** — confirmed via `insn_add_ch0` regressing on branch
+`pipelining`, well after this doc's own 56/56 claim above. Root-causing
+and re-closing the gap took most of a session and landed in two commits,
+`31f60fe` and `d93606f`. Every single finding below was a formal-scoping
+gap (the generic riscv-formal spec models, or riscv-formal's own generic
+checkers, having no way to know about a real core.sv/environment
+behavior) or a genuine bug in riscv-formal's own upstream code — **zero
+new RTL bugs in `design/`** across the whole investigation, a first for
+this integration's history (every earlier milestone above found at least
+one real RTL bug).
+
+**`insn_lb`/`insn_sb`/`insn_c_andi`/`insn_c_lw`** (commit `31f60fe`):
+1. Fetch- and mem-side bus/page faults (`wb_err_i`, Sv39 PTW faults) are
+   free/solver-chosen and the generic spec models have zero concept of
+   either — broadened an existing fetch-only mcause/medeleg exclusion to
+   cover mem-side causes 5/7/13/15 too (checks.cfg `[assume]`, no RTL
+   change).
+2. Sv39 translation: `rvfi_mem_addr` reports the post-translation
+   *physical* address (this project's own established convention) while
+   every generic spec model expects the untranslated *virtual* address —
+   with `satp` free, the solver can map to an unrelated physical address.
+   Fixed by pinning `satp` to Bare mode for `insn_*`/`c_*` checks (new
+   `rvfi_csr_satp_*` port).
+
+**`csrc_any_mepc`/`mcause`/`sepc`/`scause`** (commit `31f60fe`), five
+rounds:
+1. WARL bit-0 masking (`mepc`/`sepc`) via riscv-formal's own supported
+   `any_mask="..."` test-string suffix — no patch needed, already
+   existed upstream (closes "Next steps" item 4 from the original version
+   of this section).
+2. A genuine XLEN=64 portability bug in riscv-formal's own
+   `rvfi_csrc_any_check.sv` (a hardcoded 32-bit wire silently truncating
+   a 64-bit register-sourced CSR write) — one-line upstream patch.
+3. Async interrupts silently overwriting these CSRs mid-window, on
+   cycles with no retiring instruction at all — two narrower RVFI-level
+   exclusions (`!rvfi_trap`, then also `!rvfi_intr`) each proved
+   incomplete before landing on the real fix: a new `rvfi_any_trap_taken`
+   port exposing the actual gating condition (`trap_taken ||
+   interrupt_taken`) directly, excluded unconditionally every cycle.
+4. `sepc`/`scause` were entirely missing from riscv-formal's own CSR
+   database (`rvfi_macros.py`) — looked exactly like an S-mode-privilege
+   bug at first (a real dead end this investigation spent real effort
+   ruling out) before the actual cause (two missing `Csr(...)` entries)
+   was found.
+
+**`reg_ch0`** (commit `d93606f`): found via a 12-check due-diligence
+regression sample after `31f60fe`. `rvfi_rs2_rdata` is a bare
+combinational tap of the same physical wire the Debug Module's Access
+Register GPR port shares with normal decode, gated on `dm_access_active`
+— safe in real hardware (`dm.sv` gates on the hart being genuinely
+halted) but `dm.sv` isn't in this formal loop at all, and
+`i_debug_halt_req` is modeled fully free every cycle. Fixed the same way
+as `rvfi_any_trap_taken`: a new `rvfi_any_debug_entry` port ORing every
+path that can flip `dm_access_active` mid-instruction, excluded
+unconditionally for `reg_ch0`'s own window.
+
+**Four one-time hand-patches to riscv-formal's own shared checkout are
+now required** (`~/riscv-formal/checks/rvfi_testbench.sv` ×3 additions,
+`rvfi_csrc_any_check.sv`, `rvfi_macros.py`+regenerated `rvfi_macros.vh`)
+— none are part of this git repo; see "Environment setup" below for the
+exact diffs, and re-apply them on every fresh `riscv-formal` clone.
+
+**Full sweep, all 91 generated `isa=rv64ic` checks, confirmed 91/91
+PASS** (not a sample — every check, independently re-verified via a
+fresh `grep -l 'DONE (PASS' */logfile.txt` scan with zero `FAIL`/`ERROR`
+matches). Getting a trustworthy sweep needed two orchestration fixes,
+worth remembering: launching all 10 checks in a batch at the exact same
+instant reproducibly killed 9/10 within ~3 seconds of `yosys` starting
+(fixed with a 4-second stagger between launches); `bitwuzla` crashed
+with a genuine `BrokenPipeError` on multiple checks, not just the
+already-known `reg_ch0` — the sweep used `boolector` uniformly for all
+91 checks rather than chase which ones `bitwuzla` could handle (this
+doc's own `[options]` default `solver` stays `bitwuzla`, unchanged — the
+sweep's solver choice was a script-local override, not a project
+convention change).
+
 ## Next steps, roughly in order
 
 1. Resolve or accept-as-documented-limitation the M-extension
-   solver-hardness issues above.
+   solver-hardness issues above (still open, untouched by the 2026-09-17
+   sweep — `checks.cfg`'s `isa` is `rv64ic`, no `m`).
 2. Build the final combined `isa_rv64imac.txt` manifest (union of AMO + M +
    C instruction names) and confirm the full set passes together once all
    three stages are individually clean — catches anything stage-isolation
    might have missed.
-3. `mstatus` RVFI trace port — deferred from this round, see its own note
-   above.
-4. If ever revisited: try the `_mask="..."` suffix for `mepc`/`sepc` (fixes
-   the WARL self-consistency failure specifically) — `mcause`/`scause`
-   would still need a fundamentally different check (or a custom one) to
-   handle trap-driven writes, which `_mask` alone doesn't address.
+3. `mstatus` RVFI trace port — still deferred, untouched by the
+   2026-09-17 sweep.
 
 ## Environment setup (WSL)
 
