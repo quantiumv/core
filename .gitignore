@@ -58,6 +58,11 @@ dkms.conf
 #Iverilog Simulation Files
 *.vcd
 *a.out
+*.vvp
 
 # Internal-only reference documentation (not for the public repo)
 docs/internal/
+
+# Ad hoc scratch/repro directories (debugging sessions, not meant to be
+# tracked -- e.g. .scratch_amo_repro/ from the AMO/SBA race investigation)
+.scratch_*/
