@@ -696,6 +696,23 @@ module core (
      */
     localparam int SLOT_COUNT = 2;
     wire cur_slot = 1'b0;
+    /*
+     * Pipelining Milestone P2, step 1 of 5 (see verification/riscv-formal's
+     * own sibling staged-milestone precedent for why this lands as several
+     * small, separately-verified steps rather than one large change):
+     * fetch_slot marks every genuinely fetch-side write site among the 20
+     * P1 slot arrays (the ones a future independent fetch stage will need
+     * to write BEFORE cur_slot's own instruction has retired) so they're
+     * distinguishable from execute-side sites, which stay cur_slot-only.
+     * Deliberately an ALIAS of cur_slot here, not yet the inverse -- this
+     * step's own bar is "zero behavior change," proven by fetch_slot and
+     * cur_slot being textually different names for the SAME wire. Step 3
+     * (once a real fstate machine and a real toggling cur_slot register
+     * exist) flips this one line to `wire fetch_slot = ~cur_slot;` --
+     * every site below already using the right name needs no further edit
+     * at that point.
+     */
+    wire fetch_slot = cur_slot;
     logic         ptw_pmp_fault;
     logic         ptw_pte_fault;   // real assign lives in the "Sv39 Page-Table Walker" section
     logic         ptw_pte_leaf;    // (needs the PTE-decode wires, only available there)
@@ -1425,9 +1442,9 @@ module core (
             // (wb_master_drive never asserts a request this cycle), but
             // written as an explicit priority arm anyway, not relying on
             // that exclusivity.
-            fetch_fault_q[cur_slot] <= 1'b1;
+            fetch_fault_q[fetch_slot] <= 1'b1;
         end else if (state == S_FETCH && wb_done) begin
-            instr_line_q[cur_slot]  <= wb_dat_i;
+            instr_line_q[fetch_slot]  <= wb_dat_i;
             // pmp_fetchhi_fault is only consulted here for the UNTRANSLATED
             // case -- Sv39 real bug fix (post-M6 independent re-review): see
             // the state-transition always_ff's own matching comment for why
@@ -1437,8 +1454,8 @@ module core (
             // S_FETCH_HI's own new arms (state-transition + this always_ff's
             // own S_FETCH_HI block below) capture the REAL, resolved
             // pmp_fetchhi_fault result once it's actually valid.
-            crossed_q[cur_slot]     <= fetch_hi_taken && (fetch_translate_active || !pmp_fetchhi_fault);
-            fetch_fault_q[cur_slot] <= wb_err_i || (fetch_hi_taken && !fetch_translate_active && pmp_fetchhi_fault);
+            crossed_q[fetch_slot]     <= fetch_hi_taken && (fetch_translate_active || !pmp_fetchhi_fault);
+            fetch_fault_q[fetch_slot] <= wb_err_i || (fetch_hi_taken && !fetch_translate_active && pmp_fetchhi_fault);
         end
         /*
          * Sv39 real bug fix (post-M6 independent re-review): the ORIGINAL
@@ -1459,10 +1476,10 @@ module core (
             // S_FETCH priority ordering. No bus request was ever issued
             // for it (wb_master_drive's own suppression), so there's no
             // wb_dat_i to capture.
-            fetch_fault_q[cur_slot] <= 1'b1;
+            fetch_fault_q[fetch_slot] <= 1'b1;
         end else if (state == S_FETCH_HI && wb_done) begin
-            instr_hi_q[cur_slot]    <= wb_dat_i[15:0];
-            fetch_fault_q[cur_slot] <= wb_err_i;
+            instr_hi_q[fetch_slot]    <= wb_dat_i[15:0];
+            fetch_fault_q[fetch_slot] <= wb_err_i;
         end
         /*
          * Sv39 (Milestone 3): a PMP-denied or bus-errored PTE read is an
@@ -1475,9 +1492,9 @@ module core (
          * fetch_hi_fault_q[cur_slot]'s own always_ff below instead.
          */
         if (state == S_PTW && ptw_pmp_fault && !ptw_is_mem) begin
-            fetch_fault_q[cur_slot] <= 1'b1;
+            fetch_fault_q[fetch_slot] <= 1'b1;
         end else if (state == S_PTW && wb_done && !ptw_is_mem) begin
-            fetch_fault_q[cur_slot] <= wb_err_i;
+            fetch_fault_q[fetch_slot] <= wb_err_i;
         end
     end
 
@@ -2130,10 +2147,10 @@ module core (
      */
     always_ff @(posedge clk) begin
         if (rst) begin
-            fetch_lo_resolved_q[cur_slot] <= 1'b0;
-            fetch_hi_resolved_q[cur_slot] <= 1'b0;
-            fetch_lo_fault_q[cur_slot]    <= 1'b0;
-            fetch_hi_fault_q[cur_slot]    <= 1'b0;
+            fetch_lo_resolved_q[fetch_slot] <= 1'b0;
+            fetch_hi_resolved_q[fetch_slot] <= 1'b0;
+            fetch_lo_fault_q[fetch_slot]    <= 1'b0;
+            fetch_hi_fault_q[fetch_slot]    <= 1'b0;
             mem_resolved_q[cur_slot]      <= 1'b0;
             mem_fault_q[cur_slot]         <= 1'b0;
             mem_access_fault_q[cur_slot]  <= 1'b0;
@@ -2195,14 +2212,14 @@ module core (
             if (tlb_hit_active) begin
                 case (state)
                     S_FETCH: begin
-                        fetch_lo_fault_q[cur_slot]    <= ptw_pte_fault;
-                        fetch_lo_resolved_q[cur_slot] <= !ptw_pte_fault;
-                        if (!ptw_pte_fault) fetch_lo_paddr_q[cur_slot] <= ptw_resolved_paddr;
+                        fetch_lo_fault_q[fetch_slot]    <= ptw_pte_fault;
+                        fetch_lo_resolved_q[fetch_slot] <= !ptw_pte_fault;
+                        if (!ptw_pte_fault) fetch_lo_paddr_q[fetch_slot] <= ptw_resolved_paddr;
                     end
                     S_FETCH_HI: begin
-                        fetch_hi_fault_q[cur_slot]    <= ptw_pte_fault;
-                        fetch_hi_resolved_q[cur_slot] <= !ptw_pte_fault;
-                        if (!ptw_pte_fault) fetch_hi_paddr_q[cur_slot] <= ptw_resolved_paddr;
+                        fetch_hi_fault_q[fetch_slot]    <= ptw_pte_fault;
+                        fetch_hi_resolved_q[fetch_slot] <= !ptw_pte_fault;
+                        if (!ptw_pte_fault) fetch_hi_paddr_q[fetch_slot] <= ptw_resolved_paddr;
                     end
                     default: begin   // S_MEM
                         mem_fault_q[cur_slot]        <= ptw_pte_fault;
@@ -2225,8 +2242,8 @@ module core (
             // cycle takes.
             if (state == S_PTW && ptw_pmp_fault) begin
                 case (ptw_reason_q[cur_slot])
-                    PTW_REASON_LO:  fetch_lo_fault_q[cur_slot] <= 1'b0;
-                    PTW_REASON_HI:  fetch_hi_fault_q[cur_slot] <= 1'b0;
+                    PTW_REASON_LO:  fetch_lo_fault_q[fetch_slot] <= 1'b0;
+                    PTW_REASON_HI:  fetch_hi_fault_q[fetch_slot] <= 1'b0;
                     default: begin   // PTW_REASON_MEM
                         mem_fault_q[cur_slot]        <= 1'b0;
                         mem_access_fault_q[cur_slot] <= 1'b1;
@@ -2235,14 +2252,14 @@ module core (
             end else if (state == S_PTW && wb_done) begin
                 case (ptw_reason_q[cur_slot])
                     PTW_REASON_LO: begin
-                        fetch_lo_fault_q[cur_slot]    <= !wb_err_i && ptw_pte_fault;
-                        fetch_lo_resolved_q[cur_slot] <= wb_ok && ptw_pte_leaf && !ptw_pte_fault;
-                        if (wb_ok && ptw_pte_leaf && !ptw_pte_fault) fetch_lo_paddr_q[cur_slot] <= ptw_resolved_paddr;
+                        fetch_lo_fault_q[fetch_slot]    <= !wb_err_i && ptw_pte_fault;
+                        fetch_lo_resolved_q[fetch_slot] <= wb_ok && ptw_pte_leaf && !ptw_pte_fault;
+                        if (wb_ok && ptw_pte_leaf && !ptw_pte_fault) fetch_lo_paddr_q[fetch_slot] <= ptw_resolved_paddr;
                     end
                     PTW_REASON_HI: begin
-                        fetch_hi_fault_q[cur_slot]    <= !wb_err_i && ptw_pte_fault;
-                        fetch_hi_resolved_q[cur_slot] <= wb_ok && ptw_pte_leaf && !ptw_pte_fault;
-                        if (wb_ok && ptw_pte_leaf && !ptw_pte_fault) fetch_hi_paddr_q[cur_slot] <= ptw_resolved_paddr;
+                        fetch_hi_fault_q[fetch_slot]    <= !wb_err_i && ptw_pte_fault;
+                        fetch_hi_resolved_q[fetch_slot] <= wb_ok && ptw_pte_leaf && !ptw_pte_fault;
+                        if (wb_ok && ptw_pte_leaf && !ptw_pte_fault) fetch_hi_paddr_q[fetch_slot] <= ptw_resolved_paddr;
                     end
                     default: begin   // PTW_REASON_MEM
                         mem_fault_q[cur_slot]        <= !wb_err_i && ptw_pte_fault;
@@ -2440,8 +2457,8 @@ module core (
             // registers need that exact same "always freshly written by
             // the very next ordinary fetch" property explicitly added.
             if (state == S_FETCH && wb_done) begin
-                fetch_lo_resolved_q[cur_slot] <= 1'b0;
-                fetch_lo_fault_q[cur_slot]    <= 1'b0;
+                fetch_lo_resolved_q[fetch_slot] <= 1'b0;
+                fetch_lo_fault_q[fetch_slot]    <= 1'b0;
                 /*
                  * fetch_hi_resolved_q[cur_slot]/fetch_hi_fault_q[cur_slot], HERE TOO -- a
                  * real bug found post-M6 by simulation (not caught by
@@ -2471,12 +2488,12 @@ module core (
                  * not, crossing or not -- mirroring fetch_lo_resolved_q[cur_slot]'s
                  * own "every S_FETCH refreshes it" property exactly.
                  */
-                fetch_hi_resolved_q[cur_slot] <= 1'b0;
-                fetch_hi_fault_q[cur_slot]    <= 1'b0;
+                fetch_hi_resolved_q[fetch_slot] <= 1'b0;
+                fetch_hi_fault_q[fetch_slot]    <= 1'b0;
             end
             if (state == S_FETCH_HI && wb_done) begin
-                fetch_hi_resolved_q[cur_slot] <= 1'b0;
-                fetch_hi_fault_q[cur_slot]    <= 1'b0;
+                fetch_hi_resolved_q[fetch_slot] <= 1'b0;
+                fetch_hi_fault_q[fetch_slot]    <= 1'b0;
             end
         end
     end
