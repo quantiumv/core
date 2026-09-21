@@ -706,13 +706,59 @@ module core (
      * distinguishable from execute-side sites, which stay cur_slot-only.
      * Deliberately an ALIAS of cur_slot here, not yet the inverse -- this
      * step's own bar is "zero behavior change," proven by fetch_slot and
-     * cur_slot being textually different names for the SAME wire. Step 3
-     * (once a real fstate machine and a real toggling cur_slot register
-     * exist) flips this one line to `wire fetch_slot = ~cur_slot;` --
-     * every site below already using the right name needs no further edit
-     * at that point.
+     * cur_slot being textually different names for the SAME wire. Step 2
+     * introduces a real fstate machine but keeps it gated to only ever
+     * fetch cur_slot's own instruction (no lookahead yet), so fetch_slot
+     * stays this same alias through step 2 too. Step 3 (once cur_slot is
+     * a real, toggling register and fstate is allowed to run ahead of it)
+     * flips this one line to `wire fetch_slot = ~cur_slot;` -- every site
+     * below already using the right name needs no further edit at that
+     * point.
      */
     wire fetch_slot = cur_slot;
+    /*
+     * Pipelining Milestone P2, step 2 of 5: fstate is a new, independent
+     * small state machine that owns the UNTRANSLATED fetch's own bus
+     * request/response sequencing (both the low and, when the
+     * instruction crosses a dword boundary, high halfword) -- replacing
+     * state's OWN S_FETCH/S_FETCH_HI-driven mechanism for that case only.
+     * Translated (Sv39) fetches are explicitly OUT of scope for this
+     * milestone (see fetch_translate_active's own header comment for the
+     * Sv39 descope reasoning) -- state's existing S_FETCH/S_FETCH_HI/
+     * S_PTW machinery keeps handling those completely unmodified, and
+     * fstate simply never engages (stays F_IDLE) for the whole episode.
+     *
+     * "No lookahead yet" is enforced structurally, not just by
+     * convention: fstate's own always_ff (Fetch section below) forces it
+     * back to F_IDLE on every cycle state ISN'T S_FETCH, so it can never
+     * start working on a NEW instruction before state has actually
+     * arrived at S_FETCH for it -- state and fstate always agree on
+     * which instruction is being fetched, just like the pre-P2 design.
+     * This also means every interruption (a debug halt request arriving
+     * mid-fetch, exactly like state's own priority-ordered bail to
+     * S_DEBUG_HALTED already does today) forces fstate back to F_IDLE
+     * too, so a later resume always restarts the SAME fetch completely
+     * fresh -- matching state's own "re-run S_FETCH's whole decision
+     * tree from scratch" behavior on resume exactly, including re-
+     * checking pmp_fetchlo_fault in case a halted debugger changed PMP
+     * config in the meantime.
+     *
+     * F_IDLE: not fetching (either between instructions, or this
+     * instruction is being handled by the old translated/interrupted
+     * path instead). F_REQ_LO/F_REQ_HI: the low/high halfword's own bus
+     * request is outstanding (mirrors old S_FETCH/S_FETCH_HI). F_VALID:
+     * a one-cycle pulse -- the fetch (successful capture OR an already-
+     * latched PMP/bus-error fault) is ready for state's own S_FETCH arm
+     * to consume THIS cycle; consumed automatically the next cycle
+     * (falls through to the `default` arm below, back to F_IDLE), no
+     * separate transition needed. Only 4 of the plan's 5 fstate values
+     * exist yet -- F_FLUSH_DRAIN (draining a stale icache response after
+     * an abandoned request) has no way to be entered until step 3 adds
+     * the flush mechanism that needs it, so adding it now would be
+     * untestable dead code.
+     */
+    typedef enum logic [1:0] { F_IDLE, F_REQ_LO, F_REQ_HI, F_VALID } fstate_t;
+    fstate_t fstate;
     logic         ptw_pmp_fault;
     logic         ptw_pte_fault;   // real assign lives in the "Sv39 Page-Table Walker" section
     logic         ptw_pte_leaf;    // (needs the PTE-decode wires, only available there)
@@ -1097,6 +1143,74 @@ module core (
     wire fetch_hi_needed = (pc[2:1] == 2'b11) && (wb_dat_i[49:48] == 2'b11);
     wire fetch_hi_taken  = wb_ok && fetch_hi_needed;
 
+    /*
+     * Pipelining P2 step 2: fstate's own progression -- see its
+     * declaration comment (earlier in this file) for the full design.
+     * Declared here (ahead of the state-transition always_ff below,
+     * which reads fstate_now) rather than down in the Fetch section
+     * alongside fstate's own always_ff, for the same "everything this
+     * needs -- wb_done/fetch_hi_taken/pmp_fetch*_fault/
+     * debug_halt_req_entry/debug_progbuf_active/fetch_translate_active --
+     * is already available or forward-declared by this point" reason
+     * every other early-declared signal in this file already follows.
+     *
+     * fstate_now is fstate's EFFECTIVE phase for THIS cycle's own
+     * combinational decisions (bus-driving in wb_master_drive, register
+     * capture in the Fetch section, and state's own S_FETCH arm below)
+     * -- adversarial review of an earlier version of this step found a
+     * real bug here: naively gating those decisions on the raw fstate
+     * REGISTER cost 1-2 extra clock cycles per untranslated fetch (one
+     * cycle sitting in F_IDLE before F_REQ_LO's registered value could
+     * even start driving the low-half request, and another cycle for
+     * state's own S_FETCH arm to observe a registered F_VALID) versus
+     * the pre-P2 design, which made this same "request now / done now"
+     * decision combinationally, every cycle, with no register hop at
+     * all. fstate_now closes that gap by re-deriving the SAME "what
+     * should happen this cycle" logic combinationally off the CURRENT
+     * fstate register plus this cycle's own live signals -- exactly
+     * mirroring how state's own pre-P2 S_FETCH/S_FETCH_HI arms always
+     * decided things directly off live wb_done/pmp_fetch*_fault, never
+     * through an intermediate register. The fstate register itself
+     * still exists and still updates one cycle behind (via fstate_now,
+     * see its own always_ff in the Fetch section) -- it's what makes a
+     * GENUINE multi-cycle bus wait (wb_done not yet arrived) correctly
+     * persist as "still F_REQ_LO/F_REQ_HI" on every subsequent cycle;
+     * fstate_now only diverges from raw fstate on the exact cycle a
+     * phase actually completes or begins.
+     *
+     * fstate_eligible is the "no lookahead, restart fresh on any
+     * interruption" rule: fstate can only ever be doing real work while
+     * state is CURRENTLY sitting in S_FETCH for an untranslated fetch
+     * that isn't being redirected to S_DEBUG_HALTED/progbuf this same
+     * cycle -- any other cycle forces F_IDLE, mirroring state's own
+     * "re-run S_FETCH from scratch" resume behavior exactly (see
+     * S_FETCH's own arm below).
+     */
+    wire fstate_eligible = (state == S_FETCH) && !fetch_translate_active
+                         && !debug_halt_req_entry && !debug_progbuf_active;
+    // "Working the low half" covers BOTH F_IDLE (just arrived, decision
+    // not yet registered) and F_REQ_LO (already waiting) -- from this
+    // cycle's own combinational perspective they're the same phase; only
+    // the bookkeeping register distinguishes "first cycle" from "later
+    // cycle", which none of this logic needs to care about.
+    wire fstate_lo_phase = fstate_eligible && (fstate == F_IDLE || fstate == F_REQ_LO);
+    wire fstate_hi_phase = fstate_eligible && (fstate == F_REQ_HI);
+    // pmp_fetchlo_fault is known combinationally before any bus request is
+    // ever issued, and only needs checking once (the first cycle, i.e.
+    // while the register still reads F_IDLE) -- mirrors state's own pre-P2
+    // pmp_fetchlo_fault priority over wb_done exactly, including against a
+    // same-cycle immediate (zero-wait-state) response.
+    wire fstate_lo_denied_now = fstate_eligible && (fstate == F_IDLE) && pmp_fetchlo_fault;
+    wire fstate_lo_done_now   = fstate_lo_phase && !fstate_lo_denied_now && wb_done;
+    wire fstate_hi_done_now   = fstate_hi_phase && wb_done;
+    wire fstate_t fstate_now = fstate_t'(
+        fstate_lo_denied_now ? F_VALID :
+        fstate_lo_done_now   ? ((fetch_hi_taken && !pmp_fetchhi_fault) ? F_REQ_HI : F_VALID) :
+        fstate_hi_done_now   ? F_VALID :
+        fstate_lo_phase      ? F_REQ_LO :
+        fstate_hi_phase      ? F_REQ_HI :
+        F_IDLE); // not eligible, or F_VALID already consumed last cycle
+
     always_ff @(posedge clk) begin
         if (rst) begin
             state <= S_FETCH;
@@ -1120,89 +1234,104 @@ module core (
                 S_FETCH:     if (debug_progbuf_active) state <= S_EXEC;
                              else if (debug_halt_req_entry) state <= S_DEBUG_HALTED;
                              /*
-                              * Sv39 (Milestone 3): translation needed and not
-                              * yet resolved for THIS fetch -- MUST win top
-                              * priority over both checks below, unconditionally,
-                              * regardless of hit or miss: fetch_paddr (hence
-                              * pmp_fetchlo_fault, computed off it) is stale/
-                              * meaningless until fetch_lo_resolved_q[cur_slot] is set,
-                              * mirrors debug_progbuf_active/debug_halt_req_entry's
-                              * own "redirect before the ordinary path" shape.
-                              * Sv39 (Milestone 5): a MISS redirects to the real
-                              * walker (S_PTW); a HIT stays right here in
-                              * S_FETCH for exactly one more cycle instead --
-                              * resolved combinationally-then-registered by the
-                              * walker progression always_ff's own
-                              * tlb_hit_active branch this same cycle, taking
-                              * effect next cycle. Either way, fetch_lo_resolved_q[cur_slot]
-                              * (and, for a hit, fetch_lo_paddr_q[cur_slot] too) is
-                              * guaranteed valid by the time this outer
-                              * condition next reads false -- the same
-                              * invariant a real walk's own S_PTW-then-back-
-                              * here sequencing already relied on, now shared
-                              * by both resolution paths.
+                              * Pipelining P2 step 2: split into the existing
+                              * Sv39 (translated) path -- COMPLETELY UNCHANGED
+                              * below, still driven by state itself exactly
+                              * as before this milestone -- and the new
+                              * untranslated fast path, now owned by fstate
+                              * (see fstate's own declaration comment,
+                              * earlier in this file, for the full design).
                               */
-                             else if (fetch_translate_active && !fetch_lo_resolved_q[cur_slot]) begin
-                                 if (!tlb_hit) state <= S_PTW;
+                             else if (fetch_translate_active) begin
                                  /*
-                                  * TLB-hit PTE-content fault: same real gap
-                                  * as S_MEM's own identical arm (see that
-                                  * state's own comment for the full
-                                  * reasoning) -- on a HIT, fetch_lo_resolved_q[cur_slot]
-                                  * stays 0 forever when ptw_pte_fault is set
-                                  * (mirrors mem_resolved_q[cur_slot]'s own
-                                  * "resolved" semantics), so without this
-                                  * arm the outer condition here never reads
-                                  * false and S_FETCH could never otherwise
-                                  * leave for this instruction.
+                                  * Sv39 (Milestone 3): translation needed and
+                                  * not yet resolved for THIS fetch -- MUST win
+                                  * top priority within this branch,
+                                  * unconditionally, regardless of hit or miss:
+                                  * fetch_paddr (hence pmp_fetchlo_fault,
+                                  * computed off it) is stale/meaningless until
+                                  * fetch_lo_resolved_q[cur_slot] is set.
+                                  * Sv39 (Milestone 5): a MISS redirects to the
+                                  * real walker (S_PTW); a HIT stays right here
+                                  * in S_FETCH for exactly one more cycle
+                                  * instead -- resolved combinationally-then-
+                                  * registered by the walker progression
+                                  * always_ff's own tlb_hit_active branch this
+                                  * same cycle, taking effect next cycle.
+                                  * Either way, fetch_lo_resolved_q[cur_slot]
+                                  * (and, for a hit, fetch_lo_paddr_q[cur_slot]
+                                  * too) is guaranteed valid by the time this
+                                  * inner condition next reads false -- the
+                                  * same invariant a real walk's own S_PTW-
+                                  * then-back-here sequencing already relied
+                                  * on, now shared by both resolution paths.
                                   */
-                                 else if (ptw_pte_fault) state <= S_EXEC;
+                                 if (!fetch_lo_resolved_q[cur_slot]) begin
+                                     if (!tlb_hit) state <= S_PTW;
+                                     /*
+                                      * TLB-hit PTE-content fault: same real gap
+                                      * as S_MEM's own identical arm (see that
+                                      * state's own comment for the full
+                                      * reasoning) -- on a HIT, fetch_lo_resolved_q[cur_slot]
+                                      * stays 0 forever when ptw_pte_fault is set
+                                      * (mirrors mem_resolved_q[cur_slot]'s own
+                                      * "resolved" semantics), so without this
+                                      * arm the outer condition here never reads
+                                      * false and S_FETCH could never otherwise
+                                      * leave for this instruction.
+                                      */
+                                     else if (ptw_pte_fault) state <= S_EXEC;
+                                 end
+                                 /*
+                                  * pmp_fetchlo_fault (PMP+PLIC plan, Milestone
+                                  * 2): known combinationally off fetch_paddr
+                                  * before any bus request for this fetch is
+                                  * ever issued (wb_master_drive's own S_FETCH
+                                  * arm suppresses it in lockstep, per that
+                                  * arm's own comment) -- falls straight
+                                  * through to S_EXEC with no wb_done to wait
+                                  * for.
+                                  *
+                                  * pmp_fetchhi_fault is deliberately NOT
+                                  * checked here (Sv39 real bug, found and
+                                  * fixed post-M6 by an earlier independent
+                                  * adversarial re-review): fetch_hi_paddr_q[cur_slot]
+                                  * is NOT yet resolved for THIS instruction at
+                                  * this point -- it's whatever the PREVIOUS
+                                  * crossing fetch happened to leave there
+                                  * (fetch_lo_paddr_q[cur_slot]/fetch_hi_paddr_q[cur_slot]
+                                  * have no reset at all). Checking it here
+                                  * would silently bypass PMP execute-
+                                  * protection (a stale-but-permitted address
+                                  * lets S_FETCH_HI's own real walk proceed
+                                  * unchecked once it resolves -- see that
+                                  * state's own arm below) or spuriously fault
+                                  * a legitimate instruction (a stale-but-
+                                  * denied address). Fix: always enter
+                                  * S_FETCH_HI when fetch_hi_taken -- the real
+                                  * PMP check is deferred to S_FETCH_HI's own
+                                  * arm below, evaluated only once
+                                  * fetch_hi_paddr_q[cur_slot] has genuinely
+                                  * resolved for this instruction.
+                                  */
+                                 else if (pmp_fetchlo_fault) state <= S_EXEC;
+                                 else if (wb_done) state <= state_t'(fetch_hi_taken ? S_FETCH_HI : S_EXEC);
+                             end else begin
+                                 /*
+                                  * Pipelining P2 step 2: the untranslated fast
+                                  * path. fstate_now (declared just above this
+                                  * always_ff, see its own comment) folds in the
+                                  * entire low/high-halfword bus sequence --
+                                  * including its own pmp_fetchlo_fault/
+                                  * pmp_fetchhi_fault checks -- combinationally,
+                                  * so this reads fstate_now rather than the raw
+                                  * fstate register: reacting to the registered
+                                  * value here would cost an extra, unintended
+                                  * cycle (a real bug an earlier version of this
+                                  * step had, found by adversarial review).
+                                  */
+                                 if (fstate_now == F_VALID) state <= S_EXEC;
                              end
-                             /*
-                              * pmp_fetchlo_fault (PMP+PLIC plan, Milestone 2):
-                              * known combinationally off fetch_paddr before
-                              * any bus request for this fetch is ever issued
-                              * (wb_master_drive's own S_FETCH arm suppresses
-                              * it in lockstep, per that arm's own comment) --
-                              * falls straight through to S_EXEC with no
-                              * wb_done to wait for, same shape as
-                              * debug_progbuf_active immediately above, for
-                              * an unrelated reason.
-                              *
-                              * pmp_fetchhi_fault -- Sv39 real bug, found and
-                              * fixed post-M6 by this session's own independent
-                              * adversarial re-review: the pre-Sv39 comment this
-                              * replaces claimed pmp_fetchhi_fault is "known
-                              * combinationally... the SECOND dword's own
-                              * permission, only ever meaningful once
-                              * fetch_hi_taken is already known" -- true ONLY
-                              * when fetch_paddr_hi is the untranslated
-                              * fetch_paddr+8 (this arm's own original,
-                              * pre-Sv39 shape). Once Sv39 M3 made
-                              * fetch_paddr_hi read fetch_hi_paddr_q[cur_slot] whenever
-                              * fetch_translate_active, that register is NOT
-                              * yet resolved for THIS instruction at this exact
-                              * point -- it's whatever the PREVIOUS crossing
-                              * fetch happened to leave there (fetch_lo_paddr_q[cur_slot]/
-                              * fetch_hi_paddr_q[cur_slot] have no reset at all). Checking
-                              * pmp_fetchhi_fault here while translating would
-                              * silently bypass PMP execute-protection (a stale-
-                              * but-permitted address lets S_FETCH_HI's own real
-                              * walk proceed unchecked once it resolves -- see
-                              * that state's own new arm below) or spuriously
-                              * fault a legitimate instruction (a stale-but-
-                              * denied address). Fix: while translating, ALWAYS
-                              * enter S_FETCH_HI when fetch_hi_taken -- the real
-                              * PMP check is deferred to S_FETCH_HI's own new
-                              * arm below, evaluated only once fetch_hi_paddr_q[cur_slot]
-                              * has genuinely resolved for this instruction.
-                              * The untranslated case is completely unchanged
-                              * (pmp_fetchhi_fault is genuinely valid here then,
-                              * exactly as the original comment described).
-                              */
-                             else if (pmp_fetchlo_fault) state <= S_EXEC;
-                             else if (wb_done) state <= state_t'(fetch_hi_taken
-                                 && (fetch_translate_active || !pmp_fetchhi_fault) ? S_FETCH_HI : S_EXEC);
                 /*
                  * Sv39 (Milestone 3): same redirect, same reason, for the
                  * second (crossing) dword -- fetch_paddr_hi/fetch_hi_vaddr's
@@ -1210,6 +1339,11 @@ module core (
                  * INDEPENDENT walk rather than reusing the lo half's own
                  * resolved address.
                  */
+                // Sv39-only now (Pipelining P2 step 2): the untranslated
+                // case no longer visits S_FETCH_HI at all -- fstate's own
+                // F_REQ_HI arm handles it instead (see the untranslated
+                // branch of S_FETCH above) -- so fetch_translate_active is
+                // always true by the time this arm is even reached.
                 S_FETCH_HI:  if (fetch_translate_active && !fetch_hi_resolved_q[cur_slot]) begin
                                  if (!tlb_hit) state <= S_PTW;
                                  /*
@@ -1237,11 +1371,11 @@ module core (
                               * wait for, since wb_master_drive's own
                               * S_FETCH_HI arm suppresses the real bus
                               * request in lockstep (see that arm's own
-                              * comment). For the untranslated case this arm
-                              * is dead code by construction -- S_FETCH's own
-                              * transition into S_FETCH_HI already required
-                              * !pmp_fetchhi_fault then, so it can never read
-                              * true here.
+                              * comment). This whole S_FETCH_HI case is
+                              * itself now Sv39-only (see this arm's own
+                              * header comment) -- the untranslated case
+                              * this comment used to describe as merely
+                              * "dead code" is genuinely unreachable now.
                               */
                              else if (pmp_fetchhi_fault) state <= S_EXEC;
                              else if (wb_done) state <= S_EXEC;
@@ -1374,6 +1508,20 @@ module core (
         end
     end
 
+    /*
+     * Pipelining P2 step 2: fstate's own register, one cycle behind
+     * fstate_now (see fstate_now's own declaration comment, right before
+     * this always_ff's sibling state-transition block above, for the
+     * full design -- this update is deliberately just "fstate <=
+     * fstate_now", since fstate_now already folds in every condition
+     * (eligibility, faults, wb_done) that used to live in a case
+     * statement here).
+     */
+    always_ff @(posedge clk) begin
+        if (rst) fstate <= F_IDLE;
+        else     fstate <= fstate_now;
+    end
+
     /* --------------------------------------------------------------- *
      * Fetch
      * --------------------------------------------------------------- */
@@ -1423,7 +1571,19 @@ module core (
      */
     logic        fetch_fault_q [SLOT_COUNT];
     always_ff @(posedge clk) begin
-        if (state == S_FETCH && fetch_translate_active && !fetch_lo_resolved_q[cur_slot]) begin
+        /*
+         * Pipelining P2 step 2: gated on fetch_translate_active now --
+         * state stays S_FETCH throughout BOTH halves of an untranslated
+         * crossing fetch (fstate owns the low/high sequencing instead of
+         * S_FETCH_HI, see the state-transition always_ff's own S_FETCH
+         * arm), so an un-gated "state == S_FETCH && wb_done" would fire a
+         * SECOND time on the high half's own wb_done and wrongly re-
+         * capture instr_line_q with the wrong dword's data. The
+         * untranslated path's own equivalent capture lives in the new
+         * fstate-keyed block below instead.
+         */
+        if (fetch_translate_active) begin
+        if (state == S_FETCH && !fetch_lo_resolved_q[cur_slot]) begin
             // Sv39 (Milestone 3): redirecting to S_PTW this cycle --
             // fetch_paddr (hence pmp_fetchlo_fault, computed off it) is
             // not yet resolved, so its transient value must not be
@@ -1445,17 +1605,50 @@ module core (
             fetch_fault_q[fetch_slot] <= 1'b1;
         end else if (state == S_FETCH && wb_done) begin
             instr_line_q[fetch_slot]  <= wb_dat_i;
-            // pmp_fetchhi_fault is only consulted here for the UNTRANSLATED
-            // case -- Sv39 real bug fix (post-M6 independent re-review): see
-            // the state-transition always_ff's own matching comment for why
-            // it's not yet meaningful here while translating (fetch_hi_paddr_q[cur_slot]
-            // hasn't resolved for this instruction yet). While translating,
-            // crossed_q[cur_slot]/fetch_fault_q[cur_slot] both stay as if the HI half is clean --
+            // pmp_fetchhi_fault is NOT consulted here while translating --
+            // Sv39 real bug fix (post-M6 independent re-review): see the
+            // state-transition always_ff's own matching comment for why
+            // it's not yet meaningful here (fetch_hi_paddr_q[cur_slot]
+            // hasn't resolved for this instruction yet). crossed_q[cur_slot]/
+            // fetch_fault_q[cur_slot] both stay as if the HI half is clean --
             // S_FETCH_HI's own new arms (state-transition + this always_ff's
             // own S_FETCH_HI block below) capture the REAL, resolved
             // pmp_fetchhi_fault result once it's actually valid.
-            crossed_q[fetch_slot]     <= fetch_hi_taken && (fetch_translate_active || !pmp_fetchhi_fault);
-            fetch_fault_q[fetch_slot] <= wb_err_i || (fetch_hi_taken && !fetch_translate_active && pmp_fetchhi_fault);
+            crossed_q[fetch_slot]     <= fetch_hi_taken;
+            fetch_fault_q[fetch_slot] <= wb_err_i;
+        end
+        end else begin
+            /*
+             * Pipelining P2 step 2: the untranslated fast path, keyed on
+             * the shared fstate_lo_denied_now/fstate_lo_done_now/
+             * fstate_hi_done_now wires (declared right before the
+             * state-transition always_ff, alongside fstate_now -- see
+             * that comment for the full "why combinational, not the raw
+             * fstate register" reasoning) instead of state's S_FETCH/
+             * S_FETCH_HI. Mirrors the translated branch's own
+             * pmp-denied/wb_done shapes exactly, including
+             * pmp_fetchhi_fault now being fully valid to consult
+             * immediately (no walker resolution needed for an
+             * untranslated fetch_paddr_hi), unlike the translated branch
+             * above. Using the *_now wires here (rather than raw
+             * fstate==F_REQ_LO/F_REQ_HI) also closes a real gap a plain
+             * register-keyed version would have: a zero-wait-state bus
+             * response arriving on the very first eligible cycle (fstate
+             * register still reading F_IDLE) needs capturing too, not
+             * just a response arriving on a later, genuinely-registered
+             * F_REQ_LO/F_REQ_HI cycle.
+             */
+            if (fstate_lo_denied_now) begin
+                fetch_fault_q[fetch_slot] <= 1'b1;
+            end else if (fstate_lo_done_now) begin
+                instr_line_q[fetch_slot]  <= wb_dat_i;
+                crossed_q[fetch_slot]     <= fetch_hi_taken && !pmp_fetchhi_fault;
+                fetch_fault_q[fetch_slot] <= wb_err_i || (fetch_hi_taken && pmp_fetchhi_fault);
+            end
+            if (fstate_hi_done_now) begin
+                instr_hi_q[fetch_slot]    <= wb_dat_i[15:0];
+                fetch_fault_q[fetch_slot] <= wb_err_i;
+            end
         end
         /*
          * Sv39 real bug fix (post-M6 independent re-review): the ORIGINAL
@@ -4467,49 +4660,113 @@ module core (
                  * S_DEBUG_HALTED with nothing fetched at all,
                  * debug_progbuf_active because the "fetch" is already
                  * available combinationally as i_progbuf_data, with no
-                 * real bus transaction needed at all. pmp_fetchlo_fault
-                 * (PMP+PLIC plan, Milestone 2) suppresses it for a third
-                 * reason: unlike a real bus error (only discoverable
-                 * once a request actually comes back), a low-half PMP
-                 * denial is already known combinationally off
-                 * fetch_paddr before this request would even be issued --
-                 * the request must never be issued at all, mirroring the
-                 * misalignment precedent (checked before the bus phase
-                 * starts), not the bus-error one (reacts after). Either
-                 * way, wb_done must never arrive for this cycle's
-                 * would-be request. See the state-transition always_ff's
-                 * own S_FETCH arm, which relies on exactly this.
-                 *
-                 * Sv39 (Milestone 3): (fetch_translate_active &&
-                 * !fetch_lo_resolved_q[cur_slot]) suppresses it for a fourth reason,
-                 * same class as pmp_fetchlo_fault -- fetch_paddr/fetch_addr
-                 * are stale/meaningless until the walker resolves them, so
-                 * issuing a request against them now would fetch garbage.
+                 * real bus transaction needed at all. Applies to BOTH
+                 * branches below, so checked once, ahead of the
+                 * translated/untranslated split.
                  */
-                if (!wb_done && !debug_halt_req_entry && !debug_progbuf_active && !pmp_fetchlo_fault
-                        && !(fetch_translate_active && !fetch_lo_resolved_q[cur_slot])) begin
-                    wb_cyc_o  = 1'b1;
-                    wb_stb_o  = 1'b1;
-                    wb_addr_o = fetch_from_trap_vector ? {trap_vector[31:3], 3'b0} : fetch_addr;
-                    wb_sel_o  = 8'hFF; // don't-care for a read; full line for clarity
+                if (!debug_halt_req_entry && !debug_progbuf_active) begin
+                    if (fetch_translate_active) begin
+                        /*
+                         * Sv39 path -- unchanged from before this
+                         * milestone. pmp_fetchlo_fault (PMP+PLIC plan,
+                         * Milestone 2) suppresses it: unlike a real bus
+                         * error (only discoverable once a request actually
+                         * comes back), a low-half PMP denial is already
+                         * known combinationally off fetch_paddr before
+                         * this request would even be issued -- the
+                         * request must never be issued at all, mirroring
+                         * the misalignment precedent (checked before the
+                         * bus phase starts), not the bus-error one (reacts
+                         * after). !fetch_lo_resolved_q[cur_slot]
+                         * suppresses it for a second reason, same class:
+                         * fetch_paddr/fetch_addr are stale/meaningless
+                         * until the walker resolves them, so issuing a
+                         * request against them now would fetch garbage.
+                         * See the state-transition always_ff's own S_FETCH
+                         * arm, which relies on exactly this.
+                         */
+                        if (!wb_done && !pmp_fetchlo_fault && fetch_lo_resolved_q[cur_slot]) begin
+                            wb_cyc_o  = 1'b1;
+                            wb_stb_o  = 1'b1;
+                            wb_addr_o = fetch_from_trap_vector ? {trap_vector[31:3], 3'b0} : fetch_addr;
+                            wb_sel_o  = 8'hFF; // don't-care for a read; full line for clarity
+                        end
+                    end else begin
+                        /*
+                         * Pipelining P2 step 2: the untranslated fast
+                         * path -- fstate owns both halves now (mirrors
+                         * the OLD S_FETCH/S_FETCH_HI split exactly). Keyed
+                         * on fstate_now, NOT the raw fstate register --
+                         * driving off the registered value would cost an
+                         * extra idle cycle before ever asserting the
+                         * request (a real bug an earlier version of this
+                         * step had, found by adversarial review; see
+                         * fstate_now's own declaration comment).
+                         *
+                         * F_REQ_LO's !wb_done/!pmp_fetchlo_fault terms ARE
+                         * dead code by construction (fstate_now's own
+                         * derivation never reads F_REQ_LO when denied or
+                         * already done) -- kept anyway for the same
+                         * defensive-clarity reason S_FETCH_HI's own
+                         * precedent below does.
+                         *
+                         * F_REQ_HI is DIFFERENT -- a second real bug an
+                         * earlier version of THIS SAME fix had, also found
+                         * by adversarial review: on the exact cycle
+                         * fstate_now first transitions from the low half's
+                         * own completion into F_REQ_HI, the plain wb_done
+                         * wire STILL reflects that just-arrived LOW-half
+                         * ack (wb_done is a single combinational wire, not
+                         * per-phase) -- so a naive "!wb_done" guard here
+                         * would wrongly read that stale ack as already
+                         * satisfying the HIGH half's own (not-yet-issued)
+                         * request, suppressing it for one cycle. Using
+                         * !fstate_hi_done_now instead is correct in both
+                         * cases: on that same transition cycle,
+                         * fstate_hi_phase (keyed off the raw, not-yet-
+                         * updated fstate REGISTER) is still false, so
+                         * fstate_hi_done_now is false too -- the request
+                         * drives immediately, as intended. Once genuinely
+                         * registered into F_REQ_HI and actually waiting,
+                         * fstate_hi_phase is true and fstate_hi_done_now
+                         * correctly tracks the HIGH half's OWN ack instead.
+                         */
+                        case (fstate_now)
+                            F_REQ_LO: if (!wb_done && !pmp_fetchlo_fault) begin
+                                wb_cyc_o  = 1'b1;
+                                wb_stb_o  = 1'b1;
+                                wb_addr_o = fetch_from_trap_vector ? {trap_vector[31:3], 3'b0} : fetch_addr;
+                                wb_sel_o  = 8'hFF;
+                            end
+                            F_REQ_HI: if (!fstate_hi_done_now && !pmp_fetchhi_fault) begin
+                                wb_cyc_o  = 1'b1;
+                                wb_stb_o  = 1'b1;
+                                wb_addr_o = fetch_addr_hi;
+                                wb_sel_o  = 8'hFF;
+                            end
+                            default: ; // F_IDLE, F_VALID: nothing to drive
+                        endcase
+                    end
                 end
             end
             /*
              * C extension: the second dword of a crossing fetch --
-             * reuses the exact same !wb_done gating discipline as
-             * every other arm here. Sv39 (Milestone 3): same
-             * translation-not-yet-resolved suppression as S_FETCH above.
+             * reuses the exact same !wb_done gating discipline as every
+             * other arm here. Sv39-only now (Pipelining P2 step 2): the
+             * untranslated case no longer visits S_FETCH_HI at all --
+             * fstate's own F_REQ_HI arm above handles it instead -- so
+             * fetch_translate_active is always true by the time this arm
+             * is even selected; the fetch_hi_resolved_q[cur_slot]
+             * suppression (same reason as S_FETCH's own
+             * fetch_lo_resolved_q[cur_slot] term) simplifies accordingly.
              */
             S_FETCH_HI: begin
                 // Sv39 real bug fix (post-M6 independent re-review): the
-                // extra !pmp_fetchhi_fault term is new -- once
-                // fetch_hi_paddr_q[cur_slot] has genuinely resolved and PMP denies
-                // it, the real bus request must never be issued at all,
-                // mirroring S_MEM's own !pmp_load_fault && !pmp_store_fault
-                // suppression. For the untranslated case this term is dead
-                // code by construction (S_FETCH's own transition into
-                // S_FETCH_HI already required !pmp_fetchhi_fault then).
-                if (!wb_done && !(fetch_translate_active && !fetch_hi_resolved_q[cur_slot]) && !pmp_fetchhi_fault) begin
+                // !pmp_fetchhi_fault term -- once fetch_hi_paddr_q[cur_slot]
+                // has genuinely resolved and PMP denies it, the real bus
+                // request must never be issued at all, mirroring S_MEM's
+                // own !pmp_load_fault && !pmp_store_fault suppression.
+                if (!wb_done && fetch_hi_resolved_q[cur_slot] && !pmp_fetchhi_fault) begin
                     wb_cyc_o  = 1'b1;
                     wb_stb_o  = 1'b1;
                     wb_addr_o = fetch_addr_hi;
