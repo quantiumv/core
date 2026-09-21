@@ -69,15 +69,27 @@ module core_c_ext_tb;
     `include "halt_wait.sv"
 
     /*
-     * White-box check: S_FETCH_HI (state 3'd4, the C extension's new
-     * 5th state_t value) must genuinely be visited while fetching the
-     * deliberately-crossing instruction at pc=0x16 -- mirrors
-     * core_a_ext_tb.sv's own hand-rolled S_AMO_WRITE-visit check.
+     * White-box check: the high halfword's own fetch phase must
+     * genuinely be visited while fetching the deliberately-crossing
+     * instruction at pc=0x16 -- mirrors core_a_ext_tb.sv's own
+     * hand-rolled S_AMO_WRITE-visit check.
+     *
+     * Pipelining P2 step 2: this is untranslated code (no Sv39), so the
+     * high half is now fetched via fstate's own F_REQ_HI (2'd2 --
+     * fstate_t's 3rd value: F_IDLE=0, F_REQ_LO=1, F_REQ_HI=2, F_VALID=3),
+     * NOT state's old S_FETCH_HI (3'd4) -- state itself no longer visits
+     * S_FETCH_HI at all on this fast path (see design/core.sv's own
+     * fstate declaration comment). Checking fstate_now (core.sv's own
+     * combinational "effective this-cycle phase" wire, not the fstate
+     * register) would also work but isn't needed here: unlike
+     * wb_master_drive/state's own S_FETCH arm, this check just needs to
+     * see F_REQ_HI on ANY cycle of the (possibly multi-cycle) high-half
+     * wait, which the plain registered fstate already does correctly.
      */
     localparam logic [63:0] CROSSING_INSTR_PC = 64'h16;
     int fetch_hi_visit_count = 0;
     always @(posedge clk) begin
-        if (dut.core0.pc == CROSSING_INSTR_PC && dut.core0.state == 3'd4) begin
+        if (dut.core0.pc == CROSSING_INSTR_PC && dut.core0.fstate == 2'd2) begin
             fetch_hi_visit_count <= fetch_hi_visit_count + 1;
         end
     end
