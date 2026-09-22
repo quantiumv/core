@@ -77,6 +77,31 @@ module cache_complex_tb;
         cc_cyc = 0; cc_stb = 0;
     endtask
 
+    /*
+     * cc_issue: drive a core-facing request for exactly ONE cycle, then
+     * drop cyc_i/stb_i -- does NOT wait for ack_o/err_o. Only valid to
+     * use this way because icache.sv/dcache.sv's own CACHE_IDLE arm only
+     * ever consults cyc_i/stb_i for the single cycle it samples hit vs.
+     * miss (confirmed directly against the real RTL): once sampled, a
+     * miss commits to CACHE_REFILL/CACHE_WRITE and runs to completion
+     * autonomously off its own mem_ack_i/mem_err_i, needing nothing
+     * further from cyc_i/stb_i. This lets a SECOND, different-stream
+     * request be issued here on the very next cycle while the first is
+     * still genuinely in flight downstream -- exactly the scenario the
+     * new downstream arbiter (cache_complex.sv's own header) exists to
+     * handle correctly, without this testbench needing two independent
+     * core-facing ports (this module's core-facing side is still a
+     * single shared one, unchanged -- see below for why that limits
+     * what this test can observe directly, and how it works around it).
+     */
+    task automatic cc_issue(logic [31:0] a, logic [63:0] d, logic [7:0] s, logic w, logic ifetch);
+        @(negedge clk);
+        cc_addr = a; cc_dat_i = d; cc_sel = s; cc_we = w; cc_ifetch = ifetch;
+        cc_cyc = 1; cc_stb = 1;
+        @(posedge clk); #1;
+        cc_cyc = 0; cc_stb = 0;
+    endtask
+
     initial begin
         cc_addr = 0; cc_dat_i = 0; cc_sel = 0; cc_we = 0; cc_ifetch = 0; cc_cyc = 0; cc_stb = 0;
         @(posedge clk); #1;
@@ -145,6 +170,81 @@ module cache_complex_tb;
                 check($sformatf("alternation %0d: D$ hit correct", i), cc_dat_o, 64'hCCCC_0000_0000_0000);
             end
         end
+
+        /*
+         * --- Genuine dual-outstanding contention (Pipelining P2
+         *     prerequisite -- see cache_complex.sv's own header for the
+         *     full design): an I$ cold-miss refill is issued and, BEFORE
+         *     it can possibly complete (LINE_WORDS=4 beats, each needing
+         *     a real round trip through wb4_sram), a D$ cold-miss
+         *     refill to a DIFFERENT line is issued on top of it,
+         *     exploiting cc_issue's own "sample once, move on" property
+         *     -- exactly what core.sv's own future fstate/execute
+         *     overlap will do. This module's core-facing ack_o/err_o/
+         *     dat_o is still a single shared, active_ifetch_q-muxed
+         *     output (core.sv still only issues one core-facing request
+         *     at a time today), so this test can't observe BOTH
+         *     streams' own completion at the top level simultaneously
+         *     -- instead, it waits for the D$ request's own (now-active)
+         *     ack, confirms it, then RE-ISSUES the original I$ address:
+         *     if the new downstream arbiter correctly let icache0's own
+         *     interrupted refill run to completion in the background,
+         *     undisturbed by dcache0's own downstream traffic, this
+         *     second I$ request is now a HIT with the right data.
+         *
+         *     Under the OLD single-latch design this test would have
+         *     failed: icache0's own eventual mem_ack_i would have been
+         *     silently dropped (ic_mem_ack permanently gated to 0 the
+         *     instant active_ifetch_q flipped to dcache0), leaving
+         *     icache0 stuck mid-refill forever with no way to complete.
+         */
+        mem0.memory[32'h40 >> 3] = 64'hDDDD_0000_0000_0000;
+        mem0.memory[32'h48 >> 3] = 64'hDDDD_0000_0000_0001;
+        mem0.memory[32'h50 >> 3] = 64'hDDDD_0000_0000_0002;
+        mem0.memory[32'h58 >> 3] = 64'hDDDD_0000_0000_0003;
+        mem0.memory[32'h60 >> 3] = 64'hEEEE_0000_0000_0000;
+        mem0.memory[32'h68 >> 3] = 64'hEEEE_0000_0000_0001;
+        mem0.memory[32'h70 >> 3] = 64'hEEEE_0000_0000_0002;
+        mem0.memory[32'h78 >> 3] = 64'hEEEE_0000_0000_0003;
+
+        // Sample icache0 into CACHE_REFILL for line 0x40, then move on
+        // immediately -- icache0 is now autonomous, mid-refill.
+        cc_issue(32'h40, 64'h0, 8'h00, 1'b0, 1'b1);
+
+        // Before icache0's own refill can possibly finish, issue a D$
+        // cold-miss to a DIFFERENT line: two independent, un-abortable
+        // downstream transactions genuinely in flight at once.
+        cc_cycle(32'h60, 64'h0, 8'h00, 1'b0, 1'b0);
+        check("dual-outstanding: D$ read completes correctly despite icache0's own concurrent in-flight refill",
+              cc_dat_o, 64'hEEEE_0000_0000_0000);
+        check("dual-outstanding: D$ read err_o clear", {63'b0, cc_err}, 64'd0);
+
+        // Re-issue the ORIGINAL I$ address -- if the arbiter correctly
+        // let icache0's own interrupted refill complete in the
+        // background, this is now a cache hit with the correct data.
+        cc_cycle(32'h40, 64'h0, 8'h00, 1'b0, 1'b1);
+        check("dual-outstanding: interrupted I$ refill completed correctly (now a hit, right data)",
+              cc_dat_o, 64'hDDDD_0000_0000_0000);
+        check("dual-outstanding: interrupted I$ refill err_o clear", {63'b0, cc_err}, 64'd0);
+
+        // Confirm ALL FOUR words of the interrupted I$ line landed
+        // correctly (not just the first beat, in case the arbiter's own
+        // contention corrupted a LATER beat specifically).
+        cc_cycle(32'h48, 64'h0, 8'h00, 1'b0, 1'b1);
+        check("dual-outstanding: interrupted I$ refill, word 1 correct", cc_dat_o, 64'hDDDD_0000_0000_0001);
+        cc_cycle(32'h50, 64'h0, 8'h00, 1'b0, 1'b1);
+        check("dual-outstanding: interrupted I$ refill, word 2 correct", cc_dat_o, 64'hDDDD_0000_0000_0002);
+        cc_cycle(32'h58, 64'h0, 8'h00, 1'b0, 1'b1);
+        check("dual-outstanding: interrupted I$ refill, word 3 correct", cc_dat_o, 64'hDDDD_0000_0000_0003);
+
+        // And confirm the D$ line that interrupted it is ALSO fully
+        // intact, all four words.
+        cc_cycle(32'h68, 64'h0, 8'h00, 1'b0, 1'b0);
+        check("dual-outstanding: interrupting D$ refill, word 1 correct", cc_dat_o, 64'hEEEE_0000_0000_0001);
+        cc_cycle(32'h70, 64'h0, 8'h00, 1'b0, 1'b0);
+        check("dual-outstanding: interrupting D$ refill, word 2 correct", cc_dat_o, 64'hEEEE_0000_0000_0002);
+        cc_cycle(32'h78, 64'h0, 8'h00, 1'b0, 1'b0);
+        check("dual-outstanding: interrupting D$ refill, word 3 correct", cc_dat_o, 64'hEEEE_0000_0000_0003);
 
         $display("");
         $display("cache_complex_tb: %0d passed, %0d failed", pass_count, fail_count);
