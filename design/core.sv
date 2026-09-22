@@ -680,42 +680,58 @@ module core (
      * scratch state (fetch/PTW/mem/AMO capture regs -- NOT "state"
      * itself, NOT reservation_valid_q/reservation_addr_q's genuinely
      * cross-instruction LR/SC state, NOT pc/current_priv) is widened
-     * into a SLOT_COUNT-entry array, indexed by cur_slot. This milestone
-     * hardwires cur_slot to 0 -- the FSM still only ever uses one slot,
-     * so every X_q[cur_slot] read/write below is provably identical to
-     * the old bare X_q. P2 (real fetch/execute overlap) is what will
-     * make cur_slot actually toggle between 0 and 1; this pass is pure
-     * mechanical plumbing so P2 only has to change slot SELECTION, not
-     * rediscover every read/write site across this file.
+     * into a SLOT_COUNT-entry array, indexed by cur_slot. P1 itself
+     * hardwired cur_slot to 0 -- the FSM still only ever used one slot,
+     * so every X_q[cur_slot] read/write below was provably identical to
+     * the old bare X_q. Pipelining P2 step 3a makes cur_slot a REAL
+     * register (below) -- this pass was pure mechanical plumbing so P2
+     * only had to change slot SELECTION, not rediscover every read/write
+     * site across this file.
      *
-     * cur_slot is a `wire` (not a real flip-flop) on purpose: it has no
-     * state of its own yet, so a continuous, always-0 assign is the
-     * honest representation for THIS milestone -- P2 replaces this one
-     * assign with whatever real slot-toggling logic it needs, without
-     * touching any of the X_q[cur_slot] sites established here.
+     * cur_slot toggles exactly when a fetch episode hands off to S_EXEC
+     * -- i.e. every "state <= S_EXEC" transition reachable from
+     * S_FETCH/S_FETCH_HI/S_PTW (companion `cur_slot <= ~cur_slot`
+     * assignments added alongside each one, in the state-transition
+     * always_ff below), NOT at retirement. This is deliberate, not
+     * incidental: with fstate step 2 already writing fetch-side data
+     * via fetch_slot mid-episode, cur_slot/fetch_slot must stay a fixed,
+     * consistent pair for that episode's ENTIRE duration -- toggling at
+     * retirement instead would flip fetch_slot's own meaning out from
+     * under a still-in-flight fetch (a real hazard once step 3b enables
+     * genuine lookahead spanning multiple cycles of the PRIOR
+     * instruction's own S_EXEC/S_MEM/S_AMO_WRITE dwell; harmless today,
+     * step 3a itself, only because fstate stays gated to state==S_FETCH,
+     * so no fetch is ever still-in-flight at a retirement edge yet --
+     * see fstate_eligible's own declaration comment).
+     *
+     * SLOT_COUNT=2 hard-caps lookahead depth at exactly one instruction:
+     * fstate (step 2's own machine) can only begin a fresh episode from
+     * F_IDLE, so while it holds a not-yet-consumed episode for cur_slot's
+     * OWN instruction (or, once step 3b lands, for the NEXT one), it
+     * structurally cannot also start a third. A deeper pipeline would
+     * need a 3rd+ slot and this whole cur_slot/fetch_slot scheme
+     * generalized -- not attempted here.
      */
     localparam int SLOT_COUNT = 2;
-    wire cur_slot = 1'b0;
+    logic cur_slot;
     /*
-     * Pipelining Milestone P2, step 1 of 5 (see verification/riscv-formal's
-     * own sibling staged-milestone precedent for why this lands as several
-     * small, separately-verified steps rather than one large change):
-     * fetch_slot marks every genuinely fetch-side write site among the 20
-     * P1 slot arrays (the ones a future independent fetch stage will need
-     * to write BEFORE cur_slot's own instruction has retired) so they're
-     * distinguishable from execute-side sites, which stay cur_slot-only.
-     * Deliberately an ALIAS of cur_slot here, not yet the inverse -- this
-     * step's own bar is "zero behavior change," proven by fetch_slot and
-     * cur_slot being textually different names for the SAME wire. Step 2
-     * introduces a real fstate machine but keeps it gated to only ever
-     * fetch cur_slot's own instruction (no lookahead yet), so fetch_slot
-     * stays this same alias through step 2 too. Step 3 (once cur_slot is
-     * a real, toggling register and fstate is allowed to run ahead of it)
-     * flips this one line to `wire fetch_slot = ~cur_slot;` -- every site
-     * below already using the right name needs no further edit at that
-     * point.
+     * Pipelining Milestone P2 step 3a: fetch_slot is now a REAL
+     * complement of cur_slot, not an alias (steps 1-2 kept it an alias
+     * of cur_slot on purpose -- "zero behavior change," provable since
+     * fetch_slot and cur_slot were textually different names for the
+     * SAME wire the whole time). Every site steps 1-2 already converted
+     * to write via fetch_slot needed no further edit here -- that was
+     * the entire point of doing the naming split three steps early. The
+     * sites that DID need a step-3a edit are the handful that read
+     * fetch_lo_resolved_q/fetch_hi_resolved_q/fetch_lo_paddr_q/
+     * fetch_hi_paddr_q as a MID-EPISODE guard (before cur_slot's own
+     * toggle promotes that episode's data to "the current instruction") --
+     * those were still reading [cur_slot], silently correct only because
+     * fetch_slot==cur_slot made the distinction moot until now. See each
+     * such site's own comment, near "Pipelining P2 step 3a" wording, for
+     * why it changed.
      */
-    wire fetch_slot = cur_slot;
+    wire fetch_slot = ~cur_slot;
     /*
      * Pipelining Milestone P2, step 2 of 5: fstate is a new, independent
      * small state machine that owns the UNTRANSLATED fetch's own bus
@@ -803,7 +819,40 @@ module core (
     // progression always_ff) needs it as the pre-translation VA, well
     // before Execute's own textual position.
     logic [(`WORD_SIZE - 1):0] alu_result;
-    wire ptw_is_mem = (ptw_reason_q[cur_slot] == PTW_REASON_MEM);
+    /*
+     * Pipelining P2 step 3a real bug fix (pre-existing gap, newly exposed
+     * -- not introduced by this milestone's own changes): ptw_reason_q is
+     * ONLY ever freshly written when a REAL walk actually starts (its own
+     * write site is explicitly gated `&& !tlb_hit_active`) -- a TLB HIT
+     * resolves without ever touching it, so ptw_reason_q[cur_slot] during
+     * a hit is whatever a PAST real walk last left there, for whichever
+     * slot cur_slot happens to name right now. This permission-check
+     * pipeline (ptw_is_mem and everything downstream of it: ptw_check_priv,
+     * ptw_u_violation, ptw_perm_violation, ptw_ad_fault, hence
+     * ptw_pte_fault) runs unconditionally every cycle, for BOTH a real
+     * walk (state==S_PTW) AND a TLB-hit resolve (state==S_FETCH/
+     * S_FETCH_HI/S_MEM, tlb_hit_active) -- so a hit's own ptw_is_mem was
+     * always liable to read stale, unrelated data from whatever walk
+     * previously happened to touch this same slot. With cur_slot
+     * hardwired to 0 (pre-step-3a) this was merely stale-but-defined,
+     * silently masked; with cur_slot genuinely toggling, a slot that has
+     * NEVER yet hosted a real walk reads fully undefined (X in
+     * simulation), caught by core_sv39_mem_tb.sv's own test K hanging
+     * (X propagating through tlb_hit_active itself, which gates the very
+     * write meant to resolve it, self-sustaining forever).
+     *
+     * Fix: derive ptw_is_mem from live `state` instead, EXCEPT during an
+     * actual walk (state==S_PTW), where ptw_reason_q[cur_slot] genuinely
+     * is fresh (set at walk-start, valid for the walk's entire,
+     * uninterrupted duration -- cur_slot never toggles mid-walk either)
+     * -- mirrors ptw_level_active/ptw_vaddr_active's own established
+     * tlb_hit_active-aware muxing pattern exactly, just keyed on `state`
+     * rather than `tlb_hit_active` directly, since S_FETCH_HI is also a
+     * real (non-hit, non-walk) case this needs to get right: state==
+     * S_MEM means mem stream, anything else (S_FETCH/S_FETCH_HI, hit or
+     * not) means fetch stream, state==S_PTW trusts the walk's own record.
+     */
+    wire ptw_is_mem = (state == S_PTW) ? (ptw_reason_q[cur_slot] == PTW_REASON_MEM) : (state == S_MEM);
     logic mem_op_needs_write;    // is_store||is_sc||is_amo_rmw -- excludes is_lr (read-only);
                                   // used for the walker's own R/W permission check AND the
                                   // page-fault (13 vs 15) cause split.
@@ -896,8 +945,11 @@ module core (
     // (impossible by construction, since tlb_hit is otherwise unused)
     // must never be mistaken for "resolve now".
     wire tlb_hit_active = tlb_hit && (
-        (state == S_FETCH    && fetch_translate_active && !fetch_lo_resolved_q[cur_slot]) ||
-        (state == S_FETCH_HI && fetch_translate_active && !fetch_hi_resolved_q[cur_slot]) ||
+        // Pipelining P2 step 3a: [fetch_slot], not [cur_slot] -- these are
+        // MID-EPISODE guards on the fetch-side resolved flags, read before
+        // cur_slot's own toggle promotes this episode's data to "current".
+        (state == S_FETCH    && fetch_translate_active && !fetch_lo_resolved_q[fetch_slot]) ||
+        (state == S_FETCH_HI && fetch_translate_active && !fetch_hi_resolved_q[fetch_slot]) ||
         (state == S_MEM       && mem_translate_active   && !mem_resolved_q[cur_slot]));
     /*
      * dm_access_active: gates every DM Access-Register mux (regfile0's
@@ -1213,7 +1265,8 @@ module core (
 
     always_ff @(posedge clk) begin
         if (rst) begin
-            state <= S_FETCH;
+            state    <= S_FETCH;
+            cur_slot <= 1'b0;
         end else begin
             case (state)
                 /*
@@ -1266,7 +1319,9 @@ module core (
                                   * then-back-here sequencing already relied
                                   * on, now shared by both resolution paths.
                                   */
-                                 if (!fetch_lo_resolved_q[cur_slot]) begin
+                                 // Pipelining P2 step 3a: [fetch_slot] -- see
+                                 // tlb_hit_active's own matching comment.
+                                 if (!fetch_lo_resolved_q[fetch_slot]) begin
                                      if (!tlb_hit) state <= S_PTW;
                                      /*
                                       * TLB-hit PTE-content fault: same real gap
@@ -1280,7 +1335,14 @@ module core (
                                       * false and S_FETCH could never otherwise
                                       * leave for this instruction.
                                       */
-                                     else if (ptw_pte_fault) state <= S_EXEC;
+                                     else if (ptw_pte_fault) begin
+                                         state <= S_EXEC;
+                                         // Pipelining P2 step 3a: this fetch
+                                         // episode is done (denied). See
+                                         // cur_slot's own declaration comment
+                                         // for why every such site toggles.
+                                         cur_slot <= ~cur_slot;
+                                     end
                                  end
                                  /*
                                   * pmp_fetchlo_fault (PMP+PLIC plan, Milestone
@@ -1314,8 +1376,21 @@ module core (
                                   * fetch_hi_paddr_q[cur_slot] has genuinely
                                   * resolved for this instruction.
                                   */
-                                 else if (pmp_fetchlo_fault) state <= S_EXEC;
-                                 else if (wb_done) state <= state_t'(fetch_hi_taken ? S_FETCH_HI : S_EXEC);
+                                 else if (pmp_fetchlo_fault) begin
+                                     state <= S_EXEC;
+                                     // Pipelining P2 step 3a: see cur_slot's
+                                     // own declaration comment.
+                                     cur_slot <= ~cur_slot;
+                                 end else if (wb_done) begin
+                                     state <= state_t'(fetch_hi_taken ? S_FETCH_HI : S_EXEC);
+                                     // Pipelining P2 step 3a: only toggle when
+                                     // this fetch is actually DONE this cycle
+                                     // (the non-crossing case) -- a crossing
+                                     // instruction's episode continues into
+                                     // S_FETCH_HI below, which toggles on ITS
+                                     // OWN completion instead.
+                                     if (!fetch_hi_taken) cur_slot <= ~cur_slot;
+                                 end
                              end else begin
                                  /*
                                   * Pipelining P2 step 2: the untranslated fast
@@ -1330,7 +1405,12 @@ module core (
                                   * cycle (a real bug an earlier version of this
                                   * step had, found by adversarial review).
                                   */
-                                 if (fstate_now == F_VALID) state <= S_EXEC;
+                                 if (fstate_now == F_VALID) begin
+                                     state <= S_EXEC;
+                                     // Pipelining P2 step 3a: see cur_slot's
+                                     // own declaration comment.
+                                     cur_slot <= ~cur_slot;
+                                 end
                              end
                 /*
                  * Sv39 (Milestone 3): same redirect, same reason, for the
@@ -1344,7 +1424,9 @@ module core (
                 // F_REQ_HI arm handles it instead (see the untranslated
                 // branch of S_FETCH above) -- so fetch_translate_active is
                 // always true by the time this arm is even reached.
-                S_FETCH_HI:  if (fetch_translate_active && !fetch_hi_resolved_q[cur_slot]) begin
+                // Pipelining P2 step 3a: [fetch_slot] -- see
+                // tlb_hit_active's own matching comment.
+                S_FETCH_HI:  if (fetch_translate_active && !fetch_hi_resolved_q[fetch_slot]) begin
                                  if (!tlb_hit) state <= S_PTW;
                                  /*
                                   * TLB-hit PTE-content fault: same real gap
@@ -1357,7 +1439,12 @@ module core (
                                   * could never otherwise leave for this
                                   * instruction.
                                   */
-                                 else if (ptw_pte_fault) state <= S_EXEC;
+                                 else if (ptw_pte_fault) begin
+                                     state <= S_EXEC;
+                                     // Pipelining P2 step 3a: see cur_slot's
+                                     // own declaration comment.
+                                     cur_slot <= ~cur_slot;
+                                 end
                              end
                              /*
                               * Sv39 real bug fix (post-M6 independent
@@ -1377,8 +1464,15 @@ module core (
                               * this comment used to describe as merely
                               * "dead code" is genuinely unreachable now.
                               */
-                             else if (pmp_fetchhi_fault) state <= S_EXEC;
-                             else if (wb_done) state <= S_EXEC;
+                             else if (pmp_fetchhi_fault) begin
+                                 state <= S_EXEC;
+                                 // Pipelining P2 step 3a: see cur_slot's own
+                                 // declaration comment.
+                                 cur_slot <= ~cur_slot;
+                             end else if (wb_done) begin
+                                 state <= S_EXEC;
+                                 cur_slot <= ~cur_slot;
+                             end
                 /*
                  * Sv39 (Milestone 3): the walker itself. ptw_pmp_fault is
                  * known combinationally off ptw_pte_addr before this
@@ -1396,11 +1490,30 @@ module core (
                  * else (a clean non-leaf pointer PTE) descends one level
                  * by looping on this same state.
                  */
-                S_PTW:       if (ptw_pmp_fault) state <= S_EXEC;
-                             else if (wb_done) begin
-                                 if (wb_err_i) state <= S_EXEC;
-                                 else if (ptw_pte_fault) state <= S_EXEC;
-                                 else if (ptw_pte_leaf) state <= state_t'((ptw_reason_q[cur_slot] == PTW_REASON_HI) ? S_FETCH_HI
+                /*
+                 * Pipelining P2 step 3a: the three fault arms below (PMP-
+                 * denied PTE read, bus-errored PTE read, PTE-content
+                 * fault) all bail to S_EXEC -- but this walk can be on
+                 * behalf of EITHER a fetch (PTW_REASON_LO/HI) or a plain
+                 * load/store's own translation (PTW_REASON_MEM), sharing
+                 * this one walker. cur_slot must only toggle for the
+                 * former -- a MEM-reason fault means the instruction
+                 * that's ALREADY sitting in cur_slot (fetched earlier,
+                 * now failing its own data access) is retiring with a
+                 * trap, not that a NEW instruction's fetch just
+                 * completed. See cur_slot's own declaration comment.
+                 */
+                S_PTW:       if (ptw_pmp_fault) begin
+                                 state <= S_EXEC;
+                                 if (ptw_reason_q[cur_slot] != PTW_REASON_MEM) cur_slot <= ~cur_slot;
+                             end else if (wb_done) begin
+                                 if (wb_err_i) begin
+                                     state <= S_EXEC;
+                                     if (ptw_reason_q[cur_slot] != PTW_REASON_MEM) cur_slot <= ~cur_slot;
+                                 end else if (ptw_pte_fault) begin
+                                     state <= S_EXEC;
+                                     if (ptw_reason_q[cur_slot] != PTW_REASON_MEM) cur_slot <= ~cur_slot;
+                                 end else if (ptw_pte_leaf) state <= state_t'((ptw_reason_q[cur_slot] == PTW_REASON_HI) ? S_FETCH_HI
                                                                         : (ptw_reason_q[cur_slot] == PTW_REASON_MEM) ? S_MEM
                                                                         : S_FETCH);
                                  else state <= S_PTW;
@@ -1583,7 +1696,9 @@ module core (
          * fstate-keyed block below instead.
          */
         if (fetch_translate_active) begin
-        if (state == S_FETCH && !fetch_lo_resolved_q[cur_slot]) begin
+        // Pipelining P2 step 3a: [fetch_slot] -- see tlb_hit_active's own
+        // matching comment.
+        if (state == S_FETCH && !fetch_lo_resolved_q[fetch_slot]) begin
             // Sv39 (Milestone 3): redirecting to S_PTW this cycle --
             // fetch_paddr (hence pmp_fetchlo_fault, computed off it) is
             // not yet resolved, so its transient value must not be
@@ -1663,7 +1778,9 @@ module core (
          * being issued) -- so this plain overwrite is still safe, just for
          * a different reason than the stale comment gave.
          */
-        if (state == S_FETCH_HI && fetch_translate_active && fetch_hi_resolved_q[cur_slot] && pmp_fetchhi_fault) begin
+        // Pipelining P2 step 3a: [fetch_slot] -- see tlb_hit_active's own
+        // matching comment.
+        if (state == S_FETCH_HI && fetch_translate_active && fetch_hi_resolved_q[fetch_slot] && pmp_fetchhi_fault) begin
             // The real, resolved HI-half PMP check, denied -- checked
             // ahead of wb_done below, mirroring pmp_fetchlo_fault's own
             // S_FETCH priority ordering. No bus request was ever issued
@@ -1882,7 +1999,9 @@ module core (
     wire mstatus_tvm_w;
 
     /* verilator lint_off UNUSEDSIGNAL */
-    wire [(`WORD_SIZE - 1):0] fetch_paddr = fetch_translate_active ? fetch_lo_paddr_q[cur_slot] : pc;
+    // Pipelining P2 step 3a: [fetch_slot] -- see tlb_hit_active's own
+    // matching comment.
+    wire [(`WORD_SIZE - 1):0] fetch_paddr = fetch_translate_active ? fetch_lo_paddr_q[fetch_slot] : pc;
     /* verilator lint_on UNUSEDSIGNAL */
     wire [31:0] fetch_addr = {fetch_paddr[31:3], 3'b0};
 
@@ -1902,7 +2021,9 @@ module core (
      * resolved fetch_hi_paddr_q[cur_slot], not derived from fetch_paddr at all.
      */
     /* verilator lint_off UNUSEDSIGNAL */
-    wire [(`WORD_SIZE - 1):0] fetch_paddr_hi = fetch_translate_active ? fetch_hi_paddr_q[cur_slot] : (fetch_paddr + `WORD_SIZE'(8));
+    // Pipelining P2 step 3a: [fetch_slot] -- see tlb_hit_active's own
+    // matching comment.
+    wire [(`WORD_SIZE - 1):0] fetch_paddr_hi = fetch_translate_active ? fetch_hi_paddr_q[fetch_slot] : (fetch_paddr + `WORD_SIZE'(8));
     /* verilator lint_on UNUSEDSIGNAL */
     wire [31:0] fetch_addr_hi = {fetch_paddr_hi[31:3], 3'b0};
 
@@ -2340,13 +2461,38 @@ module core (
      */
     always_ff @(posedge clk) begin
         if (rst) begin
-            fetch_lo_resolved_q[fetch_slot] <= 1'b0;
-            fetch_hi_resolved_q[fetch_slot] <= 1'b0;
-            fetch_lo_fault_q[fetch_slot]    <= 1'b0;
-            fetch_hi_fault_q[fetch_slot]    <= 1'b0;
-            mem_resolved_q[cur_slot]      <= 1'b0;
-            mem_fault_q[cur_slot]         <= 1'b0;
-            mem_access_fault_q[cur_slot]  <= 1'b0;
+            /*
+             * Pipelining P2 step 3a real bug fix: reset EVERY slot
+             * explicitly (a for loop over SLOT_COUNT), not just
+             * [fetch_slot]/[cur_slot]'s own single value at this instant.
+             * Two compounding problems with the original single-index
+             * reset: (1) it only ever cleared ONE of the two array
+             * elements, leaving the other permanently uninitialized
+             * (X in simulation) the first time anything actually reads
+             * it -- harmless through steps 1-2, where cur_slot (hence
+             * fetch_slot) was hardwired to 0 and slot 1 was structurally
+             * dead code, but a real, confirmed hang the moment cur_slot
+             * starts genuinely toggling (caught by core_sv39_mem_tb.sv's
+             * own test K via direct simulation, not by static review --
+             * fetch_lo_resolved_q[1] observed going X mid-run, then S_FETCH
+             * never leaving for that instruction again). (2) even the ONE
+             * slot it did clear was resolved using cur_slot's OWN
+             * PRE-reset value (this always_ff's fetch_slot/cur_slot reads
+             * are continuous, not registered, so on the very first reset
+             * pulse -- before cur_slot's OWN separate always_ff has ever
+             * driven it -- fetch_slot/cur_slot could read X too, silently
+             * dropping the write to an undefined array index instead of
+             * resetting anything at all).
+             */
+            for (int rst_slot = 0; rst_slot < SLOT_COUNT; rst_slot++) begin
+                fetch_lo_resolved_q[rst_slot] <= 1'b0;
+                fetch_hi_resolved_q[rst_slot] <= 1'b0;
+                fetch_lo_fault_q[rst_slot]    <= 1'b0;
+                fetch_hi_fault_q[rst_slot]    <= 1'b0;
+                mem_resolved_q[rst_slot]      <= 1'b0;
+                mem_fault_q[rst_slot]         <= 1'b0;
+                mem_access_fault_q[rst_slot]  <= 1'b0;
+            end
             tlb0_valid_q        <= 1'b0;
             tlb1_valid_q        <= 1'b0;
             tlb2_valid_q        <= 1'b0;
@@ -2362,12 +2508,23 @@ module core (
             // the mem stream joins fetch-lo/fetch-hi here, keyed off
             // S_MEM instead -- no separate "HI" episode for mem (an
             // aligned access can never cross a 4KB page boundary).
-            if (state == S_FETCH && fetch_translate_active && !fetch_lo_resolved_q[cur_slot] && !tlb_hit_active) begin
+            // Pipelining P2 step 3a: the two guard conditions read
+            // [fetch_slot] (see tlb_hit_active's own matching comment) --
+            // but ptw_reason_q/ptw_level_q/ptw_base_q/ptw_vaddr_q below
+            // stay [cur_slot], UNCHANGED from step 1: they're pure
+            // per-walk scratch, not fetch-side data, and Sv39 fetches
+            // stay fully non-overlapping with any other instruction's own
+            // execution for this entire milestone (the Sv39 descope), so
+            // whichever instruction cur_slot currently names has ALWAYS
+            // already retired by the time a translated fetch's own walk
+            // runs -- safe to borrow as scratch regardless of which slot
+            // name is used, and cur_slot is what step 1 already picked.
+            if (state == S_FETCH && fetch_translate_active && !fetch_lo_resolved_q[fetch_slot] && !tlb_hit_active) begin
                 ptw_reason_q[cur_slot] <= PTW_REASON_LO;
                 ptw_level_q[cur_slot]  <= 2'd2;
                 ptw_base_q[cur_slot]   <= {8'b0, satp_ppn_w, 12'b0};
                 ptw_vaddr_q[cur_slot]  <= pc;
-            end else if (state == S_FETCH_HI && fetch_translate_active && !fetch_hi_resolved_q[cur_slot] && !tlb_hit_active) begin
+            end else if (state == S_FETCH_HI && fetch_translate_active && !fetch_hi_resolved_q[fetch_slot] && !tlb_hit_active) begin
                 ptw_reason_q[cur_slot] <= PTW_REASON_HI;
                 ptw_level_q[cur_slot]  <= 2'd2;
                 ptw_base_q[cur_slot]   <= {8'b0, satp_ppn_w, 12'b0};
@@ -4475,10 +4632,30 @@ module core (
      * S_FETCH_HI was the one that actually faulted. */
     assign trap_val = fetch_fault_q[cur_slot] ? pc
         // Sv39 M3: the faulting VIRTUAL address, per spec's mtval
-        // convention -- ptw_vaddr_q[cur_slot] (captured at walk-start from the
+        // convention -- ptw_vaddr_q (captured at walk-start from the
         // pre-translation VA), not pc, since for a crossing fetch whose
         // SECOND half faults, pc alone can't identify which dword did.
-        : (fetch_lo_fault_q[cur_slot] || fetch_hi_fault_q[cur_slot]) ? ptw_vaddr_q[cur_slot]
+        //
+        // Pipelining P2 step 3a real bug fix: [fetch_slot], NOT [cur_slot],
+        // unlike every OTHER ptw_vaddr_q/ptw_reason_q/ptw_level_q/
+        // ptw_base_q site in this file (all correctly cur_slot -- pure
+        // per-walk scratch, written and consulted entirely WITHIN one
+        // uninterrupted S_PTW episode, pre-toggle). This site is the
+        // exception: fetch_fault_q/fetch_lo_fault_q/fetch_hi_fault_q are
+        // consulted here POST-toggle (trap_val is evaluated combinationally
+        // during S_EXEC, after cur_slot's own fetch-completion toggle
+        // already fired) -- correct for those three since step 1 already
+        // wrote them via fetch_slot (pre-toggle cur_slot's own value,
+        // which becomes readable as fetch_slot again, not cur_slot, once
+        // the toggle flips). ptw_vaddr_q, however, was written via bare
+        // cur_slot (walker-scratch convention, unchanged from step 1) --
+        // so reading it back via cur_slot here reads the WRONG (post-
+        // toggle) slot, landing on whatever the slot fstate is now
+        // fetching into happens to hold (X-propagated/uninitialized on
+        // the very first such fault). Confirmed via core_sv39_fetch_tb.sv's
+        // own mtval checks (cases C/F/G/H/I/J/K), all of which failed with
+        // mtval reading all-X before this fix.
+        : (fetch_lo_fault_q[cur_slot] || fetch_hi_fault_q[cur_slot]) ? ptw_vaddr_q[fetch_slot]
         : is_illegal_instr ? (is_compressed ? {48'b0, first_hw}
                                              : {{(`WORD_SIZE - `INSTR_SIZE){1'b0}}, instruction})
         : (mem_load_misaligned || mem_store_misaligned) ? mem_paddr
@@ -4685,7 +4862,9 @@ module core (
                          * See the state-transition always_ff's own S_FETCH
                          * arm, which relies on exactly this.
                          */
-                        if (!wb_done && !pmp_fetchlo_fault && fetch_lo_resolved_q[cur_slot]) begin
+                        // Pipelining P2 step 3a: [fetch_slot] -- see
+                        // tlb_hit_active's own matching comment.
+                        if (!wb_done && !pmp_fetchlo_fault && fetch_lo_resolved_q[fetch_slot]) begin
                             wb_cyc_o  = 1'b1;
                             wb_stb_o  = 1'b1;
                             wb_addr_o = fetch_from_trap_vector ? {trap_vector[31:3], 3'b0} : fetch_addr;
@@ -4766,7 +4945,9 @@ module core (
                 // has genuinely resolved and PMP denies it, the real bus
                 // request must never be issued at all, mirroring S_MEM's
                 // own !pmp_load_fault && !pmp_store_fault suppression.
-                if (!wb_done && fetch_hi_resolved_q[cur_slot] && !pmp_fetchhi_fault) begin
+                // Pipelining P2 step 3a: [fetch_slot] -- see
+                // tlb_hit_active's own matching comment.
+                if (!wb_done && fetch_hi_resolved_q[fetch_slot] && !pmp_fetchhi_fault) begin
                     wb_cyc_o  = 1'b1;
                     wb_stb_o  = 1'b1;
                     wb_addr_o = fetch_addr_hi;
