@@ -4,7 +4,8 @@
 // core.sv itself carries native RVFI ports (gated by `ifdef RISCV_FORMAL,
 // see its own comment near those ports) -- this wrapper's only job is to
 // rename clk/rst to clock/reset, splice `RVFI_CONN into the instantiation,
-// and drive the Wishbone slave side (wb_dat_i/wb_ack_i/wb_err_i) as free/
+// and drive the Wishbone slave side of BOTH of core.sv's master ports
+// (wb_fetch_* and wb_mem_*, each with its own dat_i/ack_i/err_i) as free/
 // unconstrained formal inputs, matching every other riscv-formal core
 // integration's convention (see cores/nerv/wrapper.sv upstream): the
 // "insn" check family verifies architectural correctness of whatever the
@@ -60,17 +61,33 @@ module rvfi_wrapper (
     // loop at all, and i_debug_halt_req below is modeled fully free).
     output logic rvfi_any_debug_entry
 );
-    (* keep *) wire [31:0] wb_addr;
-    (* keep *) wire [63:0] wb_dat_m2s;
-    (* keep *) `rvformal_rand_reg [63:0] wb_dat_s2m;
-    (* keep *) wire [7:0]  wb_sel;
-    (* keep *) wire        wb_we;
-    (* keep *) wire        wb_cyc;
-    (* keep *) wire        wb_stb;
-    (* keep *) `rvformal_rand_reg wb_ack;
-    (* keep *) `rvformal_rand_reg wb_err;
+    // Two INDEPENDENT free slave models, one per core.sv master port --
+    // duplicated, not shared: core.sv's fetch and mem ports are physically
+    // separate (see its own header comment), so a real system's two
+    // responders can each ack/err/return data on any cycle regardless of
+    // what the other is doing. Sharing one rand_reg group between them
+    // would silently forbid the solver from ever exploring the two streams
+    // terminating independently -- exactly the real behavior once
+    // fetch/execute overlap lands (Pipelining P2 step 3b).
+    (* keep *) wire [31:0] wb_fetch_addr;
+    (* keep *) wire        wb_fetch_cyc;
+    (* keep *) wire        wb_fetch_stb;
+    (* keep *) `rvformal_rand_reg [63:0] wb_fetch_dat_s2m;
+    (* keep *) `rvformal_rand_reg wb_fetch_ack;
+    (* keep *) `rvformal_rand_reg wb_fetch_err;
+
+    (* keep *) wire [31:0] wb_mem_addr;
+    (* keep *) wire [63:0] wb_mem_dat_m2s;
+    (* keep *) `rvformal_rand_reg [63:0] wb_mem_dat_s2m;
+    (* keep *) wire [7:0]  wb_mem_sel;
+    (* keep *) wire        wb_mem_we;
+    (* keep *) wire        wb_mem_cyc;
+    (* keep *) wire        wb_mem_stb;
+    (* keep *) `rvformal_rand_reg wb_mem_ack;
+    (* keep *) `rvformal_rand_reg wb_mem_err;
     // Free/unconstrained -- lets the solver assert the timer-interrupt-pending
-    // input on any cycle, same convention as wb_ack/wb_err above and matching
+    // input on any cycle, same convention as the wb_*_ack/wb_*_err groups
+    // above and matching
     // riscv-formal's own cores/nerv/wrapper.sv precedent for a free interrupt-
     // pending input (irq, wired the identical way). Without this, i_mtip
     // floats to core.sv's own ANSI default (1'b0) since core uut's own
@@ -96,15 +113,22 @@ module rvfi_wrapper (
         .clk(clock),
         .rst(reset),
 
-        .wb_addr_o(wb_addr),
-        .wb_dat_o(wb_dat_m2s),
-        .wb_dat_i(wb_dat_s2m),
-        .wb_sel_o(wb_sel),
-        .wb_we_o(wb_we),
-        .wb_cyc_o(wb_cyc),
-        .wb_stb_o(wb_stb),
-        .wb_ack_i(wb_ack),
-        .wb_err_i(wb_err),
+        .wb_fetch_addr_o(wb_fetch_addr),
+        .wb_fetch_cyc_o(wb_fetch_cyc),
+        .wb_fetch_stb_o(wb_fetch_stb),
+        .wb_fetch_dat_i(wb_fetch_dat_s2m),
+        .wb_fetch_ack_i(wb_fetch_ack),
+        .wb_fetch_err_i(wb_fetch_err),
+
+        .wb_mem_addr_o(wb_mem_addr),
+        .wb_mem_dat_o(wb_mem_dat_m2s),
+        .wb_mem_dat_i(wb_mem_dat_s2m),
+        .wb_mem_sel_o(wb_mem_sel),
+        .wb_mem_we_o(wb_mem_we),
+        .wb_mem_cyc_o(wb_mem_cyc),
+        .wb_mem_stb_o(wb_mem_stb),
+        .wb_mem_ack_i(wb_mem_ack),
+        .wb_mem_err_i(wb_mem_err),
         .i_mtip(i_mtip),
         .i_debug_halt_req(i_debug_halt_req),
         .i_debug_resume_req(i_debug_resume_req),

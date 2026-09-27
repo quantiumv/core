@@ -10,14 +10,17 @@
 
 
 /*
- * Module: cache_complex -- I$/D$ pair, one shared memory-facing port
+ * Module: cache_complex -- I$/D$ pair, two independent core-facing
+ *         ports, one shared memory-facing port
  *
  * Thin wrapper: instantiates icache.sv and dcache.sv, routes core.sv's
- * single time-multiplexed Wishbone master port to whichever one applies
- * (ifetch_i high -> icache0, low -> dcache0 -- see core.sv's own
- * wb_ifetch_o port comment for why this side-band signal exists at all),
- * and ARBITRATES both sub-caches' independent downstream refill/write
- * traffic onto ONE shared memory-facing Wishbone master port.
+ * TWO independent Wishbone master ports (fetch_* and data_*, one per
+ * sub-cache, permanently wired -- see core.sv's own header comment for
+ * why the old single ifetch_i-muxed port isn't safe once real
+ * fetch/execute overlap lands) straight through to icache0/dcache0
+ * respectively, and ARBITRATES both sub-caches' independent downstream
+ * refill/write traffic onto ONE shared memory-facing Wishbone master
+ * port.
  *
  * Pipelining P2 prerequisite (real dual-outstanding arbiter, replacing
  * the old plain-select design): the old version's header stated, as a
@@ -26,7 +29,7 @@
  * dcache0 can never both have outstanding downstream traffic at the same
  * time" -- true as of the fstate machine shipped in P2 steps 1-3a (the
  * top-level state register is still single-issue: S_MEM blocks on
- * wb_done before a new S_FETCH request can start), but P2's own end goal
+ * wb_mem_done before a new S_FETCH request can start), but P2's own end goal
  * (step 3b, not yet implemented) is real fetch/execute overlap: letting
  * instruction N+1's own fetch start while instruction N is still
  * draining a LOAD/STORE in dcache0. Both icache.sv's CACHE_REFILL and
@@ -50,14 +53,13 @@
  * sub-cache's request appeared -- a genuine lost-response/deadlock bug,
  * not a mere latency inefficiency, once that scenario becomes reachable.
  *
- * Landed AHEAD of step 3b itself (core.sv doesn't issue overlapping
- * core-facing requests yet, so the arbiter below is exercised on every
- * real request but never actually contended in today's build) --
- * deliberately, matching this project's own staged-milestone discipline:
- * a strict superset of the old routing for every single-issue scenario
- * the old code already got right (see this file's own regression
- * argument, unchanged for that case), landed and independently verified
- * before the change that will actually put it under real contention.
+ * Landed AHEAD of step 3b itself, deliberately, matching this project's
+ * own staged-milestone discipline. core.sv alone still never overlaps
+ * its own fetch and mem traffic, but the arbiter below IS genuinely
+ * contended in today's soc.sv build: dm0's System Bus Access reaches
+ * dcache0 through data_* (arb0 -> decoder0) while core0's fetch reaches
+ * icache0 directly through fetch_*, so an SBA miss and an I$ refill can
+ * want the shared downstream port on the same cycle.
  *
  * wb4_sram.sv (the sole downstream slave) is a single cyc_i/stb_i/
  * addr_i/dat_i/sel_i/we_i in, ack_o/err_o/dat_o out, NO-BURST,
@@ -90,7 +92,9 @@
  * 1's own SLOT_COUNT=2 scheme): the NEXT dcache0 request can't even be
  * reached without ITS OWN instruction's fetch completing first, which
  * needs an icache0 grant. Re-check this argument if lookahead depth
- * ever grows past one instruction.
+ * ever grows past one instruction. dm0's SBA is a second dcache0
+ * requester outside that argument, but it issues one access per
+ * debugger command, never a continuous stream.
  *
  * No change needed to icache.sv/dcache.sv: both already hold their own
  * mem_cyc_o/mem_stb_o combinationally asserted (Wishbone classic
@@ -101,12 +105,18 @@
  * sub-cache's own state IS the pending-request queue, so no separate
  * queueing structure is needed here.
  *
- * Core-facing routing (active_ifetch_q, below) stays UNCHANGED from the
- * old design -- core.sv still only ever issues one core-facing request
- * at a time today (step 3b's own job, not this file's), so that latch
- * is still exactly correct there; it was the OLD DOWNSTREAM latch that
- * was wrong once dual-outstanding downstream traffic becomes possible,
- * and that is what the new arbiter below replaces.
+ * Core-facing routing: the OLD single active_ifetch_q-muxed port is
+ * GONE -- this is the core-facing half of the Pipelining P2 step 3b
+ * prerequisite (core.sv's own two-master-port split is the other half).
+ * The old latch only ever remembered the MOST RECENT core-facing
+ * request; once core.sv can issue a fetch request and then, before it
+ * completes, a mem request (exactly what step 3b needs), the mux would
+ * flip and the fetch's own eventual completion would become permanently
+ * invisible at the top level. Two permanently-wired slave ports (one
+ * per sub-cache) make that structurally impossible instead of merely
+ * unlikely: icache0's own ack_o/err_o/dat_o always answer the
+ * fetch-facing port, dcache0's own always answer the data-facing port,
+ * with no shared mux or latch between them at all.
  */
 module cache_complex #(
     parameter num_lines  = 64,
@@ -115,36 +125,47 @@ module cache_complex #(
     input logic clk,
     input logic rst,
 
-    // Core-facing port -- this module is a Wishbone SLAVE from core.sv's
-    // side. ifetch_i is not part of the Wishbone protocol itself -- see
-    // core.sv's wb_ifetch_o port comment.
-    input  logic [31:0] addr_i,
-    input  logic [63:0] dat_i,
-    output logic [63:0] dat_o,
-    input  logic [7:0]  sel_i,
-    input  logic        we_i,
-    input  logic        ifetch_i,
-    input  logic        cyc_i,
-    input  logic        stb_i,
-    output logic        ack_o,
-    output logic        err_o,
+    // Core-facing ports -- this module is a Wishbone SLAVE, TWICE over,
+    // from core.sv's side: one independent port per sub-cache, matching
+    // core.sv's own wb_fetch_*/wb_mem_* split one-for-one (see that
+    // module's own header comment). fetch_* is read-only (permanently
+    // wired to icache0, which has no we_i/dat_i/sel_i pins to drive
+    // either); data_* keeps the full read+write shape (permanently
+    // wired to dcache0). Named data_*, not mem_*, to avoid colliding
+    // with this module's own downstream mem_* port name below.
+    input  logic [31:0] fetch_addr_i,
+    input  logic        fetch_cyc_i,
+    input  logic        fetch_stb_i,
+    output logic [63:0] fetch_dat_o,
+    output logic        fetch_ack_o,
+    output logic        fetch_err_o,
+
+    input  logic [31:0] data_addr_i,
+    input  logic [63:0] data_dat_i,
+    output logic [63:0] data_dat_o,
+    input  logic [7:0]  data_sel_i,
+    input  logic        data_we_i,
+    input  logic        data_cyc_i,
+    input  logic        data_stb_i,
+    output logic        data_ack_o,
+    output logic        data_err_o,
 
     /*
      * Zifencei: passed straight through to icache0.flush_i UNCONDITIONALLY
-     * -- load-bearing to get right, not a style choice. ifetch_i is LOW
-     * throughout S_EXEC (FENCE.I's own commit cycle, where core.sv pulses
-     * icache_flush_o -- see that port's own comment), so gating this on
-     * ifetch_i the way cyc_i/stb_i are routed above would silently make
-     * FENCE.I a permanent no-op: the exact class of bug this signal exists
-     * to prevent, not just an edge case. D$ has no equivalent flush path
+     * -- load-bearing to get right, not a style choice. The fetch port is
+     * idle throughout S_EXEC (FENCE.I's own commit cycle, where core.sv
+     * pulses icache_flush_o -- see that port's own comment), so gating
+     * this on fetch_cyc_i/fetch_stb_i would silently make FENCE.I a
+     * permanent no-op: the exact class of bug this signal exists to
+     * prevent, not just an edge case. D$ has no equivalent flush path
      * (or need for one) -- write-through already keeps a store hit's
      * cached copy and SRAM in lockstep.
      */
     input  logic        flush_i,
 
     // Memory-facing port -- this module is a Wishbone MASTER from
-    // wb4_sram.sv's side. Shared by both sub-caches; see this module's
-    // own header for why no arbitration is needed.
+    // wb4_sram.sv's side. Shared by both sub-caches via the downstream
+    // arbiter below; see this module's own header for its policy.
     output logic [31:0] mem_addr_o,
     output logic [63:0] mem_dat_o,
     input  logic [63:0] mem_dat_i,
@@ -175,7 +196,7 @@ module cache_complex #(
 
     icache #(.num_lines(num_lines), .line_words(line_words)) icache0 (
         .clk(clk), .rst(rst),
-        .addr_i(addr_i), .dat_o(ic_dat_o), .cyc_i(cyc_i && ifetch_i), .stb_i(stb_i && ifetch_i),
+        .addr_i(fetch_addr_i), .dat_o(ic_dat_o), .cyc_i(fetch_cyc_i), .stb_i(fetch_stb_i),
         .ack_o(ic_ack), .err_o(ic_err), .flush_i(flush_i),
         .mem_addr_o(ic_mem_addr), .mem_dat_i(ic_mem_dat_i), .mem_sel_o(ic_mem_sel),
         .mem_we_o(ic_mem_we), .mem_cyc_o(ic_mem_cyc), .mem_stb_o(ic_mem_stb),
@@ -197,32 +218,24 @@ module cache_complex #(
 
     dcache #(.num_lines(num_lines), .line_words(line_words)) dcache0 (
         .clk(clk), .rst(rst),
-        .addr_i(addr_i), .dat_i(dat_i), .dat_o(dc_dat_o), .sel_i(sel_i),
-        .we_i(we_i), .cyc_i(cyc_i && !ifetch_i), .stb_i(stb_i && !ifetch_i),
+        .addr_i(data_addr_i), .dat_i(data_dat_i), .dat_o(dc_dat_o), .sel_i(data_sel_i),
+        .we_i(data_we_i), .cyc_i(data_cyc_i), .stb_i(data_stb_i),
         .ack_o(dc_ack), .err_o(dc_err),
         .mem_addr_o(dc_mem_addr), .mem_dat_o(dc_mem_dat_o), .mem_dat_i(dc_mem_dat_i),
         .mem_sel_o(dc_mem_sel), .mem_we_o(dc_mem_we), .mem_cyc_o(dc_mem_cyc), .mem_stb_o(dc_mem_stb),
         .mem_ack_i(dc_mem_ack), .mem_err_i(dc_mem_err)
     );
 
-    /*
-     * Latched at request-issue time -- see this module's own header for
-     * why this can't race the sub-caches' own state transitions, and
-     * design/wb_addr_decoder.sv's identical sel_uart_q for the same
-     * underlying "remember which target an outstanding transaction
-     * belongs to" reasoning.
-     */
-    logic active_ifetch_q;
-    always_ff @(posedge clk) begin
-        if (rst)
-            active_ifetch_q <= 1'b0;
-        else if (cyc_i && stb_i)
-            active_ifetch_q <= ifetch_i;
-    end
+    // Each core-facing port is permanently wired to its own sub-cache --
+    // no mux or latch needed here anymore (see this module's own header
+    // comment for why that's the whole point of this split).
+    assign fetch_ack_o = ic_ack;
+    assign fetch_err_o = ic_err;
+    assign fetch_dat_o = ic_dat_o;
 
-    assign ack_o = active_ifetch_q ? ic_ack   : dc_ack;
-    assign err_o = active_ifetch_q ? ic_err   : dc_err;
-    assign dat_o = active_ifetch_q ? ic_dat_o : dc_dat_o;
+    assign data_ack_o = dc_ack;
+    assign data_err_o = dc_err;
+    assign data_dat_o = dc_dat_o;
 
     /*
      * Downstream arbiter -- see this module's own header for the full
@@ -256,11 +269,9 @@ module cache_complex #(
      * downstream on the immediately preceding cycle -- i.e. whose
      * response the next mem_ack_i/mem_err_i (wb4_sram.sv's own
      * one-cycle-latency response) belongs to. Updates on the exact same
-     * edge a grant is made, mirroring active_ifetch_q's own "latches on
-     * the same edge the routed traffic first appears" timing proof --
-     * re-derived here for the DOWNSTREAM grant decision instead of the
-     * core-facing request, since once dual-outstanding traffic is
-     * possible those two are no longer the same event. Holds its value
+     * edge a grant is made, i.e. the edge the routed traffic first
+     * appears downstream, so it is always settled by the time that
+     * traffic's response arrives. Holds its value
      * on any cycle neither is granted -- harmless: on such a cycle
      * mem_cyc_o/mem_stb_o are already low, so wb4_sram.sv's own
      * registered ack_o/err_o for the following cycle is 0 regardless of
@@ -277,12 +288,8 @@ module cache_complex #(
 
     // Each sub-cache only ever sees a real mem_ack_i/mem_err_i while it
     // was the one actually granted the downstream request that response
-    // answers -- the other one's own downstream port is forced idle-
-    // response (0), same "a gated-off master's response inputs don't
-    // matter" convention the old code used, just re-keyed off
-    // mem_owner_ic_q (the GRANT winner) instead of active_ifetch_q (the
-    // CORE-FACING request winner) -- the two are no longer always the
-    // same signal once dual-outstanding traffic is possible.
+    // answers (mem_owner_ic_q, the GRANT winner) -- the other one's own
+    // downstream port is forced idle-response (0).
     assign ic_mem_ack   = mem_owner_ic_q ? mem_ack_i : 1'b0;
     assign ic_mem_err   = mem_owner_ic_q ? mem_err_i : 1'b0;
     assign ic_mem_dat_i = mem_dat_i;

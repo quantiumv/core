@@ -6,18 +6,34 @@
 /*
  * Module: soc
  *
- * Top-level integration: {core, dm0} (two Wishbone masters, Milestone 8)
- * <-> wb_arbiter2 <-> wb_addr_decoder <-> {cache_complex -> wb4_sram,
- * uart16550, clint0}. Exactly the wiring already proven in
+ * Top-level integration: {core0's mem port, dm0} (two Wishbone masters,
+ * Milestone 8) <-> wb_arbiter2 <-> wb_addr_decoder <-> {cache_complex's
+ * data port -> wb4_sram, uart16550, clint0, plic0}, plus core0's fetch
+ * port straight into cache_complex's fetch port (see below). Exactly
+ * the wiring already proven in
  * testbench/core_wb_tb.sv (for core<->decoder<->{ram,uart}),
  * testbench/core_cache_harness.sv (for core<->cache_complex<->sram), and
  * testbench/decoder_clint_harness.sv (for decoder<->{ram,uart,clint} at
  * the bus level, see that harness's own header for exactly what it does
  * and doesn't cover) -- this file adds no new logic of its own, only the
- * connections between already-independently-verified pieces (arb0's own
- * cache_ifetch gating, right where cache0 is instantiated below, is the
- * one piece of real reasoning THIS file itself contributes, not just a
- * connection between pieces already proven elsewhere).
+ * connections between already-independently-verified pieces.
+ *
+ * core0.wb_fetch_* (Pipelining P2 step 3b prerequisite) wires DIRECTLY
+ * to cache0.fetch_* -- bypassing arb0/decoder0 entirely, not routed
+ * through them the way wb_mem_* is. Code is only ever executed from
+ * RAM, so fetch traffic has no address decode to need. This IS a
+ * deliberate behavior change for a stray fetch to a non-RAM address
+ * (UART/CLINT/PLIC/DRAM windows): it used to reach the peripheral via
+ * decoder0 and typically trapped as an illegal instruction (cause 2)
+ * on whatever register bits came back; it now misses in icache0, the
+ * refill hits wb4_sram's own out-of-range check (addr[31:26] != 0 ->
+ * err_o, no aliasing into RAM), and it traps cleanly as an instruction
+ * access fault (cause 1, mtval = the address) -- the spec's answer for
+ * fetching from non-executable memory. It also retires the old
+ * cache_ifetch gating (wb_ifetch && !arb_grant): with two structurally
+ * independent core-facing ports on cache_complex, there is no shared
+ * request stream left for a System Bus Access to misclassify against
+ * the wrong sub-cache.
  *
  * clint0 (design/clint.sv, Milestone 3, already independently verified)
  * hangs off the decoder's third slave port exactly like uart0 hangs off
@@ -32,8 +48,10 @@
  * uart16550.sv is a real side-effecting MMIO peripheral (THR triggers a
  * genuine $write on every store; LSR is a poll register explicitly
  * structured to grow real serial timing later), and placing the cache
- * downstream of the decoder makes UART traffic structurally uncacheable
- * -- cache_complex's ports simply never see it -- rather than requiring
+ * downstream of the decoder makes UART load/store traffic structurally
+ * uncacheable -- cache_complex's data port simply never sees it (a
+ * stray FETCH to a UART address is the one exception, and it faults
+ * rather than being cached -- see core0.wb_fetch_* above) -- rather than requiring
  * the cache to duplicate the decoder's own addr_i[15] test internally,
  * with the real risk of getting it wrong (e.g. a cached LSR poll
  * silently breaking once real timing lands there). See the cache
@@ -151,16 +169,24 @@ module soc (
     input  logic jtag_trst_n = 1'b0
 );
 
-    logic [31:0] core_wb_addr;
-    logic [63:0] core_wb_dat_m2s, core_wb_dat_s2m;
-    logic [7:0]  core_wb_sel;
-    logic        core_wb_we, core_wb_cyc, core_wb_stb, core_wb_ack, core_wb_err;
+    // core0's fetch-side port -- wired straight to cache0.fetch_* below,
+    // never through arb0/decoder0 (see this file's own header comment).
+    logic [31:0] core_wb_fetch_addr;
+    logic [63:0] core_wb_fetch_dat;
+    logic        core_wb_fetch_cyc, core_wb_fetch_stb, core_wb_fetch_ack, core_wb_fetch_err;
+
+    // core0's mem-side port -- feeds arb0.m0_*, unchanged in shape from
+    // the old single wb_* port, just renamed to distinguish it from the
+    // fetch-side port above.
+    logic [31:0] core_wb_mem_addr;
+    logic [63:0] core_wb_mem_dat_m2s, core_wb_mem_dat_s2m;
+    logic [7:0]  core_wb_mem_sel;
+    logic        core_wb_mem_we, core_wb_mem_cyc, core_wb_mem_stb, core_wb_mem_ack, core_wb_mem_err;
     logic [31:0] wb_addr;
     logic [63:0] wb_dat_m2s, wb_dat_s2m;
     logic [7:0]  wb_sel;
     logic        wb_we, wb_cyc, wb_stb, wb_ack, wb_err;
-    logic        wb_ifetch;
-    logic        wb_lock;
+    logic        wb_mem_lock;
     logic        icache_flush;
     logic        clint_mtip;
     // plic_meip/plic_seip: forward-declared here (not near plic0's own
@@ -171,7 +197,6 @@ module soc (
     // throughout core.sv for the identical Icarus declared-before-used
     // reason.
     logic        plic_meip, plic_seip;
-    logic        arb_grant;
 
     /*
      * Debug Module wiring (Milestone 6) -- dm0's Access Register ports
@@ -195,10 +220,13 @@ module soc (
 
     core core0 (
         .clk(clk), .rst(rst),
-        .wb_addr_o(core_wb_addr), .wb_dat_o(core_wb_dat_m2s), .wb_dat_i(core_wb_dat_s2m),
-        .wb_sel_o(core_wb_sel), .wb_we_o(core_wb_we), .wb_cyc_o(core_wb_cyc), .wb_stb_o(core_wb_stb),
-        .wb_ack_i(core_wb_ack), .wb_err_i(core_wb_err), .wb_ifetch_o(wb_ifetch),
-        .wb_lock_o(wb_lock),
+        .wb_fetch_addr_o(core_wb_fetch_addr), .wb_fetch_cyc_o(core_wb_fetch_cyc),
+        .wb_fetch_stb_o(core_wb_fetch_stb), .wb_fetch_dat_i(core_wb_fetch_dat),
+        .wb_fetch_ack_i(core_wb_fetch_ack), .wb_fetch_err_i(core_wb_fetch_err),
+        .wb_mem_addr_o(core_wb_mem_addr), .wb_mem_dat_o(core_wb_mem_dat_m2s), .wb_mem_dat_i(core_wb_mem_dat_s2m),
+        .wb_mem_sel_o(core_wb_mem_sel), .wb_mem_we_o(core_wb_mem_we), .wb_mem_cyc_o(core_wb_mem_cyc),
+        .wb_mem_stb_o(core_wb_mem_stb), .wb_mem_ack_i(core_wb_mem_ack), .wb_mem_err_i(core_wb_mem_err),
+        .wb_mem_lock_o(wb_mem_lock),
         .icache_flush_o(icache_flush), .i_mtip(clint_mtip),
         .i_meip(plic_meip), .i_seip(plic_seip),
 
@@ -234,16 +262,18 @@ module soc (
      */
     wb_arbiter2 arb0 (
         .clk(clk), .rst(rst),
-        .m0_addr_i(core_wb_addr), .m0_dat_i(core_wb_dat_m2s), .m0_dat_o(core_wb_dat_s2m),
-        .m0_sel_i(core_wb_sel), .m0_we_i(core_wb_we), .m0_cyc_i(core_wb_cyc), .m0_stb_i(core_wb_stb),
-        .m0_ack_o(core_wb_ack), .m0_err_o(core_wb_err), .m0_lock_i(wb_lock),
+        .m0_addr_i(core_wb_mem_addr), .m0_dat_i(core_wb_mem_dat_m2s), .m0_dat_o(core_wb_mem_dat_s2m),
+        .m0_sel_i(core_wb_mem_sel), .m0_we_i(core_wb_mem_we), .m0_cyc_i(core_wb_mem_cyc), .m0_stb_i(core_wb_mem_stb),
+        .m0_ack_o(core_wb_mem_ack), .m0_err_o(core_wb_mem_err), .m0_lock_i(wb_mem_lock),
         .m1_addr_i(sba_addr), .m1_dat_i(sba_dat_m2s), .m1_dat_o(sba_dat_s2m),
         .m1_sel_i(sba_sel), .m1_we_i(sba_we), .m1_cyc_i(sba_cyc), .m1_stb_i(sba_stb),
         .m1_ack_o(sba_ack), .m1_err_o(sba_err), .m1_lock_i(1'b0),
         .addr_o(wb_addr), .dat_o(wb_dat_m2s), .dat_i(wb_dat_s2m),
         .sel_o(wb_sel), .we_o(wb_we), .cyc_o(wb_cyc), .stb_o(wb_stb),
         .ack_i(wb_ack), .err_i(wb_err),
-        .o_grant(arb_grant)
+        /* verilator lint_off PINCONNECTEMPTY */
+        .o_grant()
+        /* verilator lint_on PINCONNECTEMPTY */
     );
 
     logic [31:0] ram_addr, uart_addr, clint_addr, plic_addr;
@@ -353,30 +383,20 @@ module soc (
     logic [7:0]  mem_sel;
     logic        mem_we, mem_cyc, mem_stb, mem_ack, mem_err;
 
-    /*
-     * cache_ifetch (Milestone 8): wb_ifetch is core0's OWN "this bus
-     * request is an instruction fetch" hint -- meaningful only for
-     * core0's own traffic, since dm0's System Bus Access never fetches
-     * instructions. Before arb0 existed, cache0 sat directly behind
-     * core0's own port, so wb_ifetch was always trustworthy as-is; now
-     * that arb0 can forward a SBA request (a real RAM-address read/write
-     * that flows through this same cache0 instance) while core0's own
-     * wb_ifetch output is left driving whatever it was last doing
-     * (unrelated to the request actually in flight), gating it by
-     * arb_grant is required, not optional -- without this, a System Bus
-     * Access to a RAM address could get silently misclassified against
-     * the wrong cache (I$ instead of D$, or vice versa) depending on
-     * what core0 happened to be doing the same cycle. arb_grant==0 means
-     * core0 (m0) currently holds the arbitrated port, the only case
-     * wb_ifetch is ever real.
-     */
-    wire cache_ifetch = wb_ifetch && !arb_grant;
-
+    // cache0.fetch_* wired directly to core0's own fetch-side port -- see
+    // this file's own header comment for why fetch traffic bypasses
+    // arb0/decoder0 entirely. cache0.data_* stays behind decoder0 exactly
+    // like the old single port did, fed by ram_* (core0's mem-side
+    // traffic AND any System Bus Access targeting a RAM address, both
+    // already correctly arbitrated/decoded upstream by arb0/decoder0
+    // before either ever reaches here).
     cache_complex cache0 (
         .clk(clk), .rst(rst),
-        .addr_i(ram_addr), .dat_i(ram_dat_o), .dat_o(ram_dat_i), .sel_i(ram_sel),
-        .we_i(ram_we), .ifetch_i(cache_ifetch), .cyc_i(ram_cyc), .stb_i(ram_stb),
-        .ack_o(ram_ack), .err_o(ram_err), .flush_i(icache_flush),
+        .fetch_addr_i(core_wb_fetch_addr), .fetch_cyc_i(core_wb_fetch_cyc), .fetch_stb_i(core_wb_fetch_stb),
+        .fetch_dat_o(core_wb_fetch_dat), .fetch_ack_o(core_wb_fetch_ack), .fetch_err_o(core_wb_fetch_err),
+        .data_addr_i(ram_addr), .data_dat_i(ram_dat_o), .data_dat_o(ram_dat_i), .data_sel_i(ram_sel),
+        .data_we_i(ram_we), .data_cyc_i(ram_cyc), .data_stb_i(ram_stb),
+        .data_ack_o(ram_ack), .data_err_o(ram_err), .flush_i(icache_flush),
         .mem_addr_o(mem_addr), .mem_dat_o(mem_dat_m2s), .mem_dat_i(mem_dat_s2m),
         .mem_sel_o(mem_sel), .mem_we_o(mem_we), .mem_cyc_o(mem_cyc), .mem_stb_o(mem_stb),
         .mem_ack_i(mem_ack), .mem_err_i(mem_err)

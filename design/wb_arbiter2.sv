@@ -12,8 +12,10 @@
  * design/wb_addr_decoder.sv, which needs no changes at all -- it only
  * ever sees a single master port regardless of how many real masters
  * exist upstream of it) and accepts two independent master ports
- * upstream: m0 (this project's own usage: core.sv's ordinary fetch/load/
- * store traffic) and m1 (this project's own usage: dm.sv's new System
+ * upstream: m0 (this project's own usage: core.sv's mem port -- load/
+ * store/AMO and Sv39 PTE reads; instruction fetches ride core.sv's
+ * separate fetch port, which bypasses this arbiter entirely) and m1
+ * (this project's own usage: dm.sv's new System
  * Bus Access port, design/dm.sv's own o_sba_.../i_sba_... group).
  *
  * m1 has fixed priority over m0 -- justified because System Bus Access
@@ -50,7 +52,7 @@
  * ALWAYS produces a second, "ghost" ack one cycle after the real one --
  * not just when masters switch. In the single-master case this is
  * harmless: by the time the ghost arrives, that master has already
- * moved on to a different state and isn't consulting wb_ack_i anymore.
+ * moved on to a different state and isn't consulting its ack_i anymore.
  * But an arbiter sitting between two masters has to actively decide who
  * a response belongs to, and an earlier version of this module decided
  * that using only `ack_i`'s own arrival to end a transaction
@@ -92,9 +94,9 @@
  * own read-modify-write AMOs are not one bus transaction -- they are
  * TWO (S_MEM's read, then S_AMO_WRITE's write), glued together only by
  * core.sv's own FSM, with exactly one genuinely idle bus cycle in
- * between (wb_cyc_o drops the SAME cycle the read's ack arrives, since
- * it's gated by !wb_done; `state` only becomes S_AMO_WRITE the
- * following edge, and THAT state's own fresh wb_cyc_o=1 request appears
+ * between (wb_mem_cyc_o drops the SAME cycle the read's ack arrives, since
+ * it's gated by !wb_mem_done; `state` only becomes S_AMO_WRITE the
+ * following edge, and THAT state's own fresh wb_mem_cyc_o=1 request appears
  * immediately, the same cycle). Right on that boundary cycle,
  * in_flight_q has already cleared (core0's own cyc_i was already low
  * the prior cycle) at the exact moment core0's OWN new write request
@@ -103,7 +105,7 @@
  * between an AMO's read and write and silently break the atomicity
  * RISC-V requires against every other bus agent. Fixed with a real
  * Wishbone B4 LOCK signal (m0_lock_i below) core.sv now drives across
- * exactly that two-phase span -- see core.sv's own wb_lock_o port
+ * exactly that two-phase span -- see core.sv's own wb_mem_lock_o port
  * comment for the full derivation. m1 (SBA) has no equivalent concept
  * this milestone and simply ties m1_lock_i to its own ANSI default.
  *
@@ -143,16 +145,16 @@
  *
  * No starvation-avoidance logic (round-robin, priority aging, etc.) is
  * implemented, and none is needed for this project's own usage: m0
- * (core.sv) does not hold cyc_i asserted forever -- most instructions
- * spend at least one real cycle bus-idle (S_EXEC) between consecutive
- * fetches, confirmed by inspection -- so m1 is never permanently locked
+ * (core.sv's mem port) does not hold cyc_i asserted forever -- that port
+ * is idle throughout every instruction's fetch and S_EXEC cycles,
+ * confirmed by inspection -- so m1 is never permanently locked
  * out even under fixed priority.
  */
 module wb_arbiter2 (
     input logic clk,
     input logic rst,
 
-    // Master 0 -- lower priority (this project's own usage: core.sv).
+    // Master 0 -- lower priority (this project's own usage: core.sv's mem port).
     input  logic [31:0] m0_addr_i,
     input  logic [63:0] m0_dat_i,
     output logic [63:0] m0_dat_o,
@@ -168,7 +170,7 @@ module wb_arbiter2 (
      * arbitration decision must grant m0 unconditionally, even if m1 is
      * also requesting, overriding m1's own normal fixed-priority win.
      * See the module header's AMO-atomicity fix for why this exists and
-     * core.sv's own wb_lock_o port comment for exactly when it's
+     * core.sv's own wb_mem_lock_o port comment for exactly when it's
      * asserted. Defaults to 1'b0 so a caller with no lock concept (any
      * hypothetical master besides core.sv) stays compile-clean without
      * wiring it, same precedent this project's own i_mtip/
@@ -207,17 +209,15 @@ module wb_arbiter2 (
 
     /*
      * o_grant: which master THIS cycle's live request-forwarding
-     * decision (`grant` below) currently points at (0=m0, 1=m1) --
-     * exposed so a consumer with its own out-of-band, per-transaction
-     * side signal keyed to a SPECIFIC master (soc.sv's own wb_ifetch,
-     * which is only ever meaningful for core.sv/m0's own traffic, never
-     * for a System Bus Access) can gate that signal correctly instead
-     * of reading whatever m0 happens to be driving regardless of which
-     * master is actually being forwarded this cycle -- see soc.sv's own
-     * comment at the point this output is consumed for the full
-     * reasoning. Deliberately the COMBINATIONAL `grant`, not a
-     * registered echo of it -- o_grant must be correct for the SAME
-     * cycle cyc_o/addr_o carry a fresh request, not one cycle behind.
+     * decision (`grant` below) currently points at (0=m0, 1=m1) -- kept
+     * as a generic/diagnostic output for a consumer with its own
+     * out-of-band side signal keyed to a SPECIFIC master. No current
+     * consumer: soc.sv leaves it unconnected (its old user, soc.sv's
+     * wb_ifetch gate, was deleted when core.sv's fetches moved to their
+     * own port, which bypasses this arbiter). Deliberately the
+     * COMBINATIONAL `grant`, not a registered echo of it -- o_grant must
+     * be correct for the SAME cycle cyc_o/addr_o carry a fresh request,
+     * not one cycle behind.
      */
     output logic o_grant
 );
