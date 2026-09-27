@@ -13,15 +13,15 @@
  * so "read succeeds, write faults" is structurally impossible to
  * construct through it (or any real cache/decoder path sitting on top
  * of it) alone. This mock slave sidesteps that by not being a real,
- * general-purpose memory at all -- it's split into exactly two behaviors
- * gated on wb_ifetch_o (the same side-band signal cache_complex.sv
- * already uses for I$/D$ routing):
- *   - Instruction fetches: served from a real, small backing array,
- *     same convention as wb4_sram.sv (so a real program can actually run).
- *   - Any data access (S_MEM/S_AMO_WRITE, ifetch low): reads always
- *     succeed with a fixed known value; writes always fault. There is
- *     only ever one AMO under test in the testbenches that use this
- *     harness, so no address-matching logic is needed for the data path.
+ * general-purpose memory at all -- it's two independent mock slaves, one
+ * per core.sv master port (no merge needed: they never shared an
+ * address space):
+ *   - Fetch port: served from a real, small backing array, same
+ *     convention as wb4_sram.sv (so a real program can actually run).
+ *   - Mem port (S_MEM/S_AMO_WRITE/S_PTW): reads always succeed with a
+ *     fixed known value; writes always fault. There is only ever one
+ *     AMO under test in the testbenches that use this harness, so no
+ *     address-matching logic is needed for the data path.
  *
  * Use core_wb4_sram_harness (or core_cache_harness for the cached path)
  * for every other testbench -- this one exists solely to make the AMO
@@ -34,22 +34,31 @@ module core_amo_write_fault_harness #(
     input logic rst
 );
 
-    logic [31:0] wb_addr;
-    logic [63:0] wb_dat_m2s, wb_dat_s2m;
-    logic [7:0]  wb_sel;
-    logic        wb_we, wb_cyc, wb_stb, wb_ack, wb_err, wb_ifetch;
+    // core.sv's fetch-side (read-only) master port.
+    logic [31:0] wbf_addr;
+    logic [63:0] wbf_dat_s2m;
+    logic        wbf_cyc, wbf_stb, wbf_ack, wbf_err;
+
+    // core.sv's mem-side master port. wbm_addr/wbm_dat_m2s/wbm_sel are
+    // never consulted (see the mock's own always block below).
+    logic [31:0] wbm_addr;
+    logic [63:0] wbm_dat_m2s, wbm_dat_s2m;
+    logic [7:0]  wbm_sel;
+    logic        wbm_we, wbm_cyc, wbm_stb, wbm_ack, wbm_err;
 
     core core0 (
         .clk(clk), .rst(rst),
-        .wb_addr_o(wb_addr), .wb_dat_o(wb_dat_m2s), .wb_dat_i(wb_dat_s2m),
-        .wb_sel_o(wb_sel), .wb_we_o(wb_we), .wb_cyc_o(wb_cyc), .wb_stb_o(wb_stb),
-        .wb_ack_i(wb_ack), .wb_err_i(wb_err), .wb_ifetch_o(wb_ifetch)
+        .wb_fetch_addr_o(wbf_addr), .wb_fetch_cyc_o(wbf_cyc), .wb_fetch_stb_o(wbf_stb),
+        .wb_fetch_dat_i(wbf_dat_s2m), .wb_fetch_ack_i(wbf_ack), .wb_fetch_err_i(wbf_err),
+        .wb_mem_addr_o(wbm_addr), .wb_mem_dat_o(wbm_dat_m2s), .wb_mem_dat_i(wbm_dat_s2m),
+        .wb_mem_sel_o(wbm_sel), .wb_mem_we_o(wbm_we), .wb_mem_cyc_o(wbm_cyc), .wb_mem_stb_o(wbm_stb),
+        .wb_mem_ack_i(wbm_ack), .wb_mem_err_i(wbm_err)
     );
 
     reg [63:0] memory [0:(NUM_WORDS - 1)];
     localparam ADDR_WIDTH = $clog2(NUM_WORDS);
-    wire [ADDR_WIDTH-1:0] word_addr = wb_addr[ADDR_WIDTH+2:3];
-    wire addr_valid = (wb_addr[31:ADDR_WIDTH+3] == 0);
+    wire [ADDR_WIDTH-1:0] word_addr = wbf_addr[ADDR_WIDTH+2:3];
+    wire addr_valid = (wbf_addr[31:ADDR_WIDTH+3] == 0);
 
     /*
      * AMO_OLD_VALUE: what a read on the data path always returns --
@@ -66,34 +75,45 @@ module core_amo_write_fault_harness #(
             memory[init_i] = '0;
     end
 
+    // Fetch-port mock: same registered one-cycle ack/err echo as wb4_sram.sv.
     always @(posedge clk) begin
         if (rst) begin
-            wb_ack     <= 1'b0;
-            wb_err     <= 1'b0;
-            wb_dat_s2m <= 64'b0;
-        end else if (wb_cyc && wb_stb) begin
-            if (wb_ifetch) begin
-                if (addr_valid) begin
-                    wb_dat_s2m <= memory[word_addr];
-                    wb_ack     <= 1'b1;
-                    wb_err     <= 1'b0;
-                end else begin
-                    wb_ack <= 1'b0;
-                    wb_err <= 1'b1;
-                end
+            wbf_ack     <= 1'b0;
+            wbf_err     <= 1'b0;
+            wbf_dat_s2m <= 64'b0;
+        end else if (wbf_cyc && wbf_stb) begin
+            if (addr_valid) begin
+                wbf_dat_s2m <= memory[word_addr];
+                wbf_ack     <= 1'b1;
+                wbf_err     <= 1'b0;
             end else begin
-                if (wb_we) begin
-                    wb_ack <= 1'b0;
-                    wb_err <= 1'b1;
-                end else begin
-                    wb_dat_s2m <= AMO_OLD_VALUE;
-                    wb_ack     <= 1'b1;
-                    wb_err     <= 1'b0;
-                end
+                wbf_ack <= 1'b0;
+                wbf_err <= 1'b1;
             end
         end else begin
-            wb_ack <= 1'b0;
-            wb_err <= 1'b0;
+            wbf_ack <= 1'b0;
+            wbf_err <= 1'b0;
+        end
+    end
+
+    // Mem-port mock: reads always return AMO_OLD_VALUE, writes always fault.
+    always @(posedge clk) begin
+        if (rst) begin
+            wbm_ack     <= 1'b0;
+            wbm_err     <= 1'b0;
+            wbm_dat_s2m <= 64'b0;
+        end else if (wbm_cyc && wbm_stb) begin
+            if (wbm_we) begin
+                wbm_ack <= 1'b0;
+                wbm_err <= 1'b1;
+            end else begin
+                wbm_dat_s2m <= AMO_OLD_VALUE;
+                wbm_ack     <= 1'b1;
+                wbm_err     <= 1'b0;
+            end
+        end else begin
+            wbm_ack <= 1'b0;
+            wbm_err <= 1'b0;
         end
     end
 

@@ -321,9 +321,9 @@ module dm_tb;
      * dut_amo_sba -- Milestone 8 review-fix regression: a real RMW AMO
      * (amoadd.d) is not one bus transaction -- it's two (S_MEM's read,
      * then S_AMO_WRITE's write), with one genuinely idle bus cycle in
-     * between (wb_cyc_o drops the SAME cycle the read's own ack
-     * arrives, since it's gated by !wb_done, but `state` only becomes
-     * S_AMO_WRITE the FOLLOWING edge). Without core.sv's own wb_lock_o
+     * between (wb_mem_cyc_o drops the SAME cycle the read's own ack
+     * arrives, since it's gated by !wb_mem_done, but `state` only becomes
+     * S_AMO_WRITE the FOLLOWING edge). Without core.sv's own wb_mem_lock_o
      * (a real Wishbone B4 LOCK signal) holding the arbiter's grant
      * through that gap, a pending SBA transaction can win the fixed-
      * priority tie that arises right as the write's own fresh request
@@ -331,16 +331,16 @@ module dm_tb;
      * between the AMO's read and write -- silently breaking the
      * atomicity RISC-V requires against every other bus agent. See
      * design/wb_arbiter2.sv's own header and design/core.sv's
-     * wb_lock_o port comment for the full derivation.
+     * wb_mem_lock_o port comment for the full derivation.
      *
      * Test design: the SBA write is deliberately staged (sbcs/
      * sbaddress0/sbdata1 written ahead of time) and its OWN triggering
-     * write (sbdata0) is issued the instant dut_amo_sba.core0.wb_lock_o
+     * write (sbdata0) is issued the instant dut_amo_sba.core0.wb_mem_lock_o
      * is FIRST observed high -- i.e. the earliest possible cycle the
      * AMO's own read has started -- guaranteeing the SBA request is
      * genuinely pending during the AMO's entire locked window, not
      * racing to land before or after it by chance. Since the SBA
-     * request can only start once wb_lock_o is already 1, the AMO's
+     * request can only start once wb_mem_lock_o is already 1, the AMO's
      * own read is GUARANTEED to see the pre-existing value regardless
      * of whether the fix works (x6 == V0 either way) -- the real,
      * discriminating check is the FINAL memory value: with the fix
@@ -1490,12 +1490,12 @@ module dm_tb;
         // Stage the SBA write's own config/address/high-data now that dm0
         // is out of reset -- the 8 padding instructions above guarantee
         // core0 is nowhere near the AMO yet (it's still working through
-        // the filler), so this always lands well before wb_lock_o rises.
+        // the filler), so this always lands well before wb_mem_lock_o rises.
         amo_sba_dmi_write(DMI_SBCS, sba_cfg(1'b0, 3'd3, 1'b0, 1'b0));  // readonaddr=0, access=64-bit
         amo_sba_dmi_write(DMI_SBADDRESS0, AMO_SBA_T);
         amo_sba_dmi_write(DMI_SBDATA1, 32'h0);
 
-        while (!dut_amo_sba.core0.wb_lock_o) begin
+        while (!dut_amo_sba.core0.wb_mem_lock_o) begin
             @(posedge clk); #1;
         end
         amo_sba_dmi_write(DMI_SBDATA0, AMO_SBA_W);  // triggers the real SBA write

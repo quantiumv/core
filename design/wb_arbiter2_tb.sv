@@ -294,7 +294,7 @@ module wb_arbiter2_tb;
 
         // Test 7: m0_lock_i -- the AMO-atomicity fix's own mechanism
         // (design/wb_arbiter2.sv's module header, and design/core.sv's
-        // own wb_lock_o port comment, describe the real bug this closes:
+        // own wb_mem_lock_o port comment, describe the real bug this closes:
         // a debugger's SBA request winning the exact idle cycle between
         // an AMO's read phase and its write phase). Direct arbiter-level
         // proof, independent of the whole-core dut_amo_sba integration

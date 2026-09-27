@@ -205,7 +205,7 @@ module core_sv39_cache_tb;
      * safety proof for a real RTL fix this milestone's own integration
      * testing found: mem_resolved_q, once set by the FIRST (denied)
      * load, was never cleared on a PMP-bail (only on a real S_MEM&&
-     * wb_done completion, which a denied access never reaches) -- left
+     * wb_mem_done completion, which a denied access never reaches) -- left
      * unfixed, this SECOND, unrelated load would have silently skipped
      * its own walk and reused the FIRST load's stale, denied PA instead
      * of the sentinel's real one. mcause_3/mtval_3's own capture trigger

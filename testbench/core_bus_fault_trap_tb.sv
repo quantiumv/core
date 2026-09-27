@@ -15,9 +15,10 @@
  * real core, via core_wb4_sram_harness -- wb4_sram.sv is the one real
  * Wishbone-B4-compliant slave in this project (ack/err mutually
  * exclusive, an out-of-range access sets err_o with ack_o held 0), so
- * this harness is what actually exercises wb_done/wb_ok's necessity --
- * see design/core.sv's own header comment on wb_done/wb_ok for why bare
- * wb_ack_i is ambiguous through the CACHED path but not through this one.
+ * this harness is what actually exercises wb_fetch_done/wb_fetch_ok and
+ * wb_mem_done/wb_mem_ok's necessity -- see design/core.sv's own comment
+ * on those wires for why bare wb_fetch_ack_i/wb_mem_ack_i are ambiguous
+ * through the CACHED path but not through this one.
  *
  * NUM_WORDS=64 (a power of 2, matching wb4_sram.sv's own $clog2-based
  * addr_valid check exactly -- a non-power-of-2 size leaves a gap between
