@@ -103,6 +103,68 @@ module wb_arbiter2_tb;
         end
     end
 
+    /*
+     * DROP_REQ_ON_RESP twin: a second arbiter on the SAME master inputs,
+     * with its own identical fake slave, observed passively through every
+     * test below. The parameter only acts while in_flight_q is set, so
+     * both instances make identical grant decisions every cycle; what
+     * must differ is exactly one thing -- the twin never presents a
+     * request to its slave during that request's own response cycle
+     * (which, with a wb4_sram-style slave, is what re-fires the access).
+     */
+    logic [31:0] addr_o2;
+    logic [63:0] dat_i2, dat_o2;
+    logic [7:0]  sel_o2;
+    logic        we_o2, cyc_o2, stb_o2, ack_i2, err_i2, grant2;
+    /* verilator lint_off UNUSEDSIGNAL */
+    logic [63:0] m0_dat_o2, m1_dat_o2;
+    logic        m0_ack2, m1_ack2, m0_err2, m1_err2;
+    /* verilator lint_on UNUSEDSIGNAL */
+
+    wb_arbiter2 #(.DROP_REQ_ON_RESP(1'b1)) dut_drop (
+        .clk(clk), .rst(rst),
+        .m0_addr_i(m0_addr), .m0_dat_i(m0_dat_i), .m0_dat_o(m0_dat_o2),
+        .m0_sel_i(m0_sel), .m0_we_i(m0_we), .m0_cyc_i(m0_cyc), .m0_stb_i(m0_stb),
+        .m0_ack_o(m0_ack2), .m0_err_o(m0_err2), .m0_lock_i(m0_lock),
+        .m1_addr_i(m1_addr), .m1_dat_i(m1_dat_i), .m1_dat_o(m1_dat_o2),
+        .m1_sel_i(m1_sel), .m1_we_i(m1_we), .m1_cyc_i(m1_cyc), .m1_stb_i(m1_stb),
+        .m1_ack_o(m1_ack2), .m1_err_o(m1_err2), .m1_lock_i(m1_lock),
+        .addr_o(addr_o2), .dat_o(dat_o2), .dat_i(dat_i2), .sel_o(sel_o2), .we_o(we_o2),
+        .cyc_o(cyc_o2), .stb_o(stb_o2), .ack_i(ack_i2), .err_i(err_i2),
+        .o_grant(grant2)
+    );
+
+    always @(posedge clk) begin
+        if (rst) begin
+            ack_i2 <= 1'b0; err_i2 <= 1'b0; dat_i2 <= 64'b0;
+        end else if (cyc_o2 && stb_o2) begin
+            ack_i2 <= !force_err;
+            err_i2 <=  force_err;
+            if (!force_err) dat_i2 <= {32'hFEED_0000, addr_o2};
+        end else begin
+            ack_i2 <= 1'b0;
+            err_i2 <= 1'b0;
+        end
+    end
+
+    // refire*: request presented while that slave is responding this very
+    // cycle (the slave re-fires it next edge). first_resp_miss: the default
+    // instance's slave delivers a genuine first response (not a re-fire)
+    // that the twin's slave does not. grant/fresh-request mismatches catch
+    // any added latency or changed arbitration.
+    int refire1 = 0, refire2 = 0, grant_mismatch = 0, fresh_req_miss = 0, first_resp_miss = 0;
+    logic refire1_prev = 1'b0;
+    always @(posedge clk) if (!rst) begin
+        if (cyc_o && stb_o && (ack_i || err_i)) refire1 = refire1 + 1;
+        if (cyc_o2 && stb_o2 && (ack_i2 || err_i2)) refire2 = refire2 + 1;
+        if (grant != grant2) grant_mismatch = grant_mismatch + 1;
+        if (cyc_o && stb_o && !(ack_i || err_i) && !(cyc_o2 && stb_o2))
+            fresh_req_miss = fresh_req_miss + 1;
+        if ((ack_i || err_i) && !refire1_prev && !(ack_i2 || err_i2))
+            first_resp_miss = first_resp_miss + 1;
+        refire1_prev <= cyc_o && stb_o && (ack_i || err_i);
+    end
+
     int pass_count = 0;
     int fail_count = 0;
     logic quiet_on_pass = 1'b0;
@@ -456,6 +518,18 @@ module wb_arbiter2_tb;
         @(posedge clk); #1;
         m1_cyc = 1'b0; m1_stb = 1'b0;
         @(negedge clk);
+
+        // DROP_REQ_ON_RESP twin, checked over every test above.
+        check("DROP_REQ_ON_RESP=0 (default): held requests DO re-fire (scenario exercised)",
+              64'(refire1 > 0), 64'd1);
+        check("DROP_REQ_ON_RESP=1: no request ever presented during its own response cycle",
+              64'(refire2), 64'd0);
+        check("DROP_REQ_ON_RESP=1: grant identical to the default instance every cycle",
+              64'(grant_mismatch), 64'd0);
+        check("DROP_REQ_ON_RESP=1: every fresh request forwarded the same cycle (zero added latency)",
+              64'(fresh_req_miss), 64'd0);
+        check("DROP_REQ_ON_RESP=1: every genuine first response still delivered",
+              64'(first_resp_miss), 64'd0);
 
         $display("");
         $display("wb_arbiter2_tb: %0d passed, %0d failed", pass_count, fail_count);

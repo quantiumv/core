@@ -103,7 +103,9 @@ module dm_core_harness #(
     logic [7:0]  mem_sel;
     logic        mem_we, mem_cyc, mem_stb, mem_ack, mem_err;
 
-    wb_arbiter2 arb0 (
+    // DROP_REQ_ON_RESP: same as soc.sv's arb0 -- SBA holds cyc through its
+    // own ack cycle (see design/wb_arbiter2.sv's own header).
+    wb_arbiter2 #(.DROP_REQ_ON_RESP(1'b1)) arb0 (
         .clk(clk), .rst(rst),
         .m0_addr_i(wbm_addr), .m0_dat_i(wbm_dat_m2s), .m0_dat_o(wbm_dat_s2m),
         .m0_sel_i(wbm_sel), .m0_we_i(wbm_we), .m0_cyc_i(wbm_cyc), .m0_stb_i(wbm_stb),
