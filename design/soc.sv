@@ -259,8 +259,12 @@ module soc (
      * the policy) before either ever reaches decoder0, which needs no
      * changes at all -- it only ever sees ONE arbitrated master port
      * regardless of how many real masters sit upstream of it.
+     *
+     * DROP_REQ_ON_RESP: dm0's SBA holds cyc through its own ack cycle,
+     * which every slave behind decoder0 would otherwise re-fire on -- see
+     * design/wb_arbiter2.sv's own header.
      */
-    wb_arbiter2 arb0 (
+    wb_arbiter2 #(.DROP_REQ_ON_RESP(1'b1)) arb0 (
         .clk(clk), .rst(rst),
         .m0_addr_i(core_wb_mem_addr), .m0_dat_i(core_wb_mem_dat_m2s), .m0_dat_o(core_wb_mem_dat_s2m),
         .m0_sel_i(core_wb_mem_sel), .m0_we_i(core_wb_mem_we), .m0_cyc_i(core_wb_mem_cyc), .m0_stb_i(core_wb_mem_stb),

@@ -121,6 +121,25 @@
  * is spent; the fix simply stops mis-attributing that unavoidable
  * extra cycle to the wrong master.
  *
+ * DROP_REQ_ON_RESP (parameter, default 0; soc.sv's arb0 sets it): a
+ * THIRD real bug, pre-existing, found by the Pipelining P2 port-split
+ * review. dm.sv's SBA master holds cyc/stb THROUGH its own ack cycle
+ * (legal Wishbone classic), but every slave here treats cyc&&stb in that
+ * cycle as a brand-new request: dcache.sv starts a ghost CACHE_WRITE
+ * whose ack lands 3 cycles later -- after in_flight_q has already
+ * handed the bus to m0, so core.sv's next load/store completes on the
+ * ghost's ack and is silently lost -- and uart16550.sv re-fires the
+ * access (a THR write prints twice, an RBR read pops twice). With the
+ * parameter set, the granted master's request is simply not forwarded
+ * during its own response cycle (in_flight_q && (ack_i || err_i)), so
+ * no slave ever sees it twice. Zero cost to core.sv's mem port, which
+ * already drops cyc in its ack cycle. Opt-in rather than default because
+ * it WOULD add a cycle to a master that deliberately issues a new,
+ * back-to-back request in its previous ack cycle -- core.sv's fetch
+ * port does exactly that for a dword-crossing fetch (F_REQ_LO ->
+ * F_REQ_HI), and several test harnesses merge that port through their
+ * own wb_arbiter2 instance.
+ *
  * Two-part state, mirroring wb_addr_decoder.sv's own request/response
  * split:
  *   - `grant` (combinational): decides, EVERY cycle, which master's
@@ -150,7 +169,9 @@
  * confirmed by inspection -- so m1 is never permanently locked
  * out even under fixed priority.
  */
-module wb_arbiter2 (
+module wb_arbiter2 #(
+    parameter bit DROP_REQ_ON_RESP = 1'b0
+) (
     input logic clk,
     input logic rst,
 
@@ -238,8 +259,13 @@ module wb_arbiter2 (
     wire grant = in_flight_q ? grant_q : idle_grant;
     wire granted_cyc_i = grant ? m1_cyc_i : m0_cyc_i;
 
-    assign cyc_o  = grant ? m1_cyc_i : m0_cyc_i;
-    assign stb_o  = grant ? m1_stb_i : m0_stb_i;
+    // The granted master's own response cycle -- see DROP_REQ_ON_RESP in
+    // the module header. No combinational loop: every slave's ack/err is
+    // registered, and in_flight_q is a register.
+    wire drop_req = DROP_REQ_ON_RESP && in_flight_q && (ack_i || err_i);
+
+    assign cyc_o  = (grant ? m1_cyc_i : m0_cyc_i) && !drop_req;
+    assign stb_o  = (grant ? m1_stb_i : m0_stb_i) && !drop_req;
     assign addr_o = grant ? m1_addr_i : m0_addr_i;
     assign dat_o  = grant ? m1_dat_i  : m0_dat_i;
     assign sel_o  = grant ? m1_sel_i  : m0_sel_i;
