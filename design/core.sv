@@ -730,7 +730,18 @@ module core (
     wire        fetch_translate_active = !debug_progbuf_active
                                         && (current_priv != PRIV_M)
                                         && (satp_mode_w == 4'd8);
-    wire [(`WORD_SIZE - 1):0] fetch_hi_vaddr = pc + `WORD_SIZE'(8);
+    /*
+     * fetch_pc: the (virtual) PC of the instruction the FETCH stream is
+     * working on -- the single point every fetch-side consumer reads
+     * (fetch_paddr/fetch_hi_vaddr, fetch_hi_needed's crossing test, the
+     * TLB lookup and walker start for a fetch-reason walk), as opposed to
+     * pc, which always names the EXECUTING instruction (halfword select,
+     * pc_plus_len, AUIPC, triggers, mtval, RVFI). Identical to pc today,
+     * since fstate never looks ahead yet; Pipelining P2 step 3b makes it
+     * the predicted next PC while prefetching.
+     */
+    wire [(`WORD_SIZE - 1):0] fetch_pc = pc;
+    wire [(`WORD_SIZE - 1):0] fetch_hi_vaddr = fetch_pc + `WORD_SIZE'(8);
     /*
      * P1 (in-order-pipeline-prep, first milestone of the OoO staging
      * plan): every register below that holds ONE INSTRUCTION's own
@@ -964,7 +975,7 @@ module core (
     logic [1:0]  tlb_replace_q;
 
     /*
-     * Current VA being looked up: pc while redirecting from S_FETCH,
+     * Current VA being looked up: fetch_pc while redirecting from S_FETCH,
      * fetch_hi_vaddr from S_FETCH_HI, alu_result (mem's own pre-
      * translation VA, same source the walker's own MEM-reason walk-start
      * already uses) otherwise -- these three states are the only ones
@@ -972,7 +983,7 @@ module core (
      * state-keyed mux (rather than a separate per-stream hit signal) is
      * sufficient and avoids tripling the match logic below.
      */
-    wire [(`WORD_SIZE-1):0] tlb_lookup_vaddr = (state == S_FETCH) ? pc
+    wire [(`WORD_SIZE-1):0] tlb_lookup_vaddr = (state == S_FETCH) ? fetch_pc
                                               : (state == S_FETCH_HI) ? fetch_hi_vaddr
                                               : alu_result;
     wire [26:0] tlb_lookup_vpn = tlb_lookup_vaddr[38:12];
@@ -1262,7 +1273,7 @@ module core (
      * it needs to fall straight through to S_EXEC and trap via
      * fetch_fault_q[cur_slot] instead.
      */
-    wire fetch_hi_needed = (pc[2:1] == 2'b11) && (wb_fetch_dat_i[49:48] == 2'b11);
+    wire fetch_hi_needed = (fetch_pc[2:1] == 2'b11) && (wb_fetch_dat_i[49:48] == 2'b11);
     wire fetch_hi_taken  = wb_fetch_ok && fetch_hi_needed;
 
     /*
@@ -2020,8 +2031,8 @@ module core (
      */
     /*
      * fetch_paddr: named indirection point for the Sv39 MMU stage --
-     * Milestone 3 is its real consumer now. A plain passthrough (pc IS
-     * the physical address) whenever fetch_translate_active is false
+     * Milestone 3 is its real consumer now. A plain passthrough (fetch_pc
+     * IS the physical address) whenever fetch_translate_active is false
      * (Bare mode, M-mode, or Program Buffer execution); otherwise the
      * page-table walker's own resolved output, fetch_lo_paddr_q[cur_slot], latched
      * by the new "Sv39 Page-Table Walker" section further down. No
@@ -2085,7 +2096,7 @@ module core (
     /* verilator lint_off UNUSEDSIGNAL */
     // Pipelining P2 step 3a: [fetch_slot] -- see tlb_hit_active's own
     // matching comment.
-    wire [(`WORD_SIZE - 1):0] fetch_paddr = fetch_translate_active ? fetch_lo_paddr_q[fetch_slot] : pc;
+    wire [(`WORD_SIZE - 1):0] fetch_paddr = fetch_translate_active ? fetch_lo_paddr_q[fetch_slot] : fetch_pc;
     /* verilator lint_on UNUSEDSIGNAL */
     wire [31:0] fetch_addr = {fetch_paddr[31:3], 3'b0};
 
@@ -2613,7 +2624,7 @@ module core (
                 ptw_reason_q[cur_slot] <= PTW_REASON_LO;
                 ptw_level_q[cur_slot]  <= 2'd2;
                 ptw_base_q[cur_slot]   <= {8'b0, satp_ppn_w, 12'b0};
-                ptw_vaddr_q[cur_slot]  <= pc;
+                ptw_vaddr_q[cur_slot]  <= fetch_pc;
             end else if (state == S_FETCH_HI && fetch_translate_active && !fetch_hi_resolved_q[fetch_slot] && !tlb_hit_active) begin
                 ptw_reason_q[cur_slot] <= PTW_REASON_HI;
                 ptw_level_q[cur_slot]  <= 2'd2;
