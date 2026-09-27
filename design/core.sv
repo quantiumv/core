@@ -618,10 +618,15 @@ module core (
      * csr_file0's own mip_w/mie_w/etc. outputs first).
      *
      * trap_vector: forward-declared (was previously declared+driven
-     * together as `wire trap_vector = ...`) because wb_fetch_master_drive's
-     * S_FETCH arm now needs to read it, but wb_fetch_master_drive is textually
-     * BEFORE trap_vector's own real assign (down near Next PC) -- same
-     * "declare early, drive late" split trap_val/amo_rdata_q[cur_slot] already use.
+     * together as `wire trap_vector = ...`). Originally needed because
+     * wb_fetch_master_drive's S_FETCH arm read it directly (the
+     * fetch_from_trap_vector mux); the interrupt-entry fetch-redirect fix
+     * removed that mux entirely (wb_fetch_master_drive now only ever
+     * drives plain fetch_addr), so nothing reads trap_vector before its
+     * own real assign (down near Next PC) anymore. Left forward-declared
+     * anyway rather than restructuring back to a single `wire = ...` site
+     * -- harmless, and consistent with trap_val/amo_rdata_q[cur_slot]'s
+     * own "declare early, drive late" split elsewhere in this file.
      *
      * int_cause: same reason as interrupt_taken/interrupt_to_s above --
      * csr_file0's own i_trap_cause connection needs the generalized
@@ -658,6 +663,25 @@ module core (
     logic [2:0] debug_cause_code;
     logic trigger_debug_entry;
     logic trigger_exception_match;
+    /*
+     * fetch_redirect_cycle: the cycle either commit_now_q-timed redirect
+     * (interrupt_taken, debug_halt_req_entry) fires -- pc/current_priv (or
+     * in_debug_mode) switch on this SAME edge, but the fetch side must act
+     * as if nothing is happening yet: no request, no TLB resolve, no walk
+     * start, no fault capture, all keyed on the OLD pc/privilege. The
+     * actual redirect fetch (from the NEW pc, correctly translated/PMP-
+     * checked under the NEW privilege) happens the ordinary way starting
+     * next cycle -- see every site below that reads this wire, and the
+     * state-transition always_ff's own new S_FETCH arm for interrupt_taken.
+     * A real bug this closes: without it, this cycle's fetch machinery
+     * (TLB lookup/resolve, S_PTW walk-start, PMP-fault exit) ran against
+     * the OLD pc, and the stale trap_vector/fetch_redirect_q mux this
+     * replaces then forced the redirect PC onto the bus raw and
+     * untranslated -- under Sv39 with a delegated interrupt, the handler's
+     * FIRST instruction was fetched from the physical trap_vector address
+     * instead of the translated one.
+     */
+    wire fetch_redirect_cycle = interrupt_taken || debug_halt_req_entry;
     /*
      * debug_progbuf_active/progbuf_ebreak_done/progbuf_abort (Milestone
      * 7) -- forward-declared for the same reason trap_taken itself is:
@@ -1016,7 +1040,7 @@ module core (
         // Pipelining P2 step 3a: [fetch_slot], not [cur_slot] -- these are
         // MID-EPISODE guards on the fetch-side resolved flags, read before
         // cur_slot's own toggle promotes this episode's data to "current".
-        (state == S_FETCH    && fetch_translate_active && !fetch_lo_resolved_q[fetch_slot]) ||
+        (state == S_FETCH    && fetch_translate_active && !fetch_lo_resolved_q[fetch_slot] && !fetch_redirect_cycle) ||
         (state == S_FETCH_HI && fetch_translate_active && !fetch_hi_resolved_q[fetch_slot]) ||
         (state == S_MEM       && mem_translate_active   && !mem_resolved_q[cur_slot]));
     /*
@@ -1321,7 +1345,7 @@ module core (
      * S_FETCH's own arm below).
      */
     wire fstate_eligible = (state == S_FETCH) && !fetch_translate_active
-                         && !debug_halt_req_entry && !debug_progbuf_active;
+                         && !fetch_redirect_cycle && !debug_progbuf_active;
     // "Working the low half" covers BOTH F_IDLE (just arrived, decision
     // not yet registered) and F_REQ_LO (already waiting) -- from this
     // cycle's own combinational perspective they're the same phase; only
@@ -1368,6 +1392,23 @@ module core (
                  */
                 S_FETCH:     if (debug_progbuf_active) state <= S_EXEC;
                              else if (debug_halt_req_entry) state <= S_DEBUG_HALTED;
+                             /*
+                              * interrupt_taken: pc/current_priv redirect to
+                              * trap_vector/the new privilege on THIS edge
+                              * (Next PC/CSR sections below) -- re-run
+                              * S_FETCH from scratch next cycle so every
+                              * fetch-side site gated on fetch_redirect_cycle
+                              * (TLB resolve, walk-start, PMP-fault exit,
+                              * fstate) correctly sees a fresh instruction at
+                              * the NEW pc/privilege, not this cycle's
+                              * now-stale OLD pc. Mutually exclusive with
+                              * debug_halt_req_entry by construction
+                              * (interrupt_taken's own definition excludes
+                              * it), so arm order between the two doesn't
+                              * matter -- kept after it anyway, matching that
+                              * exclusion's own tie-break intent.
+                              */
+                             else if (interrupt_taken) state <= S_FETCH;
                              /*
                               * Pipelining P2 step 2: split into the existing
                               * Sv39 (translated) path -- COMPLETELY UNCHANGED
@@ -1789,7 +1830,7 @@ module core (
         if (fetch_translate_active) begin
         // Pipelining P2 step 3a: [fetch_slot] -- see tlb_hit_active's own
         // matching comment.
-        if (state == S_FETCH && !fetch_lo_resolved_q[fetch_slot]) begin
+        if (state == S_FETCH && (fetch_redirect_cycle || !fetch_lo_resolved_q[fetch_slot])) begin
             // Sv39 (Milestone 3): redirecting to S_PTW this cycle --
             // fetch_paddr (hence pmp_fetchlo_fault, computed off it) is
             // not yet resolved, so its transient value must not be
@@ -1797,6 +1838,14 @@ module core (
             // to latch here. Must be checked FIRST, ahead of the
             // pmp_fetchlo_fault arm below, mirroring the state-transition
             // always_ff's own identical priority requirement.
+            //
+            // fetch_redirect_cycle (interrupt/debug-halt entry): forces
+            // entry into this same empty arm even when fetch_lo_resolved_q[fetch_slot]
+            // happens to still read stale-1 from an earlier episode on this
+            // slot -- otherwise the pmp_fetchlo_fault/wb_fetch_done arms
+            // below could capture a fault/instruction off the OLD, now-
+            // stale fetch_paddr. See fetch_redirect_cycle's own declaration
+            // comment.
         end else if (state == S_FETCH && pmp_fetchlo_fault) begin
             // Low half denied -- known combinationally, no real bus
             // request was ever issued (wb_fetch_master_drive's own S_FETCH arm
@@ -2620,7 +2669,15 @@ module core (
             // already retired by the time a translated fetch's own walk
             // runs -- safe to borrow as scratch regardless of which slot
             // name is used, and cur_slot is what step 1 already picked.
-            if (state == S_FETCH && fetch_translate_active && !fetch_lo_resolved_q[fetch_slot] && !tlb_hit_active) begin
+            // fetch_redirect_cycle: without this, once tlb_hit_active is
+            // forced low that same cycle (its own matching guard), a TLB
+            // HIT here would still fall through to this "start a walk" arm
+            // and stomp ptw_vaddr_q[cur_slot] with the OLD (stale) pc --
+            // which trap_val reads on a later fault and nothing else ever
+            // rewrites on a subsequent hit. See fetch_redirect_cycle's own
+            // declaration comment for the full bug this (and its sibling
+            // guards) closes.
+            if (state == S_FETCH && fetch_translate_active && !fetch_lo_resolved_q[fetch_slot] && !tlb_hit_active && !fetch_redirect_cycle) begin
                 ptw_reason_q[cur_slot] <= PTW_REASON_LO;
                 ptw_level_q[cur_slot]  <= 2'd2;
                 ptw_base_q[cur_slot]   <= {8'b0, satp_ppn_w, 12'b0};
@@ -4205,13 +4262,17 @@ module core (
                            && !in_debug_mode && !(i_debug_halt_req || stepping_q);
     assign interrupt_to_s  = interrupt_taken && int_to_s;
 
-    logic fetch_redirect_q;
-    always_ff @(posedge clk) begin
-        if (rst) fetch_redirect_q <= 1'b0;
-        else if (interrupt_taken)             fetch_redirect_q <= 1'b1;
-        else if (state == S_FETCH && wb_fetch_done) fetch_redirect_q <= 1'b0;
-    end
-    wire fetch_from_trap_vector = interrupt_taken || fetch_redirect_q;
+    // fetch_redirect_q/fetch_from_trap_vector: REMOVED (the interrupt-entry
+    // fetch redirect fix). Forcing the raw trap_vector onto the fetch bus
+    // for as long as this flop stayed set was itself the bug: fetch_paddr
+    // is only a plain pc passthrough in Bare mode, so under Sv39 this drove
+    // a raw, UNTRANSLATED physical address, fetching the handler's first
+    // instruction from physical trap_vector instead of the translated one.
+    // fetch_redirect_cycle (see its own declaration comment) replaces this
+    // with the opposite strategy: do nothing fetch-side in the redirect
+    // cycle itself, and let the ordinary S_FETCH path (pc already redirected
+    // to trap_vector, correctly translated/PMP-checked under the new
+    // privilege) pick the handler's fetch up the very next cycle instead.
 
     /* --------------------------------------------------------------- *
      * Debug Mode: halt/resume/step (Milestone 4 of the EBREAK/JTAG
@@ -4947,18 +5008,19 @@ module core (
         case (state)
             S_FETCH: begin
                 /*
-                 * debug_halt_req_entry/debug_progbuf_active both
-                 * suppress the request entirely (not just redirect its
-                 * address, the way fetch_from_trap_vector does) --
-                 * debug_halt_req_entry because we're about to park in
-                 * S_DEBUG_HALTED with nothing fetched at all,
-                 * debug_progbuf_active because the "fetch" is already
-                 * available combinationally as i_progbuf_data, with no
-                 * real bus transaction needed at all. Applies to BOTH
-                 * branches below, so checked once, ahead of the
-                 * translated/untranslated split.
+                 * fetch_redirect_cycle/debug_progbuf_active both suppress
+                 * the request entirely -- fetch_redirect_cycle (interrupt
+                 * or debug-halt entry) because pc/current_priv (or
+                 * in_debug_mode) are only redirected on THIS edge, so the
+                 * real fetch from the new pc/privilege can't correctly
+                 * start until next cycle (see fetch_redirect_cycle's own
+                 * declaration comment), debug_progbuf_active because the
+                 * "fetch" is already available combinationally as
+                 * i_progbuf_data, with no real bus transaction needed at
+                 * all. Applies to BOTH branches below, so checked once,
+                 * ahead of the translated/untranslated split.
                  */
-                if (!debug_halt_req_entry && !debug_progbuf_active) begin
+                if (!fetch_redirect_cycle && !debug_progbuf_active) begin
                     if (fetch_translate_active) begin
                         /*
                          * Sv39 path -- unchanged from before this
@@ -4984,7 +5046,7 @@ module core (
                         if (!wb_fetch_done && !pmp_fetchlo_fault && fetch_lo_resolved_q[fetch_slot]) begin
                             wb_fetch_cyc_o  = 1'b1;
                             wb_fetch_stb_o  = 1'b1;
-                            wb_fetch_addr_o = fetch_from_trap_vector ? {trap_vector[31:3], 3'b0} : fetch_addr;
+                            wb_fetch_addr_o = fetch_addr;
                         end
                     end else begin
                         /*
@@ -5031,7 +5093,7 @@ module core (
                             F_REQ_LO: if (!wb_fetch_done && !pmp_fetchlo_fault) begin
                                 wb_fetch_cyc_o  = 1'b1;
                                 wb_fetch_stb_o  = 1'b1;
-                                wb_fetch_addr_o = fetch_from_trap_vector ? {trap_vector[31:3], 3'b0} : fetch_addr;
+                                wb_fetch_addr_o = fetch_addr;
                             end
                             F_REQ_HI: if (!fstate_hi_done_now && !pmp_fetchhi_fault) begin
                                 wb_fetch_cyc_o  = 1'b1;
