@@ -1,0 +1,25 @@
+# FSM core (design/core.sv) file list, in required compile order (decoder
+# before core, matching README.md's own documented iverilog/verilator
+# invocations). One path per line, relative to the repo root. Blank lines
+# and #-comments ignored. Never add a verification/taxi/-touching file
+# here -- that tree is Verilator-only and will not compile under Icarus.
+design/decoder.sv
+design/alu.sv
+design/c_expand.sv
+design/cache_complex.sv
+design/clint.sv
+design/core.sv
+design/csr_file.sv
+design/dcache.sv
+design/divider.sv
+design/dm.sv
+design/dm_dmi.sv
+design/icache.sv
+design/jtag_tap.sv
+design/plic.sv
+design/register_file.sv
+design/soc.sv
+design/uart16550.sv
+design/wb4_sram.sv
+design/wb_addr_decoder.sv
+design/wb_arbiter2.sv
