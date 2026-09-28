@@ -44,8 +44,8 @@ if ! verilator --cc --exe --build --timing -j 0 \
         "$REPO_ROOT"/design/cache_complex.sv "$REPO_ROOT"/design/clint.sv "$REPO_ROOT"/design/core.sv \
         "$REPO_ROOT"/design/csr_file.sv "$REPO_ROOT"/design/dcache.sv "$REPO_ROOT"/design/divider.sv \
         "$REPO_ROOT"/design/dm.sv "$REPO_ROOT"/design/dm_dmi.sv "$REPO_ROOT"/design/icache.sv \
-        "$REPO_ROOT"/design/jtag_tap.sv "$REPO_ROOT"/design/register_file.sv "$REPO_ROOT"/design/soc.sv \
-        "$REPO_ROOT"/design/uart_rx.sv "$REPO_ROOT"/design/uart_tx.sv "$REPO_ROOT"/design/wb4_sram.sv \
+        "$REPO_ROOT"/design/jtag_tap.sv "$REPO_ROOT"/design/plic.sv "$REPO_ROOT"/design/register_file.sv \
+        "$REPO_ROOT"/design/soc.sv "$REPO_ROOT"/design/uart16550.sv "$REPO_ROOT"/design/wb4_sram.sv \
         "$REPO_ROOT"/design/wb_addr_decoder.sv "$REPO_ROOT"/design/wb_arbiter2.sv \
         "$OOD_DIR/sim_soc_top.sv" "$OOD_DIR/sim_main.cpp" > "$OUT_DIR/verilator_build.log" 2>&1; then
     echo "FAIL: Verilator build failed -- see $OUT_DIR/verilator_build.log" >&2
