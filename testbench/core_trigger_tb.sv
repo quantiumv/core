@@ -299,6 +299,106 @@ module core_trigger_tb;
         if (dut_trig_store.core0.commit_now) store_commit_count <= store_commit_count + 1;
     end
 
+    /* ------------------------------------------------------------- *
+     * dut_trig_trap_race -- a real bug, fixed: trap_taken didn't used
+     * to exclude trigger_debug_entry, so an action=1 trigger sitting at
+     * the SAME address as an instruction that would ALSO trap (here, an
+     * ECALL) fired both paths on the same edge -- Debug Mode entry
+     * correctly won the STATE-machine arbitration, but trap_taken's own
+     * side effects (mepc/mcause/mstatus/current_priv, via csr_file0's
+     * trap port) fired anyway, corrupting state a halted debugger has
+     * no reason to expect changed. mcause/mepc are pre-loaded with
+     * sentinel values via a direct Access Register CSR write (the same
+     * mechanism dut_trig_warl already proves works for tdata1/dcsr) --
+     * unlike a REAL earlier trap, this can't accidentally coincide with
+     * a legitimate cause code, so any change at all is unambiguous.
+     * ------------------------------------------------------------- */
+
+    logic rst_trap_race = 1;
+    logic [6:0]  reg_addr_trap_race;
+    logic [31:0] reg_wdata_trap_race;
+    logic        reg_we_trap_race = 1'b0;
+    logic [31:0] reg_rdata_trap_race;
+    dm_core_harness #(.NUM_WORDS(32)) dut_trig_trap_race (
+        .clk(clk), .rst(rst_trap_race),
+        .i_reg_addr(reg_addr_trap_race), .i_reg_wdata(reg_wdata_trap_race),
+        .i_reg_we(reg_we_trap_race), .o_reg_rdata(reg_rdata_trap_race)
+    );
+    task automatic trap_race_dmi_write(input [6:0] addr, input [31:0] wdata);
+        reg_addr_trap_race  = addr; reg_wdata_trap_race = wdata; reg_we_trap_race = 1'b1;
+        @(posedge clk); #1;
+        reg_we_trap_race    = 1'b0;
+    endtask
+    task automatic trap_race_dmi_read(input [6:0] addr, output [31:0] rdata);
+        reg_addr_trap_race = addr; #1; rdata = reg_rdata_trap_race;
+    endtask
+    int trap_race_commit_count = 0;
+    always @(posedge clk) begin
+        if (dut_trig_trap_race.core0.commit_now) trap_race_commit_count <= trap_race_commit_count + 1;
+    end
+
+    /* ------------------------------------------------------------- *
+     * dut_trig_store_exc -- B11: an action=0 trigger matching a STORE
+     * must prevent that store's real bus write too, not just when it's
+     * an action=1 Debug Mode entry (dut_trig_store above already proves
+     * that side). Fixed by adding trigger_exception_match to
+     * mem_phase_needed's own NOT-list, so state never even enters S_MEM
+     * for the matched store -- same mechanism misalignment/PMP already
+     * use, not a new one.
+     * ------------------------------------------------------------- */
+
+    logic rst_store_exc = 1;
+    logic [6:0]  reg_addr_store_exc;
+    logic [31:0] reg_wdata_store_exc;
+    logic        reg_we_store_exc = 1'b0;
+    logic [31:0] reg_rdata_store_exc;
+    dm_core_harness #(.NUM_WORDS(64)) dut_trig_store_exc (
+        .clk(clk), .rst(rst_store_exc),
+        .i_reg_addr(reg_addr_store_exc), .i_reg_wdata(reg_wdata_store_exc),
+        .i_reg_we(reg_we_store_exc), .o_reg_rdata(reg_rdata_store_exc)
+    );
+    task automatic store_exc_dmi_write(input [6:0] addr, input [31:0] wdata);
+        reg_addr_store_exc  = addr; reg_wdata_store_exc = wdata; reg_we_store_exc = 1'b1;
+        @(posedge clk); #1;
+        reg_we_store_exc    = 1'b0;
+    endtask
+    task automatic store_exc_dmi_read(input [6:0] addr, output [31:0] rdata);
+        reg_addr_store_exc = addr; #1; rdata = reg_rdata_store_exc;
+    endtask
+    int store_exc_commit_count = 0;
+    always @(posedge clk) begin
+        if (dut_trig_store_exc.core0.commit_now) store_exc_commit_count <= store_exc_commit_count + 1;
+    end
+
+    /* ------------------------------------------------------------- *
+     * dut_trig_div -- B13: a real bug, fixed: divider0's i_start drives
+     * the divider directly off raw state==S_EXEC, not commit_now, so an
+     * action=1 trigger matching a DIV instruction's own address used to
+     * start the divide running in the background while the core sat
+     * halted in S_DEBUG_HALTED -- divider_o_busy read 1 even though the
+     * DIV never architecturally executed.
+     * ------------------------------------------------------------- */
+
+    logic rst_div = 1;
+    logic [6:0]  reg_addr_div;
+    logic [31:0] reg_wdata_div;
+    logic        reg_we_div = 1'b0;
+    logic [31:0] reg_rdata_div;
+    dm_core_harness #(.NUM_WORDS(32)) dut_trig_div (
+        .clk(clk), .rst(rst_div),
+        .i_reg_addr(reg_addr_div), .i_reg_wdata(reg_wdata_div),
+        .i_reg_we(reg_we_div), .o_reg_rdata(reg_rdata_div)
+    );
+    task automatic div_dmi_write(input [6:0] addr, input [31:0] wdata);
+        reg_addr_div  = addr; reg_wdata_div = wdata; reg_we_div = 1'b1;
+        @(posedge clk); #1;
+        reg_we_div    = 1'b0;
+    endtask
+    int div_commit_count = 0;
+    always @(posedge clk) begin
+        if (dut_trig_div.core0.commit_now) div_commit_count <= div_commit_count + 1;
+    end
+
     initial begin
         #1;
 
@@ -913,6 +1013,287 @@ module core_trigger_tb;
             {61'b0, dut_trig_store.core0.csr_file0.dcsr_q[8:6]}, 64'd2);
         check("dut_trig_store: memory[0x100] is UNCHANGED -- the store's own bus write never happened",
             dut_trig_store.sram0.memory[32], 64'hDEAD_BEEF_DEAD_BEEF);
+
+        /* ----------------------------------------------------------- *
+         * dut_trig_trap_race: action=1 trigger at an ECALL's own
+         * address. Program:
+         *  0x00  addi x1,x0,10
+         *  0x04  addi x0,x0,0     [nop -- safe initial halt window]
+         *  0x08  addi x0,x0,0     [nop]
+         *  0x0C  ecall             <- trigger watches this address
+         *  0x10  addi x2,x0,99     never reached
+         *  0x14  ebreak            never reached
+         * ----------------------------------------------------------- */
+
+        dut_trig_trap_race.sram0.memory[0] = {encode_i(32'sd0, 5'd0, 3'b000, 5'd0, `OPC_OP_IMM),
+                                               encode_i(32'sd10, 5'd0, 3'b000, 5'd1, `OPC_OP_IMM)};
+        dut_trig_trap_race.sram0.memory[1] = {{11'b0, 1'b0, 13'b0, `OPC_SYSTEM},
+                                               encode_i(32'sd0, 5'd0, 3'b000, 5'd0, `OPC_OP_IMM)};
+        dut_trig_trap_race.sram0.memory[2] = {{11'b0, 1'b1, 13'b0, `OPC_SYSTEM},
+                                               encode_i(32'sd99, 5'd0, 3'b000, 5'd2, `OPC_OP_IMM)};
+
+        @(posedge clk); #1;
+        rst_trap_race = 0;
+
+        trap_race_dmi_write(DMI_DMCONTROL, 32'h0000_0001);
+        while (trap_race_commit_count < 1) begin
+            @(posedge clk); #1;
+        end
+        trap_race_dmi_write(DMI_DMCONTROL, 32'h8000_0001);  // haltreq
+        fork
+            wait (dut_trig_trap_race.core0.o_debug_mode === 1'b1);
+            begin
+                repeat (2000) @(posedge clk);
+                $display("TIMEOUT: dut_trig_trap_race never reached its initial halt");
+                $finish;
+            end
+        join_any
+        disable fork;
+        #1;
+
+        // Sentinels into mcause/mepc via a direct Access Register CSR
+        // write -- same mechanism dut_trig_warl already proved for
+        // tdata1/tdata2/dcsr above.
+        trap_race_dmi_write(DMI_DATA0, 32'd77);
+        trap_race_dmi_write(DMI_COMMAND, ar_cmd(1'b1, csr_regno(CSR_MCAUSE)));
+        // 0xA00, not 0x999: mepc is bit-0 WARL-masked (instruction
+        // alignment), so an odd sentinel would silently store one less.
+        trap_race_dmi_write(DMI_DATA0, 32'hA00);
+        trap_race_dmi_write(DMI_COMMAND, ar_cmd(1'b1, csr_regno(CSR_MEPC)));
+
+        // Slot 0: action=1, m=1, execute=1, watching the ECALL.
+        trap_race_dmi_write(DMI_DATA0, 32'd0);
+        trap_race_dmi_write(DMI_COMMAND, ar_cmd(1'b1, csr_regno(CSR_TSELECT)));
+        trap_race_dmi_write(DMI_DATA0, 32'h0000_000C);
+        trap_race_dmi_write(DMI_COMMAND, ar_cmd(1'b1, csr_regno(CSR_TDATA2)));
+        trap_race_dmi_write(DMI_DATA0, (32'd1 << 12) | (32'd1 << 6) | (32'd1 << 2));
+        trap_race_dmi_write(DMI_COMMAND, ar_cmd(1'b1, csr_regno(CSR_TDATA1)));
+
+        trap_race_dmi_write(DMI_DMCONTROL, 32'h4000_0001);  // resumereq
+        fork
+            wait (dut_trig_trap_race.core0.o_debug_mode === 1'b1
+                  && dut_trig_trap_race.core0.state === dut_trig_trap_race.core0.S_DEBUG_HALTED
+                  && dut_trig_trap_race.core0.dpc_w === 64'hC);
+            begin
+                repeat (2000) @(posedge clk);
+                $display("TIMEOUT: dut_trig_trap_race never re-halted at the ECALL");
+                $finish;
+            end
+        join_any
+        disable fork;
+        #1;
+
+        check("dut_trig_trap_race: re-halted with dcsr.cause == 2 and dpc == 0x0C (the ecall's own address)",
+            {61'b0, dut_trig_trap_race.core0.csr_file0.dcsr_q[8:6]}, 64'd2);
+        check("dut_trig_trap_race: x2 == 0 (never reached -- genuinely halted, not just resumed past)",
+            dut_trig_trap_race.core0.regfile0.gp_registers[2], 64'd0);
+
+        trap_race_dmi_write(DMI_COMMAND, ar_cmd(1'b0, csr_regno(CSR_MCAUSE)));
+        begin
+            logic [31:0] rd;
+            trap_race_dmi_read(DMI_DATA0, rd);
+            check("dut_trig_trap_race: mcause STILL == 77 (sentinel) -- the ECALL's own trap path never fired",
+                {32'b0, rd}, 64'd77);
+        end
+        @(posedge clk); #1;
+        trap_race_dmi_write(DMI_COMMAND, ar_cmd(1'b0, csr_regno(CSR_MEPC)));
+        begin
+            logic [31:0] rd;
+            trap_race_dmi_read(DMI_DATA0, rd);
+            check("dut_trig_trap_race: mepc STILL == 0xA00 (sentinel) -- unchanged by the trap path",
+                {32'b0, rd}, 64'hA00);
+        end
+
+        /* ----------------------------------------------------------- *
+         * dut_trig_store_exc: action=0 trigger matching a STORE -- its
+         * real bus write must never happen either. Program:
+         *  0x00  addi x28,x0,0x40   handler address
+         *  0x04  csrrw x0,mtvec,x28
+         *  0x08  addi x5,x0,0x100   store target address
+         *  0x0C  addi x1,x0,0xAB    value to store
+         *  0x10  addi x0,x0,0       [nop -- safe initial halt window]
+         *  0x14  sd x1,0(x5)        <- trigger watches this address
+         *  0x18  addi x3,x0,30      reached after the handler mret's
+         *  0x1C  ebreak             ebreakm armed -- clean stop
+         *  0x40  addi x20,x0,1              handler: marker
+         *  0x44  csrrs x21,mepc,x0           x21 = mepc (== matched addr)
+         *  0x48  csrrs x22,mcause,x0         x22 = mcause
+         *  0x4C  addi x24,x21,4              skip the trapped store
+         *  0x50  csrrw x0,mepc,x24
+         *  0x54  mret
+         * memory[0x100] pre-loaded with a sentinel, checked UNCHANGED.
+         * ----------------------------------------------------------- */
+
+        dut_trig_store_exc.sram0.memory[0] = {encode_csr(`CSR_MTVEC, 5'd28, `FUNCT3_CSRRW, 5'd0, `OPC_SYSTEM),
+                                               encode_i(32'sd64, 5'd0, 3'b000, 5'd28, `OPC_OP_IMM)};
+        dut_trig_store_exc.sram0.memory[1] = {encode_i(32'sd171, 5'd0, 3'b000, 5'd1, `OPC_OP_IMM),
+                                               encode_i(32'sd256, 5'd0, 3'b000, 5'd5, `OPC_OP_IMM)};
+        dut_trig_store_exc.sram0.memory[2] = {encode_s(32'sd0, 5'd1, 5'd5, 3'b011, `OPC_STORE),
+                                               encode_i(32'sd0, 5'd0, 3'b000, 5'd0, `OPC_OP_IMM)};
+        dut_trig_store_exc.sram0.memory[3] = {{11'b0, 1'b1, 13'b0, `OPC_SYSTEM},
+                                               encode_i(32'sd30, 5'd0, 3'b000, 5'd3, `OPC_OP_IMM)};
+        dut_trig_store_exc.sram0.memory[8] = {encode_csr(CSR_MEPC, 5'd0, `FUNCT3_CSRRS, 5'd21, `OPC_SYSTEM),
+                                               encode_i(32'sd1, 5'd0, 3'b000, 5'd20, `OPC_OP_IMM)};
+        dut_trig_store_exc.sram0.memory[9] = {encode_i(32'sd4, 5'd21, 3'b000, 5'd24, `OPC_OP_IMM),
+                                               encode_csr(CSR_MCAUSE, 5'd0, `FUNCT3_CSRRS, 5'd22, `OPC_SYSTEM)};
+        dut_trig_store_exc.sram0.memory[10] = {`INSTR_HEX_MRET,
+                                                encode_csr(CSR_MEPC, 5'd24, `FUNCT3_CSRRW, 5'd0, `OPC_SYSTEM)};
+        dut_trig_store_exc.sram0.memory[32] = 64'hDEAD_BEEF_DEAD_BEEF;  // sentinel at 0x100
+
+        @(posedge clk); #1;
+        rst_store_exc = 0;
+
+        store_exc_dmi_write(DMI_DMCONTROL, 32'h0000_0001);
+        while (store_exc_commit_count < 1) begin
+            @(posedge clk); #1;
+        end
+        store_exc_dmi_write(DMI_DMCONTROL, 32'h8000_0001);  // haltreq
+        fork
+            wait (dut_trig_store_exc.core0.o_debug_mode === 1'b1);
+            begin
+                repeat (2000) @(posedge clk);
+                $display("TIMEOUT: dut_trig_store_exc never reached its initial halt");
+                $finish;
+            end
+        join_any
+        disable fork;
+        #1;
+
+        // Slot 0: action=0 (real exception), m=1, execute=1.
+        store_exc_dmi_write(DMI_DATA0, 32'd0);
+        store_exc_dmi_write(DMI_COMMAND, ar_cmd(1'b1, csr_regno(CSR_TSELECT)));
+        store_exc_dmi_write(DMI_DATA0, 32'h0000_0014);
+        store_exc_dmi_write(DMI_COMMAND, ar_cmd(1'b1, csr_regno(CSR_TDATA2)));
+        store_exc_dmi_write(DMI_DATA0, (32'd0 << 12) | (32'd1 << 6) | (32'd1 << 2));  // action=0
+        store_exc_dmi_write(DMI_COMMAND, ar_cmd(1'b1, csr_regno(CSR_TDATA1)));
+
+        store_exc_dmi_write(DMI_DATA0, 32'h0000_8000);  // dcsr.ebreakm
+        store_exc_dmi_write(DMI_DATA1, 32'd0);
+        store_exc_dmi_write(DMI_COMMAND, ar_cmd(1'b1, csr_regno(CSR_DCSR)));
+
+        store_exc_dmi_write(DMI_DMCONTROL, 32'h4000_0001);  // resumereq
+        fork
+            wait (dut_trig_store_exc.core0.o_debug_mode === 1'b1
+                  && dut_trig_store_exc.core0.state === dut_trig_store_exc.core0.S_DEBUG_HALTED
+                  && dut_trig_store_exc.core0.dpc_w === 64'h1C);
+            begin
+                repeat (4000) @(posedge clk);
+                $display("TIMEOUT: dut_trig_store_exc never reached its final EBREAK");
+                $finish;
+            end
+        join_any
+        disable fork;
+        #1;
+
+        check("dut_trig_store_exc: x1 == 0xAB (ran before the trap)",
+            dut_trig_store_exc.core0.regfile0.gp_registers[1], 64'hAB);
+        check("dut_trig_store_exc: memory[0x100] is UNCHANGED -- the store's own bus write never happened",
+            dut_trig_store_exc.sram0.memory[32], 64'hDEAD_BEEF_DEAD_BEEF);
+        check("dut_trig_store_exc: x3 == 30 (ran after the handler resumed past the trap)",
+            dut_trig_store_exc.core0.regfile0.gp_registers[3], 64'd30);
+        check("dut_trig_store_exc: x20 == 1 (the real mtvec handler genuinely ran)",
+            dut_trig_store_exc.core0.regfile0.gp_registers[20], 64'd1);
+        check("dut_trig_store_exc: x21 == 0x14 (mepc captured the store's own address)",
+            dut_trig_store_exc.core0.regfile0.gp_registers[21], 64'h14);
+        check("dut_trig_store_exc: x22 == 3 (mcause == Breakpoint)",
+            dut_trig_store_exc.core0.regfile0.gp_registers[22], 64'd3);
+
+        /* ----------------------------------------------------------- *
+         * dut_trig_div: action=1 trigger at a DIV instruction's own
+         * address. Program:
+         *  0x00  addi x1,x0,20
+         *  0x04  addi x2,x0,4
+         *  0x08  addi x0,x0,0    [nop -- safe initial halt window]
+         *  0x0C  div x3,x1,x2     <- trigger watches this address
+         *  0x10  addi x4,x0,77    reached only once the trigger's disabled
+         *  0x14  ebreak            ebreakm armed -- clean final stop
+         * ----------------------------------------------------------- */
+
+        dut_trig_div.sram0.memory[0] = {encode_i(32'sd4, 5'd0, 3'b000, 5'd2, `OPC_OP_IMM),
+                                         encode_i(32'sd20, 5'd0, 3'b000, 5'd1, `OPC_OP_IMM)};
+        dut_trig_div.sram0.memory[1] = {encode_r(7'b0000001, 5'd2, 5'd1, 3'b100, 5'd3, `OPC_OP),
+                                         encode_i(32'sd0, 5'd0, 3'b000, 5'd0, `OPC_OP_IMM)};
+        dut_trig_div.sram0.memory[2] = {{11'b0, 1'b1, 13'b0, `OPC_SYSTEM},
+                                         encode_i(32'sd77, 5'd0, 3'b000, 5'd4, `OPC_OP_IMM)};
+
+        @(posedge clk); #1;
+        rst_div = 0;
+
+        div_dmi_write(DMI_DMCONTROL, 32'h0000_0001);
+        while (div_commit_count < 1) begin
+            @(posedge clk); #1;
+        end
+        div_dmi_write(DMI_DMCONTROL, 32'h8000_0001);  // haltreq
+        fork
+            wait (dut_trig_div.core0.o_debug_mode === 1'b1);
+            begin
+                repeat (2000) @(posedge clk);
+                $display("TIMEOUT: dut_trig_div never reached its initial halt");
+                $finish;
+            end
+        join_any
+        disable fork;
+        #1;
+
+        // Slot 0: action=1, m=1, execute=1, watching the DIV.
+        div_dmi_write(DMI_DATA0, 32'd0);
+        div_dmi_write(DMI_COMMAND, ar_cmd(1'b1, csr_regno(CSR_TSELECT)));
+        div_dmi_write(DMI_DATA0, 32'h0000_000C);
+        div_dmi_write(DMI_COMMAND, ar_cmd(1'b1, csr_regno(CSR_TDATA2)));
+        div_dmi_write(DMI_DATA0, (32'd1 << 12) | (32'd1 << 6) | (32'd1 << 2));
+        div_dmi_write(DMI_COMMAND, ar_cmd(1'b1, csr_regno(CSR_TDATA1)));
+
+        div_dmi_write(DMI_DMCONTROL, 32'h4000_0001);  // resumereq
+        fork
+            wait (dut_trig_div.core0.o_debug_mode === 1'b1
+                  && dut_trig_div.core0.state === dut_trig_div.core0.S_DEBUG_HALTED
+                  && dut_trig_div.core0.dpc_w === 64'hC);
+            begin
+                repeat (2000) @(posedge clk);
+                $display("TIMEOUT: dut_trig_div never re-halted at the DIV");
+                $finish;
+            end
+        join_any
+        disable fork;
+        #1;
+
+        check("dut_trig_div: re-halted with dcsr.cause == 2 and dpc == 0x0C (the div's own address)",
+            {61'b0, dut_trig_div.core0.csr_file0.dcsr_q[8:6]}, 64'd2);
+        check("dut_trig_div: x3 == 0 (never executed -- the divide was genuinely suppressed)",
+            dut_trig_div.core0.regfile0.gp_registers[3], 64'd0);
+        check("dut_trig_div: divider never started (i_start correctly suppressed on the trigger's own S_EXEC cycle)",
+            {63'b0, dut_trig_div.core0.divider_o_busy}, 64'd0);
+
+        // Disable the trigger, arm ebreakm, resume -- the SAME div at the
+        // SAME pc must now genuinely execute and produce the right result,
+        // proving nothing was left corrupted by the earlier suppressed start.
+        div_dmi_write(DMI_DATA0, 32'd0);
+        div_dmi_write(DMI_COMMAND, ar_cmd(1'b1, csr_regno(CSR_TSELECT)));
+        div_dmi_write(DMI_DATA0, (32'd1 << 12) | (32'd1 << 6));  // execute=0 now
+        div_dmi_write(DMI_COMMAND, ar_cmd(1'b1, csr_regno(CSR_TDATA1)));
+
+        div_dmi_write(DMI_DATA0, 32'h0000_8000);  // dcsr.ebreakm
+        div_dmi_write(DMI_DATA1, 32'd0);
+        div_dmi_write(DMI_COMMAND, ar_cmd(1'b1, csr_regno(CSR_DCSR)));
+
+        div_dmi_write(DMI_DMCONTROL, 32'h4000_0001);  // resumereq
+        fork
+            wait (dut_trig_div.core0.o_debug_mode === 1'b1
+                  && dut_trig_div.core0.state === dut_trig_div.core0.S_DEBUG_HALTED
+                  && dut_trig_div.core0.dpc_w === 64'h14);
+            begin
+                repeat (2000) @(posedge clk);
+                $display("TIMEOUT: dut_trig_div never reached its final EBREAK");
+                $finish;
+            end
+        join_any
+        disable fork;
+        #1;
+
+        check("dut_trig_div: x3 == 5 (20/4, the real divide completed correctly once resumed)",
+            dut_trig_div.core0.regfile0.gp_registers[3], 64'd5);
+        check("dut_trig_div: x4 == 77 (ran after the divide)",
+            dut_trig_div.core0.regfile0.gp_registers[4], 64'd77);
 
         $display("");
         $display("core_trigger_tb: %0d passed, %0d failed", pass_count, fail_count);

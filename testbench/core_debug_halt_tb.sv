@@ -471,6 +471,18 @@ module core_debug_halt_tb;
             dut_ebreakm.core0.dpc_w, 64'h00);
         check("dut_ebreakm: dcsr.cause == 1 (ebreak)",
             {61'b0, dut_ebreakm.core0.dcsr_w[8:6]}, 64'd1);
+        // A real bug, fixed: an EBREAK-to-debug entry used to still fire
+        // commit_now (debug_ebreak_entry was itself DEFINED as
+        // commit_now && ...), so pc advanced to next_pc and minstret
+        // incremented even though the instruction never architecturally
+        // retired -- it entered Debug Mode instead. pc must stay AT the
+        // ebreak's own address (same as dpc), and minstret must still
+        // read 0 -- this is the very first instruction the program ever
+        // ran, and it didn't retire.
+        check("dut_ebreakm: pc == 0x00 too, NOT advanced past the ebreak (pc must equal dpc while halted here)",
+            dut_ebreakm.core0.pc, 64'h00);
+        check("dut_ebreakm: minstret == 0 -- the ebreak that entered Debug Mode must not count as retired",
+            dut_ebreakm.core0.csr_file0.minstret_q, 64'd0);
 
         // bump dpc past the ebreak before resuming, mirroring how a real
         // debugger steps over a software breakpoint (dpc is spec-legal
@@ -501,6 +513,10 @@ module core_debug_halt_tb;
             dut_ebreakm.core0.regfile0.gp_registers[2], 64'd0);
         check("dut_ebreakm: dpc == 0x08 (the 2nd ebreak's own address)",
             dut_ebreakm.core0.dpc_w, 64'h08);
+        check("dut_ebreakm: pc == 0x08 too, NOT advanced past the 2nd ebreak either",
+            dut_ebreakm.core0.pc, 64'h08);
+        check("dut_ebreakm: minstret == 1 -- only the ADDI in between actually retired, neither ebreak did",
+            dut_ebreakm.core0.csr_file0.minstret_q, 64'd1);
 
         /* ----------------------------------------------------------- *
          * dut_race

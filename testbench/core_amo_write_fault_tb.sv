@@ -48,6 +48,18 @@ module core_amo_write_fault_tb;
 
     core_amo_write_fault_harness #(.NUM_WORDS(64)) dut (.clk(clk), .rst(rst));
 
+    // dut2: a real bug, fixed: trap_val's AMO write-phase arm used to
+    // report the DWORD-ROUNDED amo_addr_q[cur_slot] directly, silently
+    // wrong for a .W AMO sitting in a dword's UPPER word (address bit 2
+    // set, legal -- .W only needs 4-byte alignment). AMO_TARGET (0x1000)
+    // above has byte_off==0, so it can't distinguish this from the
+    // correct {amo_addr_q[63:3], amo_byte_off_q[cur_slot]} construction
+    // -- dut2 uses 0x1004 specifically because it can.
+    logic rst2 = 1;
+    core_amo_write_fault_harness #(.NUM_WORDS(64)) dut2 (.clk(clk), .rst(rst2));
+    logic halted2 = 1'b0;
+    always @(posedge clk) if (dut2.core0.trap_taken && dut2.core0.is_ebreak) halted2 <= 1'b1;
+
     int pass_count = 0;
     int fail_count = 0;
     logic quiet_on_pass = 1'b0;
@@ -59,6 +71,7 @@ module core_amo_write_fault_tb;
 
     localparam int unsigned HANDLER_ADDR = 32'h40;
     localparam int unsigned AMO_TARGET   = 32'h1000;
+    localparam int unsigned AMO_TARGET2  = 32'h1004;
 
     logic [31:0] main_prog[0:5];
     logic [31:0] handler_prog[0:3];
@@ -112,6 +125,68 @@ module core_amo_write_fault_tb;
         check("AMO write-phase fault: mtval == the real target address (0x1000), NOT the repurposed mem_paddr modify value (105)",
             dut.core0.regfile0.gp_registers[11], 64'(AMO_TARGET));
         check("EBREAK trap fired", {63'b0, halted}, 64'd1);
+
+        /*
+         * dut2 -- same shape, but the AMO's target (0x1004) sits in the
+         * UPPER word of its containing dword, so a naive dword-rounded
+         * mtval (0x1000, the SAME wrong answer a mem_paddr-instead-of-
+         * amo_addr_q bug would ALSO have produced by coincidence at
+         * 0x1000) is trivially distinguishable from the correct 0x1004:
+         * addr  instr                                    notes
+         * 0x00  addi x28, x0, HANDLER_ADDR
+         * 0x04  csrrw x0, mtvec, x28
+         * 0x08  lui x5, 1                                 x5 = 0x1000
+         * 0x0C  addi x5, x5, 4                             x5 = 0x1004
+         * 0x10  addi x6, x0, 5                             x6 = 5
+         * 0x14  amoadd.w x7, x6, (x5)                      read succeeds,
+         *                                                   WRITE FAULTS
+         * 0x18  ebreak
+         */
+        begin
+            logic [31:0] main_prog2[0:6];
+            logic [31:0] handler_prog2[0:3];
+            int j;
+
+            main_prog2[0] = encode_i(int'(HANDLER_ADDR), 5'd0, 3'b000, 5'd28, `OPC_OP_IMM);
+            main_prog2[1] = encode_csr(`CSR_MTVEC, 5'd28, `FUNCT3_CSRRW, 5'd0, `OPC_SYSTEM);
+            main_prog2[2] = encode_u(20'h1, 5'd5, `OPC_LUI);
+            main_prog2[3] = encode_i(32'sd4, 5'd5, 3'b000, 5'd5, `OPC_OP_IMM);
+            main_prog2[4] = encode_i(32'sd5, 5'd0, 3'b000, 5'd6, `OPC_OP_IMM);
+            main_prog2[5] = encode_amo(`FUNCT5_AMOADD, 1'b0, 1'b0, 5'd6, 5'd5, `FUNCT3_AMO_W, 5'd7, `OPC_AMO);
+            main_prog2[6] = encode_i(32'sd1, 5'd0, 3'b000, 5'd0, `OPC_SYSTEM); // ebreak
+
+            for (j = 0; j < 3; j = j + 1)
+                dut2.memory[j] = {main_prog2[2*j+1], main_prog2[2*j]};
+            dut2.memory[3] = {32'h0, main_prog2[6]};
+
+            handler_prog2[0] = encode_csr(`CSR_MCAUSE, 5'd0, `FUNCT3_CSRRS, 5'd10, `OPC_SYSTEM);
+            handler_prog2[1] = encode_csr(`CSR_MTVAL, 5'd0, `FUNCT3_CSRRS, 5'd11, `OPC_SYSTEM);
+            handler_prog2[2] = encode_i(32'sd1, 5'd0, 3'b000, 5'd0, `OPC_SYSTEM); // ebreak
+            handler_prog2[3] = encode_i(32'sd0, 5'd0, 3'b000, 5'd0, `OPC_OP_IMM); // padding
+
+            for (j = 0; j < 2; j = j + 1)
+                dut2.memory[8+j] = {handler_prog2[2*j+1], handler_prog2[2*j]};
+        end
+
+        @(posedge clk); #1;
+        rst2 = 0;
+
+        fork
+            wait (halted2 === 1'b1);
+            begin
+                repeat (`TIMEOUT_CYCLES_SMALL) @(posedge clk);
+                $display("TIMEOUT: dut2 EBREAK trap never fired");
+                $finish;
+            end
+        join_any
+        disable fork;
+        #1;
+
+        check("dut2 AMO write-phase fault: mcause == 7 (store/AMO access fault)",
+            dut2.core0.regfile0.gp_registers[10], 64'd7);
+        check("dut2 AMO write-phase fault: mtval == the real target address (0x1004), NOT the dword-rounded 0x1000",
+            dut2.core0.regfile0.gp_registers[11], 64'(AMO_TARGET2));
+        check("dut2 EBREAK trap fired", {63'b0, halted2}, 64'd1);
 
         $display("");
         $display("core_amo_write_fault_tb: %0d passed, %0d failed", pass_count, fail_count);

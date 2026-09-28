@@ -66,9 +66,11 @@
  *     monitor at its own PC, same reasoning as item 5.
  *  7. A final minstret read matching the exact known instruction count
  *     retired so far, plus a post-halt hierarchical check that
- *     minstret's storage ends at the full program length -- including
- *     ebreak itself, which retires (and so still increments minstret)
- *     even though it doesn't write a register.
+ *     minstret's storage stops one short of the full program length --
+ *     this EBREAK takes the ordinary synchronous-trap path (dcsr.ebreakm
+ *     is never set here), and a trapped instruction does not retire, so
+ *     it must not increment minstret either (a real, fixed bug: see
+ *     design/core.sv's i_instr_retired port comment).
  *  8. ebreak.
  *
  * Deliberately NOT re-proven here (already covered by core_wb_tb.sv):
@@ -218,8 +220,8 @@ module core_zicsr_tb;
 
         check("x14 (minstret read -- count of instructions retired strictly before this one)",
               dut.core0.regfile0.gp_registers[14], 64'd14);
-        check("minstret final storage -- full program length, including ebreak's own retirement",
-              dut.core0.csr_file0.minstret_q, 64'd16);
+        check("minstret final storage -- one short of full program length: EBREAK traps (cause 3) and a trapped instruction must not retire",
+              dut.core0.csr_file0.minstret_q, 64'd15);
 
         check("EBREAK trap fired", {63'b0, halted}, 64'd1);
 

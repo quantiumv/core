@@ -215,6 +215,42 @@ module dm_tb;
         end
     endtask
 
+    /* ------------------------------------------------------------- *
+     * dut_progbuf_fetchfault -- a real bug, fixed: progbuf_abort used
+     * to read fetch_fault_q[cur_slot] as one of its abort conditions,
+     * but cur_slot never toggles during a Program Buffer run (progbuf
+     * "instructions" are i_progbuf_data, never fetched over the bus at
+     * all) -- so that flag just held whatever the LAST REAL instruction
+     * fetch, before the run started, left in that slot. Halting exactly
+     * at a genuine instruction-access-fault (cur_slot pointing at the
+     * faulted slot, fetch_fault_q[cur_slot] still 1) used to make every
+     * subsequent progbuf run abort immediately with cmderr=3, regardless
+     * of what it actually contained.
+     * ------------------------------------------------------------- */
+
+    logic rst_pbff = 1;
+    logic [6:0]  reg_addr_pbff;
+    logic [31:0] reg_wdata_pbff;
+    logic        reg_we_pbff = 1'b0;
+    logic [31:0] reg_rdata_pbff;
+    dm_core_harness #(.NUM_WORDS(32)) dut_progbuf_fetchfault (
+        .clk(clk), .rst(rst_pbff),
+        .i_reg_addr(reg_addr_pbff), .i_reg_wdata(reg_wdata_pbff),
+        .i_reg_we(reg_we_pbff), .o_reg_rdata(reg_rdata_pbff)
+    );
+    task automatic pbff_dmi_write(input [6:0] addr, input [31:0] wdata);
+        reg_addr_pbff  = addr; reg_wdata_pbff = wdata; reg_we_pbff = 1'b1;
+        @(posedge clk); #1;
+        reg_we_pbff    = 1'b0;
+    endtask
+    task automatic pbff_dmi_read(input [6:0] addr, output [31:0] rdata);
+        reg_addr_pbff = addr; #1; rdata = reg_rdata_pbff;
+    endtask
+    int pbff_commit_count = 0;
+    always @(posedge clk) begin
+        if (dut_progbuf_fetchfault.core0.commit_now) pbff_commit_count <= pbff_commit_count + 1;
+    end
+
     localparam [6:0] DMI_PROGBUF0 = 7'h20;
     localparam [6:0] DMI_PROGBUF1 = 7'h21;
     localparam [11:0] CSR_DPC_PB  = 12'h7B1;
@@ -1506,6 +1542,74 @@ module dm_tb;
             dut_amo_sba.core0.regfile0.gp_registers[6], 64'd500);
         check("dut_amo_sba: memory[T] == W -- the SBA's own write landed AFTER the AMO fully completed, not lost between its read and write",
             dut_amo_sba.sram0.memory[AMO_SBA_T / 8], 64'd12345);
+
+        /* ----------------------------------------------------------- *
+         * dut_progbuf_fetchfault: halt exactly at a genuine instruction-
+         * access fault, then confirm a real Program Buffer run doesn't
+         * abort on the stale fetch_fault_q[cur_slot] flag that fault
+         * left behind. Program:
+         *  0x00  jal x0,0x1000   jumps to a genuinely out-of-range
+         *                        address (dm_core_harness's own SRAM is
+         *                        only NUM_WORDS=32, i.e. 0x00-0xFF) --
+         *                        the NEXT fetch attempt (at 0x1000)
+         *                        access-faults (cause 1); mtvec is left
+         *                        unconfigured (0), so the trap harmlessly
+         *                        loops back to this same JAL, but haltreq
+         *                        (asserted after the JAL's own commit,
+         *                        before the fault) is already pending
+         *                        and catches the very next commit --
+         *                        the fault itself -- before any of that
+         *                        looping actually happens.
+         * ----------------------------------------------------------- */
+
+        dut_progbuf_fetchfault.sram0.memory[0] = {32'h0, encode_j(32'sd4096, 5'd0, `OPC_JAL)};
+
+        @(posedge clk); #1;
+        rst_pbff = 0;
+
+        pbff_dmi_write(DMI_DMCONTROL, 32'h0000_0001);  // dmactive
+        while (pbff_commit_count < 1) begin  // let the JAL itself commit first
+            @(posedge clk); #1;
+        end
+        pbff_dmi_write(DMI_DMCONTROL, 32'h8000_0001);  // haltreq -- pending, catches the fault next
+        fork
+            wait (dut_progbuf_fetchfault.core0.o_debug_mode === 1'b1);
+            begin
+                repeat (2000) @(posedge clk);
+                $display("TIMEOUT: dut_progbuf_fetchfault never halted");
+                $finish;
+            end
+        join_any
+        disable fork;
+        #1;
+
+        check("dut_progbuf_fetchfault: genuinely halted at the fault (fetch_fault_q[cur_slot] is really 1 here)",
+            {63'b0, dut_progbuf_fetchfault.core0.fetch_fault_q[dut_progbuf_fetchfault.core0.cur_slot]}, 64'd1);
+
+        // An ordinary, entirely legal progbuf run -- must NOT abort.
+        pbff_dmi_write(DMI_PROGBUF0, encode_i(32'sd55, 5'd0, 3'b000, 5'd9, `OPC_OP_IMM));  // addi x9,x0,55
+        pbff_dmi_write(DMI_PROGBUF1, {11'b0, 1'b1, 13'b0, `OPC_SYSTEM});                   // ebreak
+        pbff_dmi_write(DMI_COMMAND, {8'h00, 1'b0, 3'd3, 1'b0, 1'b1, 1'b0, 1'b0, 16'h0000}); // postexec-only
+
+        begin
+            logic [31:0] rd;
+            int tries;
+            tries = 0;
+            rd = 32'h0000_1000;  // seed with busy=1
+            while (rd[12]) begin
+                if (tries >= 100) begin
+                    $display("TIMEOUT: dut_progbuf_fetchfault busy never cleared");
+                    $finish;
+                end
+                @(posedge clk); #1;
+                pbff_dmi_read(DMI_ABSTRACTCS, rd);
+                tries++;
+            end
+            check("dut_progbuf_fetchfault: cmderr == 0 (did NOT abort on the stale fetch-fault flag)",
+                {61'b0, rd[10:8]}, 64'd0);
+        end
+        check("dut_progbuf_fetchfault: x9 == 55 (the progbuf instruction genuinely ran)",
+            dut_progbuf_fetchfault.core0.regfile0.gp_registers[9], 64'd55);
 
         $display("");
         $display("dm_tb: %0d passed, %0d failed", pass_count, fail_count);

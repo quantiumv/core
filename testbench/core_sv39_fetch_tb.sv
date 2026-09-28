@@ -77,6 +77,38 @@
  *      left over from the FIRST instruction was checked before the
  *      second instruction's own real address was ever resolved.
  *
+ * Tests L/M/N: Pipelining P3.1 regression tests, added later still --
+ * three more pre-existing FSM bugs found while auditing cur_slot's own
+ * 2-slot reuse ahead of freezing the FSM as pipelining's golden
+ * reference, all sharing the same root mechanic (per-instruction
+ * fetch-side scratch state going stale when its slot comes back around
+ * two episodes later) that test E's own pmp_fetchhi_fault bug already
+ * exemplified for a different register:
+ *   L. PMP-deny slot staleness -- fetch_lo_resolved_q[cur_slot] used to
+ *      survive a PMP-denied translated fetch uncleared, so the SAME
+ *      slot's next reuse skipped retranslation entirely and reused the
+ *      stale, denied physical address, even after the page table was
+ *      remapped and the TLB flushed.
+ *   M. TLB-hit mtval staleness (mem-side) -- a TLB-hit-triggered page
+ *      fault used to report whatever VA the slot's LAST REAL WALK left
+ *      in ptw_vaddr_q[cur_slot], not the hit's own faulting address.
+ *   N. TLB-hit fetch_fault_q staleness -- a TLB-hit PTE-content fault
+ *      (cause 12) used to be misclassified as cause 1 whenever its slot
+ *      still carried a stale cause-1 flag from an earlier, unrelated
+ *      fault.
+ * Each test's own comment (below, at its harness declaration) has the
+ * full mechanism. Tests L and N both need exactly ONE intervening
+ * instruction between the poisoning fault and the retry that lands back
+ * on its same slot -- not merely an odd count -- because the very
+ * registers under test are cleared by ANY intervening instruction's own
+ * ordinary fetch completion once it reaches that slot again (2-slot
+ * alternation guarantees a second instruction always does); the real
+ * multi-instruction work an organic handler would need (a PTE rewrite +
+ * SFENCE.VMA for L, an mepc rewrite for N) is therefore performed by a
+ * dedicated backdoor testbench process instead, timed off the fault
+ * itself, leaving a bare `mret` as the single genuine intervening
+ * instruction -- see each test's own comment for the full reasoning.
+ *
  * PTE bit layout used throughout (spec-fixed): V[0] R[1] W[2] X[3] U[4]
  * G[5] A[6] D[7] RSW[9:8] PPN0[18:10] PPN1[27:19] PPN2[53:28].
  */
@@ -102,6 +134,19 @@ module core_sv39_fetch_tb;
     endfunction
     function automatic logic [31:0] enc_csrrs(input logic [11:0] csr, input logic [4:0] rd);
         return encode_csr(csr, 5'd0, `FUNCT3_CSRRS, rd, `OPC_SYSTEM);
+    endfunction
+    // Tests M/N (Pipelining P3.1 regression tests, below): LD/SD/JALR
+    // helpers, same shapes testbench/core_sv39_mem_tb.sv and
+    // testbench/core_sv39_cache_tb.sv already use for this exact class of
+    // hand-assembled mem-side/control-flow program.
+    function automatic logic [31:0] enc_ld(input logic [4:0] rd, rs1, input int imm);
+        return encode_i(imm, rs1, 3'b011, rd, `OPC_LOAD);
+    endfunction
+    function automatic logic [31:0] enc_sd(input logic [4:0] rs2, rs1, input int imm);
+        return encode_s(imm, rs2, rs1, 3'b011, `OPC_STORE);
+    endfunction
+    function automatic logic [31:0] enc_jalr(input logic [4:0] rd, rs1, input int imm);
+        return encode_i(imm, rs1, 3'b000, rd, `OPC_JALR);
     endfunction
     localparam logic [31:0] EBREAK_INSN = {11'b0, 1'b1, 13'b0, `OPC_SYSTEM};
     localparam logic [31:0] NOP_INSN    = 32'h00000013;
@@ -324,6 +369,207 @@ module core_sv39_fetch_tb;
         mcause_k   <= dut_k.core0.regfile0.gp_registers[20];
         mtval_k    <= dut_k.core0.regfile0.gp_registers[21];
     end
+
+    /* ----------------------------------------------------------------
+     * Test L: PMP-deny slot staleness (Pipelining P3.1 regression) --
+     * proves cur_slot's own 2-slot reuse doesn't let a PMP-denied
+     * translated fetch's fetch_lo_resolved_q[cur_slot] survive stale
+     * across the SAME slot's next reuse. A fetch at VA_P translates
+     * cleanly but the resolved PA is PMP-denied (cause 1); EXACTLY one
+     * other instruction runs (mtvec's own handler, a bare `mret`) before
+     * the retry lands back on the SAME slot as the original fault
+     * (2-slot parity: see the state-transition always_ff's own cur_slot
+     * comment) -- genuinely exactly one, not merely odd, unlike this
+     * file's other two P3.1 regression tests: fetch_lo_resolved_q[cur_slot]'s
+     * own clear (the very thing this test is probing) is gated on plain
+     * wb_fetch_done, NOT on fetch_translate_active -- ANY intervening
+     * instruction's own successful fetch completion, translated or not,
+     * clears it as a side effect the instant it reuses this same slot,
+     * which happens on the SECOND instruction of ANY longer handler
+     * (strict 2-slot alternation), masking the exact staleness this test
+     * exists to catch before ever reaching a real retry. A genuine SD +
+     * SFENCE.VMA remap sequence (the organic way core_sv39_cache_tb.sv's
+     * own dut5 test proves this same remap+flush recipe works from real
+     * M-mode code) would add exactly this many extra instructions -- so
+     * the backdoor testbench watcher process below performs the SAME two
+     * effects (rewriting VA_P's own L0 leaf PTE in place to a DIFFERENT,
+     * PMP-PERMITTED physical page, and invalidating the TLB) directly,
+     * outside the instruction stream entirely, the instant the ORIGINAL
+     * fault is observed -- leaving `mret` (reusing mepc, which hardware
+     * already set to VA_P) as the ONLY real intervening instruction.
+     * Fixed: the same always_ff that clears fetch_lo_resolved_q[cur_slot]
+     * on wb_fetch_done now ALSO clears it on the matching PMP-deny exit,
+     * so the retry genuinely re-walks and reads the REMAPPED PTE.
+     * Pre-fix, fetch_lo_resolved_q[cur_slot] reads stale-1, so the retry
+     * skips translation entirely and reuses the OLD (still-denied)
+     * fetch_lo_paddr_q -- re-faulting identically, forever (mret always
+     * redirects back to the same VA_P). The SAME watcher process bounds
+     * this: a SECOND fault at VA_P (only reachable pre-fix) replaces the
+     * handler's own `mret` with a safe EBREAK instead of letting it loop,
+     * so the DUT halts deterministically either way -- x30 (set only by
+     * the REMAPPED page's own code, on the success path alone) is the
+     * discriminator: 1 post-fix, stuck at 0 pre-fix.
+     * ---------------------------------------------------------------- */
+    core_wb4_sram_harness #(.NUM_WORDS(8192)) dut_l (.clk(clk), .rst(rst));
+    logic halted_l = 1'b0;
+    always @(posedge clk) if (dut_l.core0.trap_taken && dut_l.core0.is_ebreak) halted_l <= 1'b1;
+    logic dut_l_remapped          = 1'b0;
+    logic dut_l_safety_installed  = 1'b0;
+    initial begin
+        while (!dut_l_safety_installed) begin
+            @(posedge clk);
+            if (!dut_l_remapped && dut_l.core0.trap_taken && dut_l.core0.pc == 64'h40403000) begin
+                dut_l_remapped = 1'b1;
+                // Backdoor remap, timed off the ORIGINAL fault itself --
+                // see this test's own header comment for why a real SD
+                // instruction can't be used here. New PTE: same
+                // V=R=W=X=A=D=1,U=0 flags as the original, PPN=8 (PA
+                // 0x8000) instead of PPN=4 (PA 0x4000).
+                dut_l.sram0.memory[1536 + 3] = 64'h0000_0000_0000_20CF;
+                // Backdoor SFENCE.VMA-equivalent: force every TLB entry
+                // invalid for one cycle, then release -- same reason a
+                // real SFENCE.VMA instruction can't be used here either.
+                force dut_l.core0.tlb0_valid_q = 1'b0;
+                force dut_l.core0.tlb1_valid_q = 1'b0;
+                force dut_l.core0.tlb2_valid_q = 1'b0;
+                force dut_l.core0.tlb3_valid_q = 1'b0;
+                @(posedge clk);
+                release dut_l.core0.tlb0_valid_q;
+                release dut_l.core0.tlb1_valid_q;
+                release dut_l.core0.tlb2_valid_q;
+                release dut_l.core0.tlb3_valid_q;
+            end else if (dut_l_remapped && dut_l.core0.trap_taken && dut_l.core0.pc == 64'h40403000) begin
+                // Only reachable pre-fix (see header comment) -- install
+                // a safe halt in place of the handler's own mret so the
+                // DUT stops retrying instead of looping forever.
+                dut_l.sram0.memory[32][31:0] = EBREAK_INSN;
+                dut_l_safety_installed = 1'b1;
+            end
+        end
+    end
+
+    /* ----------------------------------------------------------------
+     * Test M: TLB-hit mtval staleness, mem-side (Pipelining P3.1
+     * regression) -- proves a TLB-HIT-triggered page fault reports ITS
+     * OWN faulting VA in mtval, not whatever VA the same slot's LAST REAL
+     * WALK happened to leave in ptw_vaddr_q[cur_slot]. Two real walks
+     * (consecutive LOADs from VA_A then VA_B, filling two distinct TLB
+     * entries) are immediately followed by a STORE back to VA_B -- a
+     * third, consecutive instruction, so simple 2-slot alternation lands
+     * it on the SAME cur_slot as the VA_A load, not the VA_B one. VA_B is
+     * mapped read-only (W=0), so the store hits the cached entry and
+     * THEN faults (cause 15, store page fault) purely from the cached
+     * permission bits -- mem_fault_q[cur_slot] is set correctly either
+     * way (unchanged by this bug). Fixed: ptw_vaddr_q[cur_slot] <=
+     * tlb_lookup_vaddr now runs unconditionally on every hit, so mtval
+     * correctly reads VA_B. Pre-fix, nothing on the hit path ever writes
+     * ptw_vaddr_q[cur_slot], so mtval reads VA_A instead -- a stale
+     * address from a DIFFERENT, already-retired instruction's own real
+     * walk, sitting in the SAME slot two episodes earlier. mem-side
+     * chosen over fetch-side deliberately: mem_fault_q/ptw_vaddr_q are
+     * both indexed by the SAME plain cur_slot throughout (mem-reason
+     * S_PTW never toggles cur_slot), so there's no fetch_slot-vs-cur_slot
+     * toggle-timing to get right, unlike the fetch stream.
+     * ---------------------------------------------------------------- */
+    core_wb4_sram_harness #(.NUM_WORDS(4096)) dut_m (.clk(clk), .rst(rst));
+    logic halted_m = 1'b0;
+    always @(posedge clk) if (dut_m.core0.trap_taken && dut_m.core0.is_ebreak) halted_m <= 1'b1;
+    logic [63:0] mcause_m, mtval_m;
+    logic        captured_m = 1'b0;
+    always @(posedge clk) if (!captured_m && dut_m.core0.commit_now && dut_m.core0.pc == 64'h108) begin
+        captured_m <= 1'b1;
+        mcause_m   <= dut_m.core0.regfile0.gp_registers[20];
+        mtval_m    <= dut_m.core0.regfile0.gp_registers[21];
+    end
+
+    /* ----------------------------------------------------------------
+     * Test N: TLB-hit fetch_fault_q staleness (Pipelining P3.1
+     * regression) -- proves a TLB-HIT PTE-content fault (cause 12) on
+     * the fetch stream is never misreported as cause 1 (access fault) by
+     * a stale fetch_fault_q[cur_slot] left over from an EARLIER,
+     * unrelated cause-1 fault that used the SAME slot. VA_H's own
+     * translated fetch succeeds first (a real walk, caching a TLB entry
+     * for its VPN tag) and its own code JALRs to VA_poison -- a
+     * DIFFERENT, separately-mapped page whose PTE is valid but whose
+     * resolved physical address is out of the harness's SRAM range, so
+     * the REAL bus read errors (cause 1, poisoning fetch_fault_q on
+     * whichever slot this episode used). Bus error, not a PMP deny, is
+     * deliberate: it clears fetch_lo_resolved_q[cur_slot] via the
+     * pre-existing wb_fetch_done path regardless of Test L's own fix, so
+     * this test stays independent of it. EXACTLY one other instruction
+     * runs (mtvec's own handler, a bare `mret`) before the retry lands
+     * back on the SAME slot the poison fault used (2-slot parity, see
+     * Test L's own comment) -- genuinely exactly one, for the identical
+     * reason Test L's own header comment gives (fetch_fault_q's own
+     * capture always_ff writes it, unconditionally, on EVERY successful
+     * fetch completion via fstate_lo_done_now, translated or not -- a
+     * second handler instruction reusing the poisoned slot would wash
+     * the staleness clean before the real retry ever ran). A real
+     * `csrrw mepc,x9 ; mret` pair (x9 precomputed = VA_H | (1<<40),
+     * reusing Test J's own noncanonical-VA technique) would add exactly
+     * one such instruction, so the backdoor testbench watcher process
+     * below rewrites mepc directly the instant the poison fault is
+     * observed, leaving `mret` as the ONLY real intervening instruction.
+     * The retry targets VA_H's own VPN tag again but with that extra
+     * high bit set -- same tag, so it HITS the cached entry, but
+     * ptw_va_noncanonical is re-checked against the LIVE lookup VA on
+     * every hit, so it genuinely, freshly faults, cause 12. Fixed: two
+     * new capture-always_ff arms explicitly clear fetch_fault_q[fetch_slot]
+     * on exactly this tlb_hit_active&&ptw_pte_fault condition. Pre-fix,
+     * that condition fell into the pre-existing EMPTY "walk in progress"
+     * arm instead (also true here, since !fetch_lo_resolved_q[fetch_slot]
+     * holds on a hit), leaving the slot's stale cause-1 flag from the
+     * poison fault untouched -- exc_code checks it before cause 12 and
+     * misreports 1. The SAME watcher process bounds the retry to one
+     * attempt: on the SECOND trap (the genuine hit-fault, reached either
+     * way), it installs a real capture handler (same shape as tests
+     * C/D) in place of the single mret, so mcause/mtval get read out
+     * safely via a PC-gated latch (not a raw post-halt GPR read) instead
+     * of retrying forever -- EBREAK itself re-traps into the same
+     * handler afterward, which would otherwise silently overwrite
+     * x20/x21 with EBREAK's own cause (3) before the top-level checks
+     * ever ran, given how long this file's OTHER, slower sub-tests keep
+     * the shared clock running in the background past this one's own
+     * halt.
+     * ---------------------------------------------------------------- */
+    core_wb4_sram_harness #(.NUM_WORDS(4096)) dut_n (.clk(clk), .rst(rst));
+    logic halted_n = 1'b0;
+    always @(posedge clk) if (dut_n.core0.trap_taken && dut_n.core0.is_ebreak) halted_n <= 1'b1;
+    logic [63:0] mcause_n, mtval_n;
+    logic        captured_n = 1'b0;
+    always @(posedge clk) if (!captured_n && dut_n.core0.commit_now && dut_n.core0.pc == 64'h108) begin
+        captured_n <= 1'b1;
+        mcause_n   <= dut_n.core0.regfile0.gp_registers[20];
+        mtval_n    <= dut_n.core0.regfile0.gp_registers[21];
+    end
+    logic dut_n_redirected         = 1'b0;
+    logic dut_n_capture_installed  = 1'b0;
+    initial begin
+        while (!dut_n_capture_installed) begin
+            @(posedge clk);
+            if (!dut_n_redirected && dut_n.core0.trap_taken && dut_n.core0.pc == 64'h40404000) begin
+                dut_n_redirected = 1'b1;
+                // Backdoor mepc rewrite, timed off the ORIGINAL (poison)
+                // fault itself -- see this test's own header comment for
+                // why a real csrrw instruction can't be used here.
+                // Hardware auto-set mepc to VA_poison (the just-faulted
+                // PC) on trap entry; force it instead to the noncanonical
+                // retry VA so the handler's single mret redirects there.
+                force dut_n.core0.csr_file0.mepc_q = 64'h0000_0100_4040_3000;
+                @(posedge clk);
+                release dut_n.core0.csr_file0.mepc_q;
+            end else if (dut_n_redirected && dut_n.core0.trap_taken
+                         && dut_n.core0.pc == 64'h0000_0100_4040_3000) begin
+                // The genuine TLB-hit PTE-content fault -- install the
+                // real capture handler (identical shape to tests C/D) in
+                // place of the single mret.
+                dut_n.sram0.memory[32] = {enc_csrrs(`CSR_MTVAL,5'd21), enc_csrrs(`CSR_MCAUSE,5'd20)};
+                dut_n.sram0.memory[33] = {NOP_INSN, EBREAK_INSN};
+                dut_n_capture_installed = 1'b1;
+            end
+        end
+    end
+
     logic [31:0] setup_e[0:29];
     logic [31:0] handler_e[0:7];
     logic [15:0] hw_e7[0:3];   // vpn0=7's own last dword: 3x c.nop + crossing_1 LOW16
@@ -334,7 +580,8 @@ module core_sv39_fetch_tb;
     int i; // shared packing-loop index, Test E only
 
     wire halted = halted_a && halted_b && halted_c && halted_d && halted_e
-               && halted_f && halted_g && halted_h && halted_i && halted_j && halted_k;
+               && halted_f && halted_g && halted_h && halted_i && halted_j && halted_k
+               && halted_l && halted_m && halted_n;
     `include "halt_wait.sv"
 
 
@@ -664,6 +911,119 @@ module core_sv39_fetch_tb;
         dut_k.sram0.memory[1536 + 0] = 64'h0000_0000_0000_10CF; // L0 entry0 -> real valid leaf, PPN=4
         dut_k.sram0.memory[2048] = {EBREAK_INSN, enc_addi(5'd30,5'd0,1)}; // must NEVER be reached
 
+        /*
+         * ---- Test L: M-mode setup, 0x00-0x87 (17 words) ----
+         * satp/mstatus/mepc/mtvec exactly as test A (VA_P =
+         * 0x40403000), plus PMP (region0 TOR[0,0x4000) R+X permit --
+         * covers the M-mode code and the whole page table; region1 TOR
+         * [0x4000,0x5000) deny -- covers VA_P's ORIGINAL leaf page;
+         * region2 TOR[0x5000,0x9000) R+X permit -- covers the REMAP
+         * target, PA 0x8000). The PTE remap itself and the TLB flush are
+         * both performed by the backdoor testbench watcher process
+         * (declared alongside dut_l's own harness above -- see its
+         * comment for why), not by CPU instructions.
+         */
+        dut_l.sram0.memory[0]  = {enc_slli(5'd1,5'd1,6'd60), enc_addi(5'd1,5'd0,8)};
+        dut_l.sram0.memory[1]  = {enc_or(5'd1,5'd1,5'd2), enc_addi(5'd2,5'd0,1)};
+        dut_l.sram0.memory[2]  = {enc_addi(5'd3,5'd0,1), enc_csrrw(`CSR_SATP,5'd1)};
+        dut_l.sram0.memory[3]  = {enc_csrrw(`CSR_MSTATUS,5'd3), enc_slli(5'd3,5'd3,6'd11)};
+        dut_l.sram0.memory[4]  = {enc_slli(5'd4,5'd4,6'd20), enc_addi(5'd4,5'd0,1028)};
+        dut_l.sram0.memory[5]  = {enc_slli(5'd5,5'd5,6'd12), enc_addi(5'd5,5'd0,3)};
+        dut_l.sram0.memory[6]  = {enc_csrrw(`CSR_MEPC,5'd4), enc_or(5'd4,5'd4,5'd5)};
+        dut_l.sram0.memory[7]  = {enc_csrrw(`CSR_MTVEC,5'd6), enc_addi(5'd6,5'd0,256)};
+        dut_l.sram0.memory[8]  = {enc_slli(5'd7,5'd7,6'd10), enc_addi(5'd7,5'd0,4)};
+        dut_l.sram0.memory[9]  = {enc_addi(5'd8,5'd0,5), enc_csrrw(`CSR_PMPADDR0,5'd7)};
+        dut_l.sram0.memory[10] = {enc_csrrw(`CSR_PMPADDR1,5'd8), enc_slli(5'd8,5'd8,6'd10)};
+        dut_l.sram0.memory[11] = {enc_slli(5'd9,5'd9,6'd10), enc_addi(5'd9,5'd0,9)};
+        dut_l.sram0.memory[12] = {enc_addi(5'd22,5'd0,13), enc_csrrw(`CSR_PMPADDR2,5'd9)};
+        dut_l.sram0.memory[13] = {enc_slli(5'd23,5'd23,6'd8), enc_addi(5'd23,5'd0,8)};
+        dut_l.sram0.memory[14] = {enc_addi(5'd24,5'd0,13), enc_or(5'd22,5'd22,5'd23)};
+        dut_l.sram0.memory[15] = {enc_or(5'd22,5'd22,5'd24), enc_slli(5'd24,5'd24,6'd16)};
+        dut_l.sram0.memory[16] = {`INSTR_HEX_MRET, enc_csrrw(`CSR_PMPCFG0,5'd22)};
+        // Handler @0x100 (word 32): a bare mret -- see the watcher
+        // process (declared with dut_l's own harness above) for the
+        // real remap+flush work and the pre-fix loop-safety net.
+        dut_l.sram0.memory[32] = {NOP_INSN, `INSTR_HEX_MRET};
+        dut_l.sram0.memory[512 + 1]  = 64'h0000_0000_0000_0801; // L2 entry1 -> L1@0x2000
+        dut_l.sram0.memory[1024 + 2] = 64'h0000_0000_0000_0C01; // L1 entry2 -> L0@0x3000
+        dut_l.sram0.memory[1536 + 3] = 64'h0000_0000_0000_10CF; // L0 entry3 -> leaf PPN=4 (PA 0x4000, PMP-denied)
+        // Remap target leaf code @0x8000 (word 4096): addi x30,x0,1 ; ebreak.
+        dut_l.sram0.memory[4096] = {EBREAK_INSN, enc_addi(5'd30,5'd0,1)};
+
+        /*
+         * ---- Test M: M-mode setup, 0x00-0x6F (14 words) ----
+         * satp/mstatus/mtvec as test A; mepc = VA_CODE (0x40403000,
+         * vpn0=3). x14 = VA_DATA_A (vpn0=4), x18 = VA_DATA_B (vpn0=5),
+         * both precomputed so the S-mode code (a straight-line
+         * ld/ld/sd/ebreak sequence at VA_CODE) needs no address math of
+         * its own -- keeps the 3 mem accesses genuinely consecutive
+         * instructions (the parity this test depends on).
+         */
+        dut_m.sram0.memory[0]  = {enc_slli(5'd1,5'd1,6'd60), enc_addi(5'd1,5'd0,8)};
+        dut_m.sram0.memory[1]  = {enc_or(5'd1,5'd1,5'd2), enc_addi(5'd2,5'd0,1)};
+        dut_m.sram0.memory[2]  = {enc_addi(5'd3,5'd0,1), enc_csrrw(`CSR_SATP,5'd1)};
+        dut_m.sram0.memory[3]  = {enc_csrrw(`CSR_MSTATUS,5'd3), enc_slli(5'd3,5'd3,6'd11)};
+        dut_m.sram0.memory[4]  = {enc_slli(5'd4,5'd4,6'd20), enc_addi(5'd4,5'd0,1028)};
+        dut_m.sram0.memory[5]  = {enc_slli(5'd5,5'd5,6'd12), enc_addi(5'd5,5'd0,3)};
+        dut_m.sram0.memory[6]  = {enc_csrrw(`CSR_MEPC,5'd4), enc_or(5'd4,5'd4,5'd5)};
+        dut_m.sram0.memory[7]  = {enc_csrrw(`CSR_MTVEC,5'd6), enc_addi(5'd6,5'd0,256)};
+        dut_m.sram0.memory[8]  = {enc_slli(5'd14,5'd14,6'd20), enc_addi(5'd14,5'd0,1028)};
+        dut_m.sram0.memory[9]  = {enc_slli(5'd19,5'd19,6'd12), enc_addi(5'd19,5'd0,4)};
+        dut_m.sram0.memory[10] = {enc_addi(5'd18,5'd0,1028), enc_or(5'd14,5'd14,5'd19)};
+        dut_m.sram0.memory[11] = {enc_addi(5'd24,5'd0,5), enc_slli(5'd18,5'd18,6'd20)};
+        dut_m.sram0.memory[12] = {enc_or(5'd18,5'd18,5'd24), enc_slli(5'd24,5'd24,6'd12)};
+        dut_m.sram0.memory[13] = {NOP_INSN, `INSTR_HEX_MRET};
+        // S-mode code @0x4000 (VA_CODE): ld x25,0(x14) [VA_A, succeeds] ;
+        // ld x26,0(x18) [VA_B, read-only page, succeeds] ; sd x0,0(x18)
+        // [VA_B again -- W=0 denies it, hit-fault] ; ebreak (fallback,
+        // never reached -- the store traps first).
+        dut_m.sram0.memory[2048] = {enc_ld(5'd26,5'd18,0), enc_ld(5'd25,5'd14,0)};
+        dut_m.sram0.memory[2049] = {EBREAK_INSN, enc_sd(5'd0,5'd18,0)};
+        // Real capture handler @0x100 (word 32), identical shape to
+        // tests C/D/F-K.
+        dut_m.sram0.memory[32] = {enc_csrrs(`CSR_MTVAL,5'd21), enc_csrrs(`CSR_MCAUSE,5'd20)};
+        dut_m.sram0.memory[33] = {NOP_INSN, EBREAK_INSN};
+        dut_m.sram0.memory[512 + 1]  = 64'h0000_0000_0000_0801; // L2 entry1 -> L1@0x2000
+        dut_m.sram0.memory[1024 + 2] = 64'h0000_0000_0000_0C01; // L1 entry2 -> L0@0x3000
+        dut_m.sram0.memory[1536 + 3] = 64'h0000_0000_0000_10CF; // L0 entry3 (CODE) -> PPN=4, RWX=1
+        dut_m.sram0.memory[1536 + 4] = 64'h0000_0000_0000_14C7; // L0 entry4 (DATA_A) -> PPN=5, R=1,W=1,X=0
+        dut_m.sram0.memory[1536 + 5] = 64'h0000_0000_0000_1843; // L0 entry5 (DATA_B) -> PPN=6, R=1,W=0,X=0
+
+        /*
+         * ---- Test N: M-mode setup, 0x00-0x57 (11 words) ----
+         * satp/mstatus/mtvec as test A; mepc = VA_H (0x40403000, vpn0=3,
+         * test A's own mapping, reused verbatim). x10 = VA_poison
+         * (0x40404000, vpn0=4): a validly-mapped but out-of-SRAM-range
+         * leaf (PPN=0x20 -> PA 0x20000), so the fetch translates cleanly
+         * but the real bus read errors (cause 1). The mepc rewrite for
+         * the retry and the real capture handler are both installed by
+         * the backdoor testbench watcher process (declared alongside
+         * dut_n's own harness above -- see its comment for why), not by
+         * CPU instructions.
+         */
+        dut_n.sram0.memory[0]  = {enc_slli(5'd1,5'd1,6'd60), enc_addi(5'd1,5'd0,8)};
+        dut_n.sram0.memory[1]  = {enc_or(5'd1,5'd1,5'd2), enc_addi(5'd2,5'd0,1)};
+        dut_n.sram0.memory[2]  = {enc_addi(5'd3,5'd0,1), enc_csrrw(`CSR_SATP,5'd1)};
+        dut_n.sram0.memory[3]  = {enc_csrrw(`CSR_MSTATUS,5'd3), enc_slli(5'd3,5'd3,6'd11)};
+        dut_n.sram0.memory[4]  = {enc_slli(5'd4,5'd4,6'd20), enc_addi(5'd4,5'd0,1028)};
+        dut_n.sram0.memory[5]  = {enc_slli(5'd5,5'd5,6'd12), enc_addi(5'd5,5'd0,3)};
+        dut_n.sram0.memory[6]  = {enc_csrrw(`CSR_MEPC,5'd4), enc_or(5'd4,5'd4,5'd5)};
+        dut_n.sram0.memory[7]  = {enc_csrrw(`CSR_MTVEC,5'd6), enc_addi(5'd6,5'd0,256)};
+        dut_n.sram0.memory[8]  = {enc_slli(5'd10,5'd10,6'd20), enc_addi(5'd10,5'd0,1028)};
+        dut_n.sram0.memory[9]  = {enc_slli(5'd19,5'd19,6'd12), enc_addi(5'd19,5'd0,4)};
+        dut_n.sram0.memory[10] = {`INSTR_HEX_MRET, enc_or(5'd10,5'd10,5'd19)};
+        // VA_H's own leaf code @0x4000: jalr x0,0(x10) -- jumps straight
+        // to VA_poison, no link needed.
+        dut_n.sram0.memory[2048] = {NOP_INSN, enc_jalr(5'd0,5'd10,0)};
+        // Handler @0x100 (word 32): a bare mret -- see the watcher
+        // process (declared with dut_n's own harness above) for the
+        // mepc-rewrite/capture-handler-install work.
+        dut_n.sram0.memory[32] = {NOP_INSN, `INSTR_HEX_MRET};
+        dut_n.sram0.memory[512 + 1]  = 64'h0000_0000_0000_0801; // L2 entry1 -> L1@0x2000
+        dut_n.sram0.memory[1024 + 2] = 64'h0000_0000_0000_0C01; // L1 entry2 -> L0@0x3000
+        dut_n.sram0.memory[1536 + 3] = 64'h0000_0000_0000_10CF; // L0 entry3 (VA_H) -> leaf PPN=4
+        dut_n.sram0.memory[1536 + 4] = 64'h0000_0000_0000_80CF; // L0 entry4 (VA_poison) -> leaf PPN=0x20 (PA 0x20000, out of range)
+
         @(posedge clk); #1;
         rst = 0;
 
@@ -715,6 +1075,19 @@ module core_sv39_fetch_tb;
         check("K: noncanonical VA (bit38 set, upper bits clear) faults, mcause==12", mcause_k, 64'd12);
         check("K: mtval == the full noncanonical VA actually used", mtval_k, 64'h0000_0040_0000_0000);
         check("K: leaf code never executed (x30==0)", dut_k.core0.regfile0.gp_registers[30], 64'd0);
+
+        check({"L: PMP-deny slot staleness -- after the backdoor remap+TLB-flush, the retry ",
+            "re-walks and executes the NEW physical page's own code (marker x30==1)"},
+            dut_l.core0.regfile0.gp_registers[30], 64'd1);
+
+        check("M: mem-side TLB-hit fault correctly classified, mcause==15 (store page fault)", mcause_m, 64'd15);
+        check({"M: mtval == VA_B (0x40405000), the genuinely faulting hit's own address -- ",
+            "NOT VA_A, an earlier, unrelated instruction's own real-walk address left over in the same slot"},
+            mtval_m, 64'h40405000);
+
+        check({"N: TLB-hit PTE-content fault (noncanonical retry VA, same cached tag as VA_H) ",
+            "correctly classified as cause 12, not a stale cause 1 from the earlier, unrelated bus-error poison fault"},
+            mcause_n, 64'd12);
 
         $display("");
         $display("core_sv39_fetch_tb: %0d passed, %0d failed", pass_count, fail_count);
