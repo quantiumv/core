@@ -1171,9 +1171,17 @@ module core (
     // S_MEM for this same instruction, or S_EXEC's own state-transition
     // (mem_phase_needed ? S_MEM : ...) would loop forever instead of
     // ever letting commit_now fire.
+    // trigger_exception_match (Milestone 9's action=0 watchpoint) joins
+    // the NOT-list for the same reason misalignment/PMP already do: a
+    // load/store/AMO sitting at a matched action=0 trigger address must
+    // trap instead of ever starting its own bus transaction (the spec's
+    // execute-timing=0 requirement) -- without this, the S_MEM phase ran
+    // to completion (the read or WRITE actually landed at the slave)
+    // before trap_taken's own trigger_exception_match term ever got a
+    // chance to fire at the S_MEM->S_EXEC bailout.
     wire mem_phase_needed = (is_load || is_store)
                           && !(mem_load_misaligned || mem_store_misaligned || pmp_load_fault || pmp_store_fault
-                            || mem_fault_q[cur_slot] || mem_access_fault_q[cur_slot]);
+                            || mem_fault_q[cur_slot] || mem_access_fault_q[cur_slot] || trigger_exception_match);
 
     /*
      * wb_fetch_done/wb_fetch_ok, wb_mem_done/wb_mem_ok: wb4_sram.sv (the
@@ -1268,8 +1276,35 @@ module core (
      * condition via its outer if/else-if structure -- commit_now simply
      * hadn't been kept in sync with that same priority.
      */
-    wire commit_now = (state == S_EXEC && !mem_phase_needed && !div_stall)
+    // debug_ebreak_entry/trigger_debug_entry (forward-declared, real
+    // assigns further down): a non-memory, non-divide instruction reaches
+    // this same S_EXEC edge whether or not it's ALSO entering Debug Mode
+    // (an EBREAK-to-debug, or an ordinary instruction sitting at a
+    // matched execute trigger) -- without excluding them here, commit_now
+    // fired anyway, so pc/rvfi_valid/minstret all recorded a retirement
+    // that never architecturally happened. Loads/stores/AMOs/DIV need no
+    // equivalent term: trigger_debug_entry already pre-empts
+    // mem_phase_needed/div_stall in the state-transition always_ff below,
+    // so for THOSE classes state never even reaches the S_MEM/S_AMO_WRITE
+    // arms this same edge, and debug_ebreak_entry structurally requires
+    // is_ebreak, which is neither a memory nor a divide instruction.
+    wire commit_now = (state == S_EXEC && !mem_phase_needed && !div_stall
+                        && !debug_ebreak_entry && !trigger_debug_entry)
+                    // !pmp_load_fault && !pmp_store_fault: formal-only gap
+                    // (unreachable in real simulation -- mem_phase_needed's
+                    // own NOT-list already keeps state from ever ENTERING
+                    // S_MEM with either fault set, and the state-transition
+                    // always_ff's own S_MEM arm bails to S_EXEC, not
+                    // S_FETCH, ahead of its wb_mem_done branch whenever one
+                    // is set). Under BMC, with wb_mem_ack_i free every
+                    // cycle and no reachability constraint, this term could
+                    // otherwise fire commit_now in the exact same cycle
+                    // state bails to S_EXEC on a fault -- reaching
+                    // interrupt_taken (commit_now_q-timed) with the next
+                    // state NOT S_FETCH, violating the invariant
+                    // fetch_redirect_cycle's whole design relies on.
                     || (state == S_MEM && !(mem_translate_active && !mem_resolved_q[cur_slot])
+                        && !pmp_load_fault && !pmp_store_fault
                         && ((wb_mem_ok && !is_amo_rmw) || wb_mem_err_i))
                     || (state == S_AMO_WRITE && wb_mem_done);
 
@@ -1830,7 +1865,19 @@ module core (
         if (fetch_translate_active) begin
         // Pipelining P2 step 3a: [fetch_slot] -- see tlb_hit_active's own
         // matching comment.
-        if (state == S_FETCH && (fetch_redirect_cycle || !fetch_lo_resolved_q[fetch_slot])) begin
+        if (state == S_FETCH && tlb_hit_active && ptw_pte_fault) begin
+            // TLB-hit PTE-content fault (cause 12), not a cause-1 access
+            // fault -- fetch_fault_q must explicitly read 0 here, or a
+            // stale 1 left by an EARLIER, unrelated fetch that used this
+            // same slot (this condition and the empty arm just below's
+            // own !fetch_lo_resolved_q[fetch_slot] term are both true on
+            // this exact cycle, so without this arm it fell into that
+            // empty one and was never cleared) makes exc_code -- which
+            // checks cause 1 before cause 12 -- misreport the fault. The
+            // real cause-12 record is fetch_lo_fault_q[fetch_slot], set
+            // by the TLB-hit-resolve always_ff elsewhere in this file.
+            fetch_fault_q[fetch_slot] <= 1'b0;
+        end else if (state == S_FETCH && (fetch_redirect_cycle || !fetch_lo_resolved_q[fetch_slot])) begin
             // Sv39 (Milestone 3): redirecting to S_PTW this cycle --
             // fetch_paddr (hence pmp_fetchlo_fault, computed off it) is
             // not yet resolved, so its transient value must not be
@@ -1920,7 +1967,15 @@ module core (
          */
         // Pipelining P2 step 3a: [fetch_slot] -- see tlb_hit_active's own
         // matching comment.
-        if (state == S_FETCH_HI && fetch_translate_active && fetch_hi_resolved_q[fetch_slot] && pmp_fetchhi_fault) begin
+        if (state == S_FETCH_HI && tlb_hit_active && ptw_pte_fault) begin
+            // Same TLB-hit PTE-content-fault fix as the S_FETCH arm above,
+            // for the HI half of a crossing instruction -- unlike S_FETCH,
+            // this if/else-if chain had NO arm at all (empty or otherwise)
+            // covering "still resolving," so a stale fetch_fault_q left
+            // by an earlier fetch on this slot was never cleared here
+            // either.
+            fetch_fault_q[fetch_slot] <= 1'b0;
+        end else if (state == S_FETCH_HI && fetch_translate_active && fetch_hi_resolved_q[fetch_slot] && pmp_fetchhi_fault) begin
             // The real, resolved HI-half PMP check, denied -- checked
             // ahead of wb_fetch_done below, mirroring pmp_fetchlo_fault's own
             // S_FETCH priority ordering. No bus request was ever issued
@@ -2718,6 +2773,20 @@ module core (
              * possible from a cached entry.
              */
             if (tlb_hit_active) begin
+                // ptw_vaddr_q[cur_slot] <= tlb_lookup_vaddr: a real walk
+                // always captures the VA it's walking (the three arms just
+                // above this block), but a HIT never did -- trap_val reads
+                // this same register (as [fetch_slot] for a fetch fault,
+                // [cur_slot] for a mem fault, per the toggle-timing
+                // difference between the two reasons) unconditionally on
+                // any later fault, so a hit-path fault reported whatever
+                // VA the slot's LAST REAL WALK happened to leave behind
+                // instead of its own. tlb_lookup_vaddr is already the
+                // exact live VA this hit matched against (see its own
+                // declaration) -- same [cur_slot] index the real-walk
+                // writes above use, not [fetch_slot]: this sits in the
+                // same pre-toggle timing they do.
+                ptw_vaddr_q[cur_slot] <= tlb_lookup_vaddr;
                 case (state)
                     S_FETCH: begin
                         fetch_lo_fault_q[fetch_slot]    <= ptw_pte_fault;
@@ -2969,7 +3038,21 @@ module core (
             // S_FETCH_HI completion, translated or not -- these two new
             // registers need that exact same "always freshly written by
             // the very next ordinary fetch" property explicitly added.
-            if (state == S_FETCH && wb_fetch_done) begin
+            // || (fetch_translate_active && fetch_lo_resolved_q[fetch_slot]
+            //     && pmp_fetchlo_fault): a real bug, same class as the
+            // fetch_hi_resolved_q[cur_slot] gap this comment block already
+            // documents below. The translated PMP-lo-deny exit (state-
+            // transition always_ff's own "else if (pmp_fetchlo_fault)"
+            // arm, reached only once fetch_lo_resolved_q[fetch_slot] is
+            // ALREADY 1) never sets wb_fetch_done -- no bus request was
+            // ever issued for a denied fetch -- so without this term the
+            // clear above never fires for it, and the NEXT fetch episode
+            // to land on this same slot (two episodes later, this being a
+            // 2-slot design) reads fetch_lo_resolved_q[fetch_slot] as
+            // stale-1 and skips translation entirely, reusing the OLD
+            // denied fetch_lo_paddr_q[fetch_slot].
+            if (state == S_FETCH && (wb_fetch_done
+                    || (fetch_translate_active && fetch_lo_resolved_q[fetch_slot] && pmp_fetchlo_fault))) begin
                 fetch_lo_resolved_q[fetch_slot] <= 1'b0;
                 fetch_lo_fault_q[fetch_slot]    <= 1'b0;
                 /*
@@ -3004,7 +3087,16 @@ module core (
                 fetch_hi_resolved_q[fetch_slot] <= 1'b0;
                 fetch_hi_fault_q[fetch_slot]    <= 1'b0;
             end
-            if (state == S_FETCH_HI && wb_fetch_done) begin
+            // || (fetch_hi_resolved_q[fetch_slot] && pmp_fetchhi_fault):
+            // the identical PMP-deny staleness bug as the S_FETCH arm just
+            // above, for the HI half's own PMP-deny exit (state-transition
+            // always_ff's "else if (pmp_fetchhi_fault)" arm). No explicit
+            // fetch_translate_active guard needed -- S_FETCH_HI is only
+            // ever reached from the translated S_FETCH path (see this
+            // always_ff's own comment on that a few lines up), so it's
+            // unconditionally true here.
+            if (state == S_FETCH_HI && (wb_fetch_done
+                    || (fetch_hi_resolved_q[fetch_slot] && pmp_fetchhi_fault))) begin
                 fetch_hi_resolved_q[fetch_slot] <= 1'b0;
                 fetch_hi_fault_q[fetch_slot]    <= 1'b0;
             end
@@ -3711,6 +3803,14 @@ module core (
      * of this exact same exception OR-list, respectively -- see that
      * section for the full reasoning.
      */
+    // Debug Mode entry (trigger_debug_entry/debug_ebreak_entry) winning
+    // any same-cycle tie against this exception path needs no explicit
+    // guard here -- commit_now's own S_EXEC term already excludes both
+    // (see its declaration comment), and every source in this OR-list
+    // that can fire is reached only via that same term (fetch faults and
+    // illegal/ecall are non-memory/non-divide; a misaligned or PMP-denied
+    // load/store forces mem_phase_needed to 0, routing it through the
+    // S_EXEC term too, not S_MEM's).
     assign trap_taken = !debug_progbuf_active && commit_now && (fetch_fault_q[cur_slot]
                                    || fetch_lo_fault_q[cur_slot] || fetch_hi_fault_q[cur_slot] || is_illegal_instr
                                    || (is_ebreak && !ebreak_to_debug) || trigger_exception_match || is_ecall
@@ -3755,8 +3855,18 @@ module core (
      * construction, not something this section needs to guard against.
      */
     assign progbuf_ebreak_done = debug_progbuf_active && commit_now && is_ebreak;
+    // No fetch_fault_q[cur_slot] term here: a Program Buffer "instruction"
+    // is never actually fetched over the bus (it's i_progbuf_data, read
+    // straight from dm0's own storage -- see this section's own header),
+    // and cur_slot doesn't toggle during a progbuf run either, so that
+    // flag just holds whatever a real fetch, before progbuf started, last
+    // left in that slot -- unrelated to the instruction actually
+    // executing. A real bug: e.g. single-stepping into an instruction-
+    // access-fault trap (which sets fetch_fault_q[cur_slot] for real)
+    // left every subsequent progbuf run aborting immediately, regardless
+    // of what it actually ran.
     assign progbuf_abort = debug_progbuf_active && commit_now && !is_ebreak
-                          && (fetch_fault_q[cur_slot] || is_illegal_instr || is_ecall
+                          && (is_illegal_instr || is_ecall
                               || mem_load_misaligned || mem_store_misaligned
                               || mem_load_access_fault || mem_store_access_fault);
 
@@ -3913,7 +4023,16 @@ module core (
     logic [(`WORD_SIZE - 1):0] divider_o_quotient, divider_o_remainder;
     divider divider0 (
         .i_clk(clk), .i_rst(rst),
-        .i_start(is_div_family && (state == S_EXEC) && !divider_o_busy && !divider_o_done),
+        // !trigger_debug_entry: unlike commit_now (which already excludes
+        // it, see that wire's own comment), i_start drives divider0
+        // directly off raw state==S_EXEC and does NOT wait for commit_now
+        // -- it has to start the divide on the FIRST S_EXEC cycle
+        // regardless of when (many cycles later) the result actually
+        // commits. Without this guard, a DIV instruction sitting at a
+        // matched execute trigger started the divider running in the
+        // background while the core sat in S_DEBUG_HALTED; a resume
+        // shortly after could commit its stale, not-yet-correct quotient.
+        .i_start(is_div_family && (state == S_EXEC) && !trigger_debug_entry && !divider_o_busy && !divider_o_done),
         .i_dividend(div_dividend_in), .i_divisor(div_divisor_in), .i_signed(is_div_signed_family),
         .o_busy(divider_o_busy), .o_done(divider_o_done),
         .o_quotient(divider_o_quotient), .o_remainder(divider_o_remainder)
@@ -4101,7 +4220,23 @@ module core (
         .o_csr_rdata(csr_rdata),
         .i_csr_we(dm_access_active ? i_dm_csr_we : csr_we),
         .i_csr_wdata(dm_access_active ? i_dm_csr_wdata : alu_result),
-        .i_instr_retired(commit_now),
+        // !instr_faulted: a trapped instruction (trap_taken), an aborted
+        // Program Buffer instruction (progbuf_abort), or an execute-
+        // trigger debug entry (trigger_debug_entry) never architecturally
+        // retired, so it must not bump minstret -- matches the same gate
+        // reg_write/csr_we already use. debug_ebreak_entry needs no
+        // explicit term here: commit_now is already 0 on that same edge
+        // (see its own declaration comment).
+        //
+        // !(in_debug_mode && dcsr_w[10]): dcsr.stopcount (bit 10) -- per
+        // spec, when set, instructions retired while in Debug Mode
+        // (halted-run single-steps, Program Buffer instructions) must not
+        // count. Real, generic storage already exists for this bit
+        // (csr_file.sv's dcsr_q persists every non-hardware-owned bit
+        // across a debug entry, unlike cause[8:6]/prv[1:0]); it was
+        // simply never consulted anywhere before now. Defaults to 0 on
+        // reset, so out-of-the-box behavior is unchanged: count.
+        .i_instr_retired(commit_now && !instr_faulted && !(in_debug_mode && dcsr_w[10])),
 
         .i_current_priv(current_priv),
         .i_mtip(i_mtip),
@@ -4302,7 +4437,14 @@ module core (
      * construction -- EBREAK either traps normally or enters Debug Mode,
      * never both.
      */
-    assign debug_ebreak_entry = commit_now && is_ebreak && ebreak_to_debug && !in_debug_mode;
+    // (state == S_EXEC), not commit_now -- commit_now itself now excludes
+    // debug_ebreak_entry (see its own declaration comment), and is_ebreak
+    // implies !mem_phase_needed/!div_stall unconditionally (SYSTEM opcode,
+    // never a memory or divide instruction), so state==S_EXEC is exactly
+    // commit_now's old S_EXEC term with those two always-true conjuncts
+    // dropped -- not a behavior change, just breaking what would
+    // otherwise be a circular definition.
+    assign debug_ebreak_entry = (state == S_EXEC) && is_ebreak && ebreak_to_debug && !in_debug_mode;
 
     /*
      * stepping_q: armed on resume if dcsr.step (bit 2) was set at that
@@ -4449,28 +4591,17 @@ module core (
      * safer default, same reasoning as the action field's own WARL
      * clamp-to-1 in csr_file.sv).
      *
-     * KNOWN, DELIBERATELY UNADDRESSED narrower gap (same class as
-     * wb_mem_lock_o's own documented LR/SC-vs-SBA limitation): unlike
-     * trigger_debug_entry above, this path is NOT given the same
-     * state==S_EXEC early-intercept treatment -- trap_taken's shared
-     * commit_now-gated machinery is used by every OTHER synchronous
-     * exception source too, and giving JUST this one term an early,
-     * special-cased intercept would mean restructuring mem_phase_needed's
-     * own S_EXEC->S_MEM transition decision for every exception source,
-     * not just this one. Consequence: for action=0 (raise a Breakpoint
-     * exception rather than enter Debug Mode) matched against a STORE
-     * or an AMO's own write phase specifically, commit_now doesn't
-     * become true until state==S_MEM/S_AMO_WRITE, by which point that
-     * instruction's own bus WRITE has already landed -- the exception
-     * still fires (mcause=3, mtval=the matched address), but the memory
-     * side effect is not actually prevented, unlike a LOAD at the same
-     * address (harmless regardless, since reg_write is still correctly
-     * suppressed via instr_faulted below) or the action=1 path above
-     * (fully protected for every instruction type). A real external
-     * debugger's own common case -- action=1, Debug Mode entry -- is
-     * unaffected; this narrower gap only matters for a
-     * self-hosted/OS-level action=0 watchpoint deliberately placed on a
-     * store's own instruction address, a rarer configuration.
+     * Given the same state==S_EXEC early-intercept treatment as
+     * trigger_debug_entry above, but through mem_phase_needed's own
+     * NOT-list (see that wire's declaration) rather than a dedicated
+     * state-transition arm -- restructuring the S_EXEC->S_MEM decision
+     * for just this one exception source would have meant duplicating
+     * every OTHER source's shared trap_taken/commit_now machinery instead
+     * of reusing it. Consequence of getting this right: a STORE or an
+     * AMO's own write phase matched by an action=0 trigger never starts
+     * its bus transaction at all -- mem_phase_needed reads 0 that S_EXEC
+     * cycle, so state falls through to commit_now/trap_taken directly,
+     * the same path a misaligned or PMP-denied access already takes.
      */
     assign trigger_exception_match = !(trig0_debug_fire || trig1_debug_fire) && (trig0_exc_fire || trig1_exc_fire);
 
@@ -4787,8 +4918,17 @@ module core (
      * renamed for the new consumer (pmp_load_fault/pmp_store_fault,
      * folded into trap_val below) alongside the pre-existing ones.
      */
+    // (state == S_AMO_WRITE) arm: {amo_addr_q[cur_slot][63:3],
+    // amo_byte_off_q[cur_slot]}, not bare amo_addr_q[cur_slot] --
+    // amo_addr_q[cur_slot] is deliberately rounded DOWN to a dword
+    // boundary (it's also the real bus address), which silently reported
+    // the wrong mtval for a .W AMO sitting in a dword's upper word
+    // (address bit 2 set). amo_byte_off_q[cur_slot] already exists to
+    // hold the TRUE, unrounded low 3 bits for this exact reason -- see
+    // its own declaration comment (amo_wdata's byte-lane shift uses it
+    // too).
     wire [(`WORD_SIZE - 1):0] mem_access_fault_vaddr = mem_translate_active ? ptw_vaddr_q[cur_slot]
-        : (state == S_AMO_WRITE) ? amo_addr_q[cur_slot] : mem_paddr;
+        : (state == S_AMO_WRITE) ? {amo_addr_q[cur_slot][63:3], amo_byte_off_q[cur_slot]} : mem_paddr;
 
     /* trap_val, continued from its forward declaration above: the
      * misaligned-access and access-fault causes report the faulting
