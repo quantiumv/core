@@ -351,22 +351,43 @@ def emit_amo(p: Program, recent: list[int]):
     _sandbox_addr(p, addr_r, misaligned=False, width=8)
     width_sfx = p.rng.choice(["w", "d"])
     if p.rng.random() < 0.4:
-        # LR/SC pair, with SC's own success/failure both real outcomes.
+        # LR/SC pair, with SC's own success/failure both real outcomes
+        # -- but the FAILURE path only under normal generation, never
+        # --sail-safe (see the comment just above that branch for why).
         rd = p.reg_biased(recent)
         p.e(f"    lr.{width_sfx}    x{rd}, (x{addr_r})")
-        if p.rng.random() < 0.5:
-            # success: SC to the SAME address, no intervening access
+        if p.args.sail_safe or p.rng.random() < 0.5:
+            # success: SC to the SAME address, no intervening access.
+            # The ONLY LR/SC shape --sail-safe ever generates: per spec,
+            # an SC immediately following its own LR, same address, no
+            # intervening access, MUST succeed under ANY implementation
+            # -- unambiguous ground truth, safe to diff against Sail.
             sc_rd = p.reg()
             val = p.reg_biased(recent)
             p.e(f"    sc.{width_sfx}    x{sc_rd}, x{val}, (x{addr_r})")
         else:
-            # failure: an intervening store breaks the reservation
-            # (this core's own single-reservation-slot semantics --
-            # ANY store/SC/AMO clears it, not just one to the same addr)
-            junk_addr = p.reg()
-            _sandbox_addr(p, junk_addr, misaligned=False, width=8)
+            # failure: an intervening store (to the SAME address, so
+            # the failure is unambiguous under any ADDRESS-RANGE-based
+            # reservation-set model) breaks the reservation.
+            #
+            # NEVER generated under --sail-safe: found, via the P3.2
+            # Sail audit (sail_diff.py) and direct comparison, that
+            # this isn't just an address-granularity mismatch (which
+            # aiming the intervening store at the SAME address would
+            # fix) -- Sail's own single-hart reservation model doesn't
+            # invalidate on a same-hart store AT ALL, regardless of
+            # address, so its SC keeps succeeding even here. That's a
+            # genuine implementation-choice gray area the spec permits
+            # either way (a same-hart store between LR and SC is a
+            # misuse of the primitive no correct program would ever
+            # rely on), not a bug in either model, so it isn't safe
+            # ground truth to diff against -- this core's own "ANY
+            # store/SC/AMO clears it, anywhere" choice is instead
+            # covered by the P3.4 lockstep harness (ref_core vs
+            # core_pipe, both required to agree with EACH OTHER on
+            # this core's own documented behavior).
             junk_val = p.reg_biased(recent)
-            p.e(f"    sd      x{junk_val}, 0(x{junk_addr})")
+            p.e(f"    sd      x{junk_val}, 0(x{addr_r})")
             sc_rd = p.reg()
             val = p.reg_biased(recent)
             p.e(f"    sc.{width_sfx}    x{sc_rd}, x{val}, (x{addr_r})")
@@ -941,6 +962,41 @@ def emit_trap_delegation(p: Program):
     p.e("    csrw    mideleg, x6")
 
 
+def emit_msu_minimal_pmp(p: Program):
+    """A single, fully-permissive TOR PMP region covering the whole
+    1 MiB image -- emitted whenever --priv msu is used WITHOUT --pmp,
+    so the S-mode bootstrap's correctness never depends on this core's
+    own particular PMP reset default rather than on something this
+    program itself explicitly configures.
+
+    This core's region 0 resets to a fully-permissive NAPOT-all region
+    (pmp0cfg_a_q/_x_q/_w_q/_r_q's own reset values in csr_file.sv) -- a
+    real, deliberate design choice (confirmed by reading csr_file.sv
+    directly), not a bug: it's what lets M-mode software boot and reach
+    S-mode at all before configuring PMP itself. But the privileged
+    spec leaves PMP reset state unspecified beyond "defaults to denying
+    S/U-mode access" being merely ALLOWED, not required -- nothing
+    guarantees any other implementation (including Sail, whose own
+    default does deny S/U by reset) makes the same reset choice.
+
+    A REAL gap this closes, found via the P3.2 Sail differential audit
+    (sail_diff.py): under --sail-safe --priv msu (no --pmp, so this was
+    previously the ONLY path into S-mode), the random body's very first
+    S-mode fetch relied ENTIRELY on this core's own reset default to
+    succeed -- Sail correctly denied it instead (a fetch-access-fault),
+    a real, reproducible divergence. Explicit configuration removes the
+    dependency on either side's particular reset choice, rather than
+    trying to make Sail's config imitate this one core's own reset
+    values (its config schema has no way to express PMP reset state
+    beyond entry count, only the CSRs' own live values, which software
+    -- this preamble -- is exactly the right place to set)."""
+    p.e("    # -- msu bootstrap: explicit permissive PMP (no --pmp) --")
+    p.li(6, 0x100000 >> 2)
+    p.e("    csrw    pmpaddr0, x6")
+    p.li(6, 0x0F)  # L=0,A=TOR,X=1,W=1,R=1
+    p.e("    csrw    pmpcfg0, x6")
+
+
 def emit_entry_preamble(p: Program):
     a = p.args
     p.e("_start:")
@@ -953,6 +1009,8 @@ def emit_entry_preamble(p: Program):
     p.e("    la      x25, recovery_point")
     p.li(26, BAD_ADDR_BASE)
     p.li(27, SANDBOX_BASE)
+    if a.priv == "msu" and not a.pmp:
+        emit_msu_minimal_pmp(p)
     if a.pmp:
         emit_pmp(p)
     if a.sv39:

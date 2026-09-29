@@ -1,0 +1,143 @@
+// Sail RISC-V model config for the P3.2 differential audit (sail_diff.py).
+//
+// This is a --config-override PATCH, not a full config -- sail_riscv_sim
+// merges it on top of its own internal defaults (see `sail_riscv_sim
+// --print-default-config` for the full baseline this patches). Derived
+// by diffing that baseline against this core's own legal implementation
+// choices; regenerate by re-running --print-default-config if the Sail
+// toolchain is ever upgraded and re-diffing by hand.
+{
+  // Replace Sail's default ROM/MMIO/RAM layout with ONE region matching
+  // qvgen.py's own 1 MiB image at [0, 0x100000) -- the same address
+  // range verification/lockstep/gen/link.ld places .text.entry through
+  // .data.misc in, and the same range act_runner_tb.sv's flat SRAM
+  // covers. Nothing outside qvgen's own memory map (see its module
+  // docstring) is ever legally touched by --sail-safe output, so one
+  // full-permission RAM region is sufficient -- this audit isn't
+  // exercising PMP or Sv39 (--sail-safe forces both off in qvgen.py).
+  "memory": {
+    "regions": [
+      {
+        "base": { "len": 64, "value": "0x0" },
+        "size": { "len": 64, "value": "0x100000" },
+        "attributes": {
+          "cacheable": true,
+          "coherent": true,
+          "executable": true,
+          "readable": true,
+          "writable": true,
+          "read_idempotent": true,
+          "write_idempotent": true,
+          "misaligned_fault": "NoFault",
+          "reservability": "RsrvEventual",
+          "supports_cbo_zero": false
+        },
+        "include_in_device_tree": true
+      }
+    ],
+    // This core never supports misaligned accesses (they always trap) --
+    // a real, spec-legal implementation choice, not a bug.
+    "misaligned": { "supported": false },
+    // 4 PMP entries, matching this core's actual implementation. Sail's
+    // own `count` is structurally fixed to 0/16/64 (a model limitation,
+    // not freely configurable) -- count stays 16, and usable_count=4
+    // makes entries 4-15 read-only-zero, which behaves identically to a
+    // true 4-entry implementation for anything this generator emits (it
+    // only ever touches pmpaddr0-3/pmpcfg0). Moot for THIS audit anyway,
+    // since --sail-safe never emits PMP setup at all.
+    "pmp": { "count": 16, "usable_count": 4 }
+  },
+  "base": {
+    "xtval_nonzero": {
+      // Illegal-instruction mtval holds the instruction bits.
+      "illegal_instruction": true,
+      // EBREAK mtval is 0, not the pc or anything else.
+      "software_breakpoint": false
+    }
+  },
+  // Only what this core actually implements stays enabled (M, A, Zca,
+  // Zicsr, Zifencei, S, U, Sv39, Svbare, all left at their Sail
+  // defaults of true); everything else is turned off below, so a
+  // random program can never exercise an extension Sail supports but
+  // this core doesn't. V has no simple "supported" flag (it uses
+  // "support_level"), and disabling it cascades: every Zve*/Zv*
+  // extension that depends on V's Zve32x/Zve64x sub-support must be
+  // disabled too, or Sail's own config validator rejects the file --
+  // hence the long, flat list below rather than a shorter curated one.
+  "extensions": {
+    "V": { "support_level": "Disabled" },
+    "B": { "supported": false },
+    "D": { "supported": false },
+    "F": { "supported": false },
+    "Smcntrpmf": { "supported": false },
+    "Sscofpmf": { "supported": false },
+    "Ssqosid": { "supported": false },
+    "Sstc": { "supported": false },
+    "Sstvala": { "supported": false },
+    "Stateen": { "supported": false },
+    "Sv32": { "supported": false },
+    "Sv48": { "supported": false },
+    "Sv57": { "supported": false },
+    "Svinval": { "supported": false },
+    "Svrsw60t59b": { "supported": false },
+    "Zaamo": { "supported": false },
+    "Zabha": { "supported": false },
+    "Zacas": { "supported": false },
+    "Zalrsc": { "supported": false },
+    "Zawrs": { "supported": false },
+    "Zba": { "supported": false },
+    "Zbb": { "supported": false },
+    "Zbc": { "supported": false },
+    "Zbkb": { "supported": false },
+    "Zbkc": { "supported": false },
+    "Zbkx": { "supported": false },
+    "Zbs": { "supported": false },
+    "Zcb": { "supported": false },
+    "Zcd": { "supported": false },
+    "Zcf": { "supported": false },
+    "Zcmop": { "supported": false },
+    "Zdinx": { "supported": false },
+    "Zfa": { "supported": false },
+    "Zfbfmin": { "supported": false },
+    "Zfh": { "supported": false },
+    "Zfhmin": { "supported": false },
+    "Zfinx": { "supported": false },
+    "Zhinx": { "supported": false },
+    "Zhinxmin": { "supported": false },
+    "Zibi": { "supported": false },
+    "Zic64b": { "supported": false },
+    "Zicbom": { "supported": false },
+    "Zicbop": { "supported": false },
+    "Zicboz": { "supported": false },
+    "Zicfilp": { "supported": false },
+    "Zicntr": { "supported": false },
+    "Zicond": { "supported": false },
+    "Zihintntl": { "supported": false },
+    "Zihintpause": { "supported": false },
+    "Zihpm": { "supported": false },
+    "Zimop": { "supported": false },
+    "Zknd": { "supported": false },
+    "Zkne": { "supported": false },
+    "Zknh": { "supported": false },
+    "Zkr": { "supported": false },
+    "Zksed": { "supported": false },
+    "Zksh": { "supported": false },
+    "Zkt": { "supported": false },
+    "Zmmul": { "supported": false },
+    "Zvabd": { "supported": false },
+    "Zvbb": { "supported": false },
+    "Zvbc": { "supported": false },
+    "Zvfbfmin": { "supported": false },
+    "Zvfbfwma": { "supported": false },
+    "Zvfh": { "supported": false },
+    "Zvfhmin": { "supported": false },
+    "Zvkb": { "supported": false },
+    "Zvkg": { "supported": false },
+    "Zvkned": { "supported": false },
+    "Zvknha": { "supported": false },
+    "Zvknhb": { "supported": false },
+    "Zvksed": { "supported": false },
+    "Zvksh": { "supported": false },
+    "Zvkt": { "supported": false }
+  }
+}

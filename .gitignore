@@ -64,6 +64,10 @@ dkms.conf
 __pycache__/
 *.pyc
 
+# sail_diff.py's own scratch output (generated .s/.o/.elf/.hex/.vvp per
+# seed) -- regenerated on every run, never meant to be tracked.
+verification/lockstep/gen/_sail_diff_scratch/
+
 # Internal-only reference documentation (not for the public repo)
 docs/internal/
 
