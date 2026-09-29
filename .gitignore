@@ -60,6 +60,10 @@ dkms.conf
 *a.out
 *.vvp
 
+# Python bytecode cache (verification/lockstep/gen/qvgen.py and friends)
+__pycache__/
+*.pyc
+
 # Internal-only reference documentation (not for the public repo)
 docs/internal/
 
