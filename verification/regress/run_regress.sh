@@ -30,10 +30,10 @@ usage() {
 Usage: run_regress.sh [--core fsm|ref|pipe] [--only REGEX] [-j N]
                        [--force] [--list] [--outdir DIR]
 
-  --core fsm|ref|pipe  Which core build to test (default: fsm). Only
-                        "fsm" exists today; ref/pipe are wired in once
-                        P3.3 (verification/reference/) and P4a
-                        (design/pipe/) land.
+  --core fsm|ref|pipe  Which core build to test (default: fsm). "ref"
+                        is verification/reference/ref_core.sv (frozen
+                        P3.3); "pipe" is wired in once P4a (design/pipe/)
+                        lands.
   --only REGEX         Only run tags matching this extended regex.
   -j N                  Parallel job count (default: nproc).
   --force               Re-run every selected test, ignoring cached
@@ -57,14 +57,14 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+CORE_DEFINE=""
 case "$CORE" in
     fsm)
         DESIGN_LIST="$REPO_ROOT/verification/regress/design_files.list"
         ;;
     ref)
-        echo "ERROR: --core ref is not wired up yet -- verification/reference/" \
-             "doesn't exist until pipelining-track-plan.md's P3.3 (the freeze)." >&2
-        exit 1
+        DESIGN_LIST="$REPO_ROOT/verification/regress/ref_design_files.list"
+        CORE_DEFINE="-DQV_REF_AS_CORE"
         ;;
     pipe)
         echo "ERROR: --core pipe is not wired up yet -- design/pipe/ doesn't" \
@@ -89,7 +89,7 @@ while IFS= read -r line; do
     DESIGN_FILES="$DESIGN_FILES $REPO_ROOT/$line"
 done < "$DESIGN_LIST"
 
-INCFLAGS="-I $REPO_ROOT/design -I $REPO_ROOT/design/defaults -I $REPO_ROOT/testbench"
+INCFLAGS="-I $REPO_ROOT/design -I $REPO_ROOT/design/defaults -I $REPO_ROOT/testbench -I $REPO_ROOT/verification/reference"
 
 echo "=== Building firmware/testbench prerequisites ==="
 make -C "$REPO_ROOT/firmware" >/tmp/qv_regress_firmware_build.log 2>&1
@@ -142,7 +142,7 @@ run_one() {
     local t0 t1
 
     t0=$(date +%s)
-    iverilog -g2012 $INCFLAGS -o "$vvpout" $DESIGN_FILES $extra "$REPO_ROOT/$tbfile" \
+    iverilog -g2012 $CORE_DEFINE $INCFLAGS -o "$vvpout" $DESIGN_FILES $extra "$REPO_ROOT/$tbfile" \
         > "${logout}.compile" 2>&1
     if [ $? -ne 0 ]; then
         echo -e "${tag}\tCOMPILE_FAIL\t0" > "$resultf"
@@ -180,6 +180,20 @@ while IFS='|' read -r tag tbfile extra runcwd cores expect timeout_s; do
     [ -n "$tag" ] || continue
     [[ "$tag" == \#* ]] && continue
     if [ -n "$ONLY" ] && ! [[ "$tag" =~ $ONLY ]]; then
+        continue
+    fi
+    # cores column: comma-separated subset of fsm,ref,pipe this test is
+    # meaningful for (tests.list's own header comment). A test not
+    # listing $CORE is skipped entirely for this run -- e.g. the 6
+    # leaf-module unit tests (design_alu_tb and siblings) instantiate
+    # their module by its fixed FSM name (`alu`, `csr_file`, ...), which
+    # has no ref-side equivalent (ref_alu.sv's module is unconditionally
+    # named `ref_alu`, never aliased to `alu` the way ref_core.sv aliases
+    # to `core`) -- a real gap found by direct comparison: this column
+    # existed before P3.3 but was never actually enforced, so `--core
+    # ref` silently tried to compile every fsm-only test too and failed
+    # 8 of them.
+    if ! echo ",$cores," | grep -q ",$CORE,"; then
         continue
     fi
     echo -e "${tag}|${tbfile}|${extra}|${runcwd}|${cores}|${expect}|${timeout_s}" >> "$TAGS_FILE"

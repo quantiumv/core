@@ -17,13 +17,17 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+CORE_DEFINE=""
 case "$CORE" in
     fsm)
         DESIGN_LIST="verification/regress/design_files.list"
         TOP=soc
         ;;
     ref)
-        echo "ERROR: --core ref not wired up yet (P3.3)." >&2; exit 1 ;;
+        DESIGN_LIST="verification/regress/ref_design_files.list"
+        TOP=soc
+        CORE_DEFINE="-DQV_REF_AS_CORE"
+        ;;
     pipe)
         echo "ERROR: --core pipe not wired up yet (P4a)." >&2; exit 1 ;;
     *)
@@ -38,4 +42,5 @@ while IFS= read -r line; do
     DESIGN_FILES="$DESIGN_FILES $line"
 done < "$DESIGN_LIST"
 
-verilator --lint-only -Wall -Idesign -Idesign/defaults --top-module "$TOP" $DESIGN_FILES
+verilator --lint-only -Wall $CORE_DEFINE -Idesign -Idesign/defaults -Iverification/reference \
+    --top-module "$TOP" $DESIGN_FILES

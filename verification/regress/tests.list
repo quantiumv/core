@@ -8,98 +8,106 @@
 # "cores" tracks which of the three core builds (see run_regress.sh
 # --core) this test is meaningful for at this point in the pipelining
 # track -- see the plan at C:\Users\Potato\.claude\plans\
-# research-the-c-extension-reflective-candle.md. Only "fsm" exists today;
-# ref/pipe rows get added to this column as verification/reference/ and
-# design/pipe/ come online (P3.3 / P4a onward), per the ARCH/RET/STIM/
-# UARCH test-class breakdown in that plan.
+# research-the-c-extension-reflective-candle.md. run_regress.sh --core
+# X actually SKIPS any row not listing X (wired up as part of P3.3,
+# which is also when the "ref" value first became real). "pipe" rows
+# get added as design/pipe/ comes online (P4a onward), per the
+# ARCH/RET/STIM/UARCH test-class breakdown in that plan.
+#
+# 8 rows stay fsm-only: the design/*_tb.sv unit tests that instantiate
+# a leaf module (alu/c_expand/csr_file/divider/register_file) directly
+# by its fixed FSM name -- verification/reference/'s ref_* counterparts
+# have no such name alias (unlike ref_core.sv, which answers to `core`
+# under -DQV_REF_AS_CORE), so these simply don't have a ref-side
+# equivalent to run.
 
 # === design/*_tb.sv ===
 design_alu_tb|design/alu_tb.sv||design|fsm|pass|
 design_c_expand_tb|design/c_expand_tb.sv||design|fsm|pass|
-design_cache_complex_tb|design/cache_complex_tb.sv||design|fsm|pass|
-design_clint_tb|design/clint_tb.sv||design|fsm|pass|
+design_cache_complex_tb|design/cache_complex_tb.sv||design|fsm,ref|pass|
+design_clint_tb|design/clint_tb.sv||design|fsm,ref|pass|
 design_csr_file_priv_random_tb|design/csr_file_priv_random_tb.sv||design|fsm|pass|
 design_csr_file_random_tb|design/csr_file_random_tb.sv||design|fsm|pass|
 design_csr_file_tb|design/csr_file_tb.sv||design|fsm|pass|
-design_dcache_random_tb|design/dcache_random_tb.sv||design|fsm|pass|
-design_dcache_tb|design/dcache_tb.sv||design|fsm|pass|
+design_dcache_random_tb|design/dcache_random_tb.sv||design|fsm,ref|pass|
+design_dcache_tb|design/dcache_tb.sv||design|fsm,ref|pass|
 design_divider_random_tb|design/divider_random_tb.sv||design|fsm|pass|
 design_divider_tb|design/divider_tb.sv||design|fsm|pass|
-design_icache_random_tb|design/icache_random_tb.sv||design|fsm|pass|
-design_icache_tb|design/icache_tb.sv||design|fsm|pass|
-design_plic_tb|design/plic_tb.sv||design|fsm|pass|
+design_icache_random_tb|design/icache_random_tb.sv||design|fsm,ref|pass|
+design_icache_tb|design/icache_tb.sv||design|fsm,ref|pass|
+design_plic_tb|design/plic_tb.sv||design|fsm,ref|pass|
 design_register_file_tb|design/register_file_tb.sv||design|fsm|pass|
-design_uart16550_tb|design/uart16550_tb.sv||design|fsm|pass|
-design_wb4_sram_tb|design/wb4_sram_tb.sv||design|fsm|pass|
-design_wb_addr_decoder_clint_tb|design/wb_addr_decoder_clint_tb.sv|testbench/decoder_clint_harness.sv|design|fsm|pass|
-design_wb_addr_decoder_plic_tb|design/wb_addr_decoder_plic_tb.sv|testbench/decoder_plic_harness.sv|design|fsm|pass|
-design_wb_addr_decoder_tb|design/wb_addr_decoder_tb.sv||design|fsm|pass|
-design_wb_arbiter2_tb|design/wb_arbiter2_tb.sv||design|fsm|pass|
+design_uart16550_tb|design/uart16550_tb.sv||design|fsm,ref|pass|
+design_wb4_sram_tb|design/wb4_sram_tb.sv||design|fsm,ref|pass|
+design_wb_addr_decoder_clint_tb|design/wb_addr_decoder_clint_tb.sv|testbench/decoder_clint_harness.sv|design|fsm,ref|pass|
+design_wb_addr_decoder_plic_tb|design/wb_addr_decoder_plic_tb.sv|testbench/decoder_plic_harness.sv|design|fsm,ref|pass|
+design_wb_addr_decoder_tb|design/wb_addr_decoder_tb.sv||design|fsm,ref|pass|
+design_wb_arbiter2_tb|design/wb_arbiter2_tb.sv||design|fsm,ref|pass|
 
 # === testbench/*_tb.sv (no harness needed) ===
-tb_a_encode_crosscheck_tb|testbench/a_encode_crosscheck_tb.sv||testbench|fsm|pass|
-tb_c_encode_crosscheck_tb|testbench/c_encode_crosscheck_tb.sv||testbench|fsm|pass|
-tb_core_a_toolchain_tb|testbench/core_a_toolchain_tb.sv||design|fsm|pass|
-tb_core_alu_ops_tb|testbench/core_alu_ops_tb.sv||design|fsm|pass|
-tb_core_branch_jump_tb|testbench/core_branch_jump_tb.sv||design|fsm|pass|
-tb_core_c_toolchain_tb|testbench/core_c_toolchain_tb.sv||design|fsm|pass|
-tb_core_csr_toolchain_tb|testbench/core_csr_toolchain_tb.sv||design|fsm|pass|
-tb_core_load_store_tb|testbench/core_load_store_tb.sv||design|fsm|pass|
-tb_core_m_toolchain_tb|testbench/core_m_toolchain_tb.sv||design|fsm|pass|
-tb_core_priv_toolchain_tb|testbench/core_priv_toolchain_tb.sv||design|fsm|pass|
-tb_core_rv64_word_ops_tb|testbench/core_rv64_word_ops_tb.sv||design|fsm|pass|
-tb_core_upper_imm_tb|testbench/core_upper_imm_tb.sv||design|fsm|pass|
-tb_core_wb_tb|testbench/core_wb_tb.sv||design|fsm|pass|
-tb_jtag_dmi_e2e_tb|testbench/jtag_dmi_e2e_tb.sv||design|fsm|pass|
-tb_jtag_tap_tb|testbench/jtag_tap_tb.sv||design|fsm|pass|
-tb_m_encode_crosscheck_tb|testbench/m_encode_crosscheck_tb.sv||testbench|fsm|pass|
-tb_priv_encode_crosscheck_tb|testbench/priv_encode_crosscheck_tb.sv||testbench|fsm|pass|
-tb_riscv_encode_crosscheck_tb|testbench/riscv_encode_crosscheck_tb.sv||testbench|fsm|pass|
-tb_soc_c_regression_tb|testbench/soc_c_regression_tb.sv||design|fsm|pass|
-tb_soc_interrupt_tb|testbench/soc_interrupt_tb.sv||design|fsm|pass|
-tb_soc_tb|testbench/soc_tb.sv||design|fsm|pass|
-tb_soc_uart_rx_tb|testbench/soc_uart_rx_tb.sv||design|fsm|pass|
-tb_soc_uart_plic_tb|testbench/soc_uart_plic_tb.sv||design|fsm|pass|
-tb_soc_sba_running_tb|testbench/soc_sba_running_tb.sv||design|fsm|pass|
+tb_a_encode_crosscheck_tb|testbench/a_encode_crosscheck_tb.sv||testbench|fsm,ref|pass|
+tb_c_encode_crosscheck_tb|testbench/c_encode_crosscheck_tb.sv||testbench|fsm,ref|pass|
+tb_core_a_toolchain_tb|testbench/core_a_toolchain_tb.sv||design|fsm,ref|pass|
+tb_core_alu_ops_tb|testbench/core_alu_ops_tb.sv||design|fsm,ref|pass|
+tb_core_branch_jump_tb|testbench/core_branch_jump_tb.sv||design|fsm,ref|pass|
+tb_core_c_toolchain_tb|testbench/core_c_toolchain_tb.sv||design|fsm,ref|pass|
+tb_core_csr_toolchain_tb|testbench/core_csr_toolchain_tb.sv||design|fsm,ref|pass|
+tb_core_load_store_tb|testbench/core_load_store_tb.sv||design|fsm,ref|pass|
+tb_core_m_toolchain_tb|testbench/core_m_toolchain_tb.sv||design|fsm,ref|pass|
+tb_core_priv_toolchain_tb|testbench/core_priv_toolchain_tb.sv||design|fsm,ref|pass|
+tb_core_rv64_word_ops_tb|testbench/core_rv64_word_ops_tb.sv||design|fsm,ref|pass|
+tb_core_upper_imm_tb|testbench/core_upper_imm_tb.sv||design|fsm,ref|pass|
+tb_core_wb_tb|testbench/core_wb_tb.sv||design|fsm,ref|pass|
+tb_jtag_dmi_e2e_tb|testbench/jtag_dmi_e2e_tb.sv||design|fsm,ref|pass|
+tb_jtag_tap_tb|testbench/jtag_tap_tb.sv||design|fsm,ref|pass|
+tb_m_encode_crosscheck_tb|testbench/m_encode_crosscheck_tb.sv||testbench|fsm,ref|pass|
+tb_priv_encode_crosscheck_tb|testbench/priv_encode_crosscheck_tb.sv||testbench|fsm,ref|pass|
+tb_riscv_encode_crosscheck_tb|testbench/riscv_encode_crosscheck_tb.sv||testbench|fsm,ref|pass|
+tb_soc_c_regression_tb|testbench/soc_c_regression_tb.sv||design|fsm,ref|pass|
+tb_soc_interrupt_tb|testbench/soc_interrupt_tb.sv||design|fsm,ref|pass|
+tb_soc_tb|testbench/soc_tb.sv||design|fsm,ref|pass|
+tb_soc_uart_rx_tb|testbench/soc_uart_rx_tb.sv||design|fsm,ref|pass|
+tb_soc_uart_plic_tb|testbench/soc_uart_plic_tb.sv||design|fsm,ref|pass|
+tb_soc_sba_running_tb|testbench/soc_sba_running_tb.sv||design|fsm,ref|pass|
 
 # === testbench/*_tb.sv (core_wb4_sram_harness) ===
-tb_core_a_ext_tb|testbench/core_a_ext_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm|pass|
-tb_core_bus_fault_trap_tb|testbench/core_bus_fault_trap_tb.sv|testbench/core_wb4_sram_harness.sv,testbench/state_reached_monitor.sv|design|fsm|pass|
-tb_core_c_ext_tb|testbench/core_c_ext_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm|pass|
-tb_core_c_illegal_trap_tb|testbench/core_c_illegal_trap_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm|pass|
-tb_core_csr_readonly_trap_tb|testbench/core_csr_readonly_trap_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm|pass|
-tb_core_debug_csr_violation_tb|testbench/core_debug_csr_violation_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm|pass|
-tb_core_debug_halt_tb|testbench/core_debug_halt_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm|pass|
-tb_core_ebreak_trap_tb|testbench/core_ebreak_trap_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm|pass|
-tb_core_interrupt_tb|testbench/core_interrupt_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm|pass|
-tb_core_isa_coverage_gap_tb|testbench/core_isa_coverage_gap_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm|pass|
-tb_core_m_ext_tb|testbench/core_m_ext_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm|pass|
-tb_core_m_w_edgecases_tb|testbench/core_m_w_edgecases_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm|pass|
-tb_core_misaligned_trap_tb|testbench/core_misaligned_trap_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm|pass|
-tb_core_priv_tb|testbench/core_priv_tb.sv|testbench/core_wb4_sram_harness.sv,testbench/pc_trigger_sample_monitor.sv|design|fsm|pass|
-tb_core_priv_u_ecall_tb|testbench/core_priv_u_ecall_tb.sv|testbench/core_wb4_sram_harness.sv,testbench/pc_trigger_sample_monitor.sv|design|fsm|pass|
-tb_core_reservation_fault_tb|testbench/core_reservation_fault_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm|pass|
-tb_core_sfence_vma_priv_tb|testbench/core_sfence_vma_priv_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm|pass|
-tb_core_sv39_fetch_tb|testbench/core_sv39_fetch_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm|pass|
-tb_core_sv39_mem_tb|testbench/core_sv39_mem_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm|pass|
-tb_core_sv39_tlb_tb|testbench/core_sv39_tlb_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm|pass|
-tb_core_sv39_cache_tb|testbench/core_sv39_cache_tb.sv|testbench/core_cache_harness.sv|design|fsm|pass|
-tb_core_sv39_random_tb|testbench/core_sv39_random_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm|pass|
-tb_core_sv39_realfw_tb|testbench/core_sv39_realfw_tb.sv||design|fsm|pass|
-tb_core_sv39_irq_tb|testbench/core_sv39_irq_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm|pass|
-tb_core_zicsr_tb|testbench/core_zicsr_tb.sv|testbench/core_wb4_sram_harness.sv,testbench/pc_trigger_sample_monitor.sv|design|fsm|pass|
+tb_core_a_ext_tb|testbench/core_a_ext_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm,ref|pass|
+tb_core_bus_fault_trap_tb|testbench/core_bus_fault_trap_tb.sv|testbench/core_wb4_sram_harness.sv,testbench/state_reached_monitor.sv|design|fsm,ref|pass|
+tb_core_c_ext_tb|testbench/core_c_ext_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm,ref|pass|
+tb_core_c_illegal_trap_tb|testbench/core_c_illegal_trap_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm,ref|pass|
+tb_core_csr_readonly_trap_tb|testbench/core_csr_readonly_trap_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm,ref|pass|
+tb_core_debug_csr_violation_tb|testbench/core_debug_csr_violation_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm,ref|pass|
+tb_core_debug_halt_tb|testbench/core_debug_halt_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm,ref|pass|
+tb_core_ebreak_trap_tb|testbench/core_ebreak_trap_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm,ref|pass|
+tb_core_interrupt_tb|testbench/core_interrupt_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm,ref|pass|
+tb_core_isa_coverage_gap_tb|testbench/core_isa_coverage_gap_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm,ref|pass|
+tb_core_m_ext_tb|testbench/core_m_ext_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm,ref|pass|
+tb_core_m_w_edgecases_tb|testbench/core_m_w_edgecases_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm,ref|pass|
+tb_core_misaligned_trap_tb|testbench/core_misaligned_trap_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm,ref|pass|
+tb_core_priv_tb|testbench/core_priv_tb.sv|testbench/core_wb4_sram_harness.sv,testbench/pc_trigger_sample_monitor.sv|design|fsm,ref|pass|
+tb_core_priv_u_ecall_tb|testbench/core_priv_u_ecall_tb.sv|testbench/core_wb4_sram_harness.sv,testbench/pc_trigger_sample_monitor.sv|design|fsm,ref|pass|
+tb_core_reservation_fault_tb|testbench/core_reservation_fault_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm,ref|pass|
+tb_core_sfence_vma_priv_tb|testbench/core_sfence_vma_priv_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm,ref|pass|
+tb_core_sv39_fetch_tb|testbench/core_sv39_fetch_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm,ref|pass|
+tb_core_sv39_mem_tb|testbench/core_sv39_mem_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm,ref|pass|
+tb_core_sv39_tlb_tb|testbench/core_sv39_tlb_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm,ref|pass|
+tb_core_sv39_cache_tb|testbench/core_sv39_cache_tb.sv|testbench/core_cache_harness.sv|design|fsm,ref|pass|
+tb_core_sv39_random_tb|testbench/core_sv39_random_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm,ref|pass|
+tb_core_sv39_realfw_tb|testbench/core_sv39_realfw_tb.sv||design|fsm,ref|pass|
+tb_core_sv39_irq_tb|testbench/core_sv39_irq_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm,ref|pass|
+tb_core_zicsr_tb|testbench/core_zicsr_tb.sv|testbench/core_wb4_sram_harness.sv,testbench/pc_trigger_sample_monitor.sv|design|fsm,ref|pass|
 
 # === testbench/*_tb.sv (core_cache_harness) ===
-tb_core_a_ext_cache_tb|testbench/core_a_ext_cache_tb.sv|testbench/core_cache_harness.sv|design|fsm|pass|
-tb_core_bus_fault_cache_tb|testbench/core_bus_fault_cache_tb.sv|testbench/core_cache_harness.sv,testbench/state_reached_monitor.sv|design|fsm|pass|
-tb_core_c_ext_cache_tb|testbench/core_c_ext_cache_tb.sv|testbench/core_cache_harness.sv|design|fsm|pass|
-tb_core_fence_i_tb|testbench/core_fence_i_tb.sv|testbench/core_cache_harness.sv|design|fsm|pass|
-tb_core_interrupt_icache_miss_tb|testbench/core_interrupt_icache_miss_tb.sv|testbench/core_cache_harness.sv|design|fsm|pass|
-tb_core_m_ext_cache_tb|testbench/core_m_ext_cache_tb.sv|testbench/core_cache_harness.sv|design|fsm|pass|
+tb_core_a_ext_cache_tb|testbench/core_a_ext_cache_tb.sv|testbench/core_cache_harness.sv|design|fsm,ref|pass|
+tb_core_bus_fault_cache_tb|testbench/core_bus_fault_cache_tb.sv|testbench/core_cache_harness.sv,testbench/state_reached_monitor.sv|design|fsm,ref|pass|
+tb_core_c_ext_cache_tb|testbench/core_c_ext_cache_tb.sv|testbench/core_cache_harness.sv|design|fsm,ref|pass|
+tb_core_fence_i_tb|testbench/core_fence_i_tb.sv|testbench/core_cache_harness.sv|design|fsm,ref|pass|
+tb_core_interrupt_icache_miss_tb|testbench/core_interrupt_icache_miss_tb.sv|testbench/core_cache_harness.sv|design|fsm,ref|pass|
+tb_core_m_ext_cache_tb|testbench/core_m_ext_cache_tb.sv|testbench/core_cache_harness.sv|design|fsm,ref|pass|
 
-tb_core_pmp_tb|testbench/core_pmp_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm|pass|
+tb_core_pmp_tb|testbench/core_pmp_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm,ref|pass|
 
 # === special harnesses ===
-tb_core_amo_write_fault_tb|testbench/core_amo_write_fault_tb.sv|testbench/core_amo_write_fault_harness.sv|design|fsm|pass|
-tb_dm_tb|testbench/dm_tb.sv|testbench/dm_core_harness.sv|design|fsm|pass|
-tb_core_trigger_tb|testbench/core_trigger_tb.sv|testbench/dm_core_harness.sv|design|fsm|pass|
+tb_core_amo_write_fault_tb|testbench/core_amo_write_fault_tb.sv|testbench/core_amo_write_fault_harness.sv|design|fsm,ref|pass|
+tb_dm_tb|testbench/dm_tb.sv|testbench/dm_core_harness.sv|design|fsm,ref|pass|
+tb_core_trigger_tb|testbench/core_trigger_tb.sv|testbench/dm_core_harness.sv|design|fsm,ref|pass|

@@ -1,0 +1,5716 @@
+// SPDX-License-Identifier: MIT
+
+/* ------------------------------------------------------------------------- */
+
+
+`include "defaults/defaults.sv"
+`include "defaults/instruction_format.sv"
+`include "ref_macros.svh"
+
+
+/* ------------------------------------------------------------------------- */
+
+
+/*
+ * Module: core (multi-cycle RV64I, Wishbone master)
+ *
+ * Supersedes the single-cycle version: instead of a combinational-read
+ * imem/dmem pair private to this module, the core is now the SOLE master
+ * on a shared Wishbone bus (see design/wb_addr_decoder.sv,
+ * design/wb4_sram.sv, design/uart_tx.sv) -- instruction fetch and data
+ * access are both real bus transactions now, and both slaves ack one
+ * cycle after being addressed (registered, not combinational). That
+ * multi-cycle reality is why this can no longer be single-cycle: a
+ * 5-state FSM (S_FETCH / S_EXEC / S_MEM / S_AMO_WRITE / S_FETCH_HI)
+ * sequences each instruction instead.
+ *
+ * decoder/alu/register_file are reused completely unchanged from the
+ * single-cycle version -- they were already purely combinational glue
+ * with no notion of "cycle" baked in, so nothing about them needed to
+ * change. What's new here is entirely the FSM: WHEN the bus is driven,
+ * and WHEN the results of that already-combinational logic are allowed to
+ * actually commit (register-file write, pc update). See `commit_now`
+ * below -- that one signal is the entire difference between this file and
+ * the single-cycle version's control-flow shape.
+ *
+ * Per-instruction flow:
+ *  S_FETCH: issue a bus read at pc (dword-aligned -- the bus is 64-bit
+ *           wide, so one beat fetches up to 4 compressed halfwords or 2
+ *           adjacent 32-bit instructions; pc[2:1] selects which of the
+ *           4 halfword slots this instruction actually starts at -- see
+ *           the C extension note below). Wait for ack, latch the 64-bit
+ *           line, move to S_EXEC -- UNLESS the halfword at pc turns out
+ *           to be the low half of an uncompressed instruction starting
+ *           in the dword's LAST slot, in which case its other 16 bits
+ *           live in the NEXT dword and next state is S_FETCH_HI instead.
+ *  S_FETCH_HI: (C extension only, dword-crossing 32-bit instructions)
+ *           issue a bus read at the NEXT dword. Wait for ack, latch its
+ *           low 16 bits, move to S_EXEC.
+ *  S_EXEC:  bus idle. The fetched halfword(s) are first run through
+ *           design/c_expand.sv (a compressed instruction is expanded
+ *           into its standard 32-bit equivalent; an uncompressed one
+ *           passes through as-is) before decoder/alu/register_file
+ *           settle combinationally off the result (exactly the
+ *           single-cycle version's Decode/Control/Execute/Writeback/
+ *           Next-PC logic, verbatim -- decoder.sv itself needs no C
+ *           extension awareness at all). If this instruction is a load
+ *           or store, move to S_MEM without committing anything yet.
+ *           Otherwise this is the instruction's last cycle: commit
+ *           (regfile write + pc update, by is_compressed ? 2 : 4 bytes)
+ *           on this edge and return to S_FETCH.
+ *  S_MEM:   (loads/stores only) issue a bus read or write at alu_result.
+ *           Wait for ack; on that edge commit (a load's regfile write
+ *           happens HERE, not in S_EXEC, since the loaded value doesn't
+ *           exist yet when S_EXEC ends) and return to S_FETCH -- UNLESS
+ *           this is one of the 9 read-modify-write AMO ops, in which case
+ *           this ack was only the READ half and next state is
+ *           S_AMO_WRITE instead.
+ *  S_AMO_WRITE: (the 9 read-modify-write AMO ops only) issue a bus write
+ *           at the SAME address S_MEM just read from, using a value
+ *           computed from the just-captured old memory value and rs2.
+ *           Wait for ack; commit (both the memory write's effect and
+ *           rd = the OLD value) happens HERE, not in S_MEM.
+ *
+ * Why nothing needs re-latching between S_EXEC and S_MEM: pc doesn't
+ * change until commit_now, and the fetched instruction doesn't change
+ * until the next S_FETCH's (or, for a crossing instruction, S_FETCH_HI's)
+ * ack -- so every combinational signal derived from them
+ * (decoded_instruction, imm_1/imm_2, alu_result, next_pc, ...) is already
+ * stable for the instruction's entire multi-cycle lifetime, with no extra
+ * latching required beyond the (now up to two) real latches this design
+ * adds (the fetched instruction line, plus -- only for a dword-crossing
+ * C instruction -- the second dword's low halfword).
+ *
+ * Scope: full RV64IMAC base ISA + Zicsr + full U/S/M privilege modes,
+ * machine-timer + external (PLIC) interrupts, PMP, and (as of the Sv39
+ * staged plan, in progress) Sv39 fetch-side translation -- see satp_w/
+ * fetch_translate_active and the "Sv39 Page-Table Walker" section below.
+ * Mem-side translation (Milestone 4), a TLB (Milestone 5), and IPI/msip
+ * remain later milestones. Misaligned DATA access (loads/stores) traps cleanly (see
+ * mem_load_misaligned/mem_store_misaligned below) rather than being
+ * handled in hardware -- actual misaligned load/store SUPPORT stays
+ * deferred to a later milestone alongside Sv39, but silently truncating
+ * an overflowing access instead of either handling or trapping it, as
+ * this core did before, isn't spec-legal, so the trap half is done now.
+ * FENCE is still deliberately under-implemented (see its handling
+ * below). Misaligned INSTRUCTION fetch, by contrast, is a real,
+ * exercised case as of the C extension (any compressed instruction can
+ * leave pc 2-byte- rather than 4-byte-aligned) and IS correctly
+ * handled, not a gap. wb_fetch_err_i/wb_mem_err_i now feed instruction/
+ * load/store access-fault traps (causes 1/5/7 -- see wb_fetch_done/
+ * wb_fetch_ok, wb_mem_done/wb_mem_ok, fetch_fault_q[cur_slot],
+ * mem_load_access_fault/mem_store_access_fault below).
+ *
+ * Input ports:
+ *  clk: Clock.
+ *  rst: Synchronous reset (active high) -- resets pc and FSM state.
+ *       Does NOT reset register/memory contents; the ISA doesn't
+ *       require it, and real hardware doesn't guarantee it either
+ *       (only the reset vector is architecturally defined).
+ *
+ * Wishbone master ports: standard CLASSIC-cycle signal names, written
+ * from this module's (the master's) point of view -- `_o` drives the
+ * bus, `_i` reads it. Two INDEPENDENT ports (fetch and mem), NOT one
+ * time-multiplexed port -- Pipelining P2 step 3b prerequisite #2 (the
+ * downstream cache_complex.sv arbiter, commit 7e21635, was prerequisite
+ * #1). Real fetch/execute overlap means fstate can genuinely have its
+ * own instruction-fetch transaction outstanding at the exact same time
+ * S_MEM/S_AMO_WRITE/S_PTW has its own independent data-access
+ * transaction outstanding -- a single shared port's ack_i/err_i could
+ * only ever reflect ONE of them at a time (the old wb_ifetch_o mux's
+ * own single-latch problem, one layer up from the identical bug the
+ * cache_complex.sv fix already closed downstream), silently losing
+ * whichever stream's request didn't most recently touch the shared
+ * wires. design/cache_complex.sv's own core-facing side is split the
+ * same way, one-for-one (its fetch_* and data_* slave ports); each of THIS
+ * module's two master ports connects to exactly one of those, wired
+ * permanently, structurally -- no ifetch_i-style mux signal needed or
+ * present anymore (see wb_ifetch_o's own removal note, below).
+ *
+ * The fetch port is deliberately minimal (no we_o/dat_o/sel_o): every
+ * S_FETCH/S_FETCH_HI arm (translated or, via fstate, untranslated) is
+ * provably read-only, and icache.sv's own core-facing port already has
+ * no we_i/dat_i/sel_i pins to drive -- there is nowhere downstream for
+ * those wires to go. The mem port keeps the full old shape (read+write),
+ * unchanged -- S_MEM/S_AMO_WRITE and, per S_PTW's own routing note
+ * below, S_PTW too all still need it.
+ *
+ * S_PTW (the Sv39 page-table walker) rides the MEM port UNCONDITIONALLY,
+ * regardless of ptw_reason_q -- even a walk started on behalf of the
+ * FETCH stream's own translation (PTW_REASON_LO/HI). This is not a new
+ * decision: the old wb_ifetch_o already excluded S_PTW from its own
+ * OR-list (fetch-vs-mem was only ever S_FETCH/S_FETCH_HI vs.
+ * everything else), so every PTE read already flowed to dcache0, never
+ * icache0. It's also provably safe under this milestone's own Sv39
+ * descope: state only ever REACHES S_PTW from S_FETCH/S_FETCH_HI/S_MEM,
+ * and fstate_eligible (see its own declaration comment) requires
+ * state==S_FETCH -- so a FETCH-reason walk can only be live while
+ * state is still finishing the CURRENT instruction's own fetch, at
+ * which point fstate is definitionally already ineligible (state isn't
+ * S_FETCH anymore) and stays that way for the walk's entire duration.
+ * Nothing on the fetch port could ever contend with it. A MEM-reason
+ * walk (PTW_REASON_MEM, entered only from S_MEM) genuinely CAN run
+ * concurrently with fstate prefetching the NEXT instruction once step
+ * 3b relaxes fstate_eligible past state==S_FETCH -- exactly the
+ * concurrency this whole port split exists to make safe, handled for
+ * free by routing S_PTW's bus traffic to the mem port unconditionally.
+ * The one thing that does NOT change: which RESULT register a walk's
+ * own response updates (fetch_lo/hi_fault_q/paddr_q for LO/HI,
+ * mem_fault_q/mem_resolved_paddr_q for MEM) stays keyed on
+ * ptw_reason_q[cur_slot] exactly as today, via ptw_is_mem -- the
+ * PORT a response arrives on and the REGISTER its result updates are
+ * orthogonal questions, and only the first one is new here.
+ *
+ * wb_ifetch_o: REMOVED. Its entire job was letting a single
+ * time-multiplexed port's downstream cache layer distinguish I$ vs D$
+ * traffic; with two physically independent ports, that routing is now
+ * the physical identity of the wire bundle itself (cache_complex.sv's
+ * fetch-facing slave port is wired, at elaboration time, only to
+ * icache0; its data-facing slave port only to dcache0) -- there is
+ * nothing left for a side-band mux-select signal to do.
+ *
+ * wb_mem_lock_o: Milestone 8 review fix -- a real Wishbone B4 LOCK
+ * signal (an optional part of the spec for exactly this purpose), high
+ * across an RMW AMO's own two-phase bus sequence (S_MEM's read, then
+ * S_AMO_WRITE's write) so design/wb_arbiter2.sv never grants the OTHER
+ * master (dm.sv's System Bus Access) in the one genuinely idle cycle
+ * between them. Renamed from wb_lock_o (definition UNCHANGED -- it was
+ * already mem-port-only, S_MEM&&is_amo_rmw or S_AMO_WRITE, never
+ * fetch-related) purely to self-document the pairing now that there are
+ * two ports to be lock-of. That gap is real and was found the hard way:
+ * wb_mem_cyc_o drops the SAME cycle the read's own ack arrives (gated
+ * by !wb_mem_done, see that comment below), but `state` only becomes
+ * S_AMO_WRITE the FOLLOWING clock edge, and S_AMO_WRITE's own fresh
+ * wb_mem_cyc_o=1 request appears immediately that same cycle -- meaning
+ * the arbiter's own in-flight tracking clears and re-arbitrates FRESH on
+ * the exact same cycle the write's own request shows up, a genuine tie
+ * an unlocked arbiter resolves in the OTHER master's favor by fixed
+ * priority, silently interleaving a debugger's own read/write into the
+ * middle of what RISC-V requires to be one atomic read-modify-write.
+ * Defined purely off `state`/is_amo_rmw, deliberately NOT gated by
+ * debug_progbuf_active -- an AMO executed from the Program Buffer (M7)
+ * reuses these exact same states and needs the identical protection.
+ * LR/SC deliberately do NOT need this: each is its own single-phase
+ * S_MEM transaction (no second bus phase to protect), and their own
+ * atomicity is a wholly different mechanism (reservation_valid_q, see
+ * that register's own comment) -- notably NOT one this signal covers
+ * either: an SBA write landing exactly between a hart's own LR and its
+ * later SC does not invalidate the reservation the way the spec
+ * requires of a write from any other agent to the same address. A
+ * known, narrower, deliberately unaddressed gap -- fixing it would
+ * need a new "SBA just wrote address X" signal reaching all the way
+ * back into this file's own reservation logic, real scope beyond this
+ * milestone's own review-fix pass, and LR/SC critical sections are
+ * short enough that a debugger poking the exact same address during
+ * one is a far narrower window than the AMO case above, which triggers
+ * on ANY pending SBA traffic, not just same-address traffic.
+ *
+ * icache_flush_o: Zifencei's FENCE.I -- side-band, not part of the
+ * Wishbone protocol itself, same as wb_mem_lock_o above -- pulses one
+ * cycle on FENCE.I's own retirement (assign icache_flush_o =
+ * commit_now && is_fence_i;), telling a downstream I$ to invalidate its
+ * contents. Timing is provably clean, not just probably fine: FENCE.I
+ * retires purely within S_EXEC (bus-idle for this single-issue,
+ * non-pipelined core -- it issues zero bus traffic during S_EXEC), so
+ * the I$ is provably CACHE_IDLE at the exact cycle this pulses -- no
+ * mid-refill-flush case exists to reason about. D$ never needed a
+ * flush path to begin with (write-through already keeps a store hit's
+ * cached copy and SRAM in lockstep).
+ *
+ * i_mtip: machine-timer-interrupt-pending level from an external CLINT
+ * (design/clint.sv's mtip_o, see soc.sv). Continuously-valid status
+ * level, not a pulse -- spliced into mip's bit 7 inside csr_file0 and
+ * consumed combinationally by this module's own Interrupts section
+ * (near csr_file0's instantiation, below) to decide interrupt_taken.
+ * ANSI default (= 1'b0) so the 16+ testbenches/harnesses that
+ * instantiate core directly without driving this port stay compile-
+ * and lint-clean (same precedent as csr_file.sv's own i_mtip default).
+ *
+ * i_meip/i_seip: PMP+PLIC plan Milestone 3's generalization of i_mtip's
+ * exact same pattern -- external-interrupt-pending levels from a future
+ * PLIC (design/plic.sv's o_meip/o_seip, not yet instantiated in soc.sv
+ * until that plan's own Milestone 6), spliced into mip bits 11/9 inside
+ * csr_file0, consumed by the same Interrupts section's now-generalized
+ * MEI>MTI>SEI priority mux. Same ANSI-defaulted-0 reasoning as i_mtip.
+ */
+/* verilator lint_off DECLFILENAME */
+// Under -DQV_REF_AS_CORE this module is named `core`, deliberately not
+// matching this file's own name (ref_core.sv) -- the whole point of the
+// conditional rename (see this directory's own README.md). Expected,
+// not a real lint gap.
+`ifdef QV_REF_AS_CORE
+module core
+`else
+module ref_core
+`endif
+    /* verilator lint_on DECLFILENAME */
+    /* verilator lint_off UNUSEDPARAM */
+    // Declared now, wired up once P3.4 writes mutants against it (see
+    // this directory's own README.md, "Running mutants") -- unused
+    // until then is expected, not a real lint gap.
+    #(parameter int QV_MUTANT = 0)
+    /* verilator lint_on UNUSEDPARAM */
+(
+    input logic clk,
+    input logic rst,
+
+    // Fetch-side Wishbone master port -- see this module's own header
+    // comment for the full design (Pipelining P2 step 3b prerequisite).
+    output logic [31:0] wb_fetch_addr_o,
+    output logic        wb_fetch_cyc_o,
+    output logic        wb_fetch_stb_o,
+    input  logic [63:0] wb_fetch_dat_i,
+    input  logic        wb_fetch_ack_i,
+    input  logic        wb_fetch_err_i,
+
+    // Mem-side Wishbone master port -- S_MEM/S_AMO_WRITE, and S_PTW
+    // unconditionally (see this module's own header comment).
+    output logic [31:0] wb_mem_addr_o,
+    output logic [63:0] wb_mem_dat_o,
+    input  logic [63:0] wb_mem_dat_i,
+    output logic [7:0]  wb_mem_sel_o,
+    output logic        wb_mem_we_o,
+    output logic        wb_mem_cyc_o,
+    output logic        wb_mem_stb_o,
+    input  logic        wb_mem_ack_i,
+    input  logic        wb_mem_err_i,
+    output logic        wb_mem_lock_o,
+    output logic        icache_flush_o,
+    input  logic         i_mtip = 1'b0,
+    input  logic         i_meip = 1'b0,
+    input  logic         i_seip = 1'b0,
+
+    /*
+     * Debug Mode halt/resume (Milestone 4 of the EBREAK/JTAG staged
+     * plan). i_debug_halt_req is a LEVEL, not a pulse -- held by an
+     * external debugger until the halt is acknowledged (o_debug_mode
+     * goes high), same "level, not edge-sensitive" contract i_mtip
+     * already establishes. i_debug_resume_req is a one-cycle pulse,
+     * only meaningful while o_debug_mode is already high. Both default
+     * to 1'b0 so the many testbenches that instantiate core directly
+     * without driving them stay compile/lint-clean, same precedent
+     * i_mtip's own default set.
+     */
+    input  logic        i_debug_halt_req = 1'b0,
+    input  logic        i_debug_resume_req = 1'b0,
+    output logic        o_debug_mode,
+
+    /*
+     * Access Register interface (Milestone 5 of the EBREAK/JTAG staged
+     * plan) -- lets an external Debug Module read/write a GPR or CSR
+     * while the hart is genuinely parked in S_DEBUG_HALTED. Both muxes
+     * are gated on dm_access_active (in_debug_mode && !debug_progbuf_active),
+     * not in_debug_mode alone -- see that wire's own comment further
+     * down for why. Milestone 5's own original reasoning here (a
+     * decode-driven CSR/GPR access structurally cannot happen while
+     * in_debug_mode is 1, since commit_now/csr_we/reg_write are hard-0
+     * throughout S_DEBUG_HALTED) was correct THEN, before Milestone 7's
+     * Program Buffer existed -- it no longer holds unconditionally,
+     * since a progbuf run retires real decode-driven instructions while
+     * in_debug_mode is STILL 1. dm_access_active restores the same
+     * "temporally disjoint, nothing to arbitrate" property against the
+     * right condition instead. All inputs default to 1'b0 so the many
+     * testbenches instantiating core directly without driving them stay
+     * compile/lint-clean, same precedent i_mtip/i_debug_halt_req already
+     * set.
+     */
+    input  logic         i_dm_csr_we = 1'b0,
+    input  logic [11:0]  i_dm_csr_addr = 12'b0,
+    input  logic [63:0]  i_dm_csr_wdata = 64'b0,
+    output logic [63:0]  o_dm_csr_rdata,
+    input  logic         i_dm_gpr_we = 1'b0,
+    input  logic [4:0]   i_dm_gpr_sel = 5'b0,
+    input  logic [63:0]  i_dm_gpr_wdata = 64'b0,
+    output logic [63:0]  o_dm_gpr_rdata,
+
+    /*
+     * Program Buffer execution (Milestone 7 of the EBREAK/JTAG staged
+     * plan) -- lets an external Debug Module run a small, in-order,
+     * straight-line sequence of instructions (dm.sv's own progbuf0-15
+     * storage) while the hart is genuinely parked in S_DEBUG_HALTED,
+     * normally terminated by the debugger's own trailing EBREAK.
+     * i_progbuf_start is a one-cycle pulse (only meaningful while
+     * o_debug_mode is already high); o_progbuf_pc is which progbuf word
+     * this core currently wants (a plain 0-15 index, not a byte
+     * address); i_progbuf_data is that word, read back combinationally
+     * (dm.sv's own progbuf storage has no read latency, mirroring how
+     * the Access Register GPR/CSR reads already work). o_progbuf_done
+     * pulses on a clean EBREAK-terminated run; o_progbuf_abort pulses
+     * if any OTHER exception fires during progbuf execution (illegal
+     * instruction, ecall, misaligned/faulting memory access) -- the
+     * Debug Module is expected to report abstractcs.cmderr=3
+     * ("exception") in that case, per spec. All inputs default to
+     * their inert value so the many testbenches instantiating core
+     * directly without driving them stay compile/lint-clean, same
+     * precedent i_mtip/i_debug_halt_req/i_dm_csr_we/i_dm_gpr_we
+     * already set.
+     */
+    input  logic         i_progbuf_start = 1'b0,
+    output logic [3:0]   o_progbuf_pc,
+    input  logic [31:0]  i_progbuf_data = 32'b0,
+    output logic         o_progbuf_done,
+    output logic         o_progbuf_abort
+
+    /*
+     * RVFI (RISC-V Formal Interface) -- only present when compiled for
+     * riscv-formal (see verification/riscv-formal/), never in a normal
+     * build/lint/simulation run. Hand-written rather than pulled in via
+     * riscv-formal's own `RVFI_OUTPUTS macro (checks/rvfi_macros.vh) so
+     * core.sv has no dependency on that separately-cloned repo existing
+     * at build time -- these widths are just RVFI_OUTPUTS's own
+     * expansion for our fixed NRET=1/XLEN=64/ILEN=32, spelled out
+     * directly. First slice covers base-ISA checks (isa=rv64i in
+     * checks.cfg) only. CSR trace ports added deliberately, one extension's
+     * worth at a time: mepc/mcause/sepc/scause first (simple 3-source
+     * always_ff registers, mirrored combinationally in csr_file.sv for the
+     * *_next/wdata side -- see that module's own header comment) --
+     * mstatus deliberately deferred (12 real fields written from 5
+     * different sources, a substantially bigger lift, its own round later).
+     */
+`ifdef RISCV_FORMAL
+    ,
+    output logic        rvfi_valid,
+    output logic [63:0] rvfi_order,
+    output logic [31:0] rvfi_insn,
+    output logic        rvfi_trap,
+    output logic        rvfi_halt,
+    output logic        rvfi_intr,
+    output logic [1:0]  rvfi_mode,
+    output logic [1:0]  rvfi_ixl,
+    output logic [4:0]  rvfi_rs1_addr,
+    output logic [4:0]  rvfi_rs2_addr,
+    output logic [63:0] rvfi_rs1_rdata,
+    output logic [63:0] rvfi_rs2_rdata,
+    output logic [4:0]  rvfi_rd_addr,
+    output logic [63:0] rvfi_rd_wdata,
+    output logic [63:0] rvfi_pc_rdata,
+    output logic [63:0] rvfi_pc_wdata,
+    output logic [63:0] rvfi_mem_addr,
+    output logic [7:0]  rvfi_mem_rmask,
+    output logic [7:0]  rvfi_mem_wmask,
+    output logic [63:0] rvfi_mem_rdata,
+    output logic [63:0] rvfi_mem_wdata,
+    output logic [63:0] rvfi_csr_mepc_rmask,
+    output logic [63:0] rvfi_csr_mepc_wmask,
+    output logic [63:0] rvfi_csr_mepc_rdata,
+    output logic [63:0] rvfi_csr_mepc_wdata,
+    output logic [63:0] rvfi_csr_mcause_rmask,
+    output logic [63:0] rvfi_csr_mcause_wmask,
+    output logic [63:0] rvfi_csr_mcause_rdata,
+    output logic [63:0] rvfi_csr_mcause_wdata,
+    output logic [63:0] rvfi_csr_sepc_rmask,
+    output logic [63:0] rvfi_csr_sepc_wmask,
+    output logic [63:0] rvfi_csr_sepc_rdata,
+    output logic [63:0] rvfi_csr_sepc_wdata,
+    output logic [63:0] rvfi_csr_scause_rmask,
+    output logic [63:0] rvfi_csr_scause_wmask,
+    output logic [63:0] rvfi_csr_scause_rdata,
+    output logic [63:0] rvfi_csr_scause_wdata,
+    /*
+     * pmpcfg0/pmpaddr0: NOT wired for a csrc_any-style consistency check
+     * (checks.cfg deliberately does not list these in [csrs] -- that would
+     * also generate a new csrc_any_pmpcfg0_ch* check family this project
+     * doesn't need). Their only consumer is checks.cfg's own [assume
+     * !insn_.*_ch0 !c_.*_ch0] block, which needs *some* top-level RVFI
+     * signal it can pin PMP region 0 to its permissive-reset value through
+     * -- see that block's own comment for why. rdata is therefore the only
+     * field that's ever actually read by anything; wdata mirrors rdata
+     * (no real "next" value is tracked for PMP the way mepc_next_w is)
+     * purely so these ports have *a* legal driver, matching the port-list
+     * shape every other rvfi_csr_* port here uses.
+     */
+    output logic [63:0] rvfi_csr_pmpcfg0_rmask,
+    output logic [63:0] rvfi_csr_pmpcfg0_wmask,
+    output logic [63:0] rvfi_csr_pmpcfg0_rdata,
+    output logic [63:0] rvfi_csr_pmpcfg0_wdata,
+    output logic [63:0] rvfi_csr_pmpaddr0_rmask,
+    output logic [63:0] rvfi_csr_pmpaddr0_wmask,
+    output logic [63:0] rvfi_csr_pmpaddr0_rdata,
+    output logic [63:0] rvfi_csr_pmpaddr0_wdata,
+    /*
+     * medeleg: same "assume-scoping needs a bare RVFI signal to reference"
+     * reasoning as pmpcfg0/pmpaddr0 above, this time so checks.cfg can pin
+     * specific delegation bits rather than PMP state -- see that block's
+     * own comment in checks.cfg for why. rdata is medeleg_w, csr_file0's
+     * own already-existing control-plane export (real hardware, not new
+     * state); wdata mirrors it for the same "needs *a* legal driver, never
+     * actually consumed" reason pmpcfg0/pmpaddr0's wdata do.
+     */
+    output logic [63:0] rvfi_csr_medeleg_rmask,
+    output logic [63:0] rvfi_csr_medeleg_wmask,
+    output logic [63:0] rvfi_csr_medeleg_rdata,
+    output logic [63:0] rvfi_csr_medeleg_wdata,
+    /*
+     * satp: same "assume-scoping needs a bare RVFI signal to reference"
+     * reasoning as pmpcfg0/pmpaddr0/medeleg above. rvfi_mem_addr (see its
+     * own assign below) is derived from mem_paddr -- the POST-Sv39-
+     * translation physical address, by this project's own established
+     * naming convention (see Sv39 PTW milestones) -- while every generic
+     * riscv-formal load/store/AMO spec model (insn_lb.v, insn_sw.v,
+     * insn_amoadd_d.v, etc) computes spec_mem_addr from pure
+     * rs1_rdata+imm with zero Sv39 awareness, the
+     * same blind spot PMP already has for fetch/mem access legality. With
+     * satp fully free (as it correctly is for genuine translation
+     * coverage elsewhere), the solver can pick any satp+PTE combination
+     * that maps the checked instruction's virtual address to an
+     * unrelated physical one, trivially breaking rvfi_mem_addr's match
+     * against the spec's untranslated expectation -- confirmed by direct
+     * counterexample replay (insn_lb_ch0's own trace, after the mcause/
+     * medeleg fault-exclusion fixes above got it past its OTHER two
+     * gaps: rvfi_mem_addr's upper bits matched no sane sign-extended
+     * virtual address, and satp/PTE content is the only free source in
+     * this model that could produce that). rdata is satp_w, csr_file0's
+     * own already-existing control-plane export; wdata mirrors it for
+     * the same "needs *a* legal driver, never actually consumed" reason
+     * pmpcfg0/pmpaddr0/medeleg's wdata do.
+     */
+    output logic [63:0] rvfi_csr_satp_rmask,
+    output logic [63:0] rvfi_csr_satp_wmask,
+    output logic [63:0] rvfi_csr_satp_rdata,
+    output logic [63:0] rvfi_csr_satp_wdata,
+    /*
+     * rvfi_any_trap_taken: NOT a CSR trace port (no rmask/wmask/rdata/
+     * wdata quad, no [csrs]/[defines] involvement) -- a single bare bit,
+     * exposed the same "assume-scoping needs a bare RVFI signal to
+     * reference" way as the CSR ports above, this time reaching
+     * trap_taken || interrupt_taken directly (exactly the boolean wired
+     * to csr_file0's own i_trap_taken input just below -- see that
+     * instantiation) rather than going through mepc/sepc/mcause/scause's
+     * own already-exposed rdata/wdata or the universal rvfi_trap/rvfi_intr
+     * ports.
+     *
+     * Needed because csrc_any_mepc_ch0 (see checks.cfg's own comment)
+     * went through TWO rounds of RVFI-level exclusion (!rvfi_trap, then
+     * !rvfi_trap && !rvfi_intr) that each closed one real counterexample
+     * only for a DIFFERENT one to appear -- rvfi_trap and rvfi_intr are
+     * each a downstream, mechanically-DERIVED reflection of this same
+     * underlying event (see rvfi_intr's own comment below for exactly
+     * how it's derived: a retirement-to-retirement PC-discontinuity
+     * check, not a direct reference to trap_taken/interrupt_taken), and
+     * a derived signal is exactly where a subtle pipeline-timing gap
+     * between the DERIVATION and the real event can hide. Exposing the
+     * real gating condition directly and excluding it unconditionally,
+     * every cycle (not gated on rvfi_valid the way rvfi_trap/rvfi_intr
+     * necessarily are, since a retirement-scoped flag can only describe
+     * a retirement-scoped cycle) removes that whole class of gap in one
+     * step, matching this project's own general principle of reaching
+     * for the real hardware condition over a derived approximation of it
+     * once a derived one proves leaky.
+     */
+    output logic rvfi_any_trap_taken,
+    /*
+     * rvfi_any_debug_entry: same "expose the real gating condition
+     * directly" reasoning as rvfi_any_trap_taken immediately above, this
+     * time for reg_ch0's own gap (see checks.cfg's own comment). rvfi_rs2_
+     * rdata (see its own assign below) is a bare combinational tap of
+     * read_gpr_B_data -- the SAME physical wire regfile0's own instantiation
+     * (see that block's own comment) muxes with the Debug Module's Access
+     * Register GPR read port, selected by dm_access_active. Real hardware
+     * argues this is safe by construction ("temporally disjoint" access --
+     * dm.sv never issues an Access Register command until it observes the
+     * hart genuinely halted), but that real interlock lives entirely in
+     * dm.sv, which the riscv-formal wrapper never instantiates -- and the
+     * wrapper's own i_debug_halt_req is modeled fully free every cycle,
+     * contradicting its own documented "level, not a pulse" port contract.
+     * With i_dm_gpr_sel left unconnected in wrapper.sv (floating to its
+     * ANSI default, 5'b0), the solver can flip dm_access_active mid-
+     * instruction and the shared read silently returns gp_registers[0]
+     * (hardwired 0) instead of whatever the checked instruction's own rs2
+     * actually held -- confirmed by direct counterexample replay
+     * (reg_ch0's own trace: rs2_rdata correctly matches the tracked
+     * register right up until dm_access_active goes high, then reads 0).
+     * The OR of every path that can flip dm_access_active mid-instruction
+     * (not dm_access_active alone) closes the one-cycle gap between
+     * debug_halt_req_entry firing and the registered in_debug_mode flop
+     * (which drives dm_access_active) actually rising.
+     */
+    output logic rvfi_any_debug_entry
+`endif
+);
+
+    /* --------------------------------------------------------------- *
+     * FSM state
+     * --------------------------------------------------------------- */
+
+    /*
+     * C extension: S_FETCH_HI is appended LAST, not inserted after
+     * S_FETCH where it would read more naturally -- load-bearing, not
+     * cosmetic. This preserves S_FETCH=0/S_EXEC=1/S_MEM=2/S_AMO_WRITE=3 at
+     * their CURRENT numeric values (only the enum's bit-width widens,
+     * 2->3 bits), so the 15 existing testbenches that hardcode a numeric
+     * state literal (e.g. 2'd1 for S_EXEC, 2'd3 for S_AMO_WRITE -- see
+     * testbench/core_priv_tb.sv, core_priv_u_ecall_tb.sv, core_zicsr_tb.sv
+     * via pc_trigger_sample_monitor's default STATE_WIDTH=2, and the
+     * hand-rolled checks in core_a_ext_tb.sv/core_m_ext_tb.sv) keep
+     * comparing correctly -- Verilog zero-extends their narrower literal
+     * against this now-wider signal, landing on the same enum value.
+     * Inserting the new state anywhere else would silently renumber
+     * every later state and either misfire or, worse, silently match the
+     * wrong state in all 15 of those pre-existing call sites.
+     */
+    typedef enum logic [2:0] {
+        S_FETCH,
+        S_EXEC,
+        S_MEM,
+        S_AMO_WRITE,
+        S_FETCH_HI,
+        S_DEBUG_HALTED,
+        S_PTW           // Sv39 Milestone 3 -- appended LAST, same "preserve every
+                        // existing numeric value" discipline S_FETCH_HI's own
+                        // comment above already explains; 3'd7 stays reserved.
+    } state_t;
+
+    state_t state;
+
+    /*
+     * Current privilege level (U/S/M privilege-mode milestone). Standard
+     * RISC-V encoding -- bare local enum, no defaults.sv entry, same
+     * precedent as state_t immediately above.
+     */
+    typedef enum logic [1:0] {
+        PRIV_U = 2'b00,
+        PRIV_S = 2'b01,
+        PRIV_M = 2'b11
+    } priv_t;
+
+    priv_t current_priv;
+
+    logic [(`WORD_SIZE - 1):0] pc;
+    logic [(`WORD_SIZE - 1):0] next_pc;
+
+    /*
+     * Forward-declared here (driven later, in the Control unit and
+     * PC/halt sections respectively) purely because Icarus Verilog wants
+     * a signal declared before its first use, textually -- unlike the
+     * rest of this file, mem_phase_needed/wb_mem_master_drive genuinely need
+     * to reference them earlier in the file than where they're driven.
+     * div_stall joins them for the same reason -- commit_now/the S_EXEC
+     * transition below need it, but it isn't actually driven until the
+     * "M extension: divide" section, much further down. is_amo_rmw joins
+     * them for the identical reason (A extension) -- driven later via a
+     * plain assign, never redeclared as `wire ... = ...` at its point of
+     * computation.
+     *
+     * amo_rdata_q[cur_slot]/amo_addr_q[cur_slot]/amo_sel_q[cur_slot] are forward-declared for a
+     * different reason: they're REGISTERS (driven by an always_ff),
+     * needed by alu_operand_a/b (Execute, textually early) but only
+     * correctly drivable after Memory's load_data/mem_addr/mem_sel exist
+     * (textually late) -- same "declare early, drive late" split
+     * csr_rdata/medeleg_w already use.
+     */
+    logic is_load, is_store;
+    logic div_stall;
+    logic is_amo_rmw;
+    logic mem_load_misaligned, mem_store_misaligned;
+    logic mem_load_access_fault, mem_store_access_fault;
+    /*
+     * PMP (PMP+PLIC staged plan, Milestone 2): forward-declared for the
+     * same reason as mem_load_misaligned/mem_load_access_fault above --
+     * trap_taken's own assign and the state-transition always_ff's
+     * S_FETCH arm need pmp_fetchlo_fault/pmp_fetchhi_fault, but their
+     * real assigns live in the new PMP section much further down (right
+     * after fetch_paddr/fetch_paddr_hi exist, which is itself textually
+     * after this point). pmp_fetchhi_fault is deliberately a SEPARATE
+     * signal from pmp_fetchlo_fault, not a single combined
+     * "either half denied" wire -- fetch_hi_needed (whether a second
+     * dword is even needed) depends on wb_fetch_dat_i, the FIRST fetch's own
+     * response, so the high half's own permission genuinely cannot be
+     * evaluated until after the low half's bus request has already gone
+     * out; only the low half's own check can gate whether that first
+     * request is issued at all.
+     */
+    logic pmp_fetchlo_fault, pmp_fetchhi_fault;
+    logic pmp_load_fault, pmp_store_fault;
+    /*
+     * trap_taken: forward-declared here (assigned near exc_code far
+     * below) purely so the reservation register block above its own
+     * declaration site can gate on it -- same forward-reference pattern
+     * mem_load_misaligned/mem_store_misaligned already establish.
+     */
+    logic trap_taken;
+    /*
+     * interrupt_taken/interrupt_to_s: forward-declared here for the same
+     * reason as trap_taken -- csr_file0's own i_trap_taken/i_trap_to_s
+     * connections need them, but their real assign lives in the new
+     * Interrupts section after csr_file0's instantiation (it needs
+     * csr_file0's own mip_w/mie_w/etc. outputs first).
+     *
+     * trap_vector: forward-declared (was previously declared+driven
+     * together as `wire trap_vector = ...`). Originally needed because
+     * wb_fetch_master_drive's S_FETCH arm read it directly (the
+     * fetch_from_trap_vector mux); the interrupt-entry fetch-redirect fix
+     * removed that mux entirely (wb_fetch_master_drive now only ever
+     * drives plain fetch_addr), so nothing reads trap_vector before its
+     * own real assign (down near Next PC) anymore. Left forward-declared
+     * anyway rather than restructuring back to a single `wire = ...` site
+     * -- harmless, and consistent with trap_val/amo_rdata_q[cur_slot]'s
+     * own "declare early, drive late" split elsewhere in this file.
+     *
+     * int_cause: same reason as interrupt_taken/interrupt_to_s above --
+     * csr_file0's own i_trap_cause connection needs the generalized
+     * MEI/MTI/SEI priority mux (PMP+PLIC plan Milestone 3), but its real
+     * assign also lives in the Interrupts section after csr_file0's own
+     * mip_w/mie_w/mideleg_w outputs exist.
+     */
+    logic interrupt_taken;
+    logic interrupt_to_s;
+    logic [3:0] int_cause;
+    logic [(`WORD_SIZE - 1):0] trap_vector;
+    /*
+     * ebreak_to_debug/in_debug_mode/debug_ebreak_entry/
+     * debug_halt_req_entry/stepping_q/debug_cause_code: forward-declared
+     * for the same class of reason as trap_taken/interrupt_taken above.
+     * trap_taken's own real assign (narrowed by ebreak_to_debug) and
+     * debug_csr_violation (Milestone 3, narrowed by in_debug_mode) are
+     * both textually BEFORE csr_file0's instantiation, but ebreak_to_debug
+     * itself needs csr_file0's own o_dcsr output (dcsr_w) to compute --
+     * so it, and everything downstream of it, can't be driven until
+     * after that instantiation, same "declare early, drive late" split
+     * trap_vector already uses. debug_ebreak_entry/debug_halt_req_entry
+     * are additionally needed by the state-transition always_ff and
+     * wb_fetch_master_drive (both textually early) and by csr_file0's own
+     * i_debug_entry/i_debug_cause connections; stepping_q is needed by
+     * interrupt_taken's own updated exclusion guard (Interrupts section,
+     * textually before the real Debug Mode section below it).
+     */
+    logic ebreak_to_debug;
+    logic in_debug_mode;
+    logic debug_ebreak_entry;
+    logic debug_halt_req_entry;
+    logic stepping_q;
+    logic [2:0] debug_cause_code;
+    logic trigger_debug_entry;
+    logic trigger_exception_match;
+    /*
+     * fetch_redirect_cycle: the cycle either commit_now_q-timed redirect
+     * (interrupt_taken, debug_halt_req_entry) fires -- pc/current_priv (or
+     * in_debug_mode) switch on this SAME edge, but the fetch side must act
+     * as if nothing is happening yet: no request, no TLB resolve, no walk
+     * start, no fault capture, all keyed on the OLD pc/privilege. The
+     * actual redirect fetch (from the NEW pc, correctly translated/PMP-
+     * checked under the NEW privilege) happens the ordinary way starting
+     * next cycle -- see every site below that reads this wire, and the
+     * state-transition always_ff's own new S_FETCH arm for interrupt_taken.
+     * A real bug this closes: without it, this cycle's fetch machinery
+     * (TLB lookup/resolve, S_PTW walk-start, PMP-fault exit) ran against
+     * the OLD pc, and the stale trap_vector/fetch_redirect_q mux this
+     * replaces then forced the redirect PC onto the bus raw and
+     * untranslated -- under Sv39 with a delegated interrupt, the handler's
+     * FIRST instruction was fetched from the physical trap_vector address
+     * instead of the translated one.
+     */
+    wire fetch_redirect_cycle = interrupt_taken || debug_halt_req_entry;
+    /*
+     * debug_progbuf_active/progbuf_ebreak_done/progbuf_abort (Milestone
+     * 7) -- forward-declared for the same reason trap_taken itself is:
+     * the state-transition always_ff and wb_fetch_master_drive (both textually
+     * early) need debug_progbuf_active, and progbuf_ebreak_done/
+     * progbuf_abort's own real assigns (in the Program Buffer section,
+     * right next to trap_taken's) depend on is_illegal_instr/
+     * mem_load_misaligned/mem_store_misaligned/mem_load_access_fault/
+     * mem_store_access_fault -- the exact same forward-declared-until-
+     * their-own-late-assign wires trap_taken already relies on.
+     */
+    logic debug_progbuf_active;
+    logic progbuf_ebreak_done;
+    logic progbuf_abort;
+    /*
+     * is_sfence_vma -- forward-declared here (bare, "declare early, drive
+     * late") because Sv39 Milestone 5's own TLB-flush logic, inside the
+     * walker progression always_ff (textually early, same reason every
+     * other signal in this block is forward-declared), needs it. Its
+     * real assign stays at its original Milestone 2 site (near
+     * is_mret/is_sret, in Decode), which needs decoded_instruction --
+     * not available this early.
+     */
+    logic is_sfence_vma;
+    /*
+     * Sv39 (Milestone 3 of the Sv39 staged plan) -- forward-declared here
+     * (bare/undriven) because the state-transition always_ff and
+     * wb_fetch_master_drive/wb_mem_master_drive (both textually early, same reason debug_progbuf_active
+     * itself is forward-declared here) need fetch_translate_active/
+     * fetch_lo_resolved_q[cur_slot]/fetch_hi_resolved_q[cur_slot]/ptw_pmp_fault. satp_w is a
+     * plain csr_file0 port-connected wire (its real connection lives at
+     * that instantiation, much further down, same as mip_w/pmpcfg0_w) --
+     * satp_mode_w/satp_ppn_w/fetch_translate_active can be full, real
+     * one-line assigns right here (no further forward-reference needed)
+     * since satp_w/debug_progbuf_active/current_priv are all already
+     * available at this point. ptw_pmp_fault is the one signal here that
+     * DOES need a "declare early, drive late" split (like pmp_fetchlo_fault
+     * itself) -- its real assign lives in the new "Sv39 Page-Table
+     * Walker" section further down, which needs the PMP region-field
+     * wires that aren't available until after fetch_paddr_hi.
+     *
+     * fetch_translate_active is never MPRV-aware (instruction fetch is
+     * never affected by MPRV, per spec -- same reason the fetch-side PMP
+     * check elsewhere always uses raw current_priv, never
+     * mem_effective_priv) and excludes Program Buffer execution
+     * (decision 12 of the staged plan -- a debugger's own access is
+     * trusted and structurally can't afford S_PTW's multi-cycle latency
+     * inside S_FETCH's existing single-combinational-cycle progbuf arm).
+     *
+     * Milestone 5 adds a 4-entry TLB ahead of the walker (a hit skips
+     * S_PTW entirely, via the redirect conditions' own "&& !tlb_hit"
+     * gating) -- a miss still genuinely walks, every time.
+     * ptw_level_q[cur_slot]/ptw_base_q[cur_slot]/ptw_vaddr_q[cur_slot]/
+     * ptw_reason_q[cur_slot] are pure per-walk scratch (no reset needed, always
+     * freshly written the cycle a walk starts, before ever being read --
+     * same convention instr_line_q[cur_slot]/crossed_q[cur_slot] already establish).
+     * fetch_lo_resolved_q[cur_slot]/fetch_hi_resolved_q[cur_slot]/fetch_lo_fault_q[cur_slot]/
+     * fetch_hi_fault_q[cur_slot] DO get an explicit reset (defensive -- this is
+     * new, high-risk logic, unlike the well-proven registers that get to
+     * skip one).
+     */
+    /* verilator lint_off UNUSEDSIGNAL */
+    wire [(`WORD_SIZE - 1):0] satp_w;
+    /* verilator lint_on UNUSEDSIGNAL */
+    // ASID (bits[59:44]) is genuinely never read anywhere -- ASIDLEN=0
+    // (decision 2 of the staged plan), forced to 0 in STORAGE by
+    // csr_file.sv itself, so nothing here ever needs to consult it.
+    wire [3:0]  satp_mode_w = satp_w[63:60];
+    wire [43:0] satp_ppn_w  = satp_w[43:0];
+    wire        fetch_translate_active = !debug_progbuf_active
+                                        && (current_priv != PRIV_M)
+                                        && (satp_mode_w == 4'd8);
+    /*
+     * fetch_pc: the (virtual) PC of the instruction the FETCH stream is
+     * working on -- the single point every fetch-side consumer reads
+     * (fetch_paddr/fetch_hi_vaddr, fetch_hi_needed's crossing test, the
+     * TLB lookup and walker start for a fetch-reason walk), as opposed to
+     * pc, which always names the EXECUTING instruction (halfword select,
+     * pc_plus_len, AUIPC, triggers, mtval, RVFI). Identical to pc today,
+     * since fstate never looks ahead yet; Pipelining P2 step 3b makes it
+     * the predicted next PC while prefetching.
+     */
+    wire [(`WORD_SIZE - 1):0] fetch_pc = pc;
+    wire [(`WORD_SIZE - 1):0] fetch_hi_vaddr = fetch_pc + `WORD_SIZE'(8);
+    /*
+     * P1 (in-order-pipeline-prep, first milestone of the OoO staging
+     * plan): every register below that holds ONE INSTRUCTION's own
+     * scratch state (fetch/PTW/mem/AMO capture regs -- NOT "state"
+     * itself, NOT reservation_valid_q/reservation_addr_q's genuinely
+     * cross-instruction LR/SC state, NOT pc/current_priv) is widened
+     * into a SLOT_COUNT-entry array, indexed by cur_slot. P1 itself
+     * hardwired cur_slot to 0 -- the FSM still only ever used one slot,
+     * so every X_q[cur_slot] read/write below was provably identical to
+     * the old bare X_q. Pipelining P2 step 3a makes cur_slot a REAL
+     * register (below) -- this pass was pure mechanical plumbing so P2
+     * only had to change slot SELECTION, not rediscover every read/write
+     * site across this file.
+     *
+     * cur_slot toggles exactly when a fetch episode hands off to S_EXEC
+     * -- i.e. every "state <= S_EXEC" transition reachable from
+     * S_FETCH/S_FETCH_HI/S_PTW (companion `cur_slot <= ~cur_slot`
+     * assignments added alongside each one, in the state-transition
+     * always_ff below), NOT at retirement. This is deliberate, not
+     * incidental: with fstate step 2 already writing fetch-side data
+     * via fetch_slot mid-episode, cur_slot/fetch_slot must stay a fixed,
+     * consistent pair for that episode's ENTIRE duration -- toggling at
+     * retirement instead would flip fetch_slot's own meaning out from
+     * under a still-in-flight fetch (a real hazard once step 3b enables
+     * genuine lookahead spanning multiple cycles of the PRIOR
+     * instruction's own S_EXEC/S_MEM/S_AMO_WRITE dwell; harmless today,
+     * step 3a itself, only because fstate stays gated to state==S_FETCH,
+     * so no fetch is ever still-in-flight at a retirement edge yet --
+     * see fstate_eligible's own declaration comment).
+     *
+     * SLOT_COUNT=2 hard-caps lookahead depth at exactly one instruction:
+     * fstate (step 2's own machine) can only begin a fresh episode from
+     * F_IDLE, so while it holds a not-yet-consumed episode for cur_slot's
+     * OWN instruction (or, once step 3b lands, for the NEXT one), it
+     * structurally cannot also start a third. A deeper pipeline would
+     * need a 3rd+ slot and this whole cur_slot/fetch_slot scheme
+     * generalized -- not attempted here.
+     */
+    localparam int SLOT_COUNT = 2;
+    logic cur_slot;
+    /*
+     * Pipelining Milestone P2 step 3a: fetch_slot is now a REAL
+     * complement of cur_slot, not an alias (steps 1-2 kept it an alias
+     * of cur_slot on purpose -- "zero behavior change," provable since
+     * fetch_slot and cur_slot were textually different names for the
+     * SAME wire the whole time). Every site steps 1-2 already converted
+     * to write via fetch_slot needed no further edit here -- that was
+     * the entire point of doing the naming split three steps early. The
+     * sites that DID need a step-3a edit are the handful that read
+     * fetch_lo_resolved_q/fetch_hi_resolved_q/fetch_lo_paddr_q/
+     * fetch_hi_paddr_q as a MID-EPISODE guard (before cur_slot's own
+     * toggle promotes that episode's data to "the current instruction") --
+     * those were still reading [cur_slot], silently correct only because
+     * fetch_slot==cur_slot made the distinction moot until now. See each
+     * such site's own comment, near "Pipelining P2 step 3a" wording, for
+     * why it changed.
+     */
+    wire fetch_slot = ~cur_slot;
+    /*
+     * Pipelining Milestone P2, step 2 of 5: fstate is a new, independent
+     * small state machine that owns the UNTRANSLATED fetch's own bus
+     * request/response sequencing (both the low and, when the
+     * instruction crosses a dword boundary, high halfword) -- replacing
+     * state's OWN S_FETCH/S_FETCH_HI-driven mechanism for that case only.
+     * Translated (Sv39) fetches are explicitly OUT of scope for this
+     * milestone (see fetch_translate_active's own header comment for the
+     * Sv39 descope reasoning) -- state's existing S_FETCH/S_FETCH_HI/
+     * S_PTW machinery keeps handling those completely unmodified, and
+     * fstate simply never engages (stays F_IDLE) for the whole episode.
+     *
+     * "No lookahead yet" is enforced structurally, not just by
+     * convention: fstate's own always_ff (Fetch section below) forces it
+     * back to F_IDLE on every cycle state ISN'T S_FETCH, so it can never
+     * start working on a NEW instruction before state has actually
+     * arrived at S_FETCH for it -- state and fstate always agree on
+     * which instruction is being fetched, just like the pre-P2 design.
+     * This also means every interruption (a debug halt request arriving
+     * mid-fetch, exactly like state's own priority-ordered bail to
+     * S_DEBUG_HALTED already does today) forces fstate back to F_IDLE
+     * too, so a later resume always restarts the SAME fetch completely
+     * fresh -- matching state's own "re-run S_FETCH's whole decision
+     * tree from scratch" behavior on resume exactly, including re-
+     * checking pmp_fetchlo_fault in case a halted debugger changed PMP
+     * config in the meantime.
+     *
+     * F_IDLE: not fetching (either between instructions, or this
+     * instruction is being handled by the old translated/interrupted
+     * path instead). F_REQ_LO/F_REQ_HI: the low/high halfword's own bus
+     * request is outstanding (mirrors old S_FETCH/S_FETCH_HI). F_VALID:
+     * a one-cycle pulse -- the fetch (successful capture OR an already-
+     * latched PMP/bus-error fault) is ready for state's own S_FETCH arm
+     * to consume THIS cycle; consumed automatically the next cycle
+     * (falls through to the `default` arm below, back to F_IDLE), no
+     * separate transition needed. Only 4 of the plan's 5 fstate values
+     * exist yet -- F_FLUSH_DRAIN (draining a stale icache response after
+     * an abandoned request) has no way to be entered until step 3 adds
+     * the flush mechanism that needs it, so adding it now would be
+     * untestable dead code.
+     */
+    typedef enum logic [1:0] { F_IDLE, F_REQ_LO, F_REQ_HI, F_VALID } fstate_t;
+    fstate_t fstate;
+    logic         ptw_pmp_fault;
+    logic         ptw_pte_fault;   // real assign lives in the "Sv39 Page-Table Walker" section
+    logic         ptw_pte_leaf;    // (needs the PTE-decode wires, only available there)
+    localparam logic [1:0] PTW_REASON_LO  = 2'd0;
+    localparam logic [1:0] PTW_REASON_HI  = 2'd1;
+    localparam logic [1:0] PTW_REASON_MEM = 2'd2;   // Sv39 M4
+    logic [1:0]   ptw_reason_q [SLOT_COUNT];     // LO/HI fetch stream, or MEM (M4) -- widened from 1 bit
+    logic [1:0]   ptw_level_q [SLOT_COUNT];      // 2 -> 1 -> 0
+    logic [63:0]  ptw_base_q [SLOT_COUNT];       // current level's table, BYTE address
+    logic [63:0]  ptw_vaddr_q [SLOT_COUNT];      // the VA being translated this walk
+    logic [63:0]  fetch_lo_paddr_q [SLOT_COUNT], fetch_hi_paddr_q [SLOT_COUNT];
+    logic         fetch_lo_resolved_q [SLOT_COUNT], fetch_hi_resolved_q [SLOT_COUNT];
+    logic         fetch_lo_fault_q [SLOT_COUNT], fetch_hi_fault_q [SLOT_COUNT];
+    /*
+     * Sv39 M4 (mem-side translation) -- forward-declared here for the
+     * identical reason as the fetch-side group above: mem_translate_active
+     * gates S_MEM's own state-transition arm (textually early), and
+     * mem_resolved_q[cur_slot]/mem_fault_q[cur_slot]/mem_resolved_paddr_q[cur_slot] are the mem
+     * stream's own single-episode registers (no LO/HI split needed here
+     * -- an aligned load/store/AMO is at most 8 bytes, which can never
+     * cross a 4KB page boundary, so mem access only ever needs ONE walk).
+     *
+     * mem_effective_priv's own bare declaration moves HERE from its
+     * original (still-correct, unchanged) `assign` site in the Memory
+     * section -- that assign only needs mstatus_mprv_w/mstatus_mpp_w/
+     * current_priv, all already available there, but mem_translate_active
+     * (needed early) and the walker's own ptw_check_priv (Sv39 Page-
+     * Table Walker section) both need the DECLARATION this early. Same
+     * split ptw_pmp_fault above already uses.
+     *
+     * mem_op_needs_write needs is_sc, not declared until well after
+     * Decode -- forward-declared bare here, real assign lives right next
+     * to is_sc's own declaration.
+     */
+    priv_t mem_effective_priv;
+    wire mem_translate_active = !debug_progbuf_active
+                               && (mem_effective_priv != PRIV_M)
+                               && (satp_mode_w == 4'd8);
+    // alu_result: bare declaration moved here (real drive stays an
+    // instantiation port connection at its own original site, in
+    // Execute) -- the mem-side walk-start branch below (walker
+    // progression always_ff) needs it as the pre-translation VA, well
+    // before Execute's own textual position.
+    logic [(`WORD_SIZE - 1):0] alu_result;
+    /*
+     * Pipelining P2 step 3a real bug fix (pre-existing gap, newly exposed
+     * -- not introduced by this milestone's own changes): ptw_reason_q is
+     * ONLY ever freshly written when a REAL walk actually starts (its own
+     * write site is explicitly gated `&& !tlb_hit_active`) -- a TLB HIT
+     * resolves without ever touching it, so ptw_reason_q[cur_slot] during
+     * a hit is whatever a PAST real walk last left there, for whichever
+     * slot cur_slot happens to name right now. This permission-check
+     * pipeline (ptw_is_mem and everything downstream of it: ptw_check_priv,
+     * ptw_u_violation, ptw_perm_violation, ptw_ad_fault, hence
+     * ptw_pte_fault) runs unconditionally every cycle, for BOTH a real
+     * walk (state==S_PTW) AND a TLB-hit resolve (state==S_FETCH/
+     * S_FETCH_HI/S_MEM, tlb_hit_active) -- so a hit's own ptw_is_mem was
+     * always liable to read stale, unrelated data from whatever walk
+     * previously happened to touch this same slot. With cur_slot
+     * hardwired to 0 (pre-step-3a) this was merely stale-but-defined,
+     * silently masked; with cur_slot genuinely toggling, a slot that has
+     * NEVER yet hosted a real walk reads fully undefined (X in
+     * simulation), caught by core_sv39_mem_tb.sv's own test K hanging
+     * (X propagating through tlb_hit_active itself, which gates the very
+     * write meant to resolve it, self-sustaining forever).
+     *
+     * Fix: derive ptw_is_mem from live `state` instead, EXCEPT during an
+     * actual walk (state==S_PTW), where ptw_reason_q[cur_slot] genuinely
+     * is fresh (set at walk-start, valid for the walk's entire,
+     * uninterrupted duration -- cur_slot never toggles mid-walk either)
+     * -- mirrors ptw_level_active/ptw_vaddr_active's own established
+     * tlb_hit_active-aware muxing pattern exactly, just keyed on `state`
+     * rather than `tlb_hit_active` directly, since S_FETCH_HI is also a
+     * real (non-hit, non-walk) case this needs to get right: state==
+     * S_MEM means mem stream, anything else (S_FETCH/S_FETCH_HI, hit or
+     * not) means fetch stream, state==S_PTW trusts the walk's own record.
+     */
+    wire ptw_is_mem = (state == S_PTW) ? (ptw_reason_q[cur_slot] == PTW_REASON_MEM) : (state == S_MEM);
+    logic mem_op_needs_write;    // is_store||is_sc||is_amo_rmw -- excludes is_lr (read-only);
+                                  // used for the walker's own R/W permission check AND the
+                                  // page-fault (13 vs 15) cause split.
+    logic mem_op_is_load_class;  // is_load&&!is_lr&&!is_amo_rmw -- matches the EXISTING
+                                  // mem_load_access_fault/mem_store_access_fault convention
+                                  // (LR groups with store/AMO for ACCESS-fault classification,
+                                  // a pre-existing, deliberately different split from the one
+                                  // above); used for mem_access_fault_q[cur_slot]'s own 5-vs-7 split.
+    logic mem_resolved_q [SLOT_COUNT], mem_fault_q [SLOT_COUNT];
+    logic mem_access_fault_q [SLOT_COUNT];    // PMP-denied or bus-errored PTE READ -- cause 5/7 (access
+                                  // fault of the original type), NEVER routed through
+                                  // fetch_fault_q[cur_slot] (that would wrongly substitute `instruction`
+                                  // with the inert placeholder for what is really an ordinary,
+                                  // already-decoded load/store still needing its own real
+                                  // is_load/is_store classification at the commit edge).
+    logic [63:0] mem_resolved_paddr_q [SLOT_COUNT];
+    /*
+     * Sv39 Milestone 5: the TLB -- 4 entries, flat/individually-named
+     * (decision 5 of the staged plan, mirroring PMP's own 4-region
+     * precedent), fully associative, unified (serves fetch-lo/fetch-hi/
+     * mem lookups alike -- this core issues at most one memory-system
+     * transaction per cycle, the exact same reasoning cache_complex.sv's
+     * own header already gives for needing no icache0/dcache0 arbiter),
+     * round-robin replacement. No G-bit or ASID field (decision 2 --
+     * ASIDLEN=0 makes both irrelevant). r/w/x/u/d are cached (NOT just
+     * r/w/x/u as the plan's own original decision 2 sketch listed -- a
+     * real correctness gap found while implementing this milestone: a
+     * page cached via a LOAD (D never checked at fill time) could later
+     * be WRITTEN through the SAME cached entry, and Svade's own D-bit
+     * check must still apply to that write; hardwiring D=1 the way A=1
+     * safely can be [A is unconditionally required for ANY successful
+     * fill, by construction] would have silently skipped a real,
+     * spec-required fault). Declared here (bare, alongside the other
+     * early Sv39 registers) because tlb_hit/tlb_hit_active gate the
+     * state-transition always_ff's own S_FETCH/S_FETCH_HI/S_MEM redirect
+     * arms -- the per-entry FIELD selection (which hit entry's own ppn/
+     * permission bits) stays declared where it's consumed, in the "Sv39
+     * Page-Table Walker" section below, same "declare early only what's
+     * needed early" discipline this file already applies throughout.
+     */
+    logic        tlb0_valid_q, tlb1_valid_q, tlb2_valid_q, tlb3_valid_q;
+    logic [1:0]  tlb0_level_q, tlb1_level_q, tlb2_level_q, tlb3_level_q;
+    logic [26:0] tlb0_vpn_q,   tlb1_vpn_q,   tlb2_vpn_q,   tlb3_vpn_q;
+    logic [25:0] tlb0_ppn2_q,  tlb1_ppn2_q,  tlb2_ppn2_q,  tlb3_ppn2_q;
+    logic [8:0]  tlb0_ppn1_q,  tlb1_ppn1_q,  tlb2_ppn1_q,  tlb3_ppn1_q;
+    logic [8:0]  tlb0_ppn0_q,  tlb1_ppn0_q,  tlb2_ppn0_q,  tlb3_ppn0_q;
+    logic        tlb0_r_q, tlb1_r_q, tlb2_r_q, tlb3_r_q;
+    logic        tlb0_w_q, tlb1_w_q, tlb2_w_q, tlb3_w_q;
+    logic        tlb0_x_q, tlb1_x_q, tlb2_x_q, tlb3_x_q;
+    logic        tlb0_u_q, tlb1_u_q, tlb2_u_q, tlb3_u_q;
+    logic        tlb0_d_q, tlb1_d_q, tlb2_d_q, tlb3_d_q;
+    logic [1:0]  tlb_replace_q;
+
+    /*
+     * Current VA being looked up: fetch_pc while redirecting from S_FETCH,
+     * fetch_hi_vaddr from S_FETCH_HI, alu_result (mem's own pre-
+     * translation VA, same source the walker's own MEM-reason walk-start
+     * already uses) otherwise -- these three states are the only ones
+     * that ever consult tlb_hit/tlb_hit_active at all, so a plain
+     * state-keyed mux (rather than a separate per-stream hit signal) is
+     * sufficient and avoids tripling the match logic below.
+     */
+    wire [(`WORD_SIZE-1):0] tlb_lookup_vaddr = (state == S_FETCH) ? fetch_pc
+                                              : (state == S_FETCH_HI) ? fetch_hi_vaddr
+                                              : alu_result;
+    wire [26:0] tlb_lookup_vpn = tlb_lookup_vaddr[38:12];
+
+    // Superpage-aware partial-tag match: compare only the VPN segments
+    // AT OR ABOVE the entry's own cached level (a gigapage entry only
+    // ever compares vpn2; a megapage compares vpn2:vpn1; an ordinary
+    // page compares all three) -- the CVA6-derived technique the staged
+    // plan's own design section cites.
+    wire tlb0_hit = tlb0_valid_q && ((tlb0_level_q == 2'd2) ? (tlb_lookup_vpn[26:18] == tlb0_vpn_q[26:18])
+                                    : (tlb0_level_q == 2'd1) ? (tlb_lookup_vpn[26:9]  == tlb0_vpn_q[26:9])
+                                    :                          (tlb_lookup_vpn         == tlb0_vpn_q));
+    wire tlb1_hit = tlb1_valid_q && ((tlb1_level_q == 2'd2) ? (tlb_lookup_vpn[26:18] == tlb1_vpn_q[26:18])
+                                    : (tlb1_level_q == 2'd1) ? (tlb_lookup_vpn[26:9]  == tlb1_vpn_q[26:9])
+                                    :                          (tlb_lookup_vpn         == tlb1_vpn_q));
+    wire tlb2_hit = tlb2_valid_q && ((tlb2_level_q == 2'd2) ? (tlb_lookup_vpn[26:18] == tlb2_vpn_q[26:18])
+                                    : (tlb2_level_q == 2'd1) ? (tlb_lookup_vpn[26:9]  == tlb2_vpn_q[26:9])
+                                    :                          (tlb_lookup_vpn         == tlb2_vpn_q));
+    wire tlb3_hit = tlb3_valid_q && ((tlb3_level_q == 2'd2) ? (tlb_lookup_vpn[26:18] == tlb3_vpn_q[26:18])
+                                    : (tlb3_level_q == 2'd1) ? (tlb_lookup_vpn[26:9]  == tlb3_vpn_q[26:9])
+                                    :                          (tlb_lookup_vpn         == tlb3_vpn_q));
+    wire tlb_hit = tlb0_hit || tlb1_hit || tlb2_hit || tlb3_hit;
+
+    // Only meaningful (and only ever consulted) at the exact same three
+    // redirect points fetch_translate_active/mem_translate_active's own
+    // "!resolved" checks already gate -- a hit outside that window
+    // (impossible by construction, since tlb_hit is otherwise unused)
+    // must never be mistaken for "resolve now".
+    wire tlb_hit_active = tlb_hit && (
+        // Pipelining P2 step 3a: [fetch_slot], not [cur_slot] -- these are
+        // MID-EPISODE guards on the fetch-side resolved flags, read before
+        // cur_slot's own toggle promotes this episode's data to "current".
+        (state == S_FETCH    && fetch_translate_active && !fetch_lo_resolved_q[fetch_slot] && !fetch_redirect_cycle) ||
+        (state == S_FETCH_HI && fetch_translate_active && !fetch_hi_resolved_q[fetch_slot]) ||
+        (state == S_MEM       && mem_translate_active   && !mem_resolved_q[cur_slot]));
+    /*
+     * dm_access_active: gates every DM Access-Register mux (regfile0's
+     * read/write ports below, csr_file0's addr/we/wdata below) between
+     * the DM's own i_dm_gpr_.../i_dm_csr_... sources and the core's own
+     * ordinary decode-driven sources. Plain in_debug_mode alone is WRONG
+     * here (a real, found-during-M7-bring-up bug, not a hypothetical):
+     * in_debug_mode stays 1 for the entire duration of a Program Buffer
+     * run too (a debugger halted via progbuf execution never actually
+     * resumes), so gating on in_debug_mode alone would silently steal
+     * every progbuf instruction's own GPR/CSR write (and CSR read
+     * address) away from decode and hand it to the DM's inactive
+     * Access-Register ports instead -- the write/address the DM
+     * actually wants only exists on the single cycle cmd_do_gpr/
+     * cmd_do_csr fires, which cmd_legal's own !busy_q term already
+     * guarantees can never overlap a live debug_progbuf_active run.
+     */
+    wire dm_access_active = in_debug_mode && !debug_progbuf_active;
+    /*
+     * instr_faulted (Milestone 7 bring-up fix, found via a new test this
+     * same milestone added -- see testbench/dm_tb.sv's Test E): bare
+     * trap_taken is NOT the right "did this retiring instruction actually
+     * fault" signal once debug_progbuf_active exists, because trap_taken
+     * is unconditionally forced 0 throughout a Program Buffer run (its own
+     * top-level !debug_progbuf_active gate, see trap_taken's own assign
+     * far below). Every site that used to read `!trap_taken` as "suppress
+     * this write, the instruction faulted" (reservation_valid_q's set arm,
+     * csr_we, reg_write) was therefore blind to a progbuf instruction's
+     * own fault: a faulting LOAD executed from the Program Buffer (Test E:
+     * `ld x7,256(x0)` past dut_progbuf's sram range) still correctly set
+     * progbuf_abort and routed back to S_DEBUG_HALTED with cmderr=3, but
+     * reg_write's own `!trap_taken` term stayed true regardless (trap_taken
+     * can never be 1 here), so x7 was written anyway with whatever garbage
+     * sat on wb_mem_dat_i for the errored bus cycle. instr_faulted restores
+     * the "this instruction's normal effects must be suppressed" property
+     * against the right condition in either mode: trap_taken covers
+     * ordinary execution, progbuf_abort covers a Program Buffer run (the
+     * two can never both be true -- trap_taken is hard-0 whenever
+     * progbuf_abort could possibly be 1, and vice versa). Declared here,
+     * forward-referencing trap_taken/progbuf_abort (both already
+     * forward-declared above), so reservation_valid_q's own always_ff --
+     * textually much earlier than trap_taken/progbuf_abort's real assigns
+     * -- can use it too, not just csr_we/reg_write further down.
+     *
+     * trigger_debug_entry (Milestone 9) needs the identical treatment,
+     * for the identical underlying reason: it can fire on the exact
+     * same S_EXEC edge commit_now does (a non-memory instruction sitting
+     * at a matched trigger address), and without it here, reg_write's
+     * own commit_now-gated write would still land even though the
+     * instruction is simultaneously being redirected into Debug Mode --
+     * violating the spec's own "this instruction's effects must not
+     * take effect" requirement for an execute trigger. trap_taken and
+     * trigger_debug_entry can never both be true the same cycle either
+     * (trigger_debug_entry requires !in_debug_mode and is mutually
+     * exclusive with trigger_exception_match by construction, the same
+     * "Debug Mode entry wins the tie" property documented at that
+     * signal's own assign).
+     */
+    wire instr_faulted = trap_taken || progbuf_abort || trigger_debug_entry;
+    logic [(`WORD_SIZE - 1):0] amo_rdata_q [SLOT_COUNT];
+    /*
+     * amo_addr_q[cur_slot]: WORD_SIZE-wide for the RVFI tap's rvfi_mem_addr (see its
+     * own assign's comment) -- real hardware only ever consumes its low 32
+     * bits for the actual bus address (wb_mem_addr_o = amo_addr_q[cur_slot][31:0], this
+     * core's physical address space is deliberately 32-bit), same
+     * reasoning/precedent as mem_paddr above. Bits[63:32] are no longer
+     * dead outside `ifdef RISCV_FORMAL, though: trap_val's access-fault
+     * arm (see mem_load_access_fault/mem_store_access_fault below) reads
+     * this register unconditionally, since it's the only stable address
+     * during S_AMO_WRITE (mem_paddr is repurposed for the modify value by
+     * then) -- genuinely fully used in every build now.
+     */
+    logic [(`WORD_SIZE - 1):0] amo_addr_q [SLOT_COUNT];
+    logic [7:0]  amo_sel_q [SLOT_COUNT];
+    /*
+     * amo_byte_off_q[cur_slot]: the TRUE (unrounded) low 3 address bits, captured
+     * separately from amo_addr_q[cur_slot] -- amo_addr_q[cur_slot] is deliberately rounded
+     * down to a dword boundary (needed for both the real bus address and
+     * the RVFI-tap address), which throws away exactly the information
+     * amo_wdata's byte-lane shift needs for a .W AMO sitting in the
+     * UPPER word of its containing dword (address bit 2 set -- legal:
+     * .W only needs 4-byte alignment, not 8-byte). See amo_wdata's own
+     * comment for the real bug this fixes.
+     */
+    logic [2:0]  amo_byte_off_q [SLOT_COUNT];
+
+    /*
+     * commit_now: the single edge, per instruction, where the
+     * register-file write and the pc update are allowed to actually
+     * happen. Every other cycle of an instruction's multi-cycle lifetime
+     * (bus wait states, the settle cycle itself) must NOT commit, even
+     * though decoder/alu outputs are sitting there fully formed the
+     * whole time -- reg_write/next_pc are free-running combinational
+     * signals with no notion of "am I allowed to land yet", so this is
+     * the one gate that turns "instruction is decoded" into "instruction
+     * has retired". Non-memory instructions retire at the end of
+     * S_EXEC; loads/stores retire when S_MEM's bus transaction acks.
+     *
+     * div_stall generalizes this same idea to the one OTHER thing that
+     * can now make a non-memory instruction take more than a single
+     * S_EXEC cycle: an in-flight divide (see "M extension: divide"
+     * below, and design/divider.sv's own header -- this is the first
+     * variable-latency non-memory instruction this core has ever had).
+     * div_stall/is_div_family are declared further down, in the M
+     * extension section, but referenced here -- same forward-reference
+     * pattern is_load/is_store already use from this exact spot.
+     * mem_phase_needed and div_stall can never both be true together (a
+     * single decoded instruction can't be both a divide and a load/store),
+     * so there's no ordering/priority to arbitrate between them below.
+     *
+     * mem_load_misaligned/mem_store_misaligned (driven in the Memory
+     * section below, once mem_paddr exists -- same forward-reference
+     * split as is_load/is_store) suppress the bus phase entirely for a
+     * misaligned access: it commits (traps) at the end of S_EXEC instead,
+     * same mechanism illegal-instruction/ecall already use to trap
+     * without ever touching the bus. pmp_load_fault/pmp_store_fault
+     * (PMP+PLIC staged plan, Milestone 2) join them for the identical
+     * reason -- a PMP-blocked store's write must never reach the bus at
+     * all, mirroring the misalignment precedent exactly, not the
+     * bus-error one (which reacts to a real wb_mem_err_i that already came
+     * back from a real slave).
+     */
+    // Sv39 (Milestone 4): mem_fault_q[cur_slot]/mem_access_fault_q[cur_slot] join the
+    // NOT-list for the identical reason pmp_load_fault/pmp_store_fault
+    // already are -- once either is set (discovered mid-S_MEM, after
+    // bailing back to S_EXEC), mem_phase_needed must stop re-requesting
+    // S_MEM for this same instruction, or S_EXEC's own state-transition
+    // (mem_phase_needed ? S_MEM : ...) would loop forever instead of
+    // ever letting commit_now fire.
+    // trigger_exception_match (Milestone 9's action=0 watchpoint) joins
+    // the NOT-list for the same reason misalignment/PMP already do: a
+    // load/store/AMO sitting at a matched action=0 trigger address must
+    // trap instead of ever starting its own bus transaction (the spec's
+    // execute-timing=0 requirement) -- without this, the S_MEM phase ran
+    // to completion (the read or WRITE actually landed at the slave)
+    // before trap_taken's own trigger_exception_match term ever got a
+    // chance to fire at the S_MEM->S_EXEC bailout.
+    wire mem_phase_needed = (is_load || is_store)
+                          && !(mem_load_misaligned || mem_store_misaligned || pmp_load_fault || pmp_store_fault
+                            || mem_fault_q[cur_slot] || mem_access_fault_q[cur_slot] || trigger_exception_match);
+
+    /*
+     * wb_fetch_done/wb_fetch_ok, wb_mem_done/wb_mem_ok: wb4_sram.sv (the
+     * real leaf memory) keeps ack/err mutually exclusive per the
+     * Wishbone B4 convention -- an out-of-range access sets err_o with
+     * ack_o held 0. But icache.sv/dcache.sv (fixed for an earlier hang
+     * bug, see their own CACHE_REFILL comments) assert ack_o TOGETHER
+     * WITH err_o on a downstream error -- a deliberate compromise made
+     * back when this file had nothing consuming err_i at all. Through
+     * the real soc.sv topology, that means a bare ack_i can go high even
+     * on an errored cache response, so bare wb_fetch_ack_i/wb_mem_ack_i
+     * are ambiguous: they no longer mean "this succeeded". *_done means
+     * "this bus cycle has terminated, one way or another" (safe for
+     * anything that just needs to stop waiting -- state-transition/
+     * re-issue-guard triggers); *_ok means "terminated CLEANLY, no
+     * error" (needed wherever a decision about proceeding to the NEXT
+     * NORMAL phase is made -- fetch_hi_taken below, and S_MEM's
+     * AMO-read-succeeded decision). Never use bare wb_fetch_ack_i/
+     * wb_mem_ack_i below this point.
+     *
+     * Pipelining P2 step 3b prerequisite: split into a fetch pair and a
+     * mem pair, one per independent Wishbone master port (see this
+     * module's own header comment) -- NOT a mechanical rename alone,
+     * every consuming site below needs the one that actually matches
+     * which port its own transaction rides (S_PTW rides wb_mem_* always,
+     * regardless of ptw_reason_q -- see the header comment's own S_PTW
+     * routing note).
+     */
+    wire wb_fetch_done = wb_fetch_ack_i || wb_fetch_err_i;
+    wire wb_fetch_ok   = wb_fetch_ack_i && !wb_fetch_err_i;
+    wire wb_mem_done   = wb_mem_ack_i || wb_mem_err_i;
+    wire wb_mem_ok      = wb_mem_ack_i && !wb_mem_err_i;
+
+    /*
+     * commit_now, extended for the A extension: an AMO op's
+     * mem_phase_needed=1 now spans TWO sequential bus transactions
+     * (S_MEM's read, then S_AMO_WRITE's write), not one -- S_MEM's ack
+     * must NOT commit for an AMO op (it only ends the read half), only
+     * S_AMO_WRITE's ack does. LR/SC/plain loads/stores are unaffected:
+     * is_amo_rmw is false for all of them, so the new `&& !is_amo_rmw`
+     * term is a no-op and they still commit at S_MEM exactly as before.
+     *
+     * Bus-error trapping: an S_MEM response that errors commits
+     * IMMEDIATELY (the `|| wb_mem_err_i` term) regardless of is_amo_rmw --
+     * an AMO whose read phase faults must trap right there, not proceed
+     * into S_AMO_WRITE and issue a bogus second write (see the FSM below).
+     * S_AMO_WRITE now commits on wb_mem_done (ack OR err), not just wb_mem_ack_i,
+     * since a faulted write phase must still retire (as a trap) rather
+     * than hang. mem_load_access_fault/mem_store_access_fault (declared
+     * near mem_load_misaligned/mem_store_misaligned below) turn these
+     * error-commits into the correct trap via exc_code/trap_val.
+     *
+     * `!halted` (2026-08-12, removed 2026-08-20): a prior milestone added
+     * an explicit `!halted` term here to close a riscv-formal pc_fwd_ch0
+     * counterexample -- a spurious post-halt bus ack_i could otherwise
+     * produce a bogus extra rvfi_valid pulse with pc frozen but state
+     * still oscillating, since nothing structurally prevented state from
+     * reaching S_EXEC again once parked in S_FETCH forever. That whole
+     * scenario no longer exists as a concept now that EBREAK is a real
+     * trap (see is_ebreak's own arm in exc_code/trap_taken below): the
+     * core never parks in S_FETCH permanently anymore, so there is no
+     * "post-halt" state left to guard against. Confirmed, not assumed:
+     * pc_fwd_ch0 and pc_bwd_ch0 (the two checks that originally caught
+     * this counterexample) both re-run clean against this exact removal.
+     */
+    /*
+     * mem_translate_active && !mem_resolved_q[cur_slot] guard on the S_MEM
+     * term (real bug, found via riscv-formal's insn_add_ch0 -- see
+     * checks.cfg's own history for this exact regression): without it,
+     * this term is just "state==S_MEM && (wb_mem_ok||wb_mem_err_i)", with no
+     * requirement that a real bus transaction is actually outstanding.
+     * While translation is still pending, wb_mem_master_drive suppresses the
+     * real request (mirrors the fetch-side precedent) -- but wb_mem_ack_i/
+     * wb_mem_err_i are free, solver-chosen `rvformal_rand_reg`s in this
+     * formal model (see wrapper.sv's mem-port group), not something the RTL itself proves
+     * can never assert without a matching request. The solver can (and,
+     * confirmed via insn_add_ch0's own counterexample, did) pick wb_mem_ok=1
+     * on the very same cycle a load/store first enters S_MEM -- before
+     * mem_translate_active && !mem_resolved_q[cur_slot] has even had a
+     * chance to redirect to S_PTW -- firing commit_now (and everything
+     * gated on it: pc advance, trap_taken, regfile/CSR writes, minstret)
+     * for an instruction that hasn't actually finished. Concretely: pc
+     * advances to pc+4 while instr_line_q[cur_slot] is still frozen on
+     * the original fetch, so first_hw's own pc[2:1]-keyed halfword-select
+     * mux (Decode section above) re-slices those same raw bits as a
+     * DIFFERENT instruction once the real walk eventually completes and
+     * commit_now fires again -- rvfi_insn ends up reporting whatever that
+     * reinterpreted instruction happens to decode as, not the real
+     * load/store that actually owns this S_MEM cycle. Mirrors the state-
+     * transition block's own S_MEM arm (line ~1160 below), which already
+     * gates its wb_mem_done-based transitions behind this exact same
+     * condition via its outer if/else-if structure -- commit_now simply
+     * hadn't been kept in sync with that same priority.
+     */
+    // debug_ebreak_entry/trigger_debug_entry (forward-declared, real
+    // assigns further down): a non-memory, non-divide instruction reaches
+    // this same S_EXEC edge whether or not it's ALSO entering Debug Mode
+    // (an EBREAK-to-debug, or an ordinary instruction sitting at a
+    // matched execute trigger) -- without excluding them here, commit_now
+    // fired anyway, so pc/rvfi_valid/minstret all recorded a retirement
+    // that never architecturally happened. Loads/stores/AMOs/DIV need no
+    // equivalent term: trigger_debug_entry already pre-empts
+    // mem_phase_needed/div_stall in the state-transition always_ff below,
+    // so for THOSE classes state never even reaches the S_MEM/S_AMO_WRITE
+    // arms this same edge, and debug_ebreak_entry structurally requires
+    // is_ebreak, which is neither a memory nor a divide instruction.
+    wire commit_now = (state == S_EXEC && !mem_phase_needed && !div_stall
+                        && !debug_ebreak_entry && !trigger_debug_entry)
+                    // !pmp_load_fault && !pmp_store_fault: formal-only gap
+                    // (unreachable in real simulation -- mem_phase_needed's
+                    // own NOT-list already keeps state from ever ENTERING
+                    // S_MEM with either fault set, and the state-transition
+                    // always_ff's own S_MEM arm bails to S_EXEC, not
+                    // S_FETCH, ahead of its wb_mem_done branch whenever one
+                    // is set). Under BMC, with wb_mem_ack_i free every
+                    // cycle and no reachability constraint, this term could
+                    // otherwise fire commit_now in the exact same cycle
+                    // state bails to S_EXEC on a fault -- reaching
+                    // interrupt_taken (commit_now_q-timed) with the next
+                    // state NOT S_FETCH, violating the invariant
+                    // fetch_redirect_cycle's whole design relies on.
+                    || (state == S_MEM && !(mem_translate_active && !mem_resolved_q[cur_slot])
+                        && !pmp_load_fault && !pmp_store_fault
+                        && ((wb_mem_ok && !is_amo_rmw) || wb_mem_err_i))
+                    || (state == S_AMO_WRITE && wb_mem_done);
+
+    /*
+     * C extension: fetch_hi_needed decides, on the SAME edge S_FETCH's
+     * ack arrives, whether the halfword about to become "the current
+     * instruction" is the low half of an uncompressed (32-bit)
+     * instruction that starts in this dword's LAST halfword slot
+     * (pc[2:1]==2'b11) -- the one case where the other 16 bits live in
+     * the NEXT dword, needing a second bus transaction (S_FETCH_HI)
+     * before Execute can begin. Computed directly off the live
+     * wb_fetch_dat_i, not the not-yet-updated instr_line_q[cur_slot] -- the exact same
+     * "combinationally derive from live bus data on the same edge a sibling
+     * register captures it" pattern the A extension's
+     * amo_rdata_q[cur_slot] <= load_data already established (load_data is
+     * itself combinationally wb_mem_dat_i-derived, on the mem port), just applied to a new
+     * spot. A compressed instruction never needs this: any 2-byte-
+     * aligned halfword is always fully inside its own 8-byte dword, so
+     * a quadrant field (the halfword's own low 2 bits) of anything
+     * other than 2'b11 rules out crossing regardless of pc[2:1].
+     *
+     * fetch_hi_taken adds wb_fetch_ok on top of fetch_hi_needed: on a
+     * fetch error, wb_fetch_dat_i's bits are meaningless, so a faulted
+     * fetch must never chase a second, bogus fetch based on garbage --
+     * it needs to fall straight through to S_EXEC and trap via
+     * fetch_fault_q[cur_slot] instead.
+     */
+    wire fetch_hi_needed = (fetch_pc[2:1] == 2'b11) && (wb_fetch_dat_i[49:48] == 2'b11);
+    wire fetch_hi_taken  = wb_fetch_ok && fetch_hi_needed;
+
+    /*
+     * Pipelining P2 step 2: fstate's own progression -- see its
+     * declaration comment (earlier in this file) for the full design.
+     * Declared here (ahead of the state-transition always_ff below,
+     * which reads fstate_now) rather than down in the Fetch section
+     * alongside fstate's own always_ff, for the same "everything this
+     * needs -- wb_fetch_done/fetch_hi_taken/pmp_fetch*_fault/
+     * debug_halt_req_entry/debug_progbuf_active/fetch_translate_active --
+     * is already available or forward-declared by this point" reason
+     * every other early-declared signal in this file already follows.
+     *
+     * fstate_now is fstate's EFFECTIVE phase for THIS cycle's own
+     * combinational decisions (bus-driving in wb_fetch_master_drive, register
+     * capture in the Fetch section, and state's own S_FETCH arm below)
+     * -- adversarial review of an earlier version of this step found a
+     * real bug here: naively gating those decisions on the raw fstate
+     * REGISTER cost 1-2 extra clock cycles per untranslated fetch (one
+     * cycle sitting in F_IDLE before F_REQ_LO's registered value could
+     * even start driving the low-half request, and another cycle for
+     * state's own S_FETCH arm to observe a registered F_VALID) versus
+     * the pre-P2 design, which made this same "request now / done now"
+     * decision combinationally, every cycle, with no register hop at
+     * all. fstate_now closes that gap by re-deriving the SAME "what
+     * should happen this cycle" logic combinationally off the CURRENT
+     * fstate register plus this cycle's own live signals -- exactly
+     * mirroring how state's own pre-P2 S_FETCH/S_FETCH_HI arms always
+     * decided things directly off the live bus done signal (today's
+     * wb_fetch_done)/pmp_fetch*_fault, never
+     * through an intermediate register. The fstate register itself
+     * still exists and still updates one cycle behind (via fstate_now,
+     * see its own always_ff in the Fetch section) -- it's what makes a
+     * GENUINE multi-cycle bus wait (wb_fetch_done not yet arrived) correctly
+     * persist as "still F_REQ_LO/F_REQ_HI" on every subsequent cycle;
+     * fstate_now only diverges from raw fstate on the exact cycle a
+     * phase actually completes or begins.
+     *
+     * fstate_eligible is the "no lookahead, restart fresh on any
+     * interruption" rule: fstate can only ever be doing real work while
+     * state is CURRENTLY sitting in S_FETCH for an untranslated fetch
+     * that isn't being redirected to S_DEBUG_HALTED/progbuf this same
+     * cycle -- any other cycle forces F_IDLE, mirroring state's own
+     * "re-run S_FETCH from scratch" resume behavior exactly (see
+     * S_FETCH's own arm below).
+     */
+    wire fstate_eligible = (state == S_FETCH) && !fetch_translate_active
+                         && !fetch_redirect_cycle && !debug_progbuf_active;
+    // "Working the low half" covers BOTH F_IDLE (just arrived, decision
+    // not yet registered) and F_REQ_LO (already waiting) -- from this
+    // cycle's own combinational perspective they're the same phase; only
+    // the bookkeeping register distinguishes "first cycle" from "later
+    // cycle", which none of this logic needs to care about.
+    wire fstate_lo_phase = fstate_eligible && (fstate == F_IDLE || fstate == F_REQ_LO);
+    wire fstate_hi_phase = fstate_eligible && (fstate == F_REQ_HI);
+    // pmp_fetchlo_fault is known combinationally before any bus request is
+    // ever issued, and only needs checking once (the first cycle, i.e.
+    // while the register still reads F_IDLE) -- mirrors state's own pre-P2
+    // pmp_fetchlo_fault priority over wb_fetch_done exactly, including against a
+    // same-cycle immediate (zero-wait-state) response.
+    wire fstate_lo_denied_now = fstate_eligible && (fstate == F_IDLE) && pmp_fetchlo_fault;
+    wire fstate_lo_done_now   = fstate_lo_phase && !fstate_lo_denied_now && wb_fetch_done;
+    wire fstate_hi_done_now   = fstate_hi_phase && wb_fetch_done;
+    wire fstate_t fstate_now = fstate_t'(
+        fstate_lo_denied_now ? F_VALID :
+        fstate_lo_done_now   ? ((fetch_hi_taken && !pmp_fetchhi_fault) ? F_REQ_HI : F_VALID) :
+        fstate_hi_done_now   ? F_VALID :
+        fstate_lo_phase      ? F_REQ_LO :
+        fstate_hi_phase      ? F_REQ_HI :
+        F_IDLE); // not eligible, or F_VALID already consumed last cycle
+
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            state    <= S_FETCH;
+            cur_slot <= 1'b0;
+        end else begin
+            case (state)
+                /*
+                 * debug_progbuf_active is checked ahead of everything
+                 * else: while a Program Buffer run is in flight, S_FETCH
+                 * never issues a real bus request at all (wb_fetch_master_drive's
+                 * own S_FETCH arm suppresses it, mirroring
+                 * debug_halt_req_entry's own precedent) -- the "fetch" is
+                 * already available combinationally as i_progbuf_data, so
+                 * there's no wb_fetch_done to wait for; this transitions
+                 * straight to S_EXEC the very next cycle. debug_halt_req_entry
+                 * itself is structurally impossible here anyway
+                 * (it requires !in_debug_mode, which is false throughout
+                 * progbuf execution), but is checked ahead of the ordinary
+                 * wb_fetch_done-gated transition regardless, for the same
+                 * "wb_fetch_done never arrives" reason as before.
+                 */
+                S_FETCH:     if (debug_progbuf_active) state <= S_EXEC;
+                             else if (debug_halt_req_entry) state <= S_DEBUG_HALTED;
+                             /*
+                              * interrupt_taken: pc/current_priv redirect to
+                              * trap_vector/the new privilege on THIS edge
+                              * (Next PC/CSR sections below) -- re-run
+                              * S_FETCH from scratch next cycle so every
+                              * fetch-side site gated on fetch_redirect_cycle
+                              * (TLB resolve, walk-start, PMP-fault exit,
+                              * fstate) correctly sees a fresh instruction at
+                              * the NEW pc/privilege, not this cycle's
+                              * now-stale OLD pc. Mutually exclusive with
+                              * debug_halt_req_entry by construction
+                              * (interrupt_taken's own definition excludes
+                              * it), so arm order between the two doesn't
+                              * matter -- kept after it anyway, matching that
+                              * exclusion's own tie-break intent.
+                              */
+                             else if (interrupt_taken) state <= S_FETCH;
+                             /*
+                              * Pipelining P2 step 2: split into the existing
+                              * Sv39 (translated) path -- COMPLETELY UNCHANGED
+                              * below, still driven by state itself exactly
+                              * as before this milestone -- and the new
+                              * untranslated fast path, now owned by fstate
+                              * (see fstate's own declaration comment,
+                              * earlier in this file, for the full design).
+                              */
+                             else if (fetch_translate_active) begin
+                                 /*
+                                  * Sv39 (Milestone 3): translation needed and
+                                  * not yet resolved for THIS fetch -- MUST win
+                                  * top priority within this branch,
+                                  * unconditionally, regardless of hit or miss:
+                                  * fetch_paddr (hence pmp_fetchlo_fault,
+                                  * computed off it) is stale/meaningless until
+                                  * fetch_lo_resolved_q[cur_slot] is set.
+                                  * Sv39 (Milestone 5): a MISS redirects to the
+                                  * real walker (S_PTW); a HIT stays right here
+                                  * in S_FETCH for exactly one more cycle
+                                  * instead -- resolved combinationally-then-
+                                  * registered by the walker progression
+                                  * always_ff's own tlb_hit_active branch this
+                                  * same cycle, taking effect next cycle.
+                                  * Either way, fetch_lo_resolved_q[cur_slot]
+                                  * (and, for a hit, fetch_lo_paddr_q[cur_slot]
+                                  * too) is guaranteed valid by the time this
+                                  * inner condition next reads false -- the
+                                  * same invariant a real walk's own S_PTW-
+                                  * then-back-here sequencing already relied
+                                  * on, now shared by both resolution paths.
+                                  */
+                                 // Pipelining P2 step 3a: [fetch_slot] -- see
+                                 // tlb_hit_active's own matching comment.
+                                 if (!fetch_lo_resolved_q[fetch_slot]) begin
+                                     if (!tlb_hit) state <= S_PTW;
+                                     /*
+                                      * TLB-hit PTE-content fault: same real gap
+                                      * as S_MEM's own identical arm (see that
+                                      * state's own comment for the full
+                                      * reasoning) -- on a HIT, fetch_lo_resolved_q[cur_slot]
+                                      * stays 0 forever when ptw_pte_fault is set
+                                      * (mirrors mem_resolved_q[cur_slot]'s own
+                                      * "resolved" semantics), so without this
+                                      * arm the outer condition here never reads
+                                      * false and S_FETCH could never otherwise
+                                      * leave for this instruction.
+                                      */
+                                     else if (ptw_pte_fault) begin
+                                         state <= S_EXEC;
+                                         // Pipelining P2 step 3a: this fetch
+                                         // episode is done (denied). See
+                                         // cur_slot's own declaration comment
+                                         // for why every such site toggles.
+                                         cur_slot <= ~cur_slot;
+                                     end
+                                 end
+                                 /*
+                                  * pmp_fetchlo_fault (PMP+PLIC plan, Milestone
+                                  * 2): known combinationally off fetch_paddr
+                                  * before any bus request for this fetch is
+                                  * ever issued (wb_fetch_master_drive's own S_FETCH
+                                  * arm suppresses it in lockstep, per that
+                                  * arm's own comment) -- falls straight
+                                  * through to S_EXEC with no wb_fetch_done to wait
+                                  * for.
+                                  *
+                                  * pmp_fetchhi_fault is deliberately NOT
+                                  * checked here (Sv39 real bug, found and
+                                  * fixed post-M6 by an earlier independent
+                                  * adversarial re-review): fetch_hi_paddr_q[cur_slot]
+                                  * is NOT yet resolved for THIS instruction at
+                                  * this point -- it's whatever the PREVIOUS
+                                  * crossing fetch happened to leave there
+                                  * (fetch_lo_paddr_q[cur_slot]/fetch_hi_paddr_q[cur_slot]
+                                  * have no reset at all). Checking it here
+                                  * would silently bypass PMP execute-
+                                  * protection (a stale-but-permitted address
+                                  * lets S_FETCH_HI's own real walk proceed
+                                  * unchecked once it resolves -- see that
+                                  * state's own arm below) or spuriously fault
+                                  * a legitimate instruction (a stale-but-
+                                  * denied address). Fix: always enter
+                                  * S_FETCH_HI when fetch_hi_taken -- the real
+                                  * PMP check is deferred to S_FETCH_HI's own
+                                  * arm below, evaluated only once
+                                  * fetch_hi_paddr_q[cur_slot] has genuinely
+                                  * resolved for this instruction.
+                                  */
+                                 else if (pmp_fetchlo_fault) begin
+                                     state <= S_EXEC;
+                                     // Pipelining P2 step 3a: see cur_slot's
+                                     // own declaration comment.
+                                     cur_slot <= ~cur_slot;
+                                 end else if (wb_fetch_done) begin
+                                     state <= state_t'(fetch_hi_taken ? S_FETCH_HI : S_EXEC);
+                                     // Pipelining P2 step 3a: only toggle when
+                                     // this fetch is actually DONE this cycle
+                                     // (the non-crossing case) -- a crossing
+                                     // instruction's episode continues into
+                                     // S_FETCH_HI below, which toggles on ITS
+                                     // OWN completion instead.
+                                     if (!fetch_hi_taken) cur_slot <= ~cur_slot;
+                                 end
+                             end else begin
+                                 /*
+                                  * Pipelining P2 step 2: the untranslated fast
+                                  * path. fstate_now (declared just above this
+                                  * always_ff, see its own comment) folds in the
+                                  * entire low/high-halfword bus sequence --
+                                  * including its own pmp_fetchlo_fault/
+                                  * pmp_fetchhi_fault checks -- combinationally,
+                                  * so this reads fstate_now rather than the raw
+                                  * fstate register: reacting to the registered
+                                  * value here would cost an extra, unintended
+                                  * cycle (a real bug an earlier version of this
+                                  * step had, found by adversarial review).
+                                  */
+                                 if (fstate_now == F_VALID) begin
+                                     state <= S_EXEC;
+                                     // Pipelining P2 step 3a: see cur_slot's
+                                     // own declaration comment.
+                                     cur_slot <= ~cur_slot;
+                                 end
+                             end
+                /*
+                 * Sv39 (Milestone 3): same redirect, same reason, for the
+                 * second (crossing) dword -- fetch_paddr_hi/fetch_hi_vaddr's
+                 * own header comments explain why this needs an
+                 * INDEPENDENT walk rather than reusing the lo half's own
+                 * resolved address.
+                 */
+                // Sv39-only now (Pipelining P2 step 2): the untranslated
+                // case no longer visits S_FETCH_HI at all -- fstate's own
+                // F_REQ_HI arm handles it instead (see the untranslated
+                // branch of S_FETCH above) -- so fetch_translate_active is
+                // always true by the time this arm is even reached.
+                // Pipelining P2 step 3a: [fetch_slot] -- see
+                // tlb_hit_active's own matching comment.
+                S_FETCH_HI:  if (fetch_translate_active && !fetch_hi_resolved_q[fetch_slot]) begin
+                                 if (!tlb_hit) state <= S_PTW;
+                                 /*
+                                  * TLB-hit PTE-content fault: same real gap
+                                  * as S_MEM's own identical arm (see that
+                                  * state's own comment for the full
+                                  * reasoning) -- on a HIT, fetch_hi_resolved_q[cur_slot]
+                                  * stays 0 forever when ptw_pte_fault is set,
+                                  * so without this arm the outer condition
+                                  * here never reads false and S_FETCH_HI
+                                  * could never otherwise leave for this
+                                  * instruction.
+                                  */
+                                 else if (ptw_pte_fault) begin
+                                     state <= S_EXEC;
+                                     // Pipelining P2 step 3a: see cur_slot's
+                                     // own declaration comment.
+                                     cur_slot <= ~cur_slot;
+                                 end
+                             end
+                             /*
+                              * Sv39 real bug fix (post-M6 independent
+                              * re-review): pmp_fetchhi_fault is only ever
+                              * meaningful once fetch_hi_paddr_q[cur_slot] has resolved
+                              * for THIS instruction -- which, having fallen
+                              * through the arm above, it now has (either via
+                              * a completed walk or a TLB hit). Mirrors
+                              * pmp_fetchlo_fault's own S_FETCH treatment:
+                              * falls straight to S_EXEC with no wb_fetch_done to
+                              * wait for, since wb_fetch_master_drive's own
+                              * S_FETCH_HI arm suppresses the real bus
+                              * request in lockstep (see that arm's own
+                              * comment). This whole S_FETCH_HI case is
+                              * itself now Sv39-only (see this arm's own
+                              * header comment) -- the untranslated case
+                              * this comment used to describe as merely
+                              * "dead code" is genuinely unreachable now.
+                              */
+                             else if (pmp_fetchhi_fault) begin
+                                 state <= S_EXEC;
+                                 // Pipelining P2 step 3a: see cur_slot's own
+                                 // declaration comment.
+                                 cur_slot <= ~cur_slot;
+                             end else if (wb_fetch_done) begin
+                                 state <= S_EXEC;
+                                 cur_slot <= ~cur_slot;
+                             end
+                /*
+                 * Sv39 (Milestone 3): the walker itself. ptw_pmp_fault is
+                 * known combinationally off ptw_pte_addr before this
+                 * level's own read is ever issued (wb_mem_master_drive's own
+                 * S_PTW arm suppresses it in lockstep) -- falls straight
+                 * to S_EXEC with fetch_fault_q[cur_slot] capturing cause 1, same
+                 * "checked before the bus phase" shape pmp_fetchlo_fault
+                 * itself already uses. Otherwise: a real bus error reading
+                 * the PTE is ALSO cause 1 (fetch_fault_q[cur_slot]); a PTE-content
+                 * fault (malformed/misaligned/permission/A-bit) is cause
+                 * 12 (fetch_lo_fault_q[cur_slot]/fetch_hi_fault_q[cur_slot], see the walker's
+                 * own progression always_ff below); a resolved leaf sends
+                 * us back to whichever stream requested this walk, now
+                 * with fetch_lo_paddr_q[cur_slot]/fetch_hi_paddr_q[cur_slot] valid; anything
+                 * else (a clean non-leaf pointer PTE) descends one level
+                 * by looping on this same state.
+                 */
+                /*
+                 * Pipelining P2 step 3a: the three fault arms below (PMP-
+                 * denied PTE read, bus-errored PTE read, PTE-content
+                 * fault) all bail to S_EXEC -- but this walk can be on
+                 * behalf of EITHER a fetch (PTW_REASON_LO/HI) or a plain
+                 * load/store's own translation (PTW_REASON_MEM), sharing
+                 * this one walker. cur_slot must only toggle for the
+                 * former -- a MEM-reason fault means the instruction
+                 * that's ALREADY sitting in cur_slot (fetched earlier,
+                 * now failing its own data access) is retiring with a
+                 * trap, not that a NEW instruction's fetch just
+                 * completed. See cur_slot's own declaration comment.
+                 */
+                // Pipelining P2 step 3b prerequisite: S_PTW rides the MEM
+                // port unconditionally, regardless of ptw_reason_q -- see
+                // this module's own header comment for the full "why this
+                // is safe" derivation (already-existing wb_ifetch_o
+                // precedent + the Sv39 descope's own fstate_eligible
+                // exclusion). Only the BUS transaction's own port changes
+                // here; which result register each arm below writes to
+                // (fetch_lo/hi_* vs mem_*) stays exactly as it was, keyed
+                // on ptw_reason_q[cur_slot].
+                S_PTW:       if (ptw_pmp_fault) begin
+                                 state <= S_EXEC;
+                                 if (ptw_reason_q[cur_slot] != PTW_REASON_MEM) cur_slot <= ~cur_slot;
+                             end else if (wb_mem_done) begin
+                                 if (wb_mem_err_i) begin
+                                     state <= S_EXEC;
+                                     if (ptw_reason_q[cur_slot] != PTW_REASON_MEM) cur_slot <= ~cur_slot;
+                                 end else if (ptw_pte_fault) begin
+                                     state <= S_EXEC;
+                                     if (ptw_reason_q[cur_slot] != PTW_REASON_MEM) cur_slot <= ~cur_slot;
+                                 end else if (ptw_pte_leaf) state <= state_t'((ptw_reason_q[cur_slot] == PTW_REASON_HI) ? S_FETCH_HI
+                                                                        : (ptw_reason_q[cur_slot] == PTW_REASON_MEM) ? S_MEM
+                                                                        : S_FETCH);
+                                 else state <= S_PTW;
+                             end
+                /*
+                 * debug_ebreak_entry redirects the same commit_now edge
+                 * that would otherwise send an ordinary EBREAK back to
+                 * S_FETCH -- mutually exclusive with mem_phase_needed/
+                 * div_stall by construction (EBREAK is neither a memory
+                 * op nor a divide). progbuf_ebreak_done/progbuf_abort are
+                 * ALSO mutually exclusive with debug_ebreak_entry by
+                 * construction: the latter requires !in_debug_mode, which
+                 * is false throughout progbuf execution (see the module's
+                 * own Program Buffer section for the full reasoning).
+                 *
+                 * trigger_debug_entry (Milestone 9) is checked HERE,
+                 * ahead of mem_phase_needed's own ternary, deliberately --
+                 * NOT mirroring debug_ebreak_entry's commit_now timing.
+                 * See trigger_debug_entry's own assign (this module's
+                 * Trigger Module section) for the full reasoning: a
+                 * trigger can match a LOAD/STORE/AMO instruction's own PC
+                 * just as easily as an ALU op's, and checking ahead of
+                 * mem_phase_needed here (rather than commit_now-gated,
+                 * which for a memory op would only ever fire from
+                 * S_MEM/S_AMO_WRITE, after that instruction's own bus
+                 * transaction already completed) means a matched
+                 * load/store never reaches S_MEM at all -- no separate
+                 * S_MEM/S_AMO_WRITE arm is needed for this signal, unlike
+                 * progbuf_abort immediately below, which genuinely can
+                 * only be discovered once a memory operation is already
+                 * in flight.
+                 */
+                S_EXEC:      state <= state_t'((progbuf_ebreak_done || progbuf_abort) ? S_DEBUG_HALTED
+                                    : (debug_ebreak_entry || trigger_debug_entry) ? S_DEBUG_HALTED
+                                    : (mem_phase_needed ? S_MEM : (div_stall ? S_EXEC : S_FETCH)));
+                /*
+                 * progbuf_abort can also fire from S_MEM/S_AMO_WRITE --
+                 * a faulting memory access executed from the Program
+                 * Buffer is exactly the case this exists for (see
+                 * mem_load_access_fault/mem_store_access_fault, both
+                 * state-gated to S_MEM, and S_AMO_WRITE's own AMO-write-
+                 * phase fault arm).
+                 */
+                /*
+                 * Sv39 (Milestone 4): same redirect shape as S_FETCH's
+                 * own -- translation needed and not yet resolved wins
+                 * top priority, before ever consulting wb_mem_done. Once
+                 * resolved, pmp_load_fault/pmp_store_fault (now correctly
+                 * evaluating against the JUST-RESOLVED, translated
+                 * mem_paddr -- see their own generalized gate) can ALSO
+                 * fire at this exact point, checked next: the FINAL,
+                 * translated physical address must still pass the
+                 * existing, unmodified PMP mem-side check before the
+                 * real target access is ever issued (decision 10's own
+                 * two-tier ordering) -- mirrors pmp_fetchlo_fault's own
+                 * "known combinationally before the bus phase, bail
+                 * straight to S_EXEC" shape exactly, just one state later
+                 * than the fetch-side equivalent since mem_paddr itself
+                 * isn't resolved until partway through S_MEM.
+                 */
+                /*
+                 * TLB-hit PTE-content fault (real bug, found via riscv-
+                 * formal's insn_add_ch0 -- see checks.cfg's own history for
+                 * this exact regression): a MISS correctly redirects to
+                 * S_PTW, whose own S_PTW arm explicitly returns to S_EXEC
+                 * on ptw_pte_fault. A HIT, though, was designed to stay
+                 * right here for one more cycle so mem_resolved_q[cur_slot]/
+                 * mem_fault_q[cur_slot] can register combinationally
+                 * (see tlb_hit_active's own always_ff arm) -- but on a
+                 * FAULT, mem_resolved_q[cur_slot] is deliberately left 0
+                 * (mirrors "resolved" meaning "usable for a real access",
+                 * never true for a faulted PTE), so the outer condition
+                 * above never reads false and this state can never
+                 * otherwise leave S_MEM: tlb_hit itself doesn't change
+                 * cycle to cycle, so every subsequent cycle re-derives
+                 * the identical fault and re-arms mem_fault_q[cur_slot]
+                 * to the same value, forever. ptw_pte_fault is already the
+                 * live, tlb_hit_active-aware combinational signal (via
+                 * ptw_pte_source's own hit-vs-walk mux) the register-update
+                 * always_ff already reads for this exact case -- reusing
+                 * it here (rather than mem_fault_q[cur_slot], not yet
+                 * registered this cycle) exits on the SAME cycle the fault
+                 * is discovered, one cycle earlier than waiting for the
+                 * registered flag would, and mirrors S_PTW's own
+                 * combinational ptw_pte_fault-gated exit exactly.
+                 */
+                S_MEM:       if (mem_translate_active && !mem_resolved_q[cur_slot]) begin
+                                 if (!tlb_hit) state <= S_PTW;
+                                 else if (ptw_pte_fault) state <= S_EXEC;
+                             end else if (pmp_load_fault || pmp_store_fault) state <= S_EXEC;
+                             else if (wb_mem_done) state <= state_t'(progbuf_abort ? S_DEBUG_HALTED
+                                    : ((wb_mem_ok && is_amo_rmw) ? S_AMO_WRITE : S_FETCH));
+                S_AMO_WRITE: if (wb_mem_done) state <= state_t'(progbuf_abort ? S_DEBUG_HALTED : S_FETCH);
+                /*
+                 * i_progbuf_start (Milestone 7) is the other way out of
+                 * this state besides a real resume -- both land on
+                 * S_FETCH; debug_progbuf_active's own always_ff (set on
+                 * this same i_progbuf_start pulse) is what makes THIS
+                 * particular S_FETCH pass instant rather than a real bus
+                 * wait, per the S_FETCH arm's own comment above.
+                 */
+                S_DEBUG_HALTED: if (i_debug_resume_req || i_progbuf_start) state <= S_FETCH;
+                default:     state <= S_FETCH;
+            endcase
+        end
+    end
+
+    /*
+     * Pipelining P2 step 2: fstate's own register, one cycle behind
+     * fstate_now (see fstate_now's own declaration comment, right before
+     * this always_ff's sibling state-transition block above, for the
+     * full design -- this update is deliberately just "fstate <=
+     * fstate_now", since fstate_now already folds in every condition
+     * (eligibility, faults, wb_fetch_done) that used to live in a case
+     * statement here).
+     */
+    always_ff @(posedge clk) begin
+        if (rst) fstate <= F_IDLE;
+        else     fstate <= fstate_now;
+    end
+
+    /* --------------------------------------------------------------- *
+     * Fetch
+     * --------------------------------------------------------------- */
+
+    /*
+     * The bus is 64-bit wide and word-addressed (low 3 address bits
+     * unused, same convention as wb4_sram.sv/wb_addr_decoder.sv) -- one
+     * fetch beat brings in a full dword: up to 4 compressed halfwords,
+     * or 2 uncompressed 32-bit instructions. C extension: pc is no
+     * longer always 4-byte-aligned (a compressed instruction is only 2
+     * bytes), so pc[2:1] -- not just pc[2] -- now selects which of the
+     * dword's 4 halfword slots is "first". An uncompressed instruction
+     * starting in the LAST slot (pc[2:1]==2'b11) needs a second dword;
+     * instr_hi_q[cur_slot]/crossed_q[cur_slot] exist for exactly that case (see
+     * fetch_hi_needed above).
+     */
+    logic [63:0] instr_line_q [SLOT_COUNT];
+    logic [15:0] instr_hi_q [SLOT_COUNT];
+    logic        crossed_q [SLOT_COUNT];
+    /*
+     * fetch_fault_q[cur_slot]: captures whether THIS fetch (S_FETCH or S_FETCH_HI)
+     * came back as a bus error, at the exact same edge instr_line_q[cur_slot]/
+     * instr_hi_q[cur_slot] get latched. No explicit reset needed -- mirrors those
+     * two registers' own established convention: always freshly written
+     * on the edge S_EXEC is first reached, so nothing ever consults it
+     * uninitialized. Consumed by `instruction` below (substitutes an
+     * inert placeholder so decode never runs on garbage fetched bits) and
+     * by exc_code/trap_val (instruction access fault, cause 1).
+     *
+     * PMP+PLIC staged plan, Milestone 2: fetch_fault_q[cur_slot] ALSO captures a
+     * PMP-denied fetch now (either half), not just a real bus error --
+     * both are the same architectural cause (1, instruction access
+     * fault), and both are only actually knowable at S_FETCH's own
+     * fetch_paddr/fetch_paddr_hi-checking granularity, not later at
+     * exc_code's own S_EXEC-timed evaluation. exc_code/trap_val
+     * therefore need NO separate pmp_fetchlo_fault/pmp_fetchhi_fault
+     * terms of their own -- fetch_fault_q[cur_slot] is already the canonical,
+     * sufficient capture for every instruction-access-fault cause,
+     * mirroring how mem_load_access_fault/mem_store_access_fault (a
+     * real bus error, PURELY combinational, no register needed) and
+     * pmp_load_fault/pmp_store_fault (also purely combinational, same
+     * S_EXEC edge) DO both need their own explicit exc_code/trap_taken
+     * terms -- the difference is exactly whether the check happens at
+     * the SAME edge exc_code fires from (mem side, no register needed)
+     * or an EARLIER one (fetch side, needs fetch_fault_q[cur_slot] to carry it
+     * forward).
+     */
+    logic        fetch_fault_q [SLOT_COUNT];
+    always_ff @(posedge clk) begin
+        /*
+         * Pipelining P2 step 2: gated on fetch_translate_active now --
+         * state stays S_FETCH throughout BOTH halves of an untranslated
+         * crossing fetch (fstate owns the low/high sequencing instead of
+         * S_FETCH_HI, see the state-transition always_ff's own S_FETCH
+         * arm), so an un-gated "state == S_FETCH && wb_fetch_done" would fire a
+         * SECOND time on the high half's own wb_fetch_done and wrongly re-
+         * capture instr_line_q with the wrong dword's data. The
+         * untranslated path's own equivalent capture lives in the new
+         * fstate-keyed block below instead.
+         */
+        if (fetch_translate_active) begin
+        // Pipelining P2 step 3a: [fetch_slot] -- see tlb_hit_active's own
+        // matching comment.
+        if (state == S_FETCH && tlb_hit_active && ptw_pte_fault) begin
+            // TLB-hit PTE-content fault (cause 12), not a cause-1 access
+            // fault -- fetch_fault_q must explicitly read 0 here, or a
+            // stale 1 left by an EARLIER, unrelated fetch that used this
+            // same slot (this condition and the empty arm just below's
+            // own !fetch_lo_resolved_q[fetch_slot] term are both true on
+            // this exact cycle, so without this arm it fell into that
+            // empty one and was never cleared) makes exc_code -- which
+            // checks cause 1 before cause 12 -- misreport the fault. The
+            // real cause-12 record is fetch_lo_fault_q[fetch_slot], set
+            // by the TLB-hit-resolve always_ff elsewhere in this file.
+            fetch_fault_q[fetch_slot] <= 1'b0;
+        end else if (state == S_FETCH && (fetch_redirect_cycle || !fetch_lo_resolved_q[fetch_slot])) begin
+            // Sv39 (Milestone 3): redirecting to S_PTW this cycle --
+            // fetch_paddr (hence pmp_fetchlo_fault, computed off it) is
+            // not yet resolved, so its transient value must not be
+            // captured as a fault. The walk hasn't even started; nothing
+            // to latch here. Must be checked FIRST, ahead of the
+            // pmp_fetchlo_fault arm below, mirroring the state-transition
+            // always_ff's own identical priority requirement.
+            //
+            // fetch_redirect_cycle (interrupt/debug-halt entry): forces
+            // entry into this same empty arm even when fetch_lo_resolved_q[fetch_slot]
+            // happens to still read stale-1 from an earlier episode on this
+            // slot -- otherwise the pmp_fetchlo_fault/wb_fetch_done arms
+            // below could capture a fault/instruction off the OLD, now-
+            // stale fetch_paddr. See fetch_redirect_cycle's own declaration
+            // comment.
+        end else if (state == S_FETCH && pmp_fetchlo_fault) begin
+            // Low half denied -- known combinationally, no real bus
+            // request was ever issued (wb_fetch_master_drive's own S_FETCH arm
+            // suppressed it), so there's no wb_fetch_dat_i to capture at all;
+            // instr_line_q[cur_slot]/crossed_q[cur_slot] are left stale/irrelevant, same as
+            // they always are whenever fetch_fault_q[cur_slot] ends up set (the
+            // `instruction` substitution mux below ignores them either
+            // way). Structurally exclusive with the wb_fetch_done branch below
+            // (wb_fetch_master_drive never asserts a request this cycle), but
+            // written as an explicit priority arm anyway, not relying on
+            // that exclusivity.
+            fetch_fault_q[fetch_slot] <= 1'b1;
+        end else if (state == S_FETCH && wb_fetch_done) begin
+            instr_line_q[fetch_slot]  <= wb_fetch_dat_i;
+            // pmp_fetchhi_fault is NOT consulted here while translating --
+            // Sv39 real bug fix (post-M6 independent re-review): see the
+            // state-transition always_ff's own matching comment for why
+            // it's not yet meaningful here (fetch_hi_paddr_q[cur_slot]
+            // hasn't resolved for this instruction yet). crossed_q[cur_slot]/
+            // fetch_fault_q[cur_slot] both stay as if the HI half is clean --
+            // S_FETCH_HI's own new arms (state-transition + this always_ff's
+            // own S_FETCH_HI block below) capture the REAL, resolved
+            // pmp_fetchhi_fault result once it's actually valid.
+            crossed_q[fetch_slot]     <= fetch_hi_taken;
+            fetch_fault_q[fetch_slot] <= wb_fetch_err_i;
+        end
+        end else begin
+            /*
+             * Pipelining P2 step 2: the untranslated fast path, keyed on
+             * the shared fstate_lo_denied_now/fstate_lo_done_now/
+             * fstate_hi_done_now wires (declared right before the
+             * state-transition always_ff, alongside fstate_now -- see
+             * that comment for the full "why combinational, not the raw
+             * fstate register" reasoning) instead of state's S_FETCH/
+             * S_FETCH_HI. Mirrors the translated branch's own
+             * pmp-denied/wb_fetch_done shapes exactly, including
+             * pmp_fetchhi_fault now being fully valid to consult
+             * immediately (no walker resolution needed for an
+             * untranslated fetch_paddr_hi), unlike the translated branch
+             * above. Using the *_now wires here (rather than raw
+             * fstate==F_REQ_LO/F_REQ_HI) also closes a real gap a plain
+             * register-keyed version would have: a zero-wait-state bus
+             * response arriving on the very first eligible cycle (fstate
+             * register still reading F_IDLE) needs capturing too, not
+             * just a response arriving on a later, genuinely-registered
+             * F_REQ_LO/F_REQ_HI cycle.
+             */
+            if (fstate_lo_denied_now) begin
+                fetch_fault_q[fetch_slot] <= 1'b1;
+            end else if (fstate_lo_done_now) begin
+                instr_line_q[fetch_slot]  <= wb_fetch_dat_i;
+                crossed_q[fetch_slot]     <= fetch_hi_taken && !pmp_fetchhi_fault;
+                fetch_fault_q[fetch_slot] <= wb_fetch_err_i || (fetch_hi_taken && pmp_fetchhi_fault);
+            end
+            if (fstate_hi_done_now) begin
+                instr_hi_q[fetch_slot]    <= wb_fetch_dat_i[15:0];
+                fetch_fault_q[fetch_slot] <= wb_fetch_err_i;
+            end
+        end
+        /*
+         * Sv39 real bug fix (post-M6 independent re-review): the ORIGINAL
+         * comment here ("fetch_fault_q[cur_slot] is guaranteed 0 walking into
+         * S_FETCH_HI") was only true because pmp_fetchhi_fault used to be
+         * fully resolved before ever entering S_FETCH_HI (the untranslated
+         * case still has this property, by construction -- see above). Once
+         * translating, the state-transition always_ff's own new
+         * "pmp_fetchhi_fault ? S_EXEC" arm means a translated, PMP-denied
+         * HI half never reaches this wb_fetch_done arm at all (wb_fetch_master_drive's
+         * own S_FETCH_HI suppression prevents the real request from ever
+         * being issued) -- so this plain overwrite is still safe, just for
+         * a different reason than the stale comment gave.
+         */
+        // Pipelining P2 step 3a: [fetch_slot] -- see tlb_hit_active's own
+        // matching comment.
+        if (state == S_FETCH_HI && tlb_hit_active && ptw_pte_fault) begin
+            // Same TLB-hit PTE-content-fault fix as the S_FETCH arm above,
+            // for the HI half of a crossing instruction -- unlike S_FETCH,
+            // this if/else-if chain had NO arm at all (empty or otherwise)
+            // covering "still resolving," so a stale fetch_fault_q left
+            // by an earlier fetch on this slot was never cleared here
+            // either.
+            fetch_fault_q[fetch_slot] <= 1'b0;
+        end else if (state == S_FETCH_HI && fetch_translate_active && fetch_hi_resolved_q[fetch_slot] && pmp_fetchhi_fault) begin
+            // The real, resolved HI-half PMP check, denied -- checked
+            // ahead of wb_fetch_done below, mirroring pmp_fetchlo_fault's own
+            // S_FETCH priority ordering. No bus request was ever issued
+            // for it (wb_fetch_master_drive's own suppression), so there's no
+            // wb_fetch_dat_i to capture.
+            fetch_fault_q[fetch_slot] <= 1'b1;
+        end else if (state == S_FETCH_HI && wb_fetch_done) begin
+            instr_hi_q[fetch_slot]    <= wb_fetch_dat_i[15:0];
+            fetch_fault_q[fetch_slot] <= wb_fetch_err_i;
+        end
+        /*
+         * Sv39 (Milestone 3): a PMP-denied or bus-errored PTE read is an
+         * access fault of the ORIGINAL access type (cause 1), per
+         * norm:pmp_check_pagetable_access + spec step 2 -- reuses this
+         * SAME fetch_fault_q[cur_slot] register, the same "already the canonical,
+         * sufficient capture" reasoning its own header comment above
+         * already establishes. A genuine PTE-content page fault (cause
+         * 12) does NOT set fetch_fault_q[cur_slot] -- see fetch_lo_fault_q[cur_slot]/
+         * fetch_hi_fault_q[cur_slot]'s own always_ff below instead.
+         */
+        // Pipelining P2 step 3b prerequisite: S_PTW's own bus transaction
+        // rides the mem port unconditionally (this module's own header
+        // comment) -- wb_mem_done/wb_mem_err_i, even though the
+        // DESTINATION register here is fetch-named (ptw_is_mem==0).
+        if (state == S_PTW && ptw_pmp_fault && !ptw_is_mem) begin
+            fetch_fault_q[fetch_slot] <= 1'b1;
+        end else if (state == S_PTW && wb_mem_done && !ptw_is_mem) begin
+            fetch_fault_q[fetch_slot] <= wb_mem_err_i;
+        end
+    end
+
+    /*
+     * The dword's 4 possible 16-bit slots, and the "first"/"second"
+     * halfword of the instruction actually at pc, selected by pc[2:1].
+     * second_hw's own pc[2:1]==2'b11 arm is structural don't-care, not
+     * a real case -- that combination is exactly what triggers
+     * S_FETCH_HI instead (raw32_noncompressed below reads instr_hi_q[cur_slot] in
+     * that case, never second_hw).
+     */
+    wire [15:0] hw0 = instr_line_q[cur_slot][15:0];
+    wire [15:0] hw1 = instr_line_q[cur_slot][31:16];
+    wire [15:0] hw2 = instr_line_q[cur_slot][47:32];
+    wire [15:0] hw3 = instr_line_q[cur_slot][63:48];
+
+    wire [15:0] first_hw  = pc[2:1] == 2'b00 ? hw0 :
+                             pc[2:1] == 2'b01 ? hw1 :
+                             pc[2:1] == 2'b10 ? hw2 : hw3;
+    /* verilator lint_off WIDTHEXPAND */
+    wire [15:0] second_hw = pc[2:1] == 2'b00 ? hw1 :
+                             pc[2:1] == 2'b01 ? hw2 :
+                             pc[2:1] == 2'b10 ? hw3 : 16'bx;
+    /* verilator lint_on WIDTHEXPAND */
+
+    /*
+     * C extension: is_compressed is true iff first_hw's own quadrant
+     * field (its own low 2 bits) isn't 2'b11 -- the RISC-V-standard
+     * "which instruction length is this" test, independent of
+     * crossed_q[cur_slot]. A genuinely crossing 32-bit instruction (crossed_q[cur_slot]=1)
+     * always has first_hw[1:0]==2'b11 too (that's exactly what
+     * triggered S_FETCH_HI), so the !crossed_q[cur_slot] term isn't strictly
+     * required for correctness here, but keeps this wire's meaning
+     * self-evidently right without relying on that cross-reasoning.
+     *
+     * The !debug_progbuf_active guard (Milestone 7) is load-bearing,
+     * not defensive: first_hw/crossed_q[cur_slot] are derived from instr_line_q[cur_slot],
+     * which is stale (whatever was last really fetched before halting)
+     * throughout Program Buffer execution -- without this guard, a
+     * spurious is_compressed=1 (and is_illegal_instr's own
+     * is_compressed-gated c_expand_illegal term) could misclassify a
+     * perfectly valid progbuf instruction based on leftover state that
+     * has nothing to do with it. The `instruction` mux below has its
+     * own, separate top-priority override for the same reason; this is
+     * the one every OTHER consumer of is_compressed (is_illegal_instr,
+     * rvfi_insn, ...) also needs.
+     */
+    wire is_compressed = !debug_progbuf_active && !crossed_q[cur_slot] && (first_hw[1:0] != 2'b11);
+
+    wire [31:0] c_expand_out;
+    wire        c_expand_illegal;
+    ref_c_expand c_expand0 (
+        .i_instr16 (first_hw),
+        .o_instr32 (c_expand_out),
+        .o_illegal (c_expand_illegal)
+    );
+
+    /*
+     * The real 32-bit instruction when !is_compressed: either both
+     * halves already sit in instr_line_q[cur_slot] (the common, non-crossing
+     * case), or the low half is first_hw (== hw3 whenever crossed_q[cur_slot],
+     * since crossing only ever happens at pc[2:1]==2'b11) and the high
+     * half is instr_hi_q[cur_slot], captured during S_FETCH_HI.
+     */
+    wire [31:0] raw32_noncompressed = crossed_q[cur_slot] ? {instr_hi_q[cur_slot], hw3} : {second_hw, first_hw};
+
+    logic [(`INSTR_SIZE - 1):0] instruction;
+    assign instruction = debug_progbuf_active
+        ? i_progbuf_data /* Milestone 7 -- bypasses ALL of the real-fetch
+                             machinery below (instr_line_q[cur_slot]/crossed_q[cur_slot]/
+                             fetch_fault_q[cur_slot] are all stale/irrelevant during
+                             Program Buffer execution, see is_compressed's
+                             own comment above for why this same override
+                             is ALSO needed there, not just here). Progbuf
+                             words are always treated as a full, plain
+                             32-bit instruction -- no compressed-instruction
+                             support within the Program Buffer, a
+                             deliberate scope decision (real debuggers
+                             emit uncompressed progbuf content in
+                             practice; nothing here would misbehave on a
+                             compressed encoding, it would just decode
+                             wrong, so this is a real, documented
+                             restriction, not an oversight). */
+        : (fetch_fault_q[cur_slot] || fetch_lo_fault_q[cur_slot] || fetch_hi_fault_q[cur_slot])
+        ? 32'h00000013 /* addi x0,x0,0 -- inert placeholder for a FAULTED fetch
+                           (instr_line_q[cur_slot]/instr_hi_q[cur_slot] are garbage on wb_fetch_err_i,
+                           or were never even fetched at all on a page
+                           fault -- Sv39 Milestone 3's fetch_lo_fault_q[cur_slot]/
+                           fetch_hi_fault_q[cur_slot] join fetch_fault_q[cur_slot] here, same
+                           placeholder, same reasoning). Same trick as the
+                           compressed-illegal placeholder below, one more
+                           reason it's safe to reuse: this makes every
+                           downstream classification (is_load, is_store,
+                           is_ebreak, is_illegal_instr, ...) harmless
+                           ADDI-shaped no-ops, so nothing can act on the
+                           garbage bits before the real trap mechanism
+                           (feeding exc_code/trap_taken/trap_val directly,
+                           see below) takes over. */
+        : is_compressed
+            ? (c_expand_illegal ? 32'h00000013 /* addi x0,x0,0 -- inert placeholder
+                                                   value only, never the real trap
+                                                   mechanism: is_illegal_instr below
+                                                   (fed by c_expand_illegal
+                                                   directly) is what actually traps
+                                                   a reserved compressed encoding. */
+                                 : c_expand_out)
+            : raw32_noncompressed;
+
+    /*
+     * pc_plus_len: C extension's generalization of the old fixed pc+4
+     * -- this instruction's real length is 2 bytes when compressed, 4
+     * otherwise. Declared here (not down in Writeback, where the old
+     * pc_plus_4 lived) since is_compressed is already available this
+     * early and every consumer downstream just wants the resulting
+     * wire. is_compressed itself is stable for the instruction's whole
+     * multi-cycle lifetime (a pure combinational function of
+     * instr_line_q[cur_slot]/crossed_q[cur_slot]/pc, all latched no later than S_EXEC),
+     * same stability class as instruction itself.
+     */
+    wire [(`WORD_SIZE - 1):0] instr_len   = is_compressed ? `WORD_SIZE'(2) : `WORD_SIZE'(4);
+    wire [(`WORD_SIZE - 1):0] pc_plus_len = pc + instr_len;
+
+    /*
+     * Dword-aligned fetch address, precomputed as a plain wire rather
+     * than inline inside wb_fetch_master_drive's always_comb below -- same
+     * "Icarus doesn't fully support constant selects inside always_*
+     * processes" reason as everywhere else this pattern appears in this
+     * file.
+     */
+    /*
+     * fetch_paddr: named indirection point for the Sv39 MMU stage --
+     * Milestone 3 is its real consumer now. A plain passthrough (fetch_pc
+     * IS the physical address) whenever fetch_translate_active is false
+     * (Bare mode, M-mode, or Program Buffer execution); otherwise the
+     * page-table walker's own resolved output, fetch_lo_paddr_q[cur_slot], latched
+     * by the new "Sv39 Page-Table Walker" section further down. No
+     * restructuring of the surrounding FSM/bus-driving logic was needed
+     * to land this -- exactly the seam this wire's own header always
+     * promised. (The halfword-select logic above is deliberately left
+     * keyed on raw pc, not fetch_paddr -- pc[2:1] are page-OFFSET bits,
+     * always identity-mapped even under Sv39, so there's nothing for
+     * translation to ever change there.)
+     *
+     * Deliberately WORD_SIZE-wide even though only bits[31:3] are
+     * consumed today (this core's physical address space is 32 bits) --
+     * a real translated address should be able to occupy the full seam
+     * width without a resize, so the unused bits are structural, not an
+     * oversight.
+     */
+    /*
+     * csr_file0's own PMP control-plane exports (PMP+PLIC staged plan,
+     * Milestone 1) -- declared here, well before csr_file0's own
+     * instantiation further down, purely because the PMP fetch-side
+     * check right below needs them and Icarus wants a signal declared
+     * before its first use textually (same class of forward reference
+     * mip_w/mie_w/mideleg_w already are for the Interrupts section,
+     * just needed even earlier here). The real driving connection
+     * (.o_pmpcfg0(pmpcfg0_w) etc.) still lives at csr_file0's own
+     * instantiation, unchanged by where the bare wire is declared.
+     *
+     * UNUSEDSIGNAL wrap: pmpcfg0_w's own reserved bits ([63:32] --
+     * regions 4-7, never implemented; [6:5]/[14:13]/[22:21]/[30:29] --
+     * each real region's own reserved cfg bits) and each pmpaddr's own
+     * [63:54] (the spec-fixed-0 reserved field above address[55:2]) are
+     * genuinely never read anywhere -- real, spec-shaped registers with
+     * some structurally-unused bits, not padding, same "wrap the
+     * genuinely-partial-usage bits" precedent mip_w/mie_w/mideleg_w
+     * already establish above.
+     */
+    /* verilator lint_off UNUSEDSIGNAL */
+    wire [(`WORD_SIZE - 1):0] pmpcfg0_w, pmpaddr0_w, pmpaddr1_w, pmpaddr2_w, pmpaddr3_w;
+    /* verilator lint_on UNUSEDSIGNAL */
+    wire mstatus_mprv_w;
+
+    /*
+     * csr_file0's own Sv39 control-plane exports (Sv39 staged plan,
+     * Milestone 1) -- declared here alongside the PMP group above for the
+     * same reason (a forward reference to a csr_file0 output, needed by
+     * this file's own connection list further down). mstatus_sum_w/
+     * mstatus_mxr_w's first real reader is Milestone 4's mem-side
+     * permission check -- still genuinely unused, wrapped. mstatus_tvm_w
+     * is NOT wrapped: Milestone 2 (tvm_violation) is already its real
+     * consumer. satp_w itself, and everything Milestone 3 derives from it
+     * (satp_mode_w/satp_ppn_w/fetch_translate_active/the PTW registers),
+     * are forward-declared much earlier instead (alongside
+     * debug_progbuf_active) -- the state-transition always_ff needs them
+     * far before this point in the file.
+     */
+    /* verilator lint_off UNUSEDSIGNAL */
+    wire mstatus_sum_w, mstatus_mxr_w;
+    /* verilator lint_on UNUSEDSIGNAL */
+    wire mstatus_tvm_w;
+
+    /* verilator lint_off UNUSEDSIGNAL */
+    // Pipelining P2 step 3a: [fetch_slot] -- see tlb_hit_active's own
+    // matching comment.
+    wire [(`WORD_SIZE - 1):0] fetch_paddr = fetch_translate_active ? fetch_lo_paddr_q[fetch_slot] : fetch_pc;
+    /* verilator lint_on UNUSEDSIGNAL */
+    wire [31:0] fetch_addr = {fetch_paddr[31:3], 3'b0};
+
+    /*
+     * C extension: the second dword a crossing (S_FETCH_HI) fetch
+     * needs, one dword past fetch_addr. Only ever driven onto the bus
+     * from wb_fetch_master_drive's S_FETCH_HI and F_REQ_HI arms below.
+     *
+     * Sv39 (Milestone 3): fetch_hi_vaddr (forward-declared early,
+     * alongside fetch_translate_active) is the SEPARATE pre-translation
+     * VA source the walker uses for the HI stream -- deliberately NOT
+     * "fetch_paddr + 8" (which, once translation is active, would be
+     * "translated_lo_addr + 8", wrong whenever this dword-crossing pair
+     * straddles a real page boundary; virtual and physical adjacency
+     * only coincide WITHIN a page, never guaranteed across one). Under
+     * translation, fetch_paddr_hi becomes the walker's OWN independently-
+     * resolved fetch_hi_paddr_q[cur_slot], not derived from fetch_paddr at all.
+     */
+    /* verilator lint_off UNUSEDSIGNAL */
+    // Pipelining P2 step 3a: [fetch_slot] -- see tlb_hit_active's own
+    // matching comment.
+    wire [(`WORD_SIZE - 1):0] fetch_paddr_hi = fetch_translate_active ? fetch_hi_paddr_q[fetch_slot] : (fetch_paddr + `WORD_SIZE'(8));
+    /* verilator lint_on UNUSEDSIGNAL */
+    wire [31:0] fetch_addr_hi = {fetch_paddr_hi[31:3], 3'b0};
+
+    /* --------------------------------------------------------------- *
+     * PMP (Physical Memory Protection, PMP+PLIC staged plan, Milestone
+     * 2). Region field extraction, byte-address region bounds, and the
+     * fetch-side (instruction access) checks live here, right after
+     * fetch_paddr/fetch_paddr_hi -- the mem-side (load/store) checks
+     * live much further down, in the Memory section, right where
+     * mem_paddr exists, but REUSE the exact same region-field wires
+     * declared here (plain module-scope wires, visible throughout,
+     * despite Icarus's own declare-before-first-USE requirement only
+     * mattering for whichever consumer happens to come first textually
+     * -- that's this fetch-side check).
+     *
+     * Bit positions per design/csr_file.sv's own real pmpcfg layout
+     * (L[7], reserved[6:5], A[4:3], X[2], W[1], R[0]), replicated 4
+     * times across pmpcfg0's own 4 real bytes -- same flat, per-region
+     * duplication idiom that file's own storage already establishes,
+     * scaled the same way here. "wperm"/"rperm" (not "w"/"r") avoid
+     * colliding with this file's own established "_w" suffix meaning
+     * "wire sourced from a csr_file0 output".
+     */
+    wire        pmp0_l = pmpcfg0_w[7],  pmp1_l = pmpcfg0_w[15], pmp2_l = pmpcfg0_w[23], pmp3_l = pmpcfg0_w[31];
+    wire [1:0]  pmp0_a = pmpcfg0_w[4:3], pmp1_a = pmpcfg0_w[12:11], pmp2_a = pmpcfg0_w[20:19], pmp3_a = pmpcfg0_w[28:27];
+    wire        pmp0_x = pmpcfg0_w[2],  pmp1_x = pmpcfg0_w[10], pmp2_x = pmpcfg0_w[18], pmp3_x = pmpcfg0_w[26];
+    wire        pmp0_wperm = pmpcfg0_w[1], pmp1_wperm = pmpcfg0_w[9],  pmp2_wperm = pmpcfg0_w[17], pmp3_wperm = pmpcfg0_w[25];
+    wire        pmp0_rperm = pmpcfg0_w[0], pmp1_rperm = pmpcfg0_w[8],  pmp2_rperm = pmpcfg0_w[16], pmp3_rperm = pmpcfg0_w[24];
+
+    /*
+     * Region bounds/masks, all in BYTE-address terms (consistently, not
+     * mixing word- and byte-address units -- mem_end_paddr, added below
+     * in the Memory section for the mem-side PMP check, uses this same
+     * byte-address convention). pmpaddrN_w holds
+     * address[55:2] (a real, spec-verified 54-bit field, see
+     * design/csr_file.sv's own header) -- left-shifting by 2 recovers
+     * the byte address TOR/NAPOT actually compare against.
+     *
+     * NAPOT mask derivation is the standard "(addr ^ (addr+1))"
+     * trailing-1s technique, directly derived from the real spec's own
+     * pmpcfg-napot encoding table (see the plan file's own citation) --
+     * computed in WORD units (pmpaddrN_w's own native granularity) then
+     * widened to byte units by appending 2'b11 (the byte-within-word
+     * offset is always don't-care at word granularity or coarser).
+     */
+    wire [(`WORD_SIZE-1):0] pmp0_region_base = {8'b0, pmpaddr0_w[53:0], 2'b0};
+    wire [(`WORD_SIZE-1):0] pmp1_region_base = {8'b0, pmpaddr1_w[53:0], 2'b0};
+    wire [(`WORD_SIZE-1):0] pmp2_region_base = {8'b0, pmpaddr2_w[53:0], 2'b0};
+    wire [(`WORD_SIZE-1):0] pmp3_region_base = {8'b0, pmpaddr3_w[53:0], 2'b0};
+    wire [53:0] pmp0_napot_wordmask = pmpaddr0_w[53:0] ^ (pmpaddr0_w[53:0] + 54'd1);
+    wire [53:0] pmp1_napot_wordmask = pmpaddr1_w[53:0] ^ (pmpaddr1_w[53:0] + 54'd1);
+    wire [53:0] pmp2_napot_wordmask = pmpaddr2_w[53:0] ^ (pmpaddr2_w[53:0] + 54'd1);
+    wire [53:0] pmp3_napot_wordmask = pmpaddr3_w[53:0] ^ (pmpaddr3_w[53:0] + 54'd1);
+    wire [(`WORD_SIZE-1):0] pmp0_napot_mask = {8'b0, pmp0_napot_wordmask, 2'b11};
+    wire [(`WORD_SIZE-1):0] pmp1_napot_mask = {8'b0, pmp1_napot_wordmask, 2'b11};
+    wire [(`WORD_SIZE-1):0] pmp2_napot_mask = {8'b0, pmp2_napot_wordmask, 2'b11};
+    wire [(`WORD_SIZE-1):0] pmp3_napot_mask = {8'b0, pmp3_napot_wordmask, 2'b11};
+    wire [(`WORD_SIZE-1):0] pmp0_napot_base = pmp0_region_base & ~pmp0_napot_mask;
+    wire [(`WORD_SIZE-1):0] pmp1_napot_base = pmp1_region_base & ~pmp1_napot_mask;
+    wire [(`WORD_SIZE-1):0] pmp2_napot_base = pmp2_region_base & ~pmp2_napot_mask;
+    wire [(`WORD_SIZE-1):0] pmp3_napot_base = pmp3_region_base & ~pmp3_napot_mask;
+
+    /*
+     * Fetch-side access span: this core issues one 8-byte (dword) bus
+     * read per fetch beat (S_FETCH/S_FETCH_HI or fstate's F_REQ_LO/
+     * F_REQ_HI; the fetch port has no sel_o, every beat returns a full
+     * dword) --
+     * PMP is checked against that WHOLE dword, not just the 2-4 bytes
+     * the eventual instruction turns out to need (which isn't even
+     * known yet at this point -- decode hasn't run). This is
+     * deliberately conservative (per the real spec's own "must cover
+     * ALL bytes or the whole access faults" rule, a region smaller than
+     * 8 bytes -- i.e. NA4 -- can therefore never permit an instruction
+     * fetch under this simplification, only TOR/NAPOT regions >=8 bytes
+     * can), matching exactly what's actually transferred over the bus
+     * rather than trying to predict the eventual instruction length
+     * before it's fetched.
+     */
+    wire [(`WORD_SIZE-1):0] fetch_end_paddr    = fetch_paddr    + `WORD_SIZE'(7);
+    wire [(`WORD_SIZE-1):0] fetch_hi_end_paddr = fetch_paddr_hi + `WORD_SIZE'(7);
+
+    wire pmp0_fetchlo_match = (pmp0_a == 2'b00) ? 1'b0
+        : (pmp0_a == 2'b10) ? (fetch_paddr[55:2] == pmpaddr0_w[53:0] && fetch_end_paddr[55:2] == pmpaddr0_w[53:0])
+        : (pmp0_a == 2'b01) ? (fetch_end_paddr < pmp0_region_base)
+        :                     ((fetch_paddr & ~pmp0_napot_mask) == pmp0_napot_base
+                            && (fetch_end_paddr & ~pmp0_napot_mask) == pmp0_napot_base);
+    wire pmp1_fetchlo_match = (pmp1_a == 2'b00) ? 1'b0
+        : (pmp1_a == 2'b10) ? (fetch_paddr[55:2] == pmpaddr1_w[53:0] && fetch_end_paddr[55:2] == pmpaddr1_w[53:0])
+        : (pmp1_a == 2'b01) ? (fetch_paddr >= pmp0_region_base && fetch_end_paddr < pmp1_region_base)
+        :                     ((fetch_paddr & ~pmp1_napot_mask) == pmp1_napot_base
+                            && (fetch_end_paddr & ~pmp1_napot_mask) == pmp1_napot_base);
+    wire pmp2_fetchlo_match = (pmp2_a == 2'b00) ? 1'b0
+        : (pmp2_a == 2'b10) ? (fetch_paddr[55:2] == pmpaddr2_w[53:0] && fetch_end_paddr[55:2] == pmpaddr2_w[53:0])
+        : (pmp2_a == 2'b01) ? (fetch_paddr >= pmp1_region_base && fetch_end_paddr < pmp2_region_base)
+        :                     ((fetch_paddr & ~pmp2_napot_mask) == pmp2_napot_base
+                            && (fetch_end_paddr & ~pmp2_napot_mask) == pmp2_napot_base);
+    wire pmp3_fetchlo_match = (pmp3_a == 2'b00) ? 1'b0
+        : (pmp3_a == 2'b10) ? (fetch_paddr[55:2] == pmpaddr3_w[53:0] && fetch_end_paddr[55:2] == pmpaddr3_w[53:0])
+        : (pmp3_a == 2'b01) ? (fetch_paddr >= pmp2_region_base && fetch_end_paddr < pmp3_region_base)
+        :                     ((fetch_paddr & ~pmp3_napot_mask) == pmp3_napot_base
+                            && (fetch_end_paddr & ~pmp3_napot_mask) == pmp3_napot_base);
+
+    wire pmp0_fetchhi_match = (pmp0_a == 2'b00) ? 1'b0
+        : (pmp0_a == 2'b10) ? (fetch_paddr_hi[55:2] == pmpaddr0_w[53:0] && fetch_hi_end_paddr[55:2] == pmpaddr0_w[53:0])
+        : (pmp0_a == 2'b01) ? (fetch_hi_end_paddr < pmp0_region_base)
+        :                     ((fetch_paddr_hi & ~pmp0_napot_mask) == pmp0_napot_base
+                            && (fetch_hi_end_paddr & ~pmp0_napot_mask) == pmp0_napot_base);
+    wire pmp1_fetchhi_match = (pmp1_a == 2'b00) ? 1'b0
+        : (pmp1_a == 2'b10) ? (fetch_paddr_hi[55:2] == pmpaddr1_w[53:0] && fetch_hi_end_paddr[55:2] == pmpaddr1_w[53:0])
+        : (pmp1_a == 2'b01) ? (fetch_paddr_hi >= pmp0_region_base && fetch_hi_end_paddr < pmp1_region_base)
+        :                     ((fetch_paddr_hi & ~pmp1_napot_mask) == pmp1_napot_base
+                            && (fetch_hi_end_paddr & ~pmp1_napot_mask) == pmp1_napot_base);
+    wire pmp2_fetchhi_match = (pmp2_a == 2'b00) ? 1'b0
+        : (pmp2_a == 2'b10) ? (fetch_paddr_hi[55:2] == pmpaddr2_w[53:0] && fetch_hi_end_paddr[55:2] == pmpaddr2_w[53:0])
+        : (pmp2_a == 2'b01) ? (fetch_paddr_hi >= pmp1_region_base && fetch_hi_end_paddr < pmp2_region_base)
+        :                     ((fetch_paddr_hi & ~pmp2_napot_mask) == pmp2_napot_base
+                            && (fetch_hi_end_paddr & ~pmp2_napot_mask) == pmp2_napot_base);
+    wire pmp3_fetchhi_match = (pmp3_a == 2'b00) ? 1'b0
+        : (pmp3_a == 2'b10) ? (fetch_paddr_hi[55:2] == pmpaddr3_w[53:0] && fetch_hi_end_paddr[55:2] == pmpaddr3_w[53:0])
+        : (pmp3_a == 2'b01) ? (fetch_paddr_hi >= pmp2_region_base && fetch_hi_end_paddr < pmp3_region_base)
+        :                     ((fetch_paddr_hi & ~pmp3_napot_mask) == pmp3_napot_base
+                            && (fetch_hi_end_paddr & ~pmp3_napot_mask) == pmp3_napot_base);
+
+    /*
+     * Priority-encode (lowest-numbered region wins, norm:pmp_entry_priority)
+     * + X-permission check, one instantiation per fetch stream. Fetch
+     * never uses mem_effective_priv (MPRV only ever affects DATA
+     * accesses, never instruction fetch -- norm:pmp_check_priv_modes),
+     * always raw current_priv.
+     */
+    wire pmp_fetchlo_matched = pmp0_fetchlo_match || pmp1_fetchlo_match || pmp2_fetchlo_match || pmp3_fetchlo_match;
+    wire pmp_fetchlo_x = pmp0_fetchlo_match ? pmp0_x : pmp1_fetchlo_match ? pmp1_x : pmp2_fetchlo_match ? pmp2_x : pmp3_x;
+    wire pmp_fetchlo_l = pmp0_fetchlo_match ? pmp0_l : pmp1_fetchlo_match ? pmp1_l : pmp2_fetchlo_match ? pmp2_l : pmp3_l;
+    // norm:pmp_rwx_check + norm:pmp_no_entry_match: M-mode with L clear
+    // or no match always succeeds; S/U or a locked match needs the real
+    // X bit; S/U with NO match FAILS (>=1 region implemented, always
+    // true here).
+    wire pmp_fetchlo_x_ok = (current_priv == PRIV_M && !pmp_fetchlo_matched) ? 1'b1
+                           : (current_priv == PRIV_M && !pmp_fetchlo_l)      ? 1'b1
+                           : pmp_fetchlo_matched && pmp_fetchlo_x;
+
+    wire pmp_fetchhi_matched = pmp0_fetchhi_match || pmp1_fetchhi_match || pmp2_fetchhi_match || pmp3_fetchhi_match;
+    wire pmp_fetchhi_x = pmp0_fetchhi_match ? pmp0_x : pmp1_fetchhi_match ? pmp1_x : pmp2_fetchhi_match ? pmp2_x : pmp3_x;
+    wire pmp_fetchhi_l = pmp0_fetchhi_match ? pmp0_l : pmp1_fetchhi_match ? pmp1_l : pmp2_fetchhi_match ? pmp2_l : pmp3_l;
+    wire pmp_fetchhi_x_ok = (current_priv == PRIV_M && !pmp_fetchhi_matched) ? 1'b1
+                           : (current_priv == PRIV_M && !pmp_fetchhi_l)      ? 1'b1
+                           : pmp_fetchhi_matched && pmp_fetchhi_x;
+
+    assign pmp_fetchlo_fault = !debug_progbuf_active && !pmp_fetchlo_x_ok;
+    assign pmp_fetchhi_fault = !debug_progbuf_active && !pmp_fetchhi_x_ok;
+
+    /* --------------------------------------------------------------- *
+     * Sv39 Page-Table Walker (Milestone 3 of the Sv39 staged plan) --
+     * fetch-side only; Milestone 4's mem-side (load/store/AMO) consumer
+     * reuses every piece of this walker unchanged except its own
+     * requester tag and permission-check specialization.
+     *
+     * Milestone 5 adds a 4-entry TLB ahead of this walker (a hit skips
+     * S_PTW entirely) -- a miss still genuinely walks, every time.
+     * Rides the existing MEM Wishbone master port (wb_mem_*) via ONE
+     * state_t value (S_PTW), UNCONDITIONALLY -- even for a fetch-reason
+     * walk (see this module's own header comment) -- rather than a
+     * dedicated walker master; `state` is single-issue, so nothing can
+     * ever need to interrupt an in-flight walk the way a pipelined
+     * design's KILL_REQ/WAIT_RVALID states exist to allow. The mem port
+     * only ever reaches cache_complex.sv's data_* side, so every PTE read
+     * is an ordinary DATA access to dcache0, never icache0;
+     * the same write-through D$ that services an OS's own SD to a PTE
+     * already keeps that line coherent for a walker's later re-read of
+     * the identical address, with no invalidation logic needed.
+     * --------------------------------------------------------------- */
+
+    // VPN extraction (9-bit fields, per spec) and the canonical-address
+    // check (bits[63:39] must all equal bit 38) -- re-checked at every
+    // level (ptw_vaddr_q[cur_slot] is invariant across a single walk, so this is a
+    // redundant-but-harmless per-level re-evaluation, not a correctness
+    // issue; a noncanonical VA still faults on schedule, at level 2).
+    wire [8:0] ptw_vpn2 = ptw_vaddr_q[cur_slot][38:30];
+    wire [8:0] ptw_vpn1 = ptw_vaddr_q[cur_slot][29:21];
+    wire [8:0] ptw_vpn0 = ptw_vaddr_q[cur_slot][20:12];
+    wire [8:0] ptw_vpn_current = (ptw_level_q[cur_slot] == 2'd2) ? ptw_vpn2
+                                : (ptw_level_q[cur_slot] == 2'd1) ? ptw_vpn1 : ptw_vpn0;
+    // ptw_va_noncanonical is defined further down, alongside
+    // ptw_vaddr_active (Sv39 Milestone 5) -- it needs to be re-checked
+    // against the LIVE lookup VA on a TLB hit, not the (not-yet-valid-
+    // this-early) ptw_vaddr_q[cur_slot] alone; declaring it here would force a
+    // premature choice between the two.
+
+    // This level's PTE address: table base + vpn[level]*8 (dword-sized
+    // entries) -- an ordinary dword read, same shape S_MEM's own reads.
+    wire [(`WORD_SIZE-1):0] ptw_pte_addr     = ptw_base_q[cur_slot] + {52'b0, ptw_vpn_current, 3'b0};
+    wire [(`WORD_SIZE-1):0] ptw_pte_end_addr = ptw_pte_addr + `WORD_SIZE'(7);
+
+    /*
+     * PMP-on-PTE-read (norm:pmp_check_pagetable_access, fetched fresh
+     * from the real spec during planning): hardwired S privilege,
+     * UNCONDITIONALLY -- regardless of who triggered this walk (U-mode,
+     * S-mode, or a future M-mode-with-MPRV+MPP=U/S access once Milestone
+     * 4 lands), full stop. A PMP violation here is an access fault of
+     * the ORIGINAL access's type (cause 1 for this fetch-side walker),
+     * never a page fault -- captured into fetch_fault_q[cur_slot] below, the exact
+     * same register the ordinary fetch-side PMP checks above already
+     * use. Reuses the SAME pmp0..3 region config/bounds/mask wires the
+     * fetch-lo/fetch-hi checks above already declared -- only the
+     * ADDRESS stream being matched (ptw_pte_addr) is new.
+     */
+    wire pmp0_ptw_match = (pmp0_a == 2'b00) ? 1'b0
+        : (pmp0_a == 2'b10) ? (ptw_pte_addr[55:2] == pmpaddr0_w[53:0] && ptw_pte_end_addr[55:2] == pmpaddr0_w[53:0])
+        : (pmp0_a == 2'b01) ? (ptw_pte_end_addr < pmp0_region_base)
+        :                     ((ptw_pte_addr & ~pmp0_napot_mask) == pmp0_napot_base
+                            && (ptw_pte_end_addr & ~pmp0_napot_mask) == pmp0_napot_base);
+    wire pmp1_ptw_match = (pmp1_a == 2'b00) ? 1'b0
+        : (pmp1_a == 2'b10) ? (ptw_pte_addr[55:2] == pmpaddr1_w[53:0] && ptw_pte_end_addr[55:2] == pmpaddr1_w[53:0])
+        : (pmp1_a == 2'b01) ? (ptw_pte_addr >= pmp0_region_base && ptw_pte_end_addr < pmp1_region_base)
+        :                     ((ptw_pte_addr & ~pmp1_napot_mask) == pmp1_napot_base
+                            && (ptw_pte_end_addr & ~pmp1_napot_mask) == pmp1_napot_base);
+    wire pmp2_ptw_match = (pmp2_a == 2'b00) ? 1'b0
+        : (pmp2_a == 2'b10) ? (ptw_pte_addr[55:2] == pmpaddr2_w[53:0] && ptw_pte_end_addr[55:2] == pmpaddr2_w[53:0])
+        : (pmp2_a == 2'b01) ? (ptw_pte_addr >= pmp1_region_base && ptw_pte_end_addr < pmp2_region_base)
+        :                     ((ptw_pte_addr & ~pmp2_napot_mask) == pmp2_napot_base
+                            && (ptw_pte_end_addr & ~pmp2_napot_mask) == pmp2_napot_base);
+    wire pmp3_ptw_match = (pmp3_a == 2'b00) ? 1'b0
+        : (pmp3_a == 2'b10) ? (ptw_pte_addr[55:2] == pmpaddr3_w[53:0] && ptw_pte_end_addr[55:2] == pmpaddr3_w[53:0])
+        : (pmp3_a == 2'b01) ? (ptw_pte_addr >= pmp2_region_base && ptw_pte_end_addr < pmp3_region_base)
+        :                     ((ptw_pte_addr & ~pmp3_napot_mask) == pmp3_napot_base
+                            && (ptw_pte_end_addr & ~pmp3_napot_mask) == pmp3_napot_base);
+    wire ptw_pmp_matched = pmp0_ptw_match || pmp1_ptw_match || pmp2_ptw_match || pmp3_ptw_match;
+    wire ptw_pmp_r       = pmp0_ptw_match ? pmp0_rperm : pmp1_ptw_match ? pmp1_rperm : pmp2_ptw_match ? pmp2_rperm : pmp3_rperm;
+    // norm:pmp_no_entry_match: S/U (always the case for a PTE read) with
+    // no match FAILS (>=1 region always implemented here); L is
+    // irrelevant -- never M-mode-exempt for a page-table access.
+    assign ptw_pmp_fault = !(ptw_pmp_matched && ptw_pmp_r);
+
+    /*
+     * Sv39 Milestone 5: which TLB entry hit (if any) and its own cached
+     * fields -- selected here (not in the early forward-declare block)
+     * since nothing needs them before this point; tlb_hit itself
+     * (early-declared) is all the state-transition/bus-driving logic
+     * ever needed.
+     */
+    wire [1:0]  tlb_hit_level = tlb0_hit ? tlb0_level_q : tlb1_hit ? tlb1_level_q : tlb2_hit ? tlb2_level_q : tlb3_level_q;
+    wire [25:0] tlb_hit_ppn2  = tlb0_hit ? tlb0_ppn2_q  : tlb1_hit ? tlb1_ppn2_q  : tlb2_hit ? tlb2_ppn2_q  : tlb3_ppn2_q;
+    wire [8:0]  tlb_hit_ppn1  = tlb0_hit ? tlb0_ppn1_q  : tlb1_hit ? tlb1_ppn1_q  : tlb2_hit ? tlb2_ppn1_q  : tlb3_ppn1_q;
+    wire [8:0]  tlb_hit_ppn0  = tlb0_hit ? tlb0_ppn0_q  : tlb1_hit ? tlb1_ppn0_q  : tlb2_hit ? tlb2_ppn0_q  : tlb3_ppn0_q;
+    wire        tlb_hit_r     = tlb0_hit ? tlb0_r_q     : tlb1_hit ? tlb1_r_q     : tlb2_hit ? tlb2_r_q     : tlb3_r_q;
+    wire        tlb_hit_w     = tlb0_hit ? tlb0_w_q     : tlb1_hit ? tlb1_w_q     : tlb2_hit ? tlb2_w_q     : tlb3_w_q;
+    wire        tlb_hit_x     = tlb0_hit ? tlb0_x_q     : tlb1_hit ? tlb1_x_q     : tlb2_hit ? tlb2_x_q     : tlb3_x_q;
+    wire        tlb_hit_u     = tlb0_hit ? tlb0_u_q     : tlb1_hit ? tlb1_u_q     : tlb2_hit ? tlb2_u_q     : tlb3_u_q;
+    wire        tlb_hit_d     = tlb0_hit ? tlb0_d_q     : tlb1_hit ? tlb1_d_q     : tlb2_hit ? tlb2_d_q     : tlb3_d_q;
+
+    /*
+     * PTE field decode (spec-fixed bit layout). ptw_pte_source is
+     * Milestone 5's own seam: wb_mem_dat_i (the mem port, even for a
+     * fetch-reason walk), this level's own live response,
+     * whenever a real walk is in flight (state==S_PTW); OR, on a TLB
+     * hit (tlb_hit_active), a SYNTHESIZED PTE built from the cached
+     * entry's own r/w/x/u/d bits, feeding this EXACT SAME downstream
+     * permission-check/reconstruction logic with ZERO duplicated
+     * formula (decision 13 of the staged plan's own stated goal) --
+     * V/A are hardwired 1 (both are unconditionally required for ANY
+     * successful fill in the first place, by construction; re-deriving
+     * them from a live PTE read a hit deliberately never performs would
+     * be meaningless), G/RSW/reserved/PBMT/N are hardwired 0 (never
+     * cached, never meaningful for a hit -- a real walk's own
+     * malformed/superpage checks against these bits can never re-fire
+     * for an already-validated cached entry).
+     */
+    // RSW[9:8] and G[5] are hardwired 0 in the synthesized (TLB-hit) case
+    // above and, on the real (wb_mem_dat_i) side, were never extracted
+    // into any named wire even before this milestone -- neither field is
+    // ever meaningful to this walker's own logic (RSW is reserved for
+    // software; G is moot under ASIDLEN=0, decision 2). Genuinely unused
+    // on both sides of the mux, not an oversight -- only became a real
+    // (rather than silently-absorbed-into-a-port) UNUSEDSIGNAL warning
+    // once ptw_pte_source became an internal wire this milestone.
+    //
+    // Pipelining P2 step 3b prerequisite: wb_mem_dat_i, not wb_fetch_dat_i
+    // -- S_PTW's own bus transaction rides the mem port unconditionally,
+    // even for a fetch-reason walk (this module's own header comment).
+    /* verilator lint_off UNUSEDSIGNAL */
+    wire [(`WORD_SIZE-1):0] ptw_pte_source = tlb_hit_active
+        ? {1'b0, 2'b0, 7'b0, tlb_hit_ppn2, tlb_hit_ppn1, tlb_hit_ppn0, 2'b0,
+           tlb_hit_d, 1'b1 /*A*/, 1'b0 /*G*/, tlb_hit_u, tlb_hit_x, tlb_hit_w, tlb_hit_r, 1'b1 /*V*/}
+        : wb_mem_dat_i;
+    /* verilator lint_on UNUSEDSIGNAL */
+    wire        ptw_pte_v        = ptw_pte_source[0];
+    wire        ptw_pte_r        = ptw_pte_source[1];
+    wire        ptw_pte_w        = ptw_pte_source[2];
+    wire        ptw_pte_x        = ptw_pte_source[3];
+    wire        ptw_pte_u        = ptw_pte_source[4];
+    wire        ptw_pte_a        = ptw_pte_source[6];
+    wire        ptw_pte_d        = ptw_pte_source[7];   // Sv39 M4: mem-side writes also need D=1 (Svade)
+    wire [8:0]  ptw_pte_ppn0     = ptw_pte_source[18:10];
+    wire [8:0]  ptw_pte_ppn1     = ptw_pte_source[27:19];
+    wire [25:0] ptw_pte_ppn2     = ptw_pte_source[53:28];
+    wire [6:0]  ptw_pte_reserved = ptw_pte_source[60:54];
+    wire [1:0]  ptw_pte_pbmt     = ptw_pte_source[62:61];
+    wire        ptw_pte_n        = ptw_pte_source[63];
+
+    /*
+     * Sv39 Milestone 5: ptw_level_active/ptw_vaddr_active -- the SAME
+     * "declare early, drive late" mux idea applied to the two OTHER
+     * inputs the shared permission-check/reconstruction logic below
+     * needs: ptw_level_q[cur_slot]/ptw_vaddr_q[cur_slot] during a real walk, or the hit
+     * entry's own cached level / the LIVE lookup VA during a hit (NOT a
+     * cached VA -- re-checking ptw_va_noncanonical against the live
+     * tlb_lookup_vaddr, not a stale tag, is deliberate: two different
+     * accesses can share the same 27-bit VPN tag while differing in
+     * their own upper, non-tag bits[63:39], so canonical-ness must be
+     * re-verified per-access, not assumed from the cached entry).
+     * ptw_vpn_current (the WALKER's own next-level PTE address
+     * selector, further below) deliberately stays wired to raw
+     * ptw_vaddr_q[cur_slot] -- it's only ever consulted during a real walk, never
+     * during a hit, so it needs no such mux.
+     */
+    wire [1:0]  ptw_level_active = tlb_hit_active ? tlb_hit_level : ptw_level_q[cur_slot];
+    // bits[37:30] (VPN2's own range, short one bit of bit38's separate
+    // canonical-check use) are genuinely never read from THIS wire --
+    // VPN2 is only ever needed to index the L2 table at the START of a
+    // real walk, which reads it from raw ptw_vaddr_q[cur_slot] instead (see
+    // ptw_vpn_current's own comment above); a hit never starts a walk,
+    // so ptw_vaddr_active's own copy of those bits has no consumer.
+    /* verilator lint_off UNUSEDSIGNAL */
+    wire [(`WORD_SIZE-1):0] ptw_vaddr_active = tlb_hit_active ? tlb_lookup_vaddr : ptw_vaddr_q[cur_slot];
+    /* verilator lint_on UNUSEDSIGNAL */
+    wire [8:0]  ptw_vpn1_active = ptw_vaddr_active[29:21];
+    wire [8:0]  ptw_vpn0_active = ptw_vaddr_active[20:12];
+    // Canonical-address check (bits[63:39] must all equal bit 38) --
+    // moved here (was originally computed off bare ptw_vaddr_q[cur_slot], right
+    // after the VPN-extraction block above) so a TLB hit re-verifies it
+    // against the LIVE lookup VA -- see ptw_vaddr_active's own comment.
+    wire ptw_va_noncanonical = ptw_vaddr_active[63:39] != {25{ptw_vaddr_active[38]}};
+
+    assign ptw_pte_leaf    = ptw_pte_r || ptw_pte_x;
+    wire ptw_pte_malformed = !ptw_pte_v || (!ptw_pte_r && ptw_pte_w)
+                           || (|ptw_pte_reserved) || (|ptw_pte_pbmt) || ptw_pte_n;
+    // Superpage misalignment (algorithm step 6): a level-2 leaf's own
+    // PPN[1:0] must be all-0 (gigapage); a level-1 leaf's PPN[0] must be
+    // all-0 (megapage). Level 0 can never be superpage-misaligned.
+    // ptw_level_active, not raw ptw_level_q[cur_slot], Sv39 M5 -- harmless-but-
+    // trivially-true for a hit either way (ptw_pte_leaf is always true
+    // there, and a cached entry's own ppn1/ppn0 are already guaranteed
+    // 0 at whatever level it was validly cached), but correct either way
+    // costs nothing and keeps this formula uniform with its own siblings.
+    wire ptw_superpage_misaligned = ptw_pte_leaf && (ptw_level_active != 2'd0)
+        && ((ptw_level_active == 2'd2) ? (|{ptw_pte_ppn1, ptw_pte_ppn0}) : (|ptw_pte_ppn0));
+    // A non-leaf (pointer) PTE with nowhere further to descend to --
+    // structurally false for a hit (only leaves are ever cached).
+    wire ptw_no_more_levels = !ptw_pte_leaf && (ptw_level_active == 2'd0);
+    /*
+     * Sv39 M4: permission checks generalized to cover the mem stream
+     * (ptw_reason_q[cur_slot]==PTW_REASON_MEM) alongside fetch, sharing this one
+     * combinational block rather than duplicating it -- ptw_is_mem/
+     * ptw_check_priv (mem_effective_priv when serving mem, plain
+     * current_priv for fetch, mirroring the fetch-side PMP check's own
+     * "MPRV never affects fetch" rule) pick the right source per-stream.
+     *
+     * U-bit: fetch stream is NEVER SUM-aware (S can NEVER execute
+     * instructions from a U page, regardless of SUM -- SUM only ever
+     * affects DATA accesses, per spec); the mem stream IS SUM-aware (S
+     * may access a U page's DATA when mstatus.SUM=1). Both streams share
+     * the same "U-mode always needs U=1" half.
+     *
+     * Permission: fetch needs X; mem needs W (a write) or R-or-(MXR&&X)
+     * (a read) -- MXR only ever applies to the mem stream's own reads,
+     * never to fetch or to a write, per spec.
+     *
+     * A/D (Svade, decision 1 of the staged plan): a leaf with A=0 is
+     * ALWAYS a page fault regardless of stream -- software sets A itself
+     * and retries, no hardware auto-set, the "simple implementation" the
+     * spec's own step-9 NOTE explicitly sanctions. The mem stream's own
+     * WRITES additionally need D=1 (fetch/mem-reads never need D).
+     * (ptw_is_mem itself is declared early -- see the Sv39 forward-
+     * declare block alongside mem_translate_active.)
+     */
+    // priv_t'(...) outer cast, not a bare ternary -- SystemVerilog doesn't
+    // preserve enum typing across a ?: otherwise (the exact class of bug
+    // mem_effective_priv's own width/type fix, PMP Milestone 2, already
+    // found the hard way: a bare ternary silently inferred a 1-bit net).
+    priv_t ptw_check_priv;
+    assign ptw_check_priv = priv_t'(ptw_is_mem ? mem_effective_priv : current_priv);
+    wire ptw_u_violation = ptw_pte_leaf
+        && (ptw_pte_u ? (ptw_is_mem ? !((ptw_check_priv == PRIV_U) || (ptw_check_priv == PRIV_S && mstatus_sum_w))
+                                    : (ptw_check_priv == PRIV_S))
+                      : (ptw_check_priv == PRIV_U));
+    wire ptw_read_ok = ptw_pte_r || (mstatus_mxr_w && ptw_pte_x);
+    wire ptw_perm_violation = ptw_pte_leaf
+        && (ptw_is_mem ? (mem_op_needs_write ? !ptw_pte_w : !ptw_read_ok) : !ptw_pte_x);
+    wire ptw_ad_fault = ptw_pte_leaf && (!ptw_pte_a || (ptw_is_mem && mem_op_needs_write && !ptw_pte_d));
+    assign ptw_pte_fault = ptw_va_noncanonical || ptw_pte_malformed || ptw_superpage_misaligned
+                        || ptw_no_more_levels
+                        || (ptw_pte_leaf && (ptw_u_violation || ptw_perm_violation || ptw_ad_fault));
+
+    /*
+     * Superpage reconstruction (algorithm step 10), re-derived by hand
+     * against the real spec text, not assumed: for a leaf found at level
+     * i, pa.ppn[LEVELS-1:i] = pte.ppn[LEVELS-1:i] (always includes ppn2,
+     * since LEVELS-1=2 >= i for any i); pa.ppn[i-1:0] = va.vpn[i-1:0] --
+     * the VA's OWN low segments pass through untouched, NOT the PTE's
+     * (whose own low segments are spec-required to be 0 for a valid
+     * superpage leaf by ptw_superpage_misaligned above, which would
+     * silently zero the resulting address's low bits instead of
+     * preserving the real offset within the superpage -- a genuine bug
+     * class caught by re-deriving this from the spec's own field-range
+     * notation rather than guessing).
+     */
+    // ptw_level_active/ptw_vpn1_active/ptw_vpn0_active, not the raw
+    // ptw_level_q[cur_slot]/ptw_vpn1/ptw_vpn0 -- Sv39 M5: a TLB hit's own synthesized
+    // ptw_pte_source (whose ppn1/ppn0 are hardwired 0 for a genuine
+    // superpage entry, per the TLB fill logic) still needs the VA's own
+    // low VPN segments passed through correctly, exactly like a real walk.
+    wire [25:0] ptw_resolved_ppn2 = ptw_pte_ppn2;
+    wire [8:0]  ptw_resolved_ppn1 = (ptw_level_active <= 2'd1) ? ptw_pte_ppn1 : ptw_vpn1_active;
+    wire [8:0]  ptw_resolved_ppn0 = (ptw_level_active == 2'd0) ? ptw_pte_ppn0 : ptw_vpn0_active;
+    wire [(`WORD_SIZE-1):0] ptw_resolved_paddr =
+        {8'b0, ptw_resolved_ppn2, ptw_resolved_ppn1, ptw_resolved_ppn0, ptw_vaddr_active[11:0]};
+
+    /*
+     * Sv39 Page-Table Walker progression -- level descent, leaf
+     * resolution, and page-fault detection. Kept as its own always_ff,
+     * separate from fetch_fault_q[cur_slot]'s (in the Fetch section above), since
+     * this owns a genuinely distinct register group (the walk's own
+     * scratch state plus the two NEW page-fault captures) rather than
+     * retrofitting an already-dense, well-proven block. Lives HERE
+     * (rather than back in the Fetch section, where fetch_fault_q[cur_slot]'s own
+     * always_ff is) purely because it needs ptw_pte_leaf/ptw_pte_fault/
+     * ptw_pte_ppn0/ppn1/ppn2/ptw_resolved_paddr, none of which are
+     * available until after this section's own PTE-decode wires above --
+     * same "declare
+     * early (bare, near debug_progbuf_active), drive late" split every
+     * register this always_ff owns already went through.
+     *
+     * Every walk-terminating edge (leaf found, OR a PTE-content fault)
+     * writes fetch_lo_fault_q[cur_slot]/fetch_hi_fault_q[cur_slot] an explicit 0 or 1 --
+     * never left stale from an earlier, unrelated walk -- mirroring
+     * fetch_fault_q[cur_slot]'s own "always freshly written" convention. This is
+     * load-bearing: exc_code below checks fetch_fault_q[cur_slot] (cause 1) ahead
+     * of fetch_lo_fault_q[cur_slot]/fetch_hi_fault_q[cur_slot] (cause 12), so a stale cause-
+     * 12 flag left over from a PAST walk could otherwise misreport a
+     * pure PMP/bus-error (cause 1) fault as a page fault instead.
+     */
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            /*
+             * Pipelining P2 step 3a real bug fix: reset EVERY slot
+             * explicitly (a for loop over SLOT_COUNT), not just
+             * [fetch_slot]/[cur_slot]'s own single value at this instant.
+             * Two compounding problems with the original single-index
+             * reset: (1) it only ever cleared ONE of the two array
+             * elements, leaving the other permanently uninitialized
+             * (X in simulation) the first time anything actually reads
+             * it -- harmless through steps 1-2, where cur_slot (hence
+             * fetch_slot) was hardwired to 0 and slot 1 was structurally
+             * dead code, but a real, confirmed hang the moment cur_slot
+             * starts genuinely toggling (caught by core_sv39_mem_tb.sv's
+             * own test K via direct simulation, not by static review --
+             * fetch_lo_resolved_q[1] observed going X mid-run, then S_FETCH
+             * never leaving for that instruction again). (2) even the ONE
+             * slot it did clear was resolved using cur_slot's OWN
+             * PRE-reset value (this always_ff's fetch_slot/cur_slot reads
+             * are continuous, not registered, so on the very first reset
+             * pulse -- before cur_slot's OWN separate always_ff has ever
+             * driven it -- fetch_slot/cur_slot could read X too, silently
+             * dropping the write to an undefined array index instead of
+             * resetting anything at all).
+             */
+            for (int rst_slot = 0; rst_slot < SLOT_COUNT; rst_slot++) begin
+                fetch_lo_resolved_q[rst_slot] <= 1'b0;
+                fetch_hi_resolved_q[rst_slot] <= 1'b0;
+                fetch_lo_fault_q[rst_slot]    <= 1'b0;
+                fetch_hi_fault_q[rst_slot]    <= 1'b0;
+                mem_resolved_q[rst_slot]      <= 1'b0;
+                mem_fault_q[rst_slot]         <= 1'b0;
+                mem_access_fault_q[rst_slot]  <= 1'b0;
+            end
+            tlb0_valid_q        <= 1'b0;
+            tlb1_valid_q        <= 1'b0;
+            tlb2_valid_q        <= 1'b0;
+            tlb3_valid_q        <= 1'b0;
+            tlb_replace_q       <= 2'b0;
+        end else begin
+            // Starting a NEW walk -- (re)initialize at the root table,
+            // level 2. Sv39 M5: gated on !tlb_hit_active too -- a hit
+            // resolves entirely through the dedicated branch below and
+            // must never enter S_PTW, so setting up walk-scratch state
+            // for it here would be dead (harmless, since S_PTW is never
+            // reached to consume it, but skipped for clarity). Sv39 M4:
+            // the mem stream joins fetch-lo/fetch-hi here, keyed off
+            // S_MEM instead -- no separate "HI" episode for mem (an
+            // aligned access can never cross a 4KB page boundary).
+            // Pipelining P2 step 3a: the two guard conditions read
+            // [fetch_slot] (see tlb_hit_active's own matching comment) --
+            // but ptw_reason_q/ptw_level_q/ptw_base_q/ptw_vaddr_q below
+            // stay [cur_slot], UNCHANGED from step 1: they're pure
+            // per-walk scratch, not fetch-side data, and Sv39 fetches
+            // stay fully non-overlapping with any other instruction's own
+            // execution for this entire milestone (the Sv39 descope), so
+            // whichever instruction cur_slot currently names has ALWAYS
+            // already retired by the time a translated fetch's own walk
+            // runs -- safe to borrow as scratch regardless of which slot
+            // name is used, and cur_slot is what step 1 already picked.
+            // fetch_redirect_cycle: without this, once tlb_hit_active is
+            // forced low that same cycle (its own matching guard), a TLB
+            // HIT here would still fall through to this "start a walk" arm
+            // and stomp ptw_vaddr_q[cur_slot] with the OLD (stale) pc --
+            // which trap_val reads on a later fault and nothing else ever
+            // rewrites on a subsequent hit. See fetch_redirect_cycle's own
+            // declaration comment for the full bug this (and its sibling
+            // guards) closes.
+            if (state == S_FETCH && fetch_translate_active && !fetch_lo_resolved_q[fetch_slot] && !tlb_hit_active && !fetch_redirect_cycle) begin
+                ptw_reason_q[cur_slot] <= PTW_REASON_LO;
+                ptw_level_q[cur_slot]  <= 2'd2;
+                ptw_base_q[cur_slot]   <= {8'b0, satp_ppn_w, 12'b0};
+                ptw_vaddr_q[cur_slot]  <= fetch_pc;
+            end else if (state == S_FETCH_HI && fetch_translate_active && !fetch_hi_resolved_q[fetch_slot] && !tlb_hit_active) begin
+                ptw_reason_q[cur_slot] <= PTW_REASON_HI;
+                ptw_level_q[cur_slot]  <= 2'd2;
+                ptw_base_q[cur_slot]   <= {8'b0, satp_ppn_w, 12'b0};
+                ptw_vaddr_q[cur_slot]  <= fetch_hi_vaddr;
+            end else if (state == S_MEM && mem_translate_active && !mem_resolved_q[cur_slot] && !tlb_hit_active) begin
+                ptw_reason_q[cur_slot] <= PTW_REASON_MEM;
+                ptw_level_q[cur_slot]  <= 2'd2;
+                ptw_base_q[cur_slot]   <= {8'b0, satp_ppn_w, 12'b0};
+                ptw_vaddr_q[cur_slot]  <= alu_result;   // mem's own pre-translation VA
+            end else if (state == S_PTW && wb_mem_done && wb_mem_ok && !ptw_pte_fault && !ptw_pte_leaf) begin
+                // Clean, non-leaf (pointer) PTE -- descend one level; the
+                // next table's base is THIS PTE's own PPN.
+                ptw_level_q[cur_slot] <= ptw_level_q[cur_slot] - 2'd1;
+                ptw_base_q[cur_slot]  <= {8'b0, ptw_pte_ppn2, ptw_pte_ppn1, ptw_pte_ppn0, 12'b0};
+            end
+
+            /*
+             * TLB-hit resolve (Sv39 M5) -- mirrors the S_PTW resolve-
+             * capture case statement below exactly (same fault/resolved/
+             * paddr_q targets, same per-stream split), but fires the SAME
+             * cycle as the hit itself: no walk, no visit to S_PTW at all.
+             * Sound because ptw_pte_leaf/ptw_pte_fault/ptw_resolved_paddr
+             * are already fully, correctly computed for this case --
+             * ptw_pte_source/ptw_level_active/ptw_vaddr_active's own
+             * tlb_hit_active-aware muxing (above) feeds the EXACT SAME
+             * permission-check combinational logic a real walk uses, zero
+             * duplicated logic, per the staged plan's own decision 13.
+             * mem_access_fault_q[cur_slot] is always cleared here, never set: a hit
+             * never performs a PTE bus read, so it can never produce a
+             * PMP-on-PTE-read/bus-error access fault (cause 1/5/7) the
+             * way a real walk's own ptw_pmp_fault/wb_mem_err_i paths can --
+             * only a content-level page fault (cause 12/13/15) is
+             * possible from a cached entry.
+             */
+            if (tlb_hit_active) begin
+                // ptw_vaddr_q[cur_slot] <= tlb_lookup_vaddr: a real walk
+                // always captures the VA it's walking (the three arms just
+                // above this block), but a HIT never did -- trap_val reads
+                // this same register (as [fetch_slot] for a fetch fault,
+                // [cur_slot] for a mem fault, per the toggle-timing
+                // difference between the two reasons) unconditionally on
+                // any later fault, so a hit-path fault reported whatever
+                // VA the slot's LAST REAL WALK happened to leave behind
+                // instead of its own. tlb_lookup_vaddr is already the
+                // exact live VA this hit matched against (see its own
+                // declaration) -- same [cur_slot] index the real-walk
+                // writes above use, not [fetch_slot]: this sits in the
+                // same pre-toggle timing they do.
+                ptw_vaddr_q[cur_slot] <= tlb_lookup_vaddr;
+                case (state)
+                    S_FETCH: begin
+                        fetch_lo_fault_q[fetch_slot]    <= ptw_pte_fault;
+                        fetch_lo_resolved_q[fetch_slot] <= !ptw_pte_fault;
+                        if (!ptw_pte_fault) fetch_lo_paddr_q[fetch_slot] <= ptw_resolved_paddr;
+                    end
+                    S_FETCH_HI: begin
+                        fetch_hi_fault_q[fetch_slot]    <= ptw_pte_fault;
+                        fetch_hi_resolved_q[fetch_slot] <= !ptw_pte_fault;
+                        if (!ptw_pte_fault) fetch_hi_paddr_q[fetch_slot] <= ptw_resolved_paddr;
+                    end
+                    default: begin   // S_MEM
+                        mem_fault_q[cur_slot]        <= ptw_pte_fault;
+                        mem_access_fault_q[cur_slot] <= 1'b0;
+                        mem_resolved_q[cur_slot]     <= !ptw_pte_fault;
+                        if (!ptw_pte_fault) mem_resolved_paddr_q[cur_slot] <= ptw_resolved_paddr;
+                    end
+                endcase
+            end
+
+            // PMP-denied PTE read: ptw_pmp_fault's own cause-1 capture
+            // (fetch reason) lives in fetch_fault_q[cur_slot]'s own always_ff
+            // (Fetch section above); its cause-5/7 capture (mem reason,
+            // mem_access_fault_q[cur_slot]) is written right here instead, alongside
+            // every other mem-reason register this always_ff already owns
+            // (needs an explicit reset, unlike fetch_fault_q[cur_slot] -- see
+            // mem_access_fault_q[cur_slot]'s own declaration comment). Either way,
+            // this branch ALSO makes sure the SAME-reason cause-12/13/15
+            // flag doesn't carry a stale value forward into the trap this
+            // cycle takes.
+            if (state == S_PTW && ptw_pmp_fault) begin
+                case (ptw_reason_q[cur_slot])
+                    PTW_REASON_LO:  fetch_lo_fault_q[fetch_slot] <= 1'b0;
+                    PTW_REASON_HI:  fetch_hi_fault_q[fetch_slot] <= 1'b0;
+                    default: begin   // PTW_REASON_MEM
+                        mem_fault_q[cur_slot]        <= 1'b0;
+                        mem_access_fault_q[cur_slot] <= 1'b1;
+                    end
+                endcase
+            end else if (state == S_PTW && wb_mem_done) begin
+                // Pipelining P2 step 3b prerequisite: S_PTW's own bus
+                // transaction rides the mem port unconditionally (this
+                // module's own header comment) -- wb_mem_ok/wb_mem_err_i,
+                // even for the PTW_REASON_LO/HI arms below, whose
+                // DESTINATION registers are fetch-named.
+                case (ptw_reason_q[cur_slot])
+                    PTW_REASON_LO: begin
+                        fetch_lo_fault_q[fetch_slot]    <= !wb_mem_err_i && ptw_pte_fault;
+                        fetch_lo_resolved_q[fetch_slot] <= wb_mem_ok && ptw_pte_leaf && !ptw_pte_fault;
+                        if (wb_mem_ok && ptw_pte_leaf && !ptw_pte_fault) fetch_lo_paddr_q[fetch_slot] <= ptw_resolved_paddr;
+                    end
+                    PTW_REASON_HI: begin
+                        fetch_hi_fault_q[fetch_slot]    <= !wb_mem_err_i && ptw_pte_fault;
+                        fetch_hi_resolved_q[fetch_slot] <= wb_mem_ok && ptw_pte_leaf && !ptw_pte_fault;
+                        if (wb_mem_ok && ptw_pte_leaf && !ptw_pte_fault) fetch_hi_paddr_q[fetch_slot] <= ptw_resolved_paddr;
+                    end
+                    default: begin   // PTW_REASON_MEM
+                        mem_fault_q[cur_slot]        <= !wb_mem_err_i && ptw_pte_fault;
+                        mem_access_fault_q[cur_slot] <= wb_mem_err_i;
+                        mem_resolved_q[cur_slot]     <= wb_mem_ok && ptw_pte_leaf && !ptw_pte_fault;
+                        if (wb_mem_ok && ptw_pte_leaf && !ptw_pte_fault) mem_resolved_paddr_q[cur_slot] <= ptw_resolved_paddr;
+                    end
+                endcase
+            end
+
+            /*
+             * TLB fill (Sv39 M5) -- reason-agnostic: a successful walk
+             * resolution is cached identically whether this cycle's leaf
+             * came from the fetch-lo, fetch-hi, or mem stream. Never
+             * fires on a TLB hit -- a hit skips S_PTW entirely via the
+             * state-transition redirect conditions' own "&& !tlb_hit"
+             * gating -- so this can never re-fill an already-cached
+             * entry from itself. Caches the raw PTE's OWN ppn2/ppn1/ppn0
+             * fields (ptw_pte_ppn2/1/0, sourced from wb_mem_dat_i here since
+             * this is always a genuine walk, never a hit), NOT the
+             * already-VA-reconstructed ptw_resolved_ppn1/0 -- a later
+             * hit's own ptw_pte_source mux feeds these cached fields back
+             * into that exact same reconstruction formula
+             * (ptw_resolved_ppn1/0, upstream), so a superpage's cached
+             * zero low-PPN-segments correctly re-combine with whatever
+             * NEW address's own VPN is being looked up next time, not a
+             * frozen copy of the first address that ever filled it.
+             */
+            if (state == S_PTW && wb_mem_done && wb_mem_ok && ptw_pte_leaf && !ptw_pte_fault) begin
+                case (tlb_replace_q)
+                    2'd0: begin
+                        tlb0_valid_q <= 1'b1;
+                        tlb0_level_q <= ptw_level_q[cur_slot];
+                        tlb0_vpn_q   <= ptw_vaddr_q[cur_slot][38:12];
+                        tlb0_ppn2_q  <= ptw_pte_ppn2;
+                        tlb0_ppn1_q  <= ptw_pte_ppn1;
+                        tlb0_ppn0_q  <= ptw_pte_ppn0;
+                        tlb0_r_q     <= ptw_pte_r;
+                        tlb0_w_q     <= ptw_pte_w;
+                        tlb0_x_q     <= ptw_pte_x;
+                        tlb0_u_q     <= ptw_pte_u;
+                        tlb0_d_q     <= ptw_pte_d;
+                    end
+                    2'd1: begin
+                        tlb1_valid_q <= 1'b1;
+                        tlb1_level_q <= ptw_level_q[cur_slot];
+                        tlb1_vpn_q   <= ptw_vaddr_q[cur_slot][38:12];
+                        tlb1_ppn2_q  <= ptw_pte_ppn2;
+                        tlb1_ppn1_q  <= ptw_pte_ppn1;
+                        tlb1_ppn0_q  <= ptw_pte_ppn0;
+                        tlb1_r_q     <= ptw_pte_r;
+                        tlb1_w_q     <= ptw_pte_w;
+                        tlb1_x_q     <= ptw_pte_x;
+                        tlb1_u_q     <= ptw_pte_u;
+                        tlb1_d_q     <= ptw_pte_d;
+                    end
+                    2'd2: begin
+                        tlb2_valid_q <= 1'b1;
+                        tlb2_level_q <= ptw_level_q[cur_slot];
+                        tlb2_vpn_q   <= ptw_vaddr_q[cur_slot][38:12];
+                        tlb2_ppn2_q  <= ptw_pte_ppn2;
+                        tlb2_ppn1_q  <= ptw_pte_ppn1;
+                        tlb2_ppn0_q  <= ptw_pte_ppn0;
+                        tlb2_r_q     <= ptw_pte_r;
+                        tlb2_w_q     <= ptw_pte_w;
+                        tlb2_x_q     <= ptw_pte_x;
+                        tlb2_u_q     <= ptw_pte_u;
+                        tlb2_d_q     <= ptw_pte_d;
+                    end
+                    default: begin   // 2'd3
+                        tlb3_valid_q <= 1'b1;
+                        tlb3_level_q <= ptw_level_q[cur_slot];
+                        tlb3_vpn_q   <= ptw_vaddr_q[cur_slot][38:12];
+                        tlb3_ppn2_q  <= ptw_pte_ppn2;
+                        tlb3_ppn1_q  <= ptw_pte_ppn1;
+                        tlb3_ppn0_q  <= ptw_pte_ppn0;
+                        tlb3_r_q     <= ptw_pte_r;
+                        tlb3_w_q     <= ptw_pte_w;
+                        tlb3_x_q     <= ptw_pte_x;
+                        tlb3_u_q     <= ptw_pte_u;
+                        tlb3_d_q     <= ptw_pte_d;
+                    end
+                endcase
+                tlb_replace_q <= tlb_replace_q + 2'd1;
+            end
+
+            // Sv39 M4: the REAL, post-translation mem access has
+            // completed -- mem_resolved_q[cur_slot]'s own "always freshly written
+            // by the next ordinary event" refresh, same reasoning as the
+            // fetch streams get below. Sv39 M6: this alone isn't enough --
+            // see mem_resolved_q[cur_slot]'s own commit_now clear below, right
+            // alongside mem_fault_q[cur_slot]/mem_access_fault_q[cur_slot]'s own identical fix.
+            if (state == S_MEM && wb_mem_done) begin
+                mem_resolved_q[cur_slot] <= 1'b0;
+            end
+
+            /*
+             * mem_fault_q[cur_slot]/mem_access_fault_q[cur_slot] need a DIFFERENT refresh
+             * than fetch_lo_fault_q[cur_slot]/fetch_hi_fault_q[cur_slot]'s own "next ordinary
+             * fetch" clear above -- a real, empirically-caught bug fixed
+             * here, not a hypothetical: unlike fetch (every instruction
+             * always fetches, so "the next fetch" always arrives soon),
+             * the NEXT instruction after a mem-side trap is typically the
+             * trap HANDLER's own first instruction, which is very often
+             * NOT itself a memory access (e.g. `csrrs x20, mcause, x0`) --
+             * "clear on the next S_MEM completion" could then wait
+             * indefinitely, leaving the flag stuck at 1 and re-triggering
+             * trap_taken on every subsequent commit regardless of
+             * instruction type, an infinite re-trap loop caught by this
+             * milestone's own new mem-side walker test hanging instead of
+             * ever reaching its trap handler's own ebreak. Fixed by
+             * clearing unconditionally on the VERY NEXT commit_now
+             * instead (any instruction, any state) -- safe because
+             * commit_now is structurally false during S_PTW itself (only
+             * S_EXEC/S_MEM/S_AMO_WRITE ever commit), so this can never
+             * race the same-cycle SET above; the clear queues for the
+             * cycle AFTER the one that consumed the flag via trap_taken,
+             * exactly matching fetch_fault_q[cur_slot]'s own "always freshly
+             * written before its next real use" property, just achieved
+             * through a different, mem-appropriate trigger.
+             *
+             * Sv39 M6: mem_resolved_q[cur_slot] joins this same clear, for the exact
+             * same bug class -- a real gap found by the cache-mediated
+             * integration test, not anticipated by M4's own design. A
+             * translated access whose FINAL PA is PMP-denied (pmp_load_
+             * fault/pmp_store_fault) bails from S_MEM straight back to
+             * S_EXEC and NEVER reaches wb_mem_done (wb_mem_master_drive's own
+             * suppression blocks the real bus request from ever being
+             * issued at all) -- so the S_MEM&&wb_mem_done clear above never
+             * fires, and mem_resolved_q[cur_slot]/mem_resolved_paddr_q[cur_slot] would stay
+             * stuck holding THIS instruction's own (denied) translation
+             * forever, silently skipping the walk for every SUBSEQUENT
+             * translated mem access and reusing the stale, wrong PA
+             * instead. Clearing here is safe for the ordinary (untranslated
+             * or successfully-translated) case too: mem_resolved_q[cur_slot] is
+             * already 0 by the time an unrelated or successful instruction
+             * commits, making this an inert no-op there.
+             */
+            if (commit_now) begin
+                mem_fault_q[cur_slot]        <= 1'b0;
+                mem_access_fault_q[cur_slot] <= 1'b0;
+                mem_resolved_q[cur_slot]     <= 1'b0;
+            end
+
+            // SFENCE.VMA (Sv39 M5, decision 3): unconditional full-TLB
+            // flush, ignoring rs1/rs2 entirely -- same commit_now-timed,
+            // single-cycle-pulse shape FENCE.I's own icache_flush_o
+            // already established (SFENCE.VMA retires purely within
+            // S_EXEC, bus-idle, so this can never coincide with the TLB
+            // fill block above, which only ever fires from S_PTW -- but
+            // placed after it in program order regardless, so a flush
+            // would win any theoretical same-cycle conflict).
+            //
+            // !instr_faulted -- real bug fix (post-M6 independent
+            // re-review): is_sfence_vma is a raw decode signal, true
+            // regardless of whether the instruction is actually legal.
+            // Every OTHER commit-time side effect in this file (csr_we,
+            // reg_write) correctly suppresses itself on instr_faulted
+            // (trap_taken || progbuf_abort || trigger_debug_entry) -- this
+            // flush was the one write that didn't, so an S-mode SFENCE.VMA
+            // that traps as illegal (mstatus.TVM=1) or gets intercepted by
+            // a debug trigger on its own PC still unconditionally wiped
+            // the entire TLB, even though the instruction architecturally
+            // never executed -- a precise-exception violation.
+            if (commit_now && is_sfence_vma && !instr_faulted) begin
+                tlb0_valid_q <= 1'b0;
+                tlb1_valid_q <= 1'b0;
+                tlb2_valid_q <= 1'b0;
+                tlb3_valid_q <= 1'b0;
+            end
+
+            // The REAL, post-translation fetch (using the now-resolved
+            // fetch_paddr/fetch_paddr_hi) has completed -- this episode
+            // is over; the NEXT fresh instruction's fetch must re-walk
+            // (no TLB yet), so clear back to the "not yet resolved" state.
+            // Harmless no-op whenever translation was never active (both
+            // flags already 0).
+            //
+            // fetch_lo_fault_q[cur_slot]/fetch_hi_fault_q[cur_slot] are ALSO cleared here --
+            // load-bearing, not just tidiness: these two flags feed the
+            // `instruction` substitution mux and trap_taken UNCONDITIONALLY,
+            // every cycle, regardless of state. Without this clear, a page
+            // fault taken while translation was active would leave the
+            // flag stuck at 1 forever the instant translation later goes
+            // INACTIVE (e.g. the very next instruction, now running in
+            // M-mode after the trap) -- S_PTW, the only place that was
+            // writing it, would never be entered again to refresh it,
+            // permanently re-triggering trap_taken on every subsequent
+            // ordinary fetch (an infinite re-trap loop, caught empirically
+            // by this milestone's own new fetch-side walker test hanging
+            // instead of ever reaching its trap handler's own ebreak).
+            // fetch_fault_q[cur_slot] never had this problem: it's already
+            // unconditionally refreshed by every ordinary S_FETCH/
+            // S_FETCH_HI completion, translated or not -- these two new
+            // registers need that exact same "always freshly written by
+            // the very next ordinary fetch" property explicitly added.
+            // || (fetch_translate_active && fetch_lo_resolved_q[fetch_slot]
+            //     && pmp_fetchlo_fault): a real bug, same class as the
+            // fetch_hi_resolved_q[cur_slot] gap this comment block already
+            // documents below. The translated PMP-lo-deny exit (state-
+            // transition always_ff's own "else if (pmp_fetchlo_fault)"
+            // arm, reached only once fetch_lo_resolved_q[fetch_slot] is
+            // ALREADY 1) never sets wb_fetch_done -- no bus request was
+            // ever issued for a denied fetch -- so without this term the
+            // clear above never fires for it, and the NEXT fetch episode
+            // to land on this same slot (two episodes later, this being a
+            // 2-slot design) reads fetch_lo_resolved_q[fetch_slot] as
+            // stale-1 and skips translation entirely, reusing the OLD
+            // denied fetch_lo_paddr_q[fetch_slot].
+            if (state == S_FETCH && (wb_fetch_done
+                    || (fetch_translate_active && fetch_lo_resolved_q[fetch_slot] && pmp_fetchlo_fault))) begin
+                fetch_lo_resolved_q[fetch_slot] <= 1'b0;
+                fetch_lo_fault_q[fetch_slot]    <= 1'b0;
+                /*
+                 * fetch_hi_resolved_q[cur_slot]/fetch_hi_fault_q[cur_slot], HERE TOO -- a
+                 * real bug found post-M6 by simulation (not caught by
+                 * the independent adversarial review's own static
+                 * reading, nor by the pmp_fetchhi_fault ordering fix
+                 * this same session already made): unlike
+                 * fetch_lo_resolved_q[cur_slot], which every S_FETCH visits (so
+                 * its own clear right above already refreshes it for
+                 * EVERY instruction), fetch_hi_resolved_q[cur_slot]'s own clear
+                 * used to live ONLY in the S_FETCH_HI arm below --
+                 * meaning it was NEVER refreshed for a non-crossing
+                 * instruction. A crossing instruction sets it (via the
+                 * TLB-hit or S_PTW resolve paths); every ORDINARY,
+                 * non-crossing instruction afterward leaves it
+                 * completely untouched, stuck at whatever the LAST
+                 * crossing instruction left it at, for as many
+                 * instructions as it takes to reach the NEXT crossing
+                 * one. That next crossing instruction's own S_FETCH_HI
+                 * arm then reads this STALE "already resolved" flag as
+                 * true and skips straight to checking pmp_fetchhi_fault
+                 * against the PREVIOUS crossing instruction's own
+                 * stale fetch_hi_paddr_q[cur_slot] -- silently reintroducing the
+                 * exact staleness hazard the ordering fix was meant to
+                 * close, just one level removed. Clearing here too
+                 * guarantees fetch_hi_resolved_q[cur_slot] is fresh (0) at the
+                 * start of EVERY instruction's own fetch, translated or
+                 * not, crossing or not -- mirroring fetch_lo_resolved_q[cur_slot]'s
+                 * own "every S_FETCH refreshes it" property exactly.
+                 */
+                fetch_hi_resolved_q[fetch_slot] <= 1'b0;
+                fetch_hi_fault_q[fetch_slot]    <= 1'b0;
+            end
+            // || (fetch_hi_resolved_q[fetch_slot] && pmp_fetchhi_fault):
+            // the identical PMP-deny staleness bug as the S_FETCH arm just
+            // above, for the HI half's own PMP-deny exit (state-transition
+            // always_ff's "else if (pmp_fetchhi_fault)" arm). No explicit
+            // fetch_translate_active guard needed -- S_FETCH_HI is only
+            // ever reached from the translated S_FETCH path (see this
+            // always_ff's own comment on that a few lines up), so it's
+            // unconditionally true here.
+            if (state == S_FETCH_HI && (wb_fetch_done
+                    || (fetch_hi_resolved_q[fetch_slot] && pmp_fetchhi_fault))) begin
+                fetch_hi_resolved_q[fetch_slot] <= 1'b0;
+                fetch_hi_fault_q[fetch_slot]    <= 1'b0;
+            end
+        end
+    end
+
+    /* --------------------------------------------------------------- *
+     * Decode
+     * --------------------------------------------------------------- */
+
+    logic [(`L2_REG_FILE_SIZE - 1):0] read_gpr_A_sel, read_gpr_B_sel;
+    logic [(`WORD_SIZE - 1):0]        read_gpr_A_data, read_gpr_B_data;
+    logic [(`INSTR_CODE_SIZE - 1):0]  decoded_instruction;
+    logic [(`WORD_SIZE - 1):0]        imm_1, imm_2;
+    logic [(`B_IMM_SIZE - 1):0]       imm_3_or_dest_addr;
+
+    /*
+     * decoder <-> register_file looks port-level circular (decoder's
+     * *_sel outputs feed regfile's read ports; regfile's read *_data
+     * outputs feed back into decoder's i_read_gpr_*_data inputs, which
+     * decoder uses to produce o_imm_1/o_imm_2) but it isn't a real
+     * combinational cycle: the *_sel outputs depend ONLY on
+     * i_instruction inside decoder, never on the data that comes back.
+     * It settles in zero simulated time as a plain feedforward chain --
+     * and since `instruction` is latched (stable for the whole
+     * instruction), so is everything downstream of it here.
+     */
+    ref_decoder decoder0 (
+        .i_instruction(instruction),
+        .i_instruction_address(pc),
+        /*
+         * Explicitly connected to nothing (not omitted) -- it's just a
+         * passthrough of i_instruction_address (i.e. pc), nothing
+         * downstream needs a second copy of it. Empty parens rather than
+         * leaving the line out entirely so lint tools see this as
+         * deliberate rather than a possibly-forgotten connection.
+         */
+        /* verilator lint_off PINCONNECTEMPTY */
+        .o_instruction_address(),
+        /* verilator lint_on PINCONNECTEMPTY */
+        .o_read_gpr_A_sel(read_gpr_A_sel),
+        .i_read_gpr_A_data(read_gpr_A_data),
+        .o_read_gpr_B_sel(read_gpr_B_sel),
+        .i_read_gpr_B_data(read_gpr_B_data),
+        .o_decoded_instruction(decoded_instruction),
+        .o_imm_1(imm_1),
+        .o_imm_2(imm_2),
+        .o_imm_3_or_dest_addr(imm_3_or_dest_addr)
+    );
+
+    logic                       reg_write;
+    logic [(`WORD_SIZE - 1):0]  reg_write_data;
+
+    /*
+     * Access Register GPR transfer (Milestone 5) reuses read port B and
+     * the sole write port outright, rather than adding new ports to
+     * register_file.sv -- muxed here, at the instantiation boundary,
+     * gated on dm_access_active exactly like the CSR mux below csr_file0's
+     * own instantiation (see dm_access_active's own comment for why
+     * in_debug_mode alone isn't the right gate once Milestone 7's
+     * Program Buffer is in the picture). read_gpr_B_data/o_dm_gpr_rdata
+     * are the SAME physical wire read by two different consumers at two
+     * temporally disjoint times: rvfi_rs2_rdata trusts it only when a
+     * real instruction retires (commit_now, which requires
+     * dm_access_active==0 -- true both in ordinary execution and
+     * throughout a Program Buffer run, since debug_progbuf_active forces
+     * dm_access_active low exactly then), and o_dm_gpr_rdata trusts it
+     * only when dm_access_active is the very thing selecting it -- no
+     * new wire name needed.
+     */
+    ref_register_file regfile0 (
+        .i_clk(clk),
+        .i_read_gpr_A_sel(read_gpr_A_sel),
+        .o_read_gpr_A_data(read_gpr_A_data),
+        .i_read_gpr_B_sel(dm_access_active ? i_dm_gpr_sel : read_gpr_B_sel),
+        .o_read_gpr_B_data(read_gpr_B_data),
+        .i_load_gpr(dm_access_active ? i_dm_gpr_we : reg_write),
+        /*
+         * imm_3_or_dest_addr means two unrelated things depending on
+         * instruction type (see decoder.sv's port doc for the full
+         * story): a signed S/B-type offset, or a plain 5-bit rd index
+         * (R/I/U/J-type). Here we use ONLY the low 5 bits, as an
+         * unsigned register index -- correct for the R/I/U/J case, and
+         * harmless for S/B-type (stores and branches never assert
+         * reg_write, so regfile0 ignores this value in that case
+         * regardless of what garbage sign bits sit above it). Getting
+         * this confused with the SIGNED interpretation (imm3_sext,
+         * below) is the single easiest mistake to make with this port --
+         * small positive immediates look identical either way, so a
+         * quick smoke test won't catch it, only a negative-offset test
+         * will (see core_load_store_tb.sv).
+         */
+        .i_load_gpr_sel(dm_access_active ? i_dm_gpr_sel : imm_3_or_dest_addr[(`L2_REG_FILE_SIZE - 1):0]),
+        .i_load_gpr_data(dm_access_active ? i_dm_gpr_wdata : reg_write_data)
+    );
+
+    assign o_dm_gpr_rdata = read_gpr_B_data;
+
+    /* Sign-extended S/B-type offset -- see the comment above. */
+    wire [(`WORD_SIZE - 1):0] imm3_sext =
+        {{(`WORD_SIZE - `B_IMM_SIZE){imm_3_or_dest_addr[`B_IMM_SIZE - 1]}}, imm_3_or_dest_addr};
+
+    /* --------------------------------------------------------------- *
+     * Control unit
+     * --------------------------------------------------------------- */
+
+    wire is_auipc  = (decoded_instruction == `REF_INSTR_CODE(AUIPC));
+    wire is_jal    = (decoded_instruction == `REF_INSTR_CODE(JAL));
+    wire is_jalr   = (decoded_instruction == `REF_INSTR_CODE(JALR));
+    wire is_ebreak = (decoded_instruction == `REF_INSTR_CODE(EBREAK));
+
+    /*
+     * ADDW/SUBW/ADDIW reuse the plain ADD/SUB ALU ops on full 64-bit
+     * operands (bit-identical to a native 32-bit add/sub in the low 32
+     * bits -- two's-complement addition is modular arithmetic) and get
+     * truncated+re-signed HERE, centrally, in the write-back mux below.
+     * SLLW/SRLW/SRAW(+I variants) can't take that shortcut -- a shift is
+     * NOT bit-identical across widths (wrong-width operand, bits enter
+     * from the wrong end) -- so those instead use dedicated 32-bit-wide
+     * ALU ops (see alu_ops.sv) whose output is already the final,
+     * correctly-extended 64-bit value; they fall through the write-back
+     * mux untouched, same as any ordinary ALU result.
+     */
+    /*
+     * MULW joins this same group for the same reason ADDW/SUBW do: a
+     * 32x32-truncated-to-32 product is bit-identical regardless of what's
+     * in the operands' upper 32 bits (multiplication mod 2^32 doesn't
+     * depend on that), so MULW reuses MUL wholesale and just needs the
+     * same central truncate+resign as ADDW/SUBW/ADDIW -- see
+     * design/defaults/alu_ops.sv's own header comment on MUL for the
+     * full argument. DIVW/DIVUW/REMW/REMUW do NOT belong here -- see the
+     * "M extension: divide" section below for why they need their own
+     * (non-ALU) truncation path instead.
+     */
+    wire is_word_arith = (decoded_instruction == `REF_INSTR_CODE(ADDW))
+                       || (decoded_instruction == `REF_INSTR_CODE(SUBW))
+                       || (decoded_instruction == `REF_INSTR_CODE(ADDIW))
+                       || (decoded_instruction == `REF_INSTR_CODE(MULW));
+
+    /*
+     * A extension: LR/SC/AMO classification. Placed here, before
+     * alu_op_sel/mem_control below -- load-bearing, not stylistic:
+     * mem_control's SC arm needs sc_success, so this whole block must be
+     * textually established first (unlike CSR's own classification,
+     * which comes AFTER mem_control today, since nothing in mem_control
+     * needs it).
+     */
+    wire is_lr_w = (decoded_instruction == `REF_INSTR_CODE(LR_W));
+    wire is_lr_d = (decoded_instruction == `REF_INSTR_CODE(LR_D));
+    wire is_lr   = is_lr_w || is_lr_d;
+
+    wire is_sc_w = (decoded_instruction == `REF_INSTR_CODE(SC_W));
+    wire is_sc_d = (decoded_instruction == `REF_INSTR_CODE(SC_D));
+    wire is_sc   = is_sc_w || is_sc_d;
+
+    wire is_amoswap_w = (decoded_instruction == `REF_INSTR_CODE(AMOSWAP_W));
+    wire is_amoswap_d = (decoded_instruction == `REF_INSTR_CODE(AMOSWAP_D));
+    wire is_amoadd_w  = (decoded_instruction == `REF_INSTR_CODE(AMOADD_W));
+    wire is_amoadd_d  = (decoded_instruction == `REF_INSTR_CODE(AMOADD_D));
+    wire is_amoxor_w  = (decoded_instruction == `REF_INSTR_CODE(AMOXOR_W));
+    wire is_amoxor_d  = (decoded_instruction == `REF_INSTR_CODE(AMOXOR_D));
+    wire is_amoor_w   = (decoded_instruction == `REF_INSTR_CODE(AMOOR_W));
+    wire is_amoor_d   = (decoded_instruction == `REF_INSTR_CODE(AMOOR_D));
+    wire is_amoand_w  = (decoded_instruction == `REF_INSTR_CODE(AMOAND_W));
+    wire is_amoand_d  = (decoded_instruction == `REF_INSTR_CODE(AMOAND_D));
+    wire is_amomin_w  = (decoded_instruction == `REF_INSTR_CODE(AMOMIN_W));
+    wire is_amomin_d  = (decoded_instruction == `REF_INSTR_CODE(AMOMIN_D));
+    wire is_amomax_w  = (decoded_instruction == `REF_INSTR_CODE(AMOMAX_W));
+    wire is_amomax_d  = (decoded_instruction == `REF_INSTR_CODE(AMOMAX_D));
+    wire is_amominu_w = (decoded_instruction == `REF_INSTR_CODE(AMOMINU_W));
+    wire is_amominu_d = (decoded_instruction == `REF_INSTR_CODE(AMOMINU_D));
+    wire is_amomaxu_w = (decoded_instruction == `REF_INSTR_CODE(AMOMAXU_W));
+    wire is_amomaxu_d = (decoded_instruction == `REF_INSTR_CODE(AMOMAXU_D));
+
+    wire is_amoswap = is_amoswap_w || is_amoswap_d;
+
+    wire is_amo_rmw_w = is_amoswap_w || is_amoadd_w || is_amoxor_w || is_amoor_w
+                      || is_amoand_w || is_amomin_w || is_amomax_w || is_amominu_w || is_amomaxu_w;
+    wire is_amo_rmw_d = is_amoswap_d || is_amoadd_d || is_amoxor_d || is_amoor_d
+                      || is_amoand_d || is_amomin_d || is_amomax_d || is_amominu_d || is_amomaxu_d;
+    assign is_amo_rmw = is_amo_rmw_w || is_amo_rmw_d;   // drives the forward-declared logic above
+
+    /* All 22 -- used only by the address-phase operand-B redirect below. */
+    wire is_amo_family = is_lr || is_sc || is_amo_rmw;
+
+    /*
+     * amo_modify_phase: true for exactly the cycles alu0's inputs must be
+     * redirected from "compute the address" to "compute the modify
+     * value" -- gated purely on state, not on is_amo_rmw, since
+     * S_AMO_WRITE is a state ONLY an is_amo_rmw instruction can ever
+     * reach (LR/SC never transition there), so the state check alone is
+     * unambiguous.
+     */
+    wire amo_modify_phase = (state == S_AMO_WRITE);
+
+    /*
+     * LR/SC/AMO's address is rs1 alone, no offset -- imm_1 IS the
+     * address, available immediately post-decode. Deliberately NOT
+     * alu_result/mem_paddr here (even though they're numerically equal
+     * during S_EXEC): sc_success below is needed by mem_control, which
+     * is declared textually BEFORE alu0 exists (Execute comes later) --
+     * using imm_1 sidesteps that ordering entirely rather than requiring
+     * mem_control to be relocated after Execute.
+     */
+    wire [(`WORD_SIZE - 1):0] amo_target_addr = imm_1;
+
+    /*
+     * Reservation register (LR/SC). Set unconditionally on LR's own
+     * retirement (a fresh LR always creates a new reservation,
+     * superseding any prior one -- a plain overwrite, not a conditional
+     * set) -- but ONLY when LR actually retires cleanly (`!instr_faulted`),
+     * same gate reg_write/csr_we already use. Without it, a faulted LR
+     * (misaligned, or -- since is_lr is purely combinational/decode-based
+     * and doesn't care about the bus outcome -- a real access-fault via
+     * mem_store_access_fault, newly reachable once wb_mem_err_i started
+     * feeding commit_now) would still set a "valid" reservation for a
+     * load that never happened, letting a later SC to that address
+     * spuriously report success. Found via code review, not a test
+     * failure -- see testbench/core_reservation_fault_tb.sv for the
+     * proof (a faulted LR immediately followed by an SC to the same
+     * address must NOT report success). instr_faulted (rather than bare
+     * trap_taken) extends that same protection to a faulted LR executed
+     * from a Milestone 7 Program Buffer run, where trap_taken can never
+     * be 1 but progbuf_abort plays the identical role -- see
+     * instr_faulted's own comment above. Cleared on ANY store-class
+     * instruction's retirement: ordinary SB/SH/SW/SD (is_store), SC
+     * either way (is_sc, since is_store alone only catches SC's MATCHED
+     * case), or an AMO's write (is_amo_rmw) -- matching the spec
+     * requirement that a used reservation can't be reused. The clear
+     * arm doesn't need the same `!instr_faulted` guard: a faulted store/
+     * SC/AMO-write never actually wrote anything either, but invalidating
+     * the reservation anyway is still spec-conformant (a reservation
+     * surviving a faulted store attempt is not architecturally
+     * guaranteed) and strictly safer than leaving it valid.
+     */
+    logic reservation_valid_q;
+    logic [(`WORD_SIZE - 1):0] reservation_addr_q;
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            reservation_valid_q <= 1'b0;
+        end else if (commit_now && is_lr && !instr_faulted) begin
+            reservation_valid_q <= 1'b1;
+            reservation_addr_q  <= amo_target_addr;
+        end else if (commit_now && (is_store || is_sc || is_amo_rmw)) begin
+            reservation_valid_q <= 1'b0;
+        end
+    end
+
+    /*
+     * sc_success: a pure register compare, no bus access needed -- known
+     * combinationally as soon as decode settles in S_EXEC, and stable
+     * for SC's entire (possibly multi-cycle) lifetime, since nothing
+     * else can retire (and so mutate the reservation) while SC itself is
+     * in flight.
+     */
+    wire sc_addr_match = reservation_valid_q && (reservation_addr_q == amo_target_addr);
+    wire sc_success = is_sc && sc_addr_match;
+    wire [(`WORD_SIZE - 1):0] sc_result = sc_success ? `WORD_SIZE'(0) : `WORD_SIZE'(1);
+
+    /*
+     * amo_rs2_operand: rs2, width-adjusted for the modify-phase
+     * computation. Per spec, only rs2's low 32 bits are ever meaningful
+     * for a .W op -- sign-extended here to 64 bits uniformly for ALL 9
+     * RMW ops (not just the signed-compare ones), same pattern
+     * is_div_w_family already uses for DIVW's divisor. Safe for every
+     * op, not just the "obviously signed" ones: ADD/XOR/OR/AND's low-32-
+     * bit result is provably invariant to how the upper 32 bits of
+     * either 64-bit operand are populated, and MINU/MAXU's unsigned
+     * 32-bit comparison is provably identical to an unsigned 64-bit
+     * comparison of the two sign-extended operands (sign extension is an
+     * order-preserving embedding for unsigned comparison too).
+     */
+    wire [(`WORD_SIZE - 1):0] amo_rs2_operand = is_amo_rmw_w ? {{32{imm_2[31]}}, imm_2[31:0]} : imm_2;
+
+    /*
+     * amo_modify_operand_a/b: AMOSWAP's "new value" is rs2 verbatim --
+     * same "operand_b=0, ADD" passthrough trick LUI/CSRRW already use,
+     * just with operand_a set to amo_rs2_operand instead of the default
+     * imm_1. Every other RMW op reads the just-captured OLD value
+     * (amo_rdata_q[cur_slot]) as operand_a and rs2 as operand_b.
+     */
+    wire [(`WORD_SIZE - 1):0] amo_modify_operand_a = is_amoswap ? amo_rs2_operand : amo_rdata_q[cur_slot];
+    wire [(`WORD_SIZE - 1):0] amo_modify_operand_b = is_amoswap ? `WORD_SIZE'(0)  : amo_rs2_operand;
+
+    logic [(`ALU_OPSIZE - 1):0] amo_modify_op;
+    always_comb begin: amo_modify_op_sel
+        case (decoded_instruction)
+            `REF_INSTR_CODE(AMOSWAP_W), `REF_INSTR_CODE(AMOSWAP_D): amo_modify_op = `ADD;  // passthrough
+            `REF_INSTR_CODE(AMOADD_W),  `REF_INSTR_CODE(AMOADD_D):  amo_modify_op = `ADD;
+            `REF_INSTR_CODE(AMOXOR_W),  `REF_INSTR_CODE(AMOXOR_D):  amo_modify_op = `XOR;
+            `REF_INSTR_CODE(AMOOR_W),   `REF_INSTR_CODE(AMOOR_D):   amo_modify_op = `OR;
+            `REF_INSTR_CODE(AMOAND_W),  `REF_INSTR_CODE(AMOAND_D):  amo_modify_op = `AND;
+            `REF_INSTR_CODE(AMOMIN_W),  `REF_INSTR_CODE(AMOMIN_D):  amo_modify_op = `MIN;
+            `REF_INSTR_CODE(AMOMAX_W),  `REF_INSTR_CODE(AMOMAX_D):  amo_modify_op = `MAX;
+            `REF_INSTR_CODE(AMOMINU_W), `REF_INSTR_CODE(AMOMINU_D): amo_modify_op = `MINU;
+            `REF_INSTR_CODE(AMOMAXU_W), `REF_INSTR_CODE(AMOMAXU_D): amo_modify_op = `MAXU;
+            default: amo_modify_op = `ADD; // don't-care -- LR/SC never reach S_AMO_WRITE
+        endcase
+    end: amo_modify_op_sel
+
+    logic [(`ALU_OPSIZE - 1):0] alu_op;
+    always_comb begin: alu_op_sel
+        /*
+         * A extension: during S_AMO_WRITE, alu0 is being reused for the
+         * modify computation (old value op rs2), not the address
+         * computation every other state uses it for -- the first
+         * state-dependent alu_op in this file. LR/SC/AMO-during-address-
+         * phase need no arm inside the case below at all -- they fall
+         * through the existing default: alu_op = `ADD, exactly like
+         * branches/loads/stores/CSR do today.
+         */
+        if (amo_modify_phase) begin
+            alu_op = amo_modify_op;
+        end else
+        case (decoded_instruction)
+            `REF_INSTR_CODE(ADDI), `REF_INSTR_CODE(ADD),
+            `REF_INSTR_CODE(ADDIW), `REF_INSTR_CODE(ADDW),
+            /*
+             * Also every instruction that uses the ALU purely as an
+             * adder rather than for its "own" arithmetic meaning: LUI
+             * (o_imm_2=0 from the decoder, so ADD is a passthrough of
+             * o_imm_1), AUIPC (pc + immediate, via the operand-A mux
+             * below), JALR and every load/store (base + offset address
+             * calculation).
+             */
+            `REF_INSTR_CODE(LUI), `REF_INSTR_CODE(AUIPC), `REF_INSTR_CODE(JALR),
+            `REF_INSTR_CODE(LB), `REF_INSTR_CODE(LH), `REF_INSTR_CODE(LW),
+            `REF_INSTR_CODE(LBU), `REF_INSTR_CODE(LHU), `REF_INSTR_CODE(LWU), `REF_INSTR_CODE(LD),
+            `REF_INSTR_CODE(SB), `REF_INSTR_CODE(SH), `REF_INSTR_CODE(SW), `REF_INSTR_CODE(SD):
+                alu_op = `ADD;
+
+            `REF_INSTR_CODE(SUB), `REF_INSTR_CODE(SUBW):
+                alu_op = `SUB;
+
+            `REF_INSTR_CODE(SLTI), `REF_INSTR_CODE(SLT):   alu_op = `SLT;
+            `REF_INSTR_CODE(SLTIU), `REF_INSTR_CODE(SLTU): alu_op = `SLTU;
+            `REF_INSTR_CODE(XORI), `REF_INSTR_CODE(XOR):   alu_op = `XOR;
+            `REF_INSTR_CODE(ORI), `REF_INSTR_CODE(OR):     alu_op = `OR;
+            `REF_INSTR_CODE(ANDI), `REF_INSTR_CODE(AND):   alu_op = `AND;
+
+            `REF_INSTR_CODE(SLLI), `REF_INSTR_CODE(SLL): alu_op = `SLL;
+            `REF_INSTR_CODE(SRLI), `REF_INSTR_CODE(SRL): alu_op = `SRL;
+            `REF_INSTR_CODE(SRAI), `REF_INSTR_CODE(SRA): alu_op = `SRA;
+
+            `REF_INSTR_CODE(SLLIW), `REF_INSTR_CODE(SLLW): alu_op = `SLLW;
+            `REF_INSTR_CODE(SRLIW), `REF_INSTR_CODE(SRLW): alu_op = `SRLW;
+            `REF_INSTR_CODE(SRAIW), `REF_INSTR_CODE(SRAW): alu_op = `SRAW;
+
+            /*
+             * Zicsr: no new ALU ops needed (see the operand-mux comments
+             * above for the operand-B redirect each of these relies on).
+             */
+            `REF_INSTR_CODE(CSRRS), `REF_INSTR_CODE(CSRRSI): alu_op = `OR;
+            `REF_INSTR_CODE(CSRRC), `REF_INSTR_CODE(CSRRCI): alu_op = `AND;
+            `REF_INSTR_CODE(CSRRW), `REF_INSTR_CODE(CSRRWI): alu_op = `ADD;
+
+            /*
+             * M extension: multiply. MULW reuses MUL (see is_word_arith
+             * above). DIV/DIVU/REM/REMU (and their W variants) get no
+             * arms here at all -- they don't use alu_result any more than
+             * branches/JAL do (see the "M extension: divide" section
+             * below), so they correctly fall through to the same
+             * don't-care default as everything else that bypasses the
+             * ALU.
+             */
+            `REF_INSTR_CODE(MUL), `REF_INSTR_CODE(MULW): alu_op = `MUL;
+            `REF_INSTR_CODE(MULH):                   alu_op = `MULH;
+            `REF_INSTR_CODE(MULHSU):                 alu_op = `MULHSU;
+            `REF_INSTR_CODE(MULHU):                  alu_op = `MULHU;
+
+            /*
+             * Branches/JAL/FENCE/ECALL/EBREAK/INVALID don't use
+             * alu_result for anything (branches have their own
+             * comparator below; JAL's target/link come from the PC
+             * adder and pc_plus_len directly) -- alu_op is a don't-care
+             * for these, defaulted to ADD purely so alu_op always has a
+             * defined value.
+             */
+            default: alu_op = `ADD;
+        endcase
+    end: alu_op_sel
+
+    logic [1:0] mem_size;
+    logic load_signed;
+    always_comb begin: mem_control
+        is_load = 1'b0;
+        is_store = 1'b0;
+        mem_size = 2'b10;
+        load_signed = 1'b0;
+        case (decoded_instruction)
+            `REF_INSTR_CODE(LB):  begin is_load = 1'b1; mem_size = 2'b00; load_signed = 1'b1; end
+            `REF_INSTR_CODE(LBU): begin is_load = 1'b1; mem_size = 2'b00; load_signed = 1'b0; end
+            `REF_INSTR_CODE(LH):  begin is_load = 1'b1; mem_size = 2'b01; load_signed = 1'b1; end
+            `REF_INSTR_CODE(LHU): begin is_load = 1'b1; mem_size = 2'b01; load_signed = 1'b0; end
+            `REF_INSTR_CODE(LW):  begin is_load = 1'b1; mem_size = 2'b10; load_signed = 1'b1; end
+            `REF_INSTR_CODE(LWU): begin is_load = 1'b1; mem_size = 2'b10; load_signed = 1'b0; end
+            `REF_INSTR_CODE(LD):  begin is_load = 1'b1; mem_size = 2'b11; load_signed = 1'b1; end
+            `REF_INSTR_CODE(SB):  begin is_store = 1'b1; mem_size = 2'b00; end
+            `REF_INSTR_CODE(SH):  begin is_store = 1'b1; mem_size = 2'b01; end
+            `REF_INSTR_CODE(SW):  begin is_store = 1'b1; mem_size = 2'b10; end
+            `REF_INSTR_CODE(SD):  begin is_store = 1'b1; mem_size = 2'b11; end
+
+            /*
+             * A extension. LR/AMO's read phase behaves exactly like
+             * LW/LD (reusing load_data's existing byte/half/word/dword
+             * formatting infrastructure with zero changes to it, per
+             * spec's requirement that a .W AMO/LR sign-extend the loaded
+             * word). SC's arm makes is_store a DYNAMIC, reservation-
+             * dependent value: when sc_success=0, is_store=0 for that SC
+             * => mem_phase_needed=0 => SC commits immediately in S_EXEC
+             * via the unmodified existing commit_now formula, with
+             * rd = sc_result = 1. No new logic needed for that path
+             * specifically -- it falls out of the existing machinery
+             * once is_store is correctly 0.
+             */
+            `REF_INSTR_CODE(LR_W): begin is_load = 1'b1; mem_size = 2'b10; load_signed = 1'b1; end
+            `REF_INSTR_CODE(LR_D): begin is_load = 1'b1; mem_size = 2'b11; load_signed = 1'b1; end
+
+            `REF_INSTR_CODE(SC_W): begin is_store = sc_success; mem_size = 2'b10; end
+            `REF_INSTR_CODE(SC_D): begin is_store = sc_success; mem_size = 2'b11; end
+
+            `REF_INSTR_CODE(AMOSWAP_W), `REF_INSTR_CODE(AMOADD_W), `REF_INSTR_CODE(AMOXOR_W), `REF_INSTR_CODE(AMOOR_W),
+            `REF_INSTR_CODE(AMOAND_W), `REF_INSTR_CODE(AMOMIN_W), `REF_INSTR_CODE(AMOMAX_W), `REF_INSTR_CODE(AMOMINU_W),
+            `REF_INSTR_CODE(AMOMAXU_W):
+                begin is_load = 1'b1; mem_size = 2'b10; load_signed = 1'b1; end
+
+            `REF_INSTR_CODE(AMOSWAP_D), `REF_INSTR_CODE(AMOADD_D), `REF_INSTR_CODE(AMOXOR_D), `REF_INSTR_CODE(AMOOR_D),
+            `REF_INSTR_CODE(AMOAND_D), `REF_INSTR_CODE(AMOMIN_D), `REF_INSTR_CODE(AMOMAX_D), `REF_INSTR_CODE(AMOMINU_D),
+            `REF_INSTR_CODE(AMOMAXU_D):
+                begin is_load = 1'b1; mem_size = 2'b11; load_signed = 1'b1; end
+
+            default: ;
+        endcase
+    end: mem_control
+
+    /*
+     * reg_write: computed by excluding the SHORT list of instructions
+     * that don't write rd, rather than enumerating the long list that
+     * does -- fewer places to accidentally miss an entry when a future
+     * milestone adds more instructions. Gated by commit_now (see its own
+     * comment above) so this only actually reaches regfile0 on the one
+     * edge each instruction is allowed to retire, not throughout the
+     * whole multi-cycle window it happens to be decoded.
+     */
+    logic reg_write_ctrl;
+    always_comb begin: reg_write_control
+        case (decoded_instruction)
+            `REF_INSTR_CODE(SB), `REF_INSTR_CODE(SH), `REF_INSTR_CODE(SW), `REF_INSTR_CODE(SD),
+            `REF_INSTR_CODE(BEQ), `REF_INSTR_CODE(BNE), `REF_INSTR_CODE(BLT),
+            `REF_INSTR_CODE(BGE), `REF_INSTR_CODE(BLTU), `REF_INSTR_CODE(BGEU),
+            `REF_INSTR_CODE(FENCE), `REF_INSTR_CODE(FENCE_I), `REF_INSTR_CODE(ECALL), `REF_INSTR_CODE(EBREAK),
+            `REF_INSTR_CODE(MRET), `REF_INSTR_CODE(SRET), `REF_INSTR_CODE(WFI), `REF_INSTR_CODE(SFENCE_VMA),
+            `REF_INSTR_CODE(INVALID):
+                reg_write_ctrl = 1'b0;
+            default:
+                reg_write_ctrl = 1'b1;
+        endcase
+    end: reg_write_control
+
+    /*
+     * Zicsr classification. mem_control/reg_write_control above need no
+     * new arms for these six codes: mem_control's default (is_load=0,
+     * is_store=0) already applies, so a CSR instruction retires in a
+     * single S_EXEC cycle like any ordinary ALU op; reg_write_control's
+     * default (reg_write_ctrl = 1'b1) already applies too, so rd gets
+     * written same as any other non-excluded instruction.
+     */
+    wire is_csrrw  = (decoded_instruction == `REF_INSTR_CODE(CSRRW));
+    wire is_csrrs  = (decoded_instruction == `REF_INSTR_CODE(CSRRS));
+    wire is_csrrc  = (decoded_instruction == `REF_INSTR_CODE(CSRRC));
+    wire is_csrrwi = (decoded_instruction == `REF_INSTR_CODE(CSRRWI));
+    wire is_csrrsi = (decoded_instruction == `REF_INSTR_CODE(CSRRSI));
+    wire is_csrrci = (decoded_instruction == `REF_INSTR_CODE(CSRRCI));
+    wire is_csr_rw = is_csrrw || is_csrrwi;
+    wire is_csr_rs = is_csrrs || is_csrrsi;
+    wire is_csr_rc = is_csrrc || is_csrrci;
+    wire is_csr    = is_csr_rw || is_csr_rs || is_csr_rc;
+
+    /*
+     * Write-suppress condition, per spec: CSRRS/CSRRC suppress the write
+     * when rs1's FIELD is x0 (read_gpr_A_sel == 0) -- a register OTHER
+     * than x0 that happens to hold value 0 must still attempt the write,
+     * so this must NOT be checked as imm_1 == 0 (the runtime value).
+     * CSRRSI/CSRRCI have no such field/value distinction -- uimm IS a
+     * literal -- so imm_1 == 0 (which is where the decoder parks the
+     * zero-extended uimm) is correct there.
+     */
+    wire csr_write_suppress = (is_csrrs || is_csrrc)   ? (read_gpr_A_sel == 0) :
+                               (is_csrrsi || is_csrrci) ? (imm_1 == 0)         :
+                                                           1'b0;
+
+    /*
+     * Forward-declared here, same reason is_load/is_store are
+     * (see the comment near the top of this file): csr_rdata is
+     * referenced below in the operand muxes, textually before csr_file0
+     * -- the instance that actually drives it -- is declared (csr_file0
+     * has to come after alu0, since its write data is alu_result).
+     */
+    logic [(`WORD_SIZE - 1):0] csr_rdata;
+
+    /*
+     * Privilege / trap classification (U/S/M privilege-mode milestone).
+     * Forward-declared, same reason csr_rdata is above: medeleg_w is
+     * driven by csr_file0, not instantiated until Execute (needs
+     * alu_result first), but trap_to_s below needs its value now, at
+     * classification time.
+     */
+    logic [(`WORD_SIZE - 1):0] medeleg_w;
+
+    wire is_mret = (decoded_instruction == `REF_INSTR_CODE(MRET));
+    wire is_sret = (decoded_instruction == `REF_INSTR_CODE(SRET));
+    /*
+     * Sv39 staged plan, Milestone 2: SFENCE.VMA already fully decodes
+     * (decoder.sv/instructions_and_masks.sv/instruction_codes.sv, since
+     * before this plan existed) and has always been on reg_write's own
+     * no-write list -- this milestone is purely about classifying it for
+     * the TVM check below, not about giving it new decode/execute
+     * behavior. It stays an ordinary retiring no-op (no TLB exists until
+     * Milestone 5) whenever it isn't trapped.
+     */
+    assign is_sfence_vma = (decoded_instruction == `REF_INSTR_CODE(SFENCE_VMA));
+
+    /*
+     * Illegal-instruction sources this milestone: a genuinely
+     * unrecognized encoding, OR a CSR access below its address-encoded
+     * minimum privilege (bits[9:8], computed from the ADDRESS,
+     * independent of whether csr_file.sv actually backs it), OR MRET
+     * below M-mode / SRET below S-mode (also illegal-instruction per
+     * spec, not a separate source), OR SRET executed in S-mode while
+     * mstatus.TSR=1 (spec: "Trap SRET" -- an S-mode SRET must trap to
+     * M-mode when TSR=1, letting M-mode emulate/intercept the return;
+     * found via a real ACT4 S-00 failure tracing an sret-from-S-mode
+     * subtest that expects exactly this trap and got a normal return
+     * instead, since TSR was until now inert storage only).
+     *
+     * Read-only-CSR-write attempts (bits[11:10]=='11', a real write
+     * genuinely attempted -- see csr_readonly_violation below) also
+     * trap as illegal-instruction, per spec ("Attempts to write a
+     * read-only CSR... raise illegal instruction exceptions"). Found
+     * 2026-08-20 via a real ACT4 U-00 failure (newly exercised once
+     * EBREAK became a real, resumable trap -- U-00's own boot sequence
+     * attempts csrrw x0, cycle(0xC00), x10, a write to a genuinely
+     * read-only CSR): traced via sail_riscv_sim --trace-instr/--trace-reg
+     * against the real ELF, diffed against this core's own RVFI
+     * retirement trace, confirming the exact first divergence is this
+     * core silently no-op'ing the write instead of trapping. Previously
+     * csr_file.sv silently ignored these writes (a Zicsr-milestone
+     * decision core_zicsr_tb.sv's own csrrwi-to-mhartid case used to
+     * depend on -- that subtest is retired now that the real trap
+     * exists; see core_csr_readonly_trap_tb.sv for its replacement).
+     *
+     * TVM (mstatus's other "trap on privileged op" bit, same "real
+     * storage, not enforced" status TSR had before its own fix) is now
+     * real too, as of the Sv39 staged plan's own Milestone 2: per spec,
+     * an S-mode SATP CSR access or SFENCE.VMA execution while
+     * mstatus.TVM=1 traps as illegal-instruction (see tvm_violation
+     * below). SFENCE.VMA itself is deliberately left LEGAL from U-mode --
+     * a fresh, targeted fetch of the real spec text (supervisor.adoc)
+     * found no normative statement requiring a U-mode trap (an earlier,
+     * stale version of this comment had assumed one); SFENCE.VMA has no
+     * architecturally observable effect beyond invalidating the executing
+     * hart's own translation caches, so there's no correctness reason to
+     * gate it by privilege absent an explicit spec mandate. TW (WFI-under-
+     * TW) remains a separate, not-yet-exercised gap -- WFI has no real
+     * stall behavior in this core to begin with (spec-legal as a no-op),
+     * so TW has no real operation to guard yet.
+     */
+    // Declared here (ahead of csr_file0's instantiation further down)
+    // purely because Icarus's single-pass elaborator wants a net's
+    // declaration textually before its first use in a continuous
+    // assignment, unlike mstatus_mpp_w/mstatus_spp_w below which are
+    // only ever used later in the file.
+    wire mstatus_tsr_w;
+    wire is_invalid_instr    = (decoded_instruction == `REF_INSTR_CODE(INVALID));
+    wire csr_priv_violation  = is_csr  && (imm_2[9:8] > 2'(current_priv));
+    // A real write is attempted by every CSR instruction except the
+    // csrr{s,c}{,i} forms with a zero source (csr_write_suppress already
+    // captures exactly that set) -- csrrw/csrrwi always attempt a write
+    // regardless of rd, per spec. bits[11:10]=='11' marks a read-only CSR.
+    wire csr_readonly_violation = is_csr && !csr_write_suppress && (imm_2[11:10] == 2'b11);
+    /*
+     * Debug-mode CSRs (dcsr/dpc/dscratch0/dscratch1, 0x7B0-0x7B3) are a
+     * genuinely separate check from csr_priv_violation above, not an
+     * extension of it: that check is a magnitude comparison against
+     * current_priv (imm_2[9:8] > current_priv), and these four addresses
+     * encode imm_2[9:8]==2'b11 -- the same encoding as an ordinary
+     * M-mode-only CSR -- so M-mode code would sail straight through
+     * csr_priv_violation untouched. Per the RISC-V Debug spec, Debug
+     * CSRs must only be accessible from Debug Mode itself, never merely
+     * M-mode, hence a dedicated in_debug_mode gate instead of a
+     * privilege-level comparison. in_debug_mode is a real register now
+     * (Milestone 4's halt/resume FSM) -- forward-declared above, its
+     * real always_ff lives in the new Debug Mode section, since it
+     * depends on csr_file0's own o_dcsr output.
+     */
+    wire is_debug_csr_addr = is_csr && (imm_2[11:2] == 10'h1EC);
+    wire debug_csr_violation = is_debug_csr_addr && !in_debug_mode;
+    /*
+     * Trigger Module CSRs (Milestone 9), same Debug-Mode-only gating
+     * class as debug_csr_violation above -- 0x7A0-0x7A4 doesn't share
+     * is_debug_csr_addr's own single-range-check luck (0x7B0-0x7B3 is a
+     * clean 4-address-aligned block; 0x7A0-0x7A4 is FIVE addresses, one
+     * past the 4-aligned block 0x7A0-0x7A3 covers). Two explicit terms:
+     * imm_2[11:2]==10'h1E8 covers tselect/tdata1/tdata2/tdata3
+     * (0x7A0-0x7A3); imm_2[11:0]==12'h7A4 covers tinfo alone.
+     * Deliberately NOT the broader imm_2[11:3]==9'h0F4 (which would
+     * also cover 0x7A0-0x7A7, incidentally gating the unimplemented
+     * 0x7A5-0x7A7 reserved addresses as illegal-instruction-outside-
+     * Debug-Mode too -- a real behavior change from today's harmless
+     * default-arm "read 0, ignore writes at any privilege" treatment
+     * those addresses get, avoided by using the tight, exact 5-address
+     * check instead.
+     */
+    wire is_trigger_csr_addr = is_csr && ((imm_2[11:2] == 10'h1E8) || (imm_2[11:0] == 12'h7A4));
+    wire trigger_csr_violation = is_trigger_csr_addr && !in_debug_mode;
+    wire mret_priv_violation = is_mret && (current_priv != PRIV_M);
+    wire sret_priv_violation = is_sret && ((current_priv == PRIV_U)
+                              || (current_priv == PRIV_S && mstatus_tsr_w));
+    /*
+     * TVM (Sv39 staged plan, Milestone 2): a bare literal 12'h180 for
+     * satp's own address, matching debug_csr_violation/
+     * trigger_csr_violation's own bare-literal style above rather than
+     * importing a csr_file.sv localparam -- this file has never imported
+     * CSR-address localparams, always re-derives the bit pattern locally.
+     * Exact same shape as sret_priv_violation's own TSR check immediately
+     * above -- itself a real, previously-shipped fix for an inert-bit-
+     * becomes-real gap of this identical kind.
+     */
+    wire is_satp_csr = is_csr && (imm_2[11:0] == 12'h180);
+    wire tvm_violation = mstatus_tvm_w && (current_priv == PRIV_S) && (is_satp_csr || is_sfence_vma);
+    /*
+     * C extension: a reserved/unassigned compressed encoding is also
+     * illegal-instruction -- c_expand_illegal is only meaningful when
+     * is_compressed (it's a pure combinational function of first_hw,
+     * computed unconditionally regardless of whether the current
+     * instruction turned out compressed at all), hence the explicit
+     * is_compressed guard here rather than trusting c_expand_illegal
+     * alone.
+     */
+    wire is_illegal_instr = is_invalid_instr || csr_priv_violation || csr_readonly_violation
+                          || debug_csr_violation || trigger_csr_violation
+                          || mret_priv_violation || sret_priv_violation || tvm_violation
+                          || (is_compressed && c_expand_illegal);
+    wire is_ecall = (decoded_instruction == `REF_INSTR_CODE(ECALL));
+    /*
+     * Zifencei: is_fence_i drives icache_flush_o below (see that port's
+     * own header comment for why the timing is provably clean). Declared
+     * here rather than next to is_illegal_instr/is_ecall's own forward
+     * reference needs -- FENCE.I isn't consumed by exc_code/trap_taken at
+     * all, so it doesn't need the same forward-declaration treatment
+     * those wires do.
+     */
+    wire is_fence_i = (decoded_instruction == `REF_INSTR_CODE(FENCE_I));
+
+    /* Exception codes, per spec's machine-cause table (synchronous only
+     * -- bit 63/Interrupt is always 0, no interrupt source exists yet).
+     * 4/6 (load/store-AMO address misaligned) are standard RISC-V causes;
+     * mem_load_misaligned/mem_store_misaligned are driven in the Memory
+     * section below, once mem_paddr exists. 1/5/7 (instruction/load/
+     * store-AMO access fault) are likewise standard causes, driven by a
+     * real wb_fetch_err_i/wb_mem_err_i response -- fetch_fault_q[cur_slot] (instruction, cause 1) and
+     * mem_load_access_fault/mem_store_access_fault (cause 5/7, also
+     * driven in the Memory section below) are this file's classification
+     * of WHICH access faulted, mirroring the misaligned pair exactly.
+     * fetch_fault_q[cur_slot] is checked first -- defensive, not strictly required
+     * (the `instruction` substitution above already makes is_illegal_instr
+     * etc. structurally false whenever it's set), but omitting its own
+     * arm would let the fault be silently swallowed as a harmless ADDI. */
+    wire [3:0] exc_code = fetch_fault_q[cur_slot]                          ? 4'd1  :
+                           (fetch_lo_fault_q[cur_slot] || fetch_hi_fault_q[cur_slot]) ? 4'd12 : // Sv39 M3: instruction page fault
+                           is_illegal_instr                      ? 4'd2  :
+                           (is_ebreak || trigger_exception_match) ? 4'd3  :
+                           (is_ecall && current_priv == PRIV_U)  ? 4'd8  :
+                           (is_ecall && current_priv == PRIV_S)  ? 4'd9  :
+                           (is_ecall && current_priv == PRIV_M)  ? 4'd11 :
+                           mem_load_misaligned                   ? 4'd4  :
+                           mem_store_misaligned                  ? 4'd6  :
+                           // Sv39 M4: mem-side PTE-content page fault --
+                           // spec's own explicit AMO rule (never a load
+                           // page fault, always store) falls out of
+                           // mem_op_needs_write's own is_lr exclusion.
+                           (mem_fault_q[cur_slot] && mem_op_needs_write)    ? 4'd15 :
+                           mem_fault_q[cur_slot]                            ? 4'd13 :
+                           // Sv39 M4: a PMP-denied/bus-errored PTE read
+                           // (mem_access_fault_q[cur_slot]) is an access fault of
+                           // the ORIGINAL type -- same causes 5/7 as the
+                           // real-target-access checks it joins here,
+                           // classified by the SAME is_load-based split
+                           // those already use (mem_op_is_load_class).
+                           (mem_load_access_fault || pmp_load_fault || (mem_access_fault_q[cur_slot] && mem_op_is_load_class))
+                                                                   ? 4'd5  :
+                           (mem_store_access_fault || pmp_store_fault || (mem_access_fault_q[cur_slot] && !mem_op_is_load_class))
+                                                                   ? 4'd7  :
+                                                                    4'd0; // don't-care, gated by trap_taken
+
+    /*
+     * !debug_progbuf_active (Milestone 7): while a Program Buffer run is
+     * in flight, NO exception may take the normal trap path -- doing so
+     * would touch pc/current_priv/mepc/mcause via the usual commit_now+
+     * trap_taken machinery, corrupting the hart's real architectural
+     * state that the debugger still believes is exactly as it was before
+     * the run started. progbuf_ebreak_done/progbuf_abort (below) are the
+     * Program Buffer's own, entirely separate handling of is_ebreak and
+     * of this exact same exception OR-list, respectively -- see that
+     * section for the full reasoning.
+     */
+    // Debug Mode entry (trigger_debug_entry/debug_ebreak_entry) winning
+    // any same-cycle tie against this exception path needs no explicit
+    // guard here -- commit_now's own S_EXEC term already excludes both
+    // (see its declaration comment), and every source in this OR-list
+    // that can fire is reached only via that same term (fetch faults and
+    // illegal/ecall are non-memory/non-divide; a misaligned or PMP-denied
+    // load/store forces mem_phase_needed to 0, routing it through the
+    // S_EXEC term too, not S_MEM's).
+    assign trap_taken = !debug_progbuf_active && commit_now && (fetch_fault_q[cur_slot]
+                                   || fetch_lo_fault_q[cur_slot] || fetch_hi_fault_q[cur_slot] || is_illegal_instr
+                                   || (is_ebreak && !ebreak_to_debug) || trigger_exception_match || is_ecall
+                                   || mem_load_misaligned || mem_store_misaligned
+                                   || mem_load_access_fault || mem_store_access_fault
+                                   || pmp_load_fault || pmp_store_fault
+                                   || mem_fault_q[cur_slot] || mem_access_fault_q[cur_slot]);
+    /* An M-mode trap never delegates, regardless of medeleg -- falls out
+     * naturally here since current_priv==M forces this wire to 0. */
+    wire trap_to_s  = trap_taken && (current_priv != PRIV_M) && medeleg_w[6'(exc_code)];
+    wire [(`WORD_SIZE - 1):0] trap_cause = {60'b0, exc_code};
+
+    /* --------------------------------------------------------------- *
+     * Program Buffer (Milestone 7 of the EBREAK/JTAG staged plan) --
+     * lets dm0 run a small, in-order, straight-line sequence of
+     * instructions (its own progbuf0-15 storage) while the hart is
+     * genuinely parked in S_DEBUG_HALTED, normally terminated by the
+     * debugger's own trailing EBREAK. No new state_t encoding: this
+     * reuses S_FETCH/S_EXEC/S_MEM/S_AMO_WRITE exactly as they already
+     * are (see the state-transition always_ff's own progbuf arms) --
+     * decode genuinely doesn't know or care where `instruction` came
+     * from, per the `instruction` mux's own top-priority override above.
+     *
+     * Deliberately NOT supported this milestone: control flow WITHIN
+     * the Program Buffer. progbuf_pc_q below is a plain sequential
+     * counter (0,1,2,...), not a real address -- a JAL/branch executed
+     * from the Program Buffer still has its own ordinary architectural
+     * effect (e.g. linking ra, or updating pc, neither of which matters
+     * while genuinely halted -- see below), but does NOT redirect which
+     * progbuf slot executes next. Real debuggers don't rely on control
+     * flow within the Program Buffer in practice (per spec, it behaves
+     * "as if placed at an implementation-defined location in memory" --
+     * the spec does not mandate real jump support), so this is a real,
+     * documented restriction, not an oversight.
+     *
+     * pc itself is deliberately NOT snapshotted/restored around a
+     * Program Buffer run (unlike dpc/current_priv/mepc/mcause, which
+     * genuinely must not move): pc is never consulted for anything
+     * except a real resume, which always sources from dpc_w, never pc
+     * (see core.sv's own pc always_ff) -- so pc drifting during progbuf
+     * execution (e.g. via a JAL's own side effect) is harmless by
+     * construction, not something this section needs to guard against.
+     */
+    assign progbuf_ebreak_done = debug_progbuf_active && commit_now && is_ebreak;
+    // No fetch_fault_q[cur_slot] term here: a Program Buffer "instruction"
+    // is never actually fetched over the bus (it's i_progbuf_data, read
+    // straight from dm0's own storage -- see this section's own header),
+    // and cur_slot doesn't toggle during a progbuf run either, so that
+    // flag just holds whatever a real fetch, before progbuf started, last
+    // left in that slot -- unrelated to the instruction actually
+    // executing. A real bug: e.g. single-stepping into an instruction-
+    // access-fault trap (which sets fetch_fault_q[cur_slot] for real)
+    // left every subsequent progbuf run aborting immediately, regardless
+    // of what it actually ran.
+    assign progbuf_abort = debug_progbuf_active && commit_now && !is_ebreak
+                          && (is_illegal_instr || is_ecall
+                              || mem_load_misaligned || mem_store_misaligned
+                              || mem_load_access_fault || mem_store_access_fault);
+
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            debug_progbuf_active <= 1'b0;
+        end else if (i_progbuf_start) begin
+            debug_progbuf_active <= 1'b1;
+        end else if (progbuf_ebreak_done || progbuf_abort) begin
+            debug_progbuf_active <= 1'b0;
+        end
+    end
+
+    /*
+     * progbuf_pc_q: which progbuf0-15 slot is "next" -- reset to 0 on
+     * i_progbuf_start (so the run always begins at slot 0, per spec),
+     * and advances by exactly one slot per progbuf instruction actually
+     * retired (commit_now, which already correctly accounts for
+     * multi-phase instructions like a store's own S_EXEC->S_MEM span --
+     * see commit_now's own definition), EXCEPT on the run's own final
+     * commit (progbuf_ebreak_done/progbuf_abort), where advancing would
+     * be meaningless -- the run is over either way.
+     */
+    logic [3:0] progbuf_pc_q;
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            progbuf_pc_q <= 4'b0;
+        end else if (i_progbuf_start) begin
+            progbuf_pc_q <= 4'b0;
+        end else if (debug_progbuf_active && commit_now
+                     && !progbuf_ebreak_done && !progbuf_abort) begin
+            progbuf_pc_q <= progbuf_pc_q + 4'b1;
+        end
+    end
+    assign o_progbuf_pc    = progbuf_pc_q;
+    assign o_progbuf_done  = progbuf_ebreak_done;
+    assign o_progbuf_abort = progbuf_abort;
+
+    /*
+     * trap_val: forward-declared (`logic`, not `wire ... =`) -- its
+     * misaligned-access arm needs mem_paddr, which doesn't exist until
+     * the Memory section further down (same "declare early, drive late"
+     * split is_load/is_store/mem_load_misaligned already use). The real
+     * assign lives right after mem_load_misaligned/mem_store_misaligned
+     * are computed.
+     *
+     * C extension note (kept from the original illegal-instruction arm):
+     * for a compressed illegal instruction, the real faulting bits are
+     * the 16-bit halfword (zero-extended), not `instruction` -- which,
+     * in that exact case, holds the inert 32'h00000013 placeholder
+     * substituted above, not anything real.
+     */
+    logic [(`WORD_SIZE - 1):0] trap_val;
+
+    /*
+     * !debug_progbuf_active (Milestone 7 review fix): mret_taken/
+     * sret_taken are the OTHER path (besides trap_taken) that writes
+     * current_priv (see that always_ff further down). Without this
+     * gate, a debugger who places a legal-at-the-halted-privilege
+     * MRET/SRET in the Program Buffer would silently and permanently
+     * change current_priv on resume -- current_priv is one of the four
+     * pieces of state (dpc/current_priv/mepc/mcause) this milestone's
+     * own design explicitly requires stay untouched by a Program Buffer
+     * run, success or abort. A PRIVILEGE-illegal MRET/SRET is unaffected
+     * by this gate (mret_priv_violation/sret_priv_violation still feed
+     * is_illegal_instr regardless of debug_progbuf_active, so it still
+     * correctly aborts via progbuf_abort's own OR-list) -- this only
+     * suppresses the real, otherwise-legal instruction's side effect.
+     */
+    wire mret_taken = !debug_progbuf_active && commit_now && is_mret && !mret_priv_violation;
+    wire sret_taken = !debug_progbuf_active && commit_now && is_sret && !sret_priv_violation;
+
+    // instr_faulted: declared far above (see that wire's own comment) --
+    // both csr_we and reg_write below need it in place of bare trap_taken.
+    wire csr_we = is_csr && commit_now && !csr_write_suppress && !instr_faulted;
+
+    /*
+     * reg_write: relocated here (from immediately after reg_write_control
+     * above) since it now depends on instr_faulted, which isn't computed
+     * until this classification section -- reg_write itself is already
+     * forward-declared near the top of the Decode section (`logic
+     * reg_write;`), so driving it later in the file is a continuation of
+     * that same established pattern, not a new one. A faulting
+     * instruction never writes rd -- its "normal" semantics (including
+     * whatever reg_write_ctrl computed) are entirely overridden by
+     * trap-entry (ordinary execution) or a Program Buffer abort.
+     */
+    assign reg_write = reg_write_ctrl && commit_now && !instr_faulted;
+
+    /*
+     * M extension: divide. DIV/DIVU/REM/REMU (and their W variants)
+     * execute via design/divider.sv, a separate multi-cycle module, not
+     * the (purely combinational) ALU -- mem_control/reg_write_control
+     * above still need no new arms for these 8 codes, same reasoning as
+     * the CSR classification above: mem_control's default (is_load=0,
+     * is_store=0) and reg_write_control's default (reg_write_ctrl=1'b1)
+     * both already do the right thing.
+     *
+     * The *W variants need their low-32-bit operands correctly sign- or
+     * zero-extended to WORD_SIZE before reaching the divider (matching
+     * DIVW/DIVUW/REMW/REMUW's spec-defined 32-bit-domain semantics) --
+     * unlike MULW, this can't just reuse the 64-bit path and truncate
+     * the RESULT afterward, since division (unlike multiplication mod
+     * 2^n) genuinely depends on the operands' actual magnitude, not just
+     * their low bits. The result side mirrors is_word_arith/
+     * alu_result_w_trunc below: truncate+resign whichever of quotient/
+     * remainder the instruction actually wants.
+     */
+    wire is_div    = (decoded_instruction == `REF_INSTR_CODE(DIV));
+    wire is_divu   = (decoded_instruction == `REF_INSTR_CODE(DIVU));
+    wire is_rem    = (decoded_instruction == `REF_INSTR_CODE(REM));
+    wire is_remu   = (decoded_instruction == `REF_INSTR_CODE(REMU));
+    wire is_divw   = (decoded_instruction == `REF_INSTR_CODE(DIVW));
+    wire is_divuw  = (decoded_instruction == `REF_INSTR_CODE(DIVUW));
+    wire is_remw   = (decoded_instruction == `REF_INSTR_CODE(REMW));
+    wire is_remuw  = (decoded_instruction == `REF_INSTR_CODE(REMUW));
+    wire is_div_family = is_div || is_divu || is_rem || is_remu
+                       || is_divw || is_divuw || is_remw || is_remuw;
+    wire is_div_w_family      = is_divw || is_divuw || is_remw || is_remuw;
+    wire is_div_signed_family = is_div || is_rem || is_divw || is_remw;
+    wire is_div_wants_quotient = is_div || is_divu || is_divw || is_divuw;
+
+    wire [(`WORD_SIZE - 1):0] div_dividend_in =
+        !is_div_w_family      ? imm_1 :
+        is_div_signed_family  ? {{32{imm_1[31]}}, imm_1[31:0]} : {32'b0, imm_1[31:0]};
+    wire [(`WORD_SIZE - 1):0] div_divisor_in =
+        !is_div_w_family      ? imm_2 :
+        is_div_signed_family  ? {{32{imm_2[31]}}, imm_2[31:0]} : {32'b0, imm_2[31:0]};
+
+    /*
+     * i_start deliberately does NOT need its own "have I already pulsed
+     * this" flag -- divider_o_busy rises (registered, one cycle after
+     * i_start) exactly in time to naturally gate this back to 0 on every
+     * subsequent cycle of the same divide, so this is a clean one-cycle
+     * pulse without extra bookkeeping here.
+     *
+     * (state == S_EXEC) is a REQUIRED third condition here, not
+     * belt-and-suspenders -- decoded_instruction (and so is_div_family)
+     * is only meaningful once a fetch has actually settled. During
+     * S_FETCH's transient window, `instruction` still reads whatever the
+     * PREVIOUS fetch's instr_line_q[cur_slot] held, indexed by the NEW pc's own
+     * pc[2] bit -- a stale, arbitrary combination that can alias to a
+     * genuine div-family encoding purely by coincidence (found exactly
+     * this way: DIVU's own encoding, still sitting in instr_line_q[cur_slot]'s low
+     * half, aliased as "the next instruction" for one cycle while its
+     * successor's real fetch was still in flight -- spuriously
+     * retriggering the divider). commit_now and the S_EXEC transition
+     * below don't need this same guard -- both are already nested inside
+     * their own `state == S_EXEC` conditions -- but i_start drives
+     * divider0 directly and unconditionally, so it has to check for
+     * itself.
+     */
+    logic divider_o_busy, divider_o_done;
+    logic [(`WORD_SIZE - 1):0] divider_o_quotient, divider_o_remainder;
+    ref_divider divider0 (
+        .i_clk(clk), .i_rst(rst),
+        // !trigger_debug_entry: unlike commit_now (which already excludes
+        // it, see that wire's own comment), i_start drives divider0
+        // directly off raw state==S_EXEC and does NOT wait for commit_now
+        // -- it has to start the divide on the FIRST S_EXEC cycle
+        // regardless of when (many cycles later) the result actually
+        // commits. Without this guard, a DIV instruction sitting at a
+        // matched execute trigger started the divider running in the
+        // background while the core sat in S_DEBUG_HALTED; a resume
+        // shortly after could commit its stale, not-yet-correct quotient.
+        .i_start(is_div_family && (state == S_EXEC) && !trigger_debug_entry && !divider_o_busy && !divider_o_done),
+        .i_dividend(div_dividend_in), .i_divisor(div_divisor_in), .i_signed(is_div_signed_family),
+        .o_busy(divider_o_busy), .o_done(divider_o_done),
+        .o_quotient(divider_o_quotient), .o_remainder(divider_o_remainder)
+    );
+
+    assign div_stall = is_div_family && !divider_o_done;
+    wire [(`WORD_SIZE - 1):0] div_result_raw = is_div_wants_quotient ? divider_o_quotient : divider_o_remainder;
+    wire [(`WORD_SIZE - 1):0] div_result = is_div_w_family
+                                            ? {{32{div_result_raw[31]}}, div_result_raw[31:0]}
+                                            : div_result_raw;
+
+    /* --------------------------------------------------------------- *
+     * Execute
+     * --------------------------------------------------------------- */
+
+    /*
+     * AUIPC needs pc+imm, but the decoder parks the U-immediate on
+     * o_imm_1 (the "A slot") for both LUI and AUIPC, with o_imm_2
+     * hardwired to 0 (OUTPUT_U_TYPE_INSTR). LUI rides that as-is: A =
+     * imm_1, B = imm_2 (0), giving imm+0. AUIPC instead needs pc as one
+     * addend and the immediate as the other, so it swaps BOTH operands:
+     * A becomes pc, and B is redirected to imm_1 to recover the
+     * immediate that A just displaced -- using the default imm_2 here
+     * (0) would silently compute pc+0 and drop the immediate entirely.
+     */
+    /*
+     * CSRRS/CSRRC redirect A to the CSR's CURRENT value -- "OR/AND a
+     * mask into/out of the CSR" reads the CSR, not rs1/uimm -- same
+     * operand-redirect idea AUIPC already uses above, just sourced from
+     * csr_rdata instead of pc. CSRRW/CSRRWI need no redirect: their new
+     * value IS rs1/uimm, which is already sitting on imm_1 by default.
+     */
+    /*
+     * A extension: amo_modify_phase takes top priority -- during
+     * S_AMO_WRITE, alu0 is computing the modify value (old op rs2), not
+     * an address, and amo_modify_operand_a/b (declared above, in the A
+     * extension classification section) already account for AMOSWAP's
+     * passthrough shape. Outside that phase, LR/SC/AMO's address is rs1
+     * alone (imm_1), so they fall through to the same default every
+     * plain load/store already uses -- no address-phase arm needed here.
+     */
+    wire [(`WORD_SIZE - 1):0] alu_operand_a = amo_modify_phase          ? amo_modify_operand_a :
+                                               (is_csr_rs || is_csr_rc)  ? csr_rdata :
+                                               is_auipc                  ? pc        :
+                                                                           imm_1;
+    /*
+     * CSRRS ORs the rs1/uimm mask (already on imm_1) into the CSR -- B =
+     * imm_1, paired with alu_op_sel's OR arm below. CSRRC ANDs with the
+     * bitwise-complement of that same mask -- B = ~imm_1, paired with
+     * AND (pre-inverting the operand here instead of adding a dedicated
+     * "AND-NOT" ALU op, same trick as AUIPC's operand redirect above).
+     * CSRRW/CSRRWI overwrite the CSR outright -- B forced to 0, paired
+     * with ADD (the same passthrough trick LUI's ADD-with-B=0 already
+     * uses) -- so alu_result ends up uniformly "the new CSR value" for
+     * all 6 variants, and csr_file0's write port needs no extra mux.
+     *
+     * is_amo_family's arm MUST sit above is_store here -- SC's is_store
+     * is DYNAMICALLY 1 when matched (see mem_control above), and without
+     * this arm operand_b would fall through to `is_store ? imm3_sext :
+     * ...`, which is WRONG: imm3_sext reinterprets
+     * o_imm_3_or_dest_addr as a signed S/B offset, but for an R-type-
+     * shaped decode (which is what OUTPUT_R_TYPE_INSTR gives every
+     * A-extension instruction) that port instead holds rd, zero-
+     * extended -- a small positive "offset" that would silently corrupt
+     * the address computation for any matched SC with a nonzero rd.
+     * LR/AMO never set is_store at all, so they'd never have hit this
+     * arm regardless, but SC's dynamic is_store makes the priority
+     * ordering genuinely load-bearing, not just tidy.
+     */
+    wire [(`WORD_SIZE - 1):0] alu_operand_b = amo_modify_phase ? amo_modify_operand_b :
+                                               is_amo_family     ? `WORD_SIZE'(0) :
+                                               is_store            ? imm3_sext :
+                                               is_auipc             ? imm_1 :
+                                               is_csr_rs             ? imm_1 :
+                                               is_csr_rc               ? ~imm_1 :
+                                               is_csr_rw                 ? `WORD_SIZE'(0) :
+                                                                            imm_2;
+
+    // alu_result's bare declaration moved to the early Sv39 forward-declare
+    // block (mem-side walk-start needs it there); this instantiation,
+    // driving it via a port connection, is unaffected by where the bare
+    // declaration lives.
+    ref_alu alu0 (
+        .i_operand_A(alu_operand_a),
+        .i_operation(alu_op),
+        .i_operand_B(alu_operand_b),
+        .o_result(alu_result)
+    );
+
+    /*
+     * A extension: amo_result_w_trunc is a SEPARATE wire from
+     * alu_result_w_trunc (Writeback section, further down) rather than a
+     * relocation of it -- deliberate, to avoid perturbing the
+     * already-working M-extension writeback path in the same change.
+     * Same formula, needed here (before Memory) rather than there (after
+     * Wishbone-master bus-driving).
+     *
+     * Needed because a .W AMO's raw 64-bit alu0 output is NOT
+     * automatically the correct sign-extension of the true 32-bit result
+     * for every op -- ADD is the counter-example: sign-extend(0x7FFFFFFF)
+     * + sign-extend(1) = 0x0000000080000000, but the CORRECT
+     * sign-extension of the true 32-bit sum (0x7FFFFFFF+1=0x80000000,
+     * i.e. INT32_MIN) is 0xFFFFFFFF80000000 -- different! (XOR/OR/AND and
+     * MIN/MAX/MINU/MAXU happen to already be correctly sign-extended when
+     * fed sign-extended operands, but applying this truncate+resign step
+     * UNIFORMLY to all 9 ops is far simpler than reasoning per-op about
+     * which ones need it.)
+     */
+    wire [(`WORD_SIZE - 1):0] amo_result_w_trunc = {{32{alu_result[31]}}, alu_result[31:0]};
+    wire [(`WORD_SIZE - 1):0] amo_new_value = is_amo_rmw_w ? amo_result_w_trunc : alu_result;
+
+    /*
+     * csr_file0: instantiated here, after alu0 rather than up with the
+     * rest of the new Zicsr wires in the Control unit section above --
+     * its write data is alu_result, which by construction (see the
+     * operand-mux/alu_op_sel comments above) is uniformly "the new CSR
+     * value" for all 6 variants, and alu_result doesn't exist until
+     * alu0 above is declared.
+     */
+    wire [(`WORD_SIZE - 1):0] mtvec_w, stvec_w, mepc_w, sepc_w;
+    wire [1:0] mstatus_mpp_w;
+    wire mstatus_spp_w;
+    /*
+     * mip_w/mie_w/mideleg_w: WORD_SIZE-wide (matching csr_file0's real
+     * architectural CSR width), but the Interrupts section below only
+     * ever reads bit 7 (MTIE/MTIP/the MTI delegation bit) off each --
+     * every other bit is genuinely unused by this milestone's logic
+     * (they exist for a real, spec-shaped mip/mie/mideleg, not padding),
+     * same "wrap the genuinely-partial-usage bits" precedent
+     * trap_vector_base already establishes below for mtvec/stvec's own
+     * MODE field.
+     */
+    /* verilator lint_off UNUSEDSIGNAL */
+    wire [(`WORD_SIZE - 1):0] mip_w, mie_w, mideleg_w;
+    /* verilator lint_on UNUSEDSIGNAL */
+    wire mstatus_mie_w, mstatus_sie_w;
+    /*
+     * dcsr_w: only bits [15]/[13]/[12]/[2] (ebreakm/s/u, step) are
+     * consumed this milestone -- the rest exist for a real, spec-shaped
+     * dcsr, not padding, same "wrap the genuinely-partial-usage bits"
+     * precedent mip_w/mie_w/mideleg_w already establish above. dpc_w, by
+     * contrast, is fully consumed (the whole value feeds pc's own resume
+     * arm), so it needs no such wrapper.
+     */
+    /* verilator lint_off UNUSEDSIGNAL */
+    wire [(`WORD_SIZE - 1):0] dcsr_w;
+    /* verilator lint_on UNUSEDSIGNAL */
+    wire [(`WORD_SIZE - 1):0] dpc_w;
+    /*
+     * tdata1_0_w/tdata1_1_w: same genuinely-partial-usage shape as
+     * dcsr_w just above -- only bits [6]/[4]/[3] (m/s/u priv enables),
+     * [2] (execute), and [15:12] (action) are consumed this milestone
+     * (execute-address-match only), the rest exist for a real,
+     * spec-shaped mcontrol6 register. tdata2_0_w/tdata2_1_w, by
+     * contrast, are fully consumed (the whole value feeds the pc
+     * comparator), so they need no such wrapper.
+     */
+    /* verilator lint_off UNUSEDSIGNAL */
+    wire [(`WORD_SIZE - 1):0] tdata1_0_w, tdata1_1_w;
+    /* verilator lint_on UNUSEDSIGNAL */
+    wire [(`WORD_SIZE - 1):0] tdata2_0_w, tdata2_1_w;
+`ifdef RISCV_FORMAL
+    wire [(`WORD_SIZE - 1):0] mcause_w, scause_w;
+    wire [(`WORD_SIZE - 1):0] mepc_next_w, sepc_next_w, mcause_next_w, scause_next_w;
+`endif
+
+    /*
+     * Access Register CSR transfer (Milestone 5) is muxed ahead of
+     * csr_file0's existing, generic i_csr_addr/i_csr_we/i_csr_wdata
+     * inputs -- no new ports on csr_file.sv itself -- gated on
+     * dm_access_active for the same reason regfile0's mux above is (see
+     * that wire's own comment): a decode-driven csr_we CAN assert while
+     * in_debug_mode is 1 now, during a Milestone 7 Program Buffer run
+     * (e.g. Test D's own csrr x6,dpc), so in_debug_mode alone is no
+     * longer the right gate -- dm_access_active excludes exactly that
+     * window, restoring the "two sources are temporally disjoint"
+     * property this comment originally relied on. o_csr_rdata is
+     * combinational and unconditional -- csr_rdata already reflects
+     * whichever address is currently muxed in, for both consumers.
+     */
+    ref_csr_file csr_file0 (
+        .i_clk(clk),
+        .i_rst(rst),
+        .i_csr_addr(dm_access_active ? i_dm_csr_addr : imm_2[(`CSR_ADDR_SIZE - 1):0]),
+        .o_csr_rdata(csr_rdata),
+        .i_csr_we(dm_access_active ? i_dm_csr_we : csr_we),
+        .i_csr_wdata(dm_access_active ? i_dm_csr_wdata : alu_result),
+        // !instr_faulted: a trapped instruction (trap_taken), an aborted
+        // Program Buffer instruction (progbuf_abort), or an execute-
+        // trigger debug entry (trigger_debug_entry) never architecturally
+        // retired, so it must not bump minstret -- matches the same gate
+        // reg_write/csr_we already use. debug_ebreak_entry needs no
+        // explicit term here: commit_now is already 0 on that same edge
+        // (see its own declaration comment).
+        //
+        // !(in_debug_mode && dcsr_w[10]): dcsr.stopcount (bit 10) -- per
+        // spec, when set, instructions retired while in Debug Mode
+        // (halted-run single-steps, Program Buffer instructions) must not
+        // count. Real, generic storage already exists for this bit
+        // (csr_file.sv's dcsr_q persists every non-hardware-owned bit
+        // across a debug entry, unlike cause[8:6]/prv[1:0]); it was
+        // simply never consulted anywhere before now. Defaults to 0 on
+        // reset, so out-of-the-box behavior is unchanged: count.
+        .i_instr_retired(commit_now && !instr_faulted && !(in_debug_mode && dcsr_w[10])),
+
+        .i_current_priv(current_priv),
+        .i_mtip(i_mtip),
+        .i_meip(i_meip),
+        .i_seip(i_seip),
+        .i_trap_taken(trap_taken || interrupt_taken),
+        .i_trap_cause(trap_taken ? trap_cause : {1'b1, 59'b0, int_cause}),
+        .i_trap_val(trap_taken ? trap_val : `WORD_SIZE'(0)),
+        .i_trap_pc(pc),
+        .i_trap_to_s(trap_taken ? trap_to_s : interrupt_to_s),
+        .i_mret_taken(mret_taken),
+        .i_sret_taken(sret_taken),
+
+        .i_debug_entry(debug_ebreak_entry || debug_halt_req_entry || trigger_debug_entry),
+        .i_debug_cause(debug_cause_code),
+
+        .o_mtvec(mtvec_w),
+        .o_stvec(stvec_w),
+        .o_mepc(mepc_w),
+        .o_sepc(sepc_w),
+        .o_medeleg(medeleg_w),
+        .o_mstatus_mpp(mstatus_mpp_w),
+        .o_mstatus_spp(mstatus_spp_w),
+        .o_mstatus_tsr(mstatus_tsr_w),
+
+        /*
+         * Milestone 5 (csr_file.sv CSR-side CLINT/interrupt plumbing) added
+         * these 5 outputs; Milestone 6 (this section) is their real
+         * consumer -- see the Interrupts section immediately following
+         * this instantiation, which drives mti_pending/mti_to_s/
+         * mti_enabled/interrupt_taken/interrupt_to_s off exactly these
+         * five wires.
+         */
+        .o_mip(mip_w),
+        .o_mie(mie_w),
+        .o_mideleg(mideleg_w),
+        .o_mstatus_mie(mstatus_mie_w),
+        .o_mstatus_sie(mstatus_sie_w),
+
+        /*
+         * Milestone 3 (Debug CSRs) added dcsr/dpc storage in csr_file.sv;
+         * Milestone 4 (this section) is their real consumer --
+         * ebreak_to_debug reads dcsr_w's ebreakm/s/u/step bits, and the
+         * pc always_ff's resume arm reads dpc_w -- see the new Debug
+         * Mode section below.
+         */
+        .o_dcsr(dcsr_w), .o_dpc(dpc_w),
+        .o_tdata1_0(tdata1_0_w), .o_tdata1_1(tdata1_1_w),
+        .o_tdata2_0(tdata2_0_w), .o_tdata2_1(tdata2_1_w),
+
+        /*
+         * Milestone 1 of the PMP+PLIC staged plan (csr_file.sv side)
+         * added these 6 outputs; the PMP-enforcement milestone is their
+         * real consumer -- same deferred-consumer precedent o_mip/etc.
+         * above already established for the CLINT/interrupt split.
+         */
+        .o_pmpcfg0(pmpcfg0_w),
+        .o_pmpaddr0(pmpaddr0_w), .o_pmpaddr1(pmpaddr1_w),
+        .o_pmpaddr2(pmpaddr2_w), .o_pmpaddr3(pmpaddr3_w),
+        .o_mstatus_mprv(mstatus_mprv_w),
+
+        /*
+         * Milestone 1 of the Sv39 staged plan (csr_file.sv side) added
+         * these 4 outputs; later Sv39 milestones are their real consumer
+         * -- same deferred-consumer precedent the PMP group immediately
+         * above already established.
+         */
+        .o_satp(satp_w),
+        .o_mstatus_sum(mstatus_sum_w), .o_mstatus_mxr(mstatus_mxr_w), .o_mstatus_tvm(mstatus_tvm_w)
+`ifdef RISCV_FORMAL
+        ,
+        .o_mcause(mcause_w),
+        .o_scause(scause_w),
+        .o_mepc_next(mepc_next_w),
+        .o_sepc_next(sepc_next_w),
+        .o_mcause_next(mcause_next_w),
+        .o_scause_next(scause_next_w)
+`endif
+    );
+
+    assign o_dm_csr_rdata = csr_rdata;
+
+    /* --------------------------------------------------------------- *
+     * Interrupts (CLINT machine-timer, Milestone 6; generalized to
+     * MEI/SEI by the PMP+PLIC plan's own Milestone 3)
+     * --------------------------------------------------------------- */
+
+    // MTIE & MTIP (bit 7). mti_to_s reads mideleg_w[7] -- real, unmasked,
+    // software-writable storage, not hardwired 0; reads 0 in practice
+    // only because nothing this milestone writes it.
+    wire mti_pending = mie_w[7] & mip_w[7];
+    wire mti_to_s    = mideleg_w[7];
+    wire mti_enabled = mti_to_s
+        ? ((current_priv == PRIV_U) ? 1'b1 : (current_priv == PRIV_S) ? mstatus_sie_w : 1'b0)
+        : ((current_priv != PRIV_M) ? 1'b1 : mstatus_mie_w);
+
+    // MEIE & MEIP (bit 11), SEIE & SEIP (bit 9) -- same shape as MTI
+    // above, own mideleg bit each. mei_to_s is expected to stay 0 in
+    // practice (a real PLIC routes S-mode external interrupts via its
+    // own independent SEI hart context, not via mideleg-delegated MEI --
+    // see the PMP+PLIC plan's own cross-cutting decision #6), but kept
+    // generic for consistency with every other delegatable cause this
+    // core already implements this way. sei_to_s, by contrast, IS
+    // expected to be genuinely exercised once a real PLIC exists
+    // (mideleg[9]=1 lets Linux take its own device interrupts directly
+    // without trapping through M-mode first).
+    wire mei_pending = mie_w[11] & mip_w[11];
+    wire mei_to_s    = mideleg_w[11];
+    wire mei_enabled = mei_to_s
+        ? ((current_priv == PRIV_U) ? 1'b1 : (current_priv == PRIV_S) ? mstatus_sie_w : 1'b0)
+        : ((current_priv != PRIV_M) ? 1'b1 : mstatus_mie_w);
+
+    wire sei_pending = mie_w[9] & mip_w[9];
+    wire sei_to_s    = mideleg_w[9];
+    wire sei_enabled = sei_to_s
+        ? ((current_priv == PRIV_U) ? 1'b1 : (current_priv == PRIV_S) ? mstatus_sie_w : 1'b0)
+        : ((current_priv != PRIV_M) ? 1'b1 : mstatus_mie_w);
+
+    // Real relative priority order for the subset this core implements:
+    // MEI > MTI > SEI (the full spec order is MEI>MSI>MTI>SEI>SSI>STI>
+    // LCOFI; MSI/SSI/STI/LCOFI are all deliberately out of scope -- see
+    // the PMP+PLIC plan's own cross-cutting decision #7).
+    wire int_pending_and_enabled = (mei_pending && mei_enabled)
+                                 || (mti_pending && mti_enabled)
+                                 || (sei_pending && sei_enabled);
+    assign int_cause = (mei_pending && mei_enabled) ? 4'd11
+                      : (mti_pending && mti_enabled) ? 4'd7
+                      : (sei_pending && sei_enabled) ? 4'd9
+                                                      : 4'd0;
+    wire int_to_s        = (mei_pending && mei_enabled) ? mei_to_s
+                          : (mti_pending && mti_enabled) ? mti_to_s
+                          : (sei_pending && sei_enabled) ? sei_to_s
+                                                          : 1'b0;
+
+    logic commit_now_q;
+    always_ff @(posedge clk) begin
+        if (rst) commit_now_q <= 1'b0;
+        else     commit_now_q <= commit_now;
+    end
+
+    // interrupt_taken/interrupt_to_s: forward-declared above -- csr_file0's
+    // own i_trap_taken/i_trap_to_s need them before this section (which
+    // itself needs csr_file0's own outputs) can exist.
+    //
+    // Milestone 4's halt/resume FSM reintroduces the guard the removed
+    // `!halted` used to provide, under new names and with real semantics:
+    // !in_debug_mode covers every steady-state cycle spent parked in
+    // S_DEBUG_HALTED (nothing can retire there, so commit_now_q can only
+    // otherwise pulse on the single entry-transition edge, before
+    // in_debug_mode has been set yet -- exactly the window
+    // !(i_debug_halt_req || stepping_q) covers instead, resolving the
+    // tie in favor of debug entry so a pending interrupt can never sneak
+    // in ahead of a requested halt or an armed single-step). See the new
+    // Debug Mode section below for debug_halt_req_entry/stepping_q's own
+    // real definitions -- both forward-declared, same reason as
+    // in_debug_mode itself.
+    assign interrupt_taken = commit_now_q && int_pending_and_enabled
+                           && !in_debug_mode && !(i_debug_halt_req || stepping_q);
+    assign interrupt_to_s  = interrupt_taken && int_to_s;
+
+    // fetch_redirect_q/fetch_from_trap_vector: REMOVED (the interrupt-entry
+    // fetch redirect fix). Forcing the raw trap_vector onto the fetch bus
+    // for as long as this flop stayed set was itself the bug: fetch_paddr
+    // is only a plain pc passthrough in Bare mode, so under Sv39 this drove
+    // a raw, UNTRANSLATED physical address, fetching the handler's first
+    // instruction from physical trap_vector instead of the translated one.
+    // fetch_redirect_cycle (see its own declaration comment) replaces this
+    // with the opposite strategy: do nothing fetch-side in the redirect
+    // cycle itself, and let the ordinary S_FETCH path (pc already redirected
+    // to trap_vector, correctly translated/PMP-checked under the new
+    // privilege) pick the handler's fetch up the very next cycle instead.
+
+    /* --------------------------------------------------------------- *
+     * Debug Mode: halt/resume/step (Milestone 4 of the EBREAK/JTAG
+     * staged plan)
+     * --------------------------------------------------------------- */
+
+    /*
+     * ebreak_to_debug: per the RISC-V Debug spec, EBREAK enters Debug
+     * Mode instead of taking its ordinary synchronous trap (cause 3,
+     * Breakpoint) exactly when the dcsr ebreak-bit for the CURRENT
+     * privilege level is set. Bit positions -- ebreakm=15, ebreaks=13,
+     * ebreaku=12 -- match design/csr_file_tb.sv's own independently-
+     * transcribed DCSR_EBREAKM_BIT/etc. constants and the real RISC-V
+     * Debug spec's dcsr layout.
+     */
+    assign ebreak_to_debug = (current_priv == PRIV_M) ? dcsr_w[15]
+                            : (current_priv == PRIV_S) ? dcsr_w[13]
+                                                        : dcsr_w[12];
+
+    /*
+     * debug_ebreak_entry: same-cycle, commit_now-timed -- mirrors
+     * trap_taken's own timing exactly (EBREAK retires in S_EXEC like any
+     * other non-memory instruction; entering Debug Mode is simply a
+     * different destination for that same commit edge). trap_taken's own
+     * is_ebreak term (see its assign above) is narrowed by
+     * !ebreak_to_debug specifically so the two are mutually exclusive by
+     * construction -- EBREAK either traps normally or enters Debug Mode,
+     * never both.
+     */
+    // (state == S_EXEC), not commit_now -- commit_now itself now excludes
+    // debug_ebreak_entry (see its own declaration comment), and is_ebreak
+    // implies !mem_phase_needed/!div_stall unconditionally (SYSTEM opcode,
+    // never a memory or divide instruction), so state==S_EXEC is exactly
+    // commit_now's old S_EXEC term with those two always-true conjuncts
+    // dropped -- not a behavior change, just breaking what would
+    // otherwise be a circular definition.
+    assign debug_ebreak_entry = (state == S_EXEC) && is_ebreak && ebreak_to_debug && !in_debug_mode;
+
+    /*
+     * stepping_q: armed on resume if dcsr.step (bit 2) was set at that
+     * exact instant; cleared the same cycle it's consumed by
+     * debug_halt_req_entry below, so it's high for exactly the one
+     * instruction between resume and the next retirement boundary -- a
+     * true single "step," not "step until told otherwise."
+     */
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            stepping_q <= 1'b0;
+        end else if (state == S_DEBUG_HALTED && i_debug_resume_req) begin
+            stepping_q <= dcsr_w[2];
+        end else if (debug_halt_req_entry) begin
+            stepping_q <= 1'b0;
+        end
+    end
+
+    /*
+     * debug_halt_req_entry: deferred, commit_now_q-timed -- structurally
+     * identical to interrupt_taken's own one-cycle-deferred model and for
+     * the same reason (must only take effect at a real retirement
+     * boundary, never mid-instruction).
+     */
+    assign debug_halt_req_entry = !in_debug_mode && commit_now_q && (i_debug_halt_req || stepping_q);
+
+    /*
+     * debug_cause_code: per spec (dcsr.cause encoding), 1=ebreak,
+     * 2=triggermodule (Milestone 9), 3=haltreq, 4=step. resethaltreq(5)
+     * still doesn't apply (no reset-halt-request port). trigger_debug_
+     * entry is checked right after debug_ebreak_entry -- both are
+     * commit_now-timed (same-cycle) causes, unlike stepping_q/haltreq's
+     * own commit_now_q-deferred tier. An EBREAK that also happens to sit
+     * at a configured trigger address reports cause=ebreak(1), not
+     * cause=triggermodule(2) -- an arbitrary, documented tie-break, not
+     * a spec requirement (the spec doesn't mandate an order when
+     * multiple causes coincide the same cycle). stepping_q is checked
+     * before i_debug_halt_req so a single-step boundary reports
+     * cause=step even if an external halt request happens to be held at
+     * the same instant.
+     */
+    assign debug_cause_code = debug_ebreak_entry  ? 3'd1
+                             : trigger_debug_entry ? 3'd2
+                             : stepping_q          ? 3'd4
+                                                    : 3'd3;
+
+    /*
+     * in_debug_mode: real storage now -- Milestone 3 left this hardwired
+     * 0 as a forward reference. Set on either debug-entry path; cleared
+     * only from S_DEBUG_HALTED on a real resume request. current_priv is
+     * deliberately NOT restored here (see the pc always_ff's own resume
+     * arm below) -- it already holds the correct value throughout the
+     * halted period, since nothing else ever changes it while
+     * in_debug_mode is set, so there is nothing to restore. A debugger
+     * writing dcsr.prv while halted is consequently write-then-ignored
+     * on resume in this milestone -- a known, deliberate simplification,
+     * not an oversight.
+     */
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            in_debug_mode <= 1'b0;
+        end else if (debug_ebreak_entry || debug_halt_req_entry || trigger_debug_entry) begin
+            in_debug_mode <= 1'b1;
+        end else if (state == S_DEBUG_HALTED && i_debug_resume_req) begin
+            in_debug_mode <= 1'b0;
+        end
+    end
+
+    assign o_debug_mode = in_debug_mode;
+
+    /* --------------------------------------------------------------- *
+     * Trigger Module (Milestone 9 groundwork) -- 2 fixed mcontrol6
+     * comparator slots, execute-address-match only.
+     * --------------------------------------------------------------- */
+
+    wire trig0_priv_en = (current_priv == PRIV_M) ? tdata1_0_w[6]
+                        : (current_priv == PRIV_S) ? tdata1_0_w[4]
+                                                    : tdata1_0_w[3];
+    wire trig1_priv_en = (current_priv == PRIV_M) ? tdata1_1_w[6]
+                        : (current_priv == PRIV_S) ? tdata1_1_w[4]
+                                                    : tdata1_1_w[3];
+
+    /*
+     * pc is stable for an instruction's whole multi-cycle lifetime (only
+     * moves on commit_now's own edge, see pc's own always_ff below) --
+     * same raw, unconditionally-computed treatment csr_priv_violation/
+     * debug_csr_violation already get, gated externally only at each
+     * consumption site below (trap_taken for the exception path,
+     * trigger_debug_entry's own commit_now for the debug-entry path).
+     */
+    wire trig0_match = tdata1_0_w[2] && trig0_priv_en && (pc == tdata2_0_w);
+    wire trig1_match = tdata1_1_w[2] && trig1_priv_en && (pc == tdata2_1_w);
+
+    wire trig0_debug_fire = trig0_match && (tdata1_0_w[15:12] == 4'd1);
+    wire trig1_debug_fire = trig1_match && (tdata1_1_w[15:12] == 4'd1);
+    wire trig0_exc_fire   = trig0_match && (tdata1_0_w[15:12] == 4'd0);
+    wire trig1_exc_fire   = trig1_match && (tdata1_1_w[15:12] == 4'd0);
+
+    /*
+     * trigger_debug_entry: deliberately state==S_EXEC-gated, NOT
+     * commit_now-gated like debug_ebreak_entry above -- a real
+     * correctness requirement, not a style choice, found while designing
+     * this module's own verification plan. commit_now for a load/store/
+     * AMO only ever becomes true once state==S_MEM (wb_mem_ok having
+     * already arrived), by which point that instruction's own bus
+     * transaction has ALREADY completed -- for a STORE specifically,
+     * the write would already be irreversibly landed at the slave
+     * before a commit_now-gated check could ever intercept it, silently
+     * violating the spec's own "for execute, timing must be 0 (fires
+     * BEFORE the instruction takes effect)" requirement this module's
+     * tdata1_execute wiring already commits to. state==S_EXEC, by
+     * contrast, is reached by EVERY instruction (mem_phase_needed's own
+     * S_EXEC->S_MEM decision hasn't happened yet), so checking here and
+     * redirecting straight to S_DEBUG_HALTED -- ahead of, not after,
+     * mem_phase_needed's own ternary in the S_EXEC state-transition arm
+     * below -- means a matched load/store never reaches S_MEM at all,
+     * genuinely preventing its bus transaction (read OR write) from
+     * ever starting, not just suppressing its eventual register/CSR
+     * writeback. !in_debug_mode is the SAME term that already makes
+     * debug_ebreak_entry structurally impossible throughout a Program
+     * Buffer run (in_debug_mode is 1 the entire time) -- no separate
+     * debug_progbuf_active gate needed. See instr_faulted's own updated
+     * comment (this file, near reservation_valid_q) for why reg_write/
+     * csr_we ALSO need trigger_debug_entry added to their shared
+     * suppression gate: for a non-memory instruction (mem_phase_needed
+     * already 0), commit_now and this signal become true on the exact
+     * same S_EXEC edge, so reg_write's own commit_now-gated write would
+     * otherwise still fire that same cycle.
+     */
+    assign trigger_debug_entry = (state == S_EXEC) && !in_debug_mode && (trig0_debug_fire || trig1_debug_fire);
+
+    /*
+     * trigger_exception_match deliberately has NO commit_now of its
+     * own -- trap_taken's own external commit_now (and
+     * !debug_progbuf_active) gate already covers it, exactly mirroring
+     * is_ebreak's own raw-wire treatment in trap_taken's
+     * "(is_ebreak && !ebreak_to_debug)" arm, which has no commit_now
+     * embedded either. The "!(trig0_debug_fire||trig1_debug_fire)"
+     * guard is the direct generalization of that same arm's
+     * "&& !ebreak_to_debug" term -- Debug Mode entry wins any same-cycle
+     * tie against the exception path (a debugger misconfiguring two
+     * slots to the identical address with different actions is the only
+     * way both could coincide; preferring the debug-mode outcome is the
+     * safer default, same reasoning as the action field's own WARL
+     * clamp-to-1 in csr_file.sv).
+     *
+     * Given the same state==S_EXEC early-intercept treatment as
+     * trigger_debug_entry above, but through mem_phase_needed's own
+     * NOT-list (see that wire's declaration) rather than a dedicated
+     * state-transition arm -- restructuring the S_EXEC->S_MEM decision
+     * for just this one exception source would have meant duplicating
+     * every OTHER source's shared trap_taken/commit_now machinery instead
+     * of reusing it. Consequence of getting this right: a STORE or an
+     * AMO's own write phase matched by an action=0 trigger never starts
+     * its bus transaction at all -- mem_phase_needed reads 0 that S_EXEC
+     * cycle, so state falls through to commit_now/trap_taken directly,
+     * the same path a misaligned or PMP-denied access already takes.
+     */
+    assign trigger_exception_match = !(trig0_debug_fire || trig1_debug_fire) && (trig0_exc_fire || trig1_exc_fire);
+
+    /*
+     * Branch comparator: NOT routed through alu0. alu_ops.sv has no
+     * equality/inequality op, and each branch type needs a different
+     * comparison (equality, signed, unsigned) -- easier as its own small
+     * block than trying to force it through a shared single-op ALU
+     * interface. default: 1'b0 doubles as "this instruction isn't a
+     * branch at all", so the next-PC mux below needs no separate
+     * is_branch gate.
+     */
+    logic take_branch;
+    always_comb begin: branch_comparator
+        case (decoded_instruction)
+            `REF_INSTR_CODE(BEQ):  take_branch = (imm_1 == imm_2);
+            `REF_INSTR_CODE(BNE):  take_branch = (imm_1 != imm_2);
+            `REF_INSTR_CODE(BLT):  take_branch = ($signed(imm_1) <  $signed(imm_2));
+            `REF_INSTR_CODE(BGE):  take_branch = ($signed(imm_1) >= $signed(imm_2));
+            `REF_INSTR_CODE(BLTU): take_branch = (imm_1 < imm_2);
+            `REF_INSTR_CODE(BGEU): take_branch = (imm_1 >= imm_2);
+            default:           take_branch = 1'b0;
+        endcase
+    end: branch_comparator
+
+    /* --------------------------------------------------------------- *
+     * Memory
+     * --------------------------------------------------------------- */
+
+    /*
+     * alu_result does triple duty here: it's "the ALU's answer" for
+     * every non-memory instruction, "the memory address" for
+     * loads/stores (base register + offset, computed by the same adder
+     * via the operand muxing above), AND the source of the bus's
+     * dword-aligned address plus the byte-lane shift amount below --
+     * deliberate reuse of one datapath, not a coincidence.
+     *
+     * The bus (see wb4_sram.sv/uart_tx.sv) is word-granular: address
+     * bits [2:0] aren't decoded by either slave, and sub-dword access
+     * width instead comes from which of the 8 sel_o lanes are asserted.
+     * So a byte/half/word access needs its size turned into a lane mask,
+     * shifted into position by the address's low 3 bits -- the same
+     * mask-and-shift technique wb4_sram.sv uses for its own byte-enable
+     * writes.
+     */
+    wire [7:0] mem_size_mask = (mem_size == 2'b00) ? 8'b0000_0001 :
+                                (mem_size == 2'b01) ? 8'b0000_0011 :
+                                (mem_size == 2'b10) ? 8'b0000_1111 :
+                                                       8'b1111_1111;
+    /*
+     * mem_paddr: named indirection point for a future Sv39 MMU stage,
+     * mirroring fetch_paddr above. All FOUR downstream consumers of
+     * "alu_result as an address" route through this one wire, not just
+     * mem_addr, so there's exactly one RHS to touch when Sv39 lands and
+     * no risk of missing a spot. Deliberately WORD_SIZE-wide even though
+     * only bits[31:0] are consumed today, same reasoning as fetch_paddr
+     * above.
+     */
+    /*
+     * Sv39 (Milestone 4): the seam this wire's own header always
+     * promised. Gated on mem_resolved_q[cur_slot] too, NOT just mem_translate_active
+     * -- load-bearing, not defensive: mem_misaligned/mem_phase_needed
+     * (both below) consult mem_paddr's own LOW bits at S_EXEC time,
+     * BEFORE any walk for this instruction has even started. Since a
+     * VA's low 12 bits (page offset) are always identity-mapped, even
+     * under translation, falling back to alu_result (the VA) whenever
+     * !mem_resolved_q[cur_slot] gives EXACTLY the right low-bits answer for those
+     * checks without needing mem_resolved_paddr_q[cur_slot] to exist yet -- unlike
+     * fetch_paddr's own equivalent mux, which has no analogous pre-
+     * resolution consumer with this same hazard (pmp_fetchlo_fault's own
+     * stale-value read during the redirect cycle is masked by the state-
+     * transition always_ff's own top-priority redirect check instead;
+     * mem_phase_needed has no such masking, so the mux itself must be
+     * the one place this gets resolved correctly).
+     */
+    /* verilator lint_off UNUSEDSIGNAL */
+    wire [(`WORD_SIZE - 1):0] mem_paddr = (mem_translate_active && mem_resolved_q[cur_slot]) ? mem_resolved_paddr_q[cur_slot] : alu_result;
+    /* verilator lint_on UNUSEDSIGNAL */
+    wire [7:0] mem_sel = mem_size_mask << mem_paddr[2:0];
+
+    /* Dword-aligned memory address -- same precompute-outside-always_comb reason as fetch_addr above. */
+    wire [31:0] mem_addr = {mem_paddr[31:3], 3'b0};
+
+    /*
+     * Misaligned data-access detection. RV64 requires natural alignment:
+     * a byte access is always aligned; halfword/word/dword need address
+     * bits [0], [1:0], [2:0] respectively to be zero. Same case-ladder
+     * idiom as mem_size_mask above, keyed off the same mem_size encoding.
+     * Closes the trap half of a real gap this file's header comment
+     * documents: mem_sel's shift below has no carry into a second bus
+     * word, so an overflowing access used to silently truncate instead
+     * of either correctly handling it or trapping -- the spec requires
+     * one or the other.
+     */
+    wire mem_misaligned = (mem_size == 2'b01) ? (mem_paddr[0]   != 1'b0)   :
+                           (mem_size == 2'b10) ? (mem_paddr[1:0] != 2'b00) :
+                           (mem_size == 2'b11) ? (mem_paddr[2:0] != 3'b000) :
+                                                  1'b0; // byte access: always aligned
+    /*
+     * mem_load_misaligned/mem_store_misaligned classify WHICH cause code
+     * applies (4 vs 6). LR/AMO's read phase sets is_load=1 (mem_control
+     * above) but is classified as "Store/AMO" per the spec's cause
+     * table, hence the explicit is_lr/is_amo_rmw exclusion from the load
+     * side and inclusion on the store side. Checking once here, gating
+     * mem_phase_needed before S_MEM is ever entered, covers both an
+     * AMO's read and write phase with one check -- it does NOT need to
+     * (and must NOT) stay live once past that point: mem_paddr(=
+     * alu_result) gets REPURPOSED for the AMO modify value the instant
+     * S_AMO_WRITE begins (same hazard the amo_addr_q[cur_slot]/amo_sel_q[cur_slot] capture
+     * registers below already exist to avoid), and is_amo_rmw stays high
+     * throughout both phases -- so without the `state == S_EXEC` guard,
+     * this wire would spuriously reread the modify value's low bits AS
+     * an address every cycle of S_AMO_WRITE too, and could fire a bogus
+     * trap right at the AMO's real commit. Gating to S_EXEC matches
+     * exactly the one place mem_phase_needed/trap_taken actually consult
+     * these signals.
+     *
+     * mem_store_misaligned is keyed off is_sc (the STATIC "this
+     * instruction is SC" signal), not is_store (which for SC is
+     * DYNAMICALLY gated on sc_success in mem_control) -- per spec,
+     * address misalignment is a property of the address alone,
+     * independent of whether SC's reservation matches, so a misaligned
+     * SC must trap even on a mismatch.
+     */
+    assign mem_load_misaligned  = (state == S_EXEC) && mem_misaligned && is_load && !is_lr && !is_amo_rmw;
+    assign mem_store_misaligned = (state == S_EXEC) && mem_misaligned && (is_store || is_sc || is_lr || is_amo_rmw);
+
+    /*
+     * PMP mem-side check (PMP+PLIC staged plan, Milestone 2). Reuses the
+     * exact same pmp0_l/pmp0_a/pmp0_x/pmp0_wperm/pmp0_rperm/
+     * pmp0_region_base/pmp0_napot_mask/pmp0_napot_base region-field
+     * wires (and their region 1-3 siblings) the fetch-side check above
+     * already declared -- plain module-scope wires, one real region
+     * config regardless of which access stream is checking it.
+     *
+     * mem_end_paddr mirrors fetch_end_paddr's own byte-address-span
+     * convention exactly, sized from the REAL access width (mem_size)
+     * rather than fetch's own conservative "whole 8-byte dword"
+     * simplification -- unlike fetch, decode has already run by the
+     * time this is checked (S_EXEC), so the real access size is known.
+     */
+    wire [(`WORD_SIZE - 1):0] mem_end_paddr = mem_paddr + (`WORD_SIZE'(1) << mem_size) - `WORD_SIZE'(1);
+
+    /*
+     * mem_effective_priv (norm:pmp_check_priv_modes): PMP checks apply
+     * to DATA accesses in M-mode when mstatus.MPRV is set and
+     * mstatus.MPP holds S or U -- the real mechanism OpenSBI/a trap
+     * handler relies on to access S/U memory as if running at that
+     * lower privilege. Consumed ONLY here -- mstatus_mprv_w/
+     * mstatus_mpp_w have no other reader in this file (mstatus_mpp_w
+     * already exists, reused from MRET's own current_priv restoration
+     * arm; mstatus_mprv_w is Milestone 1's own new export). Instruction
+     * fetch never uses this (see the fetch-side check above) -- MPRV
+     * never affects fetch, per the same citation. (Bare declaration
+     * moved to the early Sv39 forward-declare block, alongside
+     * mem_translate_active/ptw_pmp_fault -- this assign is unchanged.)
+     */
+    assign mem_effective_priv = priv_t'((mstatus_mprv_w && current_priv == PRIV_M)
+                               ? mstatus_mpp_w : current_priv);
+
+    wire pmp0_mem_match = (pmp0_a == 2'b00) ? 1'b0
+        : (pmp0_a == 2'b10) ? (mem_paddr[55:2] == pmpaddr0_w[53:0] && mem_end_paddr[55:2] == pmpaddr0_w[53:0])
+        : (pmp0_a == 2'b01) ? (mem_end_paddr < pmp0_region_base)
+        :                     ((mem_paddr & ~pmp0_napot_mask) == pmp0_napot_base
+                            && (mem_end_paddr & ~pmp0_napot_mask) == pmp0_napot_base);
+    wire pmp1_mem_match = (pmp1_a == 2'b00) ? 1'b0
+        : (pmp1_a == 2'b10) ? (mem_paddr[55:2] == pmpaddr1_w[53:0] && mem_end_paddr[55:2] == pmpaddr1_w[53:0])
+        : (pmp1_a == 2'b01) ? (mem_paddr >= pmp0_region_base && mem_end_paddr < pmp1_region_base)
+        :                     ((mem_paddr & ~pmp1_napot_mask) == pmp1_napot_base
+                            && (mem_end_paddr & ~pmp1_napot_mask) == pmp1_napot_base);
+    wire pmp2_mem_match = (pmp2_a == 2'b00) ? 1'b0
+        : (pmp2_a == 2'b10) ? (mem_paddr[55:2] == pmpaddr2_w[53:0] && mem_end_paddr[55:2] == pmpaddr2_w[53:0])
+        : (pmp2_a == 2'b01) ? (mem_paddr >= pmp1_region_base && mem_end_paddr < pmp2_region_base)
+        :                     ((mem_paddr & ~pmp2_napot_mask) == pmp2_napot_base
+                            && (mem_end_paddr & ~pmp2_napot_mask) == pmp2_napot_base);
+    wire pmp3_mem_match = (pmp3_a == 2'b00) ? 1'b0
+        : (pmp3_a == 2'b10) ? (mem_paddr[55:2] == pmpaddr3_w[53:0] && mem_end_paddr[55:2] == pmpaddr3_w[53:0])
+        : (pmp3_a == 2'b01) ? (mem_paddr >= pmp2_region_base && mem_end_paddr < pmp3_region_base)
+        :                     ((mem_paddr & ~pmp3_napot_mask) == pmp3_napot_base
+                            && (mem_end_paddr & ~pmp3_napot_mask) == pmp3_napot_base);
+
+    wire pmp_mem_matched = pmp0_mem_match || pmp1_mem_match || pmp2_mem_match || pmp3_mem_match;
+    wire pmp_mem_rperm = pmp0_mem_match ? pmp0_rperm : pmp1_mem_match ? pmp1_rperm : pmp2_mem_match ? pmp2_rperm : pmp3_rperm;
+    wire pmp_mem_wperm = pmp0_mem_match ? pmp0_wperm : pmp1_mem_match ? pmp1_wperm : pmp2_mem_match ? pmp2_wperm : pmp3_wperm;
+    wire pmp_mem_l     = pmp0_mem_match ? pmp0_l     : pmp1_mem_match ? pmp1_l     : pmp2_mem_match ? pmp2_l     : pmp3_l;
+    // norm:pmp_rwx_check + norm:pmp_no_entry_match: effective-M-mode
+    // with L clear or no match always succeeds; S/U or a locked match
+    // needs the real R/W bit; S/U with NO match FAILS (>=1 region
+    // implemented, always true here).
+    wire pmp_mem_read_ok  = (mem_effective_priv == PRIV_M && !pmp_mem_matched) ? 1'b1
+                           : (mem_effective_priv == PRIV_M && !pmp_mem_l)      ? 1'b1
+                           : pmp_mem_matched && pmp_mem_rperm;
+    wire pmp_mem_write_ok = (mem_effective_priv == PRIV_M && !pmp_mem_matched) ? 1'b1
+                           : (mem_effective_priv == PRIV_M && !pmp_mem_l)      ? 1'b1
+                           : pmp_mem_matched && pmp_mem_wperm;
+
+    /*
+     * pmp_load_fault/pmp_store_fault: same is_load/is_lr/is_amo_rmw
+     * split as mem_load_misaligned/mem_store_misaligned above, same
+     * S_EXEC-gated combinational-before-the-bus-phase timing (mem_paddr
+     * is already known the instant S_EXEC begins -- the ALU computed it
+     * this same cycle). !debug_progbuf_active exempts Program Buffer
+     * execution entirely (PMP+PLIC plan's own cross-cutting decision):
+     * a debugger's own progbuf-driven memory access is trusted, same
+     * exemption System Bus Access already gets structurally (it's a
+     * wholly separate Wishbone master that never touches mem_paddr at
+     * all). Without this exemption, a PMP-denied progbuf store would be
+     * silently swallowed by mem_phase_needed with no resulting trap
+     * either (trap_taken's own top-level !debug_progbuf_active gate
+     * would suppress that) -- a real silent-data-loss hazard, not just
+     * an inconsistency.
+     *
+     * Sv39 (Milestone 4): the timing gate widens from bare "state==S_EXEC"
+     * to a real three-way OR. mem_paddr at S_EXEC time is the VIRTUAL
+     * address whenever translation is active (mem_resolved_paddr_q[cur_slot] isn't
+     * valid until the walk actually runs, inside S_MEM) -- checking PMP
+     * against a VA would be wrong (PMP governs the PHYSICAL address), so
+     * the untranslated S_EXEC-time check is gated OFF while translating,
+     * and a second arm re-checks once state==S_MEM && mem_resolved_q[cur_slot] --
+     * the first cycle mem_paddr genuinely holds the translated PA. This
+     * is decision 10's own two-tier ordering: the walker's separate,
+     * hardwired-S PMP-on-PTE-read check (ptw_pmp_fault) already covers
+     * the PTE reads themselves; THIS check covers the FINAL, resolved
+     * physical address, reusing this exact same, otherwise-unmodified
+     * logic (pmp_mem_read_ok/pmp_mem_write_ok) for both the translated
+     * and untranslated cases alike.
+     *
+     * Sv39 (Milestone 6, real bug found by the cache-mediated integration
+     * test -- never exercised by any earlier milestone's own tests, which
+     * only ever combined "PMP denies" with "untranslated" or "PTE read",
+     * never "PMP denies the FINAL PA of a genuinely TRANSLATED access"):
+     * a THIRD arm, state==S_EXEC && mem_translate_active && mem_resolved_q[cur_slot],
+     * is required too. Once a translated access is denied, the S_MEM
+     * arm above redirects straight back to S_EXEC (never reaching
+     * wb_mem_done, since wb_mem_master_drive's own suppression blocks issuing
+     * the real bus request at all) -- but mem_resolved_q[cur_slot], and hence
+     * mem_paddr's own translated value, both remain live and valid at
+     * S_EXEC too (mem_resolved_q[cur_slot] is only ever cleared by a real
+     * S_MEM&&wb_mem_done completion or, since this same fix, by the
+     * instruction's own eventual commit -- see mem_resolved_q[cur_slot]'s own
+     * commit_now clear below). Without this third arm, pmp_load_fault/
+     * pmp_store_fault read 0 the instant state leaves S_MEM -- mem_
+     * phase_needed's own NOT-list (which needs !pmp_load_fault to stay
+     * true right here, at S_EXEC, to ever stop re-requesting S_MEM) sees
+     * a false "not denied" and re-enters S_MEM, re-discovering the SAME
+     * denial, forever: a genuine infinite S_MEM<->S_EXEC oscillation
+     * that never reaches commit_now/trap_taken at all, caught by this
+     * milestone's own dut3 hanging instead of ever reaching its trap
+     * handler's own ebreak.
+     */
+    assign pmp_load_fault  = !debug_progbuf_active && is_load && !is_lr && !is_amo_rmw && !pmp_mem_read_ok
+                            && ((state == S_EXEC && !mem_translate_active)
+                              || (state == S_MEM  && mem_resolved_q[cur_slot])
+                              || (state == S_EXEC && mem_translate_active && mem_resolved_q[cur_slot]));
+    assign pmp_store_fault = !debug_progbuf_active && (is_store || is_sc || is_lr || is_amo_rmw) && !pmp_mem_write_ok
+                            && ((state == S_EXEC && !mem_translate_active)
+                              || (state == S_MEM  && mem_resolved_q[cur_slot])
+                              || (state == S_EXEC && mem_translate_active && mem_resolved_q[cur_slot]));
+
+    /*
+     * mem_load_access_fault/mem_store_access_fault: same is_load/is_lr/
+     * is_amo_rmw split as mem_load_misaligned/mem_store_misaligned above
+     * (LR is spec-classified under store/AMO, cause 7, not load, cause 5
+     * -- same reasoning, not just convention-matching), but keyed off a
+     * real wb_mem_err_i response during S_MEM/S_AMO_WRITE instead of a
+     * combinational address check during S_EXEC -- a bus error can only
+     * be discovered once a real bus cycle actually returns. An AMO's
+     * read-phase fault (S_MEM, wb_mem_err_i, is_amo_rmw) falls into the
+     * store/AMO term below, same as LR -- it never reaches S_AMO_WRITE
+     * (see commit_now/the FSM above). An AMO's write-phase fault
+     * (S_AMO_WRITE, wb_mem_err_i) is its own explicit term, since is_load/
+     * is_store don't apply there.
+     */
+    assign mem_load_access_fault  = (state == S_MEM) && wb_mem_err_i && is_load && !is_lr && !is_amo_rmw;
+    assign mem_store_access_fault = ((state == S_MEM) && wb_mem_err_i && (is_store || is_sc || is_lr || is_amo_rmw))
+                                  || ((state == S_AMO_WRITE) && wb_mem_err_i);
+
+    /*
+     * Sv39 (Milestone 4): mem_op_needs_write/mem_op_is_load_class --
+     * forward-declared early (alongside mem_translate_active), real
+     * assigns live here since both need is_lr/is_sc, not available until
+     * well after Decode. TWO DELIBERATELY DIFFERENT splits, not one:
+     * mem_op_needs_write EXCLUDES is_lr (LR only ever needs READ
+     * permission -- used by the walker's own R/W check and the page-
+     * fault 13-vs-15 split, per spec's own explicit AMO rule: "AMOs
+     * never raise load page-fault exceptions... always raises a store
+     * page-fault"). mem_op_is_load_class matches the EXISTING mem_load_
+     * access_fault/mem_store_access_fault convention exactly (LR groups
+     * with store/AMO there, a separate, pre-existing, deliberately
+     * different classification) -- used for mem_access_fault_q[cur_slot]'s own
+     * 5-vs-7 split below, so it composes with that existing convention
+     * instead of introducing a second, inconsistent one.
+     */
+    assign mem_op_needs_write   = is_store || is_sc || is_amo_rmw;
+    assign mem_op_is_load_class = is_load && !is_lr && !is_amo_rmw;
+
+    /*
+     * mem_access_fault_vaddr (Sv39 Milestone 4 -- renamed+widened from
+     * mem_access_fault_addr): the one place mem_paddr vs. amo_addr_q[cur_slot]
+     * genuinely matters for trap_val below. mem_paddr is live/correct
+     * during S_MEM, but gets REPURPOSED to the AMO modify value the
+     * instant S_AMO_WRITE begins (the same hazard the AMO RVFI tap
+     * already works around) -- an AMO write-phase fault must use
+     * amo_addr_q[cur_slot] instead, or mtval reports garbage.
+     *
+     * Per spec's own mtval/stval convention, once paging is active mtval
+     * reports the faulting VIRTUAL address "even for physical-memory
+     * access-fault exceptions" (decision 8 of the staged plan) -- so the
+     * translated case reports ptw_vaddr_q[cur_slot] (the VA captured at this
+     * instruction's own walk-start; stable through S_AMO_WRITE too,
+     * since the write phase never walks again) instead of mem_paddr/
+     * amo_addr_q[cur_slot] (both PA once translated). Untranslated case is
+     * value-identical to the old wire's own behavior (VA==PA), just
+     * renamed for the new consumer (pmp_load_fault/pmp_store_fault,
+     * folded into trap_val below) alongside the pre-existing ones.
+     */
+    // (state == S_AMO_WRITE) arm: {amo_addr_q[cur_slot][63:3],
+    // amo_byte_off_q[cur_slot]}, not bare amo_addr_q[cur_slot] --
+    // amo_addr_q[cur_slot] is deliberately rounded DOWN to a dword
+    // boundary (it's also the real bus address), which silently reported
+    // the wrong mtval for a .W AMO sitting in a dword's upper word
+    // (address bit 2 set). amo_byte_off_q[cur_slot] already exists to
+    // hold the TRUE, unrounded low 3 bits for this exact reason -- see
+    // its own declaration comment (amo_wdata's byte-lane shift uses it
+    // too).
+    wire [(`WORD_SIZE - 1):0] mem_access_fault_vaddr = mem_translate_active ? ptw_vaddr_q[cur_slot]
+        : (state == S_AMO_WRITE) ? {amo_addr_q[cur_slot][63:3], amo_byte_off_q[cur_slot]} : mem_paddr;
+
+    /* trap_val, continued from its forward declaration above: the
+     * misaligned-access and access-fault causes report the faulting
+     * address, per spec's mtval/stval convention. fetch_fault_q[cur_slot] (cause 1)
+     * uses pc directly -- csr_file0.i_trap_pc already receives pc
+     * unconditionally for every trap, so mepc == mtval here, which is
+     * both spec-correct and sidesteps needing to know whether S_FETCH or
+     * S_FETCH_HI was the one that actually faulted. */
+    assign trap_val = fetch_fault_q[cur_slot] ? pc
+        // Sv39 M3: the faulting VIRTUAL address, per spec's mtval
+        // convention -- ptw_vaddr_q (captured at walk-start from the
+        // pre-translation VA), not pc, since for a crossing fetch whose
+        // SECOND half faults, pc alone can't identify which dword did.
+        //
+        // Pipelining P2 step 3a real bug fix: [fetch_slot], NOT [cur_slot],
+        // unlike every OTHER ptw_vaddr_q/ptw_reason_q/ptw_level_q/
+        // ptw_base_q site in this file (all correctly cur_slot -- pure
+        // per-walk scratch, written and consulted entirely WITHIN one
+        // uninterrupted S_PTW episode, pre-toggle). This site is the
+        // exception: fetch_fault_q/fetch_lo_fault_q/fetch_hi_fault_q are
+        // consulted here POST-toggle (trap_val is evaluated combinationally
+        // during S_EXEC, after cur_slot's own fetch-completion toggle
+        // already fired) -- correct for those three since step 1 already
+        // wrote them via fetch_slot (pre-toggle cur_slot's own value,
+        // which becomes readable as fetch_slot again, not cur_slot, once
+        // the toggle flips). ptw_vaddr_q, however, was written via bare
+        // cur_slot (walker-scratch convention, unchanged from step 1) --
+        // so reading it back via cur_slot here reads the WRONG (post-
+        // toggle) slot, landing on whatever the slot fstate is now
+        // fetching into happens to hold (X-propagated/uninitialized on
+        // the very first such fault). Confirmed via core_sv39_fetch_tb.sv's
+        // own mtval checks (cases C/F/G/H/I/J/K), all of which failed with
+        // mtval reading all-X before this fix.
+        : (fetch_lo_fault_q[cur_slot] || fetch_hi_fault_q[cur_slot]) ? ptw_vaddr_q[fetch_slot]
+        : is_illegal_instr ? (is_compressed ? {48'b0, first_hw}
+                                             : {{(`WORD_SIZE - `INSTR_SIZE){1'b0}}, instruction})
+        : (mem_load_misaligned || mem_store_misaligned) ? mem_paddr
+        // Sv39 M4: mem-side PTE-content page fault (cause 13/15) --
+        // ptw_vaddr_q[cur_slot], same reasoning as the fetch-side arm above.
+        : mem_fault_q[cur_slot] ? ptw_vaddr_q[cur_slot]
+        // pmp_load_fault/pmp_store_fault (and, as of M4, mem_access_fault_q[cur_slot]
+        // -- a PMP-denied/bus-errored PTE read) all reuse
+        // mem_access_fault_vaddr's own mem_translate_active/
+        // state==S_AMO_WRITE-vs-mem_paddr mux.
+        : (mem_load_access_fault || mem_store_access_fault || pmp_load_fault || pmp_store_fault || mem_access_fault_q[cur_slot])
+            ? mem_access_fault_vaddr
+        : trigger_exception_match ? pc
+        : `WORD_SIZE'(0);
+
+    /* Store data, pre-shifted into the byte lane(s) it'll land in. */
+    wire [(`WORD_SIZE - 1):0] mem_wdata = imm_2 << (mem_paddr[2:0] * 8);
+
+    /* Read response, shifted back down so the wanted byte(s) start at bit 0. */
+    wire [(`WORD_SIZE - 1):0] mem_rdata_shifted = wb_mem_dat_i >> (mem_paddr[2:0] * 8);
+
+    /*
+     * Precomputed slices, not inline inside load_format's case statement
+     * below -- Icarus Verilog doesn't fully support constant selects
+     * inside always_* processes (same reason as alu.sv's shamt_masked).
+     */
+    wire [7:0]  load_byte  = mem_rdata_shifted[7:0];
+    wire [15:0] load_half  = mem_rdata_shifted[15:0];
+    wire [31:0] load_word  = mem_rdata_shifted[31:0];
+    /* Sign bits, precomputed too -- same reason (also used inside a replication below). */
+    wire load_byte_sign = load_byte[7];
+    wire load_half_sign = load_half[15];
+    wire load_word_sign = load_word[31];
+
+    logic [(`WORD_SIZE - 1):0] load_data;
+    always_comb begin: load_format
+        case (mem_size)
+            2'b00: load_data = load_signed ? {{56{load_byte_sign}}, load_byte}
+                                            : {56'b0, load_byte};
+            2'b01: load_data = load_signed ? {{48{load_half_sign}}, load_half}
+                                            : {48'b0, load_half};
+            2'b10: load_data = load_signed ? {{32{load_word_sign}}, load_word}
+                                            : {32'b0, load_word};
+            default: load_data = mem_rdata_shifted; // 2'b11: doubleword, no extension needed
+        endcase
+    end: load_format
+
+    /*
+     * A extension: amo_rdata_q[cur_slot]/amo_addr_q[cur_slot]/amo_sel_q[cur_slot], captured on the
+     * S_MEM-ack-to-S_AMO_WRITE transition edge (the same edge
+     * instr_line_q[cur_slot] captures a fresh fetch on). amo_rdata_q[cur_slot] holds the OLD
+     * (pre-modification) memory value -- destined for rd. amo_addr_q[cur_slot]/
+     * amo_sel_q[cur_slot] are NECESSARY, not just convenient: mem_addr/mem_sel are
+     * combinational functions of mem_paddr(=alu_result), and alu_result
+     * gets REPURPOSED for the modify value the instant amo_modify_phase
+     * goes high (S_AMO_WRITE) -- so mem_addr/mem_sel, left un-latched,
+     * would silently start reflecting the WRONG thing (the modify
+     * computation, reinterpreted as an address) the moment S_AMO_WRITE
+     * begins. Latching them at the one moment they're still correct
+     * sidesteps that entirely.
+     */
+    always_ff @(posedge clk) begin
+        if (state == S_MEM && wb_mem_ok && is_amo_rmw) begin
+            // wb_mem_ok, not bare wb_mem_ack_i -- belt-and-suspenders: the
+            // FSM fix above (commit_now/state transitions) already guarantees
+            // S_AMO_WRITE is never entered on an errored read, so this
+            // capture's value is never consumed either way on a fault, but
+            // keying it on wb_mem_ack_i alone would still populate it with
+            // garbage on a paired-error read (icache/dcache's ack+err
+            // coupling) for no reason.
+            amo_rdata_q[cur_slot] <= load_data;
+            /*
+             * Full WORD_SIZE-wide, aligned the same way the load/store RVFI
+             * tap's own rvfi_mem_addr is (see that assign's comment) --
+             * deliberately NOT mem_addr (only 32 bits, the bus-facing
+             * truncation): a real riscv-formal counterexample already
+             * caught the exact same 32-bit-truncation bug on the plain
+             * load/store tap (the spec model computes its own full 64-bit
+             * expected address from the solver's free rs1_rdata, which
+             * this core's real 32-bit physical address space doesn't
+             * bound). Truncated back to 32 bits at the one real-bus-use
+             * site below (wb_mem_addr_o), same convention as mem_paddr/
+             * fetch_paddr elsewhere in this file.
+             */
+            amo_addr_q[cur_slot]     <= {mem_paddr[63:3], 3'b0};
+            amo_sel_q[cur_slot]      <= mem_sel;
+            amo_byte_off_q[cur_slot] <= mem_paddr[2:0];
+        end
+    end
+
+    /*
+     * Shifted into byte-lane position, same idiom mem_wdata already uses
+     * (mem_wdata = imm_2 << (mem_paddr[2:0] * 8), the TRUE unrounded low
+     * bits). MUST use amo_byte_off_q[cur_slot] here, NOT amo_addr_q[cur_slot][2:0] -- a real
+     * riscv-formal counterexample (insn_amoswap_w_ch0, 2026-08-13) caught
+     * this: amo_addr_q[cur_slot] is deliberately rounded to a dword boundary, so
+     * its low 3 bits are always zero, silently dropping the shift for
+     * any .W AMO at an upper-word address (addr[2]=1, legal -- .W only
+     * needs 4-byte alignment). This was a genuine, pre-existing hardware
+     * bug (predates this session's amo_addr_q[cur_slot] widening entirely) that
+     * would have silently corrupted the write data on real silicon for
+     * exactly that address pattern -- amo_sel_q[cur_slot] never had this problem
+     * (mem_sel is computed, using the true unrounded address, BEFORE
+     * being latched), only the wdata shift did.
+     */
+    wire [(`WORD_SIZE - 1):0] amo_wdata = amo_new_value << (amo_byte_off_q[cur_slot] * 8);
+
+    /* --------------------------------------------------------------- *
+     * Wishbone master: bus driving
+     * --------------------------------------------------------------- */
+
+    /*
+     * Idle by default (every field), overridden per-state below -- keeps
+     * this a clean combinational mux with no inferred latches, same
+     * defaults-then-case idiom already used for mem_control/
+     * reg_write_control above. S_EXEC drives nothing on either port: the
+     * fetch port is only needed in S_FETCH/S_FETCH_HI and the mem port
+     * only in S_MEM/S_AMO_WRITE/S_PTW, never during the settle-and-decode
+     * cycle in between.
+     *
+     * Every requesting arm additionally gates cyc_o/stb_o with its OWN
+     * port's done signal (!wb_fetch_done -- or !fstate_hi_done_now for
+     * F_REQ_HI, see that arm -- on the fetch port, !wb_mem_done on the
+     * mem port), NOT just `state == S_*` -- this is load-bearing, not
+     * decoration. `state` only updates on the NEXT clock edge after
+     * that port's ack_i/err_i is observed (see the state always_ff above), so
+     * for the entire cycle in between -- from the moment the slave's
+     * registered ack_o/err_o first becomes 1 to the edge core.sv's FSM
+     * actually reacts to it -- cyc_o/stb_o would otherwise still read as
+     * asserted. A slave that simply does `if (cyc_i && stb_i) <act once,
+     * ack>` (both wb4_sram.sv and uart_tx.sv do exactly this, and
+     * correctly so -- nothing about the spec obligates a slave to guess
+     * whether a still-asserted cyc/stb is a new request or the master
+     * being slow to notice the old one) would then see cyc/stb still
+     * high on that extra cycle and serve the SAME request a second time.
+     * Found via this exact symptom: the UART printed "HH" for a
+     * single-byte write. Gating with the done signal drops cyc_o/stb_o
+     * combinationally the moment the cycle terminates, one way or
+     * another -- standard Wishbone master practice, and the same root
+     * cause (not the same fix -- that one patched a testbench's own
+     * master-role loop) as the wb_cycle ack-timing bug in
+     * wb4_sram_tb.sv/uart_tx_tb.sv. Using wb_fetch_done/wb_mem_done
+     * rather than bare ack_i also matters for a genuinely unpaired error
+     * response (wb4_sram.sv's own convention: err_o without ack_o) --
+     * keyed on ack alone, this guard would keep re-driving cyc_o/stb_o
+     * forever after an error the slave already terminated, the exact bug
+     * class bus-error trapping (see wb_fetch_done/wb_mem_done's own
+     * comment above) exists to close everywhere.
+     */
+
+    // See this port's own header comment (module port list, above) for
+    // the full reasoning. Deliberately a plain wire off `state`/
+    // is_amo_rmw, same reason wb_ifetch_o used to be (now deleted --
+    // routing is structural port identity, not a side-band mux-select
+    // signal) -- must stay asserted through the exact cycle
+    // wb_mem_cyc_o itself collapses to 0 (the AMO read's own
+    // !wb_mem_done-gated drop), which a wb_mem_done-gated definition
+    // would miss entirely.
+    assign wb_mem_lock_o = (state == S_MEM && is_amo_rmw) || (state == S_AMO_WRITE);
+
+    // See this port's own header comment (module port list, above) for
+    // the timing argument.
+    assign icache_flush_o = commit_now && is_fence_i;
+
+    /*
+     * Pipelining P2 core-facing two-port split (prerequisite for step
+     * 3b): the fetch side and mem side now each drive their own
+     * independent Wishbone master port, so an in-flight fetch's own
+     * eventual completion stays observable even after a mem request is
+     * issued before that fetch finishes (see this module's own header
+     * comment for the full motivation).
+     *
+     * The untranslated fast path's `case (fstate_now)` arm deliberately
+     * STAYS NESTED inside `case (state) S_FETCH:` here, exactly as
+     * before this split -- flattening it out to a bare, state-
+     * independent case is step 3b's own later, separate edit (only
+     * meaningful once fstate_eligible is relaxed past state==S_FETCH).
+     */
+    always_comb begin: wb_fetch_master_drive
+        wb_fetch_cyc_o  = 1'b0;
+        wb_fetch_stb_o  = 1'b0;
+        wb_fetch_addr_o = 32'b0;
+        case (state)
+            S_FETCH: begin
+                /*
+                 * fetch_redirect_cycle/debug_progbuf_active both suppress
+                 * the request entirely -- fetch_redirect_cycle (interrupt
+                 * or debug-halt entry) because pc/current_priv (or
+                 * in_debug_mode) are only redirected on THIS edge, so the
+                 * real fetch from the new pc/privilege can't correctly
+                 * start until next cycle (see fetch_redirect_cycle's own
+                 * declaration comment), debug_progbuf_active because the
+                 * "fetch" is already available combinationally as
+                 * i_progbuf_data, with no real bus transaction needed at
+                 * all. Applies to BOTH branches below, so checked once,
+                 * ahead of the translated/untranslated split.
+                 */
+                if (!fetch_redirect_cycle && !debug_progbuf_active) begin
+                    if (fetch_translate_active) begin
+                        /*
+                         * Sv39 path -- unchanged from before this
+                         * milestone. pmp_fetchlo_fault (PMP+PLIC plan,
+                         * Milestone 2) suppresses it: unlike a real bus
+                         * error (only discoverable once a request actually
+                         * comes back), a low-half PMP denial is already
+                         * known combinationally off fetch_paddr before
+                         * this request would even be issued -- the
+                         * request must never be issued at all, mirroring
+                         * the misalignment precedent (checked before the
+                         * bus phase starts), not the bus-error one (reacts
+                         * after). !fetch_lo_resolved_q[cur_slot]
+                         * suppresses it for a second reason, same class:
+                         * fetch_paddr/fetch_addr are stale/meaningless
+                         * until the walker resolves them, so issuing a
+                         * request against them now would fetch garbage.
+                         * See the state-transition always_ff's own S_FETCH
+                         * arm, which relies on exactly this.
+                         */
+                        // Pipelining P2 step 3a: [fetch_slot] -- see
+                        // tlb_hit_active's own matching comment.
+                        if (!wb_fetch_done && !pmp_fetchlo_fault && fetch_lo_resolved_q[fetch_slot]) begin
+                            wb_fetch_cyc_o  = 1'b1;
+                            wb_fetch_stb_o  = 1'b1;
+                            wb_fetch_addr_o = fetch_addr;
+                        end
+                    end else begin
+                        /*
+                         * Pipelining P2 step 2: the untranslated fast
+                         * path -- fstate owns both halves now (mirrors
+                         * the OLD S_FETCH/S_FETCH_HI split exactly). Keyed
+                         * on fstate_now, NOT the raw fstate register --
+                         * driving off the registered value would cost an
+                         * extra idle cycle before ever asserting the
+                         * request (a real bug an earlier version of this
+                         * step had, found by adversarial review; see
+                         * fstate_now's own declaration comment).
+                         *
+                         * F_REQ_LO's !wb_fetch_done/!pmp_fetchlo_fault
+                         * terms ARE dead code by construction (fstate_now's
+                         * own derivation never reads F_REQ_LO when denied
+                         * or already done) -- kept anyway for the same
+                         * defensive-clarity reason S_FETCH_HI's own
+                         * precedent below does.
+                         *
+                         * F_REQ_HI is DIFFERENT -- a second real bug an
+                         * earlier version of THIS SAME fix had, also found
+                         * by adversarial review: on the exact cycle
+                         * fstate_now first transitions from the low half's
+                         * own completion into F_REQ_HI, the plain
+                         * wb_fetch_done wire STILL reflects that just-
+                         * arrived LOW-half ack (wb_fetch_done is a single
+                         * combinational wire, not per-phase) -- so a naive
+                         * "!wb_fetch_done" guard here would wrongly read
+                         * that stale ack as already satisfying the HIGH
+                         * half's own (not-yet-issued) request, suppressing
+                         * it for one cycle. Using !fstate_hi_done_now
+                         * instead is correct in both cases: on that same
+                         * transition cycle, fstate_hi_phase (keyed off the
+                         * raw, not-yet-updated fstate REGISTER) is still
+                         * false, so fstate_hi_done_now is false too -- the
+                         * request drives immediately, as intended. Once
+                         * genuinely registered into F_REQ_HI and actually
+                         * waiting, fstate_hi_phase is true and
+                         * fstate_hi_done_now correctly tracks the HIGH
+                         * half's OWN ack instead.
+                         */
+                        case (fstate_now)
+                            F_REQ_LO: if (!wb_fetch_done && !pmp_fetchlo_fault) begin
+                                wb_fetch_cyc_o  = 1'b1;
+                                wb_fetch_stb_o  = 1'b1;
+                                wb_fetch_addr_o = fetch_addr;
+                            end
+                            F_REQ_HI: if (!fstate_hi_done_now && !pmp_fetchhi_fault) begin
+                                wb_fetch_cyc_o  = 1'b1;
+                                wb_fetch_stb_o  = 1'b1;
+                                wb_fetch_addr_o = fetch_addr_hi;
+                            end
+                            default: ; // F_IDLE, F_VALID: nothing to drive
+                        endcase
+                    end
+                end
+            end
+            /*
+             * C extension: the second dword of a crossing fetch --
+             * reuses the exact same !wb_fetch_done gating discipline as
+             * every other arm here. Sv39-only now (Pipelining P2 step 2):
+             * the untranslated case no longer visits S_FETCH_HI at all --
+             * fstate's own F_REQ_HI arm above handles it instead -- so
+             * fetch_translate_active is always true by the time this arm
+             * is even selected; the fetch_hi_resolved_q[cur_slot]
+             * suppression (same reason as S_FETCH's own
+             * fetch_lo_resolved_q[cur_slot] term) simplifies accordingly.
+             */
+            S_FETCH_HI: begin
+                // Sv39 real bug fix (post-M6 independent re-review): the
+                // !pmp_fetchhi_fault term -- once fetch_hi_paddr_q[cur_slot]
+                // has genuinely resolved and PMP denies it, the real bus
+                // request must never be issued at all, mirroring S_MEM's
+                // own !pmp_load_fault && !pmp_store_fault suppression.
+                // Pipelining P2 step 3a: [fetch_slot] -- see
+                // tlb_hit_active's own matching comment.
+                if (!wb_fetch_done && fetch_hi_resolved_q[fetch_slot] && !pmp_fetchhi_fault) begin
+                    wb_fetch_cyc_o  = 1'b1;
+                    wb_fetch_stb_o  = 1'b1;
+                    wb_fetch_addr_o = fetch_addr_hi;
+                end
+            end
+            default: ; // S_EXEC/S_MEM/S_AMO_WRITE/S_PTW/S_DEBUG_HALTED: fetch port idle
+        endcase
+    end: wb_fetch_master_drive
+
+    /*
+     * S_PTW routes to the MEM port unconditionally, even for a
+     * fetch-reason walk -- see this module's own header comment for the
+     * full "fstate_eligible requires state==S_FETCH, so a fetch-reason
+     * walk is definitionally never concurrent with fstate eligibility"
+     * proof. Safe by construction, not by coincidence.
+     */
+    always_comb begin: wb_mem_master_drive
+        wb_mem_cyc_o  = 1'b0;
+        wb_mem_stb_o  = 1'b0;
+        wb_mem_we_o   = 1'b0;
+        wb_mem_addr_o = 32'b0;
+        wb_mem_dat_o  = 64'b0;
+        wb_mem_sel_o  = 8'b0;
+        case (state)
+            /*
+             * Sv39 (Milestone 3): the walker's own PTE read. Suppressed
+             * entirely on a PMP-denied PTE address, same "checked before
+             * the bus phase" shape as pmp_fetchlo_fault's own S_FETCH
+             * suppression above -- mirrors the state-transition always_ff's
+             * own S_PTW arm, which relies on exactly this.
+             */
+            S_PTW: begin
+                if (!wb_mem_done && !ptw_pmp_fault) begin
+                    wb_mem_cyc_o  = 1'b1;
+                    wb_mem_stb_o  = 1'b1;
+                    wb_mem_addr_o = ptw_pte_addr[31:0];
+                    wb_mem_sel_o  = 8'hFF;
+                end
+            end
+            S_MEM: begin
+                // Sv39 (Milestone 4): suppressed while translation is
+                // needed and not yet resolved (mem_addr/mem_sel are
+                // stale/meaningless until the walker resolves mem_paddr
+                // -- mirrors S_FETCH's own identical suppression), and
+                // suppressed again if the just-resolved, translated
+                // address is PMP-denied (the real target access must
+                // never be issued at all -- mirrors pmp_fetchlo_fault's
+                // own S_FETCH suppression).
+                if (!wb_mem_done && !(mem_translate_active && !mem_resolved_q[cur_slot])
+                        && !pmp_load_fault && !pmp_store_fault) begin
+                    wb_mem_cyc_o  = 1'b1;
+                    wb_mem_stb_o  = 1'b1;
+                    wb_mem_we_o   = is_store;
+                    wb_mem_addr_o = mem_addr;
+                    wb_mem_sel_o  = mem_sel;
+                    wb_mem_dat_o  = mem_wdata;
+                end
+            end
+            /*
+             * A extension: the write half of a read-modify-write AMO.
+             * Reuses the exact same !wb_mem_done gating discipline as
+             * S_PTW/S_MEM above -- load-bearing here too, same reason.
+             */
+            S_AMO_WRITE: begin
+                if (!wb_mem_done) begin
+                    wb_mem_cyc_o  = 1'b1;
+                    wb_mem_stb_o  = 1'b1;
+                    wb_mem_we_o   = 1'b1;      // always a write -- this state exists for exactly this
+                    wb_mem_addr_o = amo_addr_q[cur_slot][31:0]; // real bus is 32-bit; amo_addr_q[cur_slot] is WORD_SIZE-wide for RVFI
+                    wb_mem_sel_o  = amo_sel_q[cur_slot];
+                    wb_mem_dat_o  = amo_wdata;
+                end
+            end
+            default: ; // S_FETCH/S_FETCH_HI/S_EXEC/S_DEBUG_HALTED: mem port idle
+        endcase
+    end: wb_mem_master_drive
+
+    /* --------------------------------------------------------------- *
+     * Writeback
+     * --------------------------------------------------------------- */
+
+    /* See the is_word_arith comment above for why only some *W ops need this. */
+    wire [(`WORD_SIZE - 1):0] alu_result_w_trunc = {{32{alu_result[31]}}, alu_result[31:0]};
+
+    /*
+     * Zicsr writes the OLD CSR value to rd, for all 6 variants (per
+     * spec) -- csr_rdata was captured combinationally off the CSR's
+     * pre-write contents this same cycle, same "read before the
+     * same-edge overwrite" principle as every other read-then-write
+     * already in this design (e.g. the regfile's own read-before-write).
+     */
+    /*
+     * A extension: is_amo_rmw MUST be checked before is_load: is_load is
+     * TRUE for an AMO's entire decode-level lifetime (see mem_control
+     * above), but AMO only ever COMMITS during S_AMO_WRITE (never
+     * S_MEM), at which point load_data/wb_mem_dat_i reflect the WRITE
+     * transaction's bus lines, not a real read -- using load_data here
+     * would silently write garbage to rd. amo_rdata_q[cur_slot] (the captured OLD
+     * value, per spec -- NOT amo_new_value, which is the NEW value
+     * destined for memory, not rd) is the correct, stable value at that
+     * commit edge. is_sc's arm produces the success(0)/failure(1) flag
+     * -- no existing arm could ever produce this.
+     */
+    assign reg_write_data = is_amo_rmw            ? amo_rdata_q[cur_slot] :
+                             is_sc                 ? sc_result :
+                             is_load                ? load_data :
+                             (is_jal || is_jalr)     ? pc_plus_len :
+                             is_word_arith            ? alu_result_w_trunc :
+                             is_csr                    ? csr_rdata :
+                             is_div_family               ? div_result :
+                                                            alu_result; // ALU ops, LUI, AUIPC, *W shifts
+
+    /* --------------------------------------------------------------- *
+     * Next PC
+     * --------------------------------------------------------------- */
+
+    /* JAL's immediate lands on imm_1 (OUTPUT_J_TYPE_INSTR); branches' on imm3_sext. */
+    wire [(`WORD_SIZE - 1):0] pc_rel_offset = is_jal ? imm_1 : imm3_sext;
+    wire [(`WORD_SIZE - 1):0] pc_rel_target = pc + pc_rel_offset;
+
+    /*
+     * Per spec, JALR's target is (rs1 + sext(imm)) with bit 0 forced to
+     * 0 -- guarantees an even target regardless of whether rs1+imm
+     * happens to be odd. Only the JUMP TARGET's LSB is cleared here; the
+     * link value written back to rd (pc_plus_len, declared up in Fetch
+     * -- C extension's generalization of the old fixed pc+4) is always
+     * unmodified.
+     */
+    wire [(`WORD_SIZE - 1):0] jalr_target = {alu_result[63:1], 1'b0};
+
+    /*
+     * Trap-vector redirect (U/S/M privilege-mode milestone). Direct mode
+     * only -- mtvec/stvec's MODE bits[1:0] are stored as written (WARL)
+     * but never consulted; Vectored mode's only benefit (cause-indexed
+     * jump) is moot with no interrupt source, and even real
+     * Vectored-mode hardware jumps straight to BASE for synchronous
+     * exceptions regardless, per spec. trap_vector_base's own low 2
+     * bits (the MODE field) are structurally never read below -- masked
+     * off, not an oversight.
+     */
+    wire route_to_s = trap_taken ? trap_to_s : interrupt_to_s;
+    /* verilator lint_off UNUSEDSIGNAL */
+    wire [(`WORD_SIZE - 1):0] trap_vector_base = route_to_s ? stvec_w : mtvec_w;
+    /* verilator lint_on UNUSEDSIGNAL */
+    assign trap_vector = {trap_vector_base[63:2], 2'b00};   // was `wire trap_vector =` -- now forward-declared
+
+    assign next_pc = trap_taken              ? trap_vector   :
+                      mret_taken              ? mepc_w        :
+                      sret_taken              ? sepc_w        :
+                      (is_jal || take_branch) ? pc_rel_target :
+                      is_jalr                 ? jalr_target   :
+                                                 pc_plus_len;
+
+    /* --------------------------------------------------------------- *
+     * PC register
+     * --------------------------------------------------------------- */
+
+    /*
+     * EBREAK is a real synchronous trap now (cause 3, Breakpoint -- see
+     * is_ebreak's own arm in exc_code/trap_taken above), so it commits
+     * exactly like any other trap: pc jumps to trap_vector via next_pc's
+     * own top-priority arm, mepc/mcause/mstatus update for real, and
+     * execution resumes from whatever mtvec points at. There is no
+     * freeze/halt special-case here anymore.
+     *
+     * The `halted` register (a permanent one-way EBREAK freeze latch,
+     * removed here 2026-08-20) used to be what every testbench polled
+     * hierarchically (e.g. dut.halted) to know a test program had
+     * finished. Since EBREAK no longer parks the core, testbenches now
+     * detect completion by observing the one-shot `trap_taken &&
+     * is_ebreak` pulse directly and latching it locally (see
+     * testbench/halt_wait.sv's updated contract). A future Debug Module
+     * milestone will reintroduce real, resumable halt/resume state under
+     * a new name -- this is a clean removal, not a placeholder.
+     */
+    always_ff @(posedge clk) begin
+        if (rst)
+            pc <= '0;
+        else if (commit_now)
+            pc <= next_pc;
+        else if (interrupt_taken)
+            pc <= trap_vector;
+        else if (state == S_DEBUG_HALTED && i_debug_resume_req)
+            /*
+             * dpc_w, not the live pc -- a debugger halted here may have
+             * written a new dpc while parked, and this is the only
+             * mechanism that redirects execution to it. current_priv is
+             * deliberately NOT restored on this same edge (see the Debug
+             * Mode section's own in_debug_mode comment) -- it was never
+             * touched since entry, so it's already correct.
+             */
+            pc <= dpc_w;
+    end
+
+    /*
+     * current_priv (U/S/M privilege-mode milestone): resets to M per
+     * spec. Updated by whichever of trap-entry/MRET/SRET fired this
+     * edge -- at most one of the three can ever be true on the same
+     * edge (see this file's Hazards reasoning in the project plan: a
+     * trap always overrides an under-privileged MRET/SRET's own
+     * mret_taken/sret_taken, via their !mret_priv_violation/
+     * !sret_priv_violation gating).
+     */
+    always_ff @(posedge clk) begin
+        if (rst)
+            current_priv <= PRIV_M;
+        else if (trap_taken)
+            current_priv <= priv_t'(trap_to_s ? PRIV_S : PRIV_M);
+        else if (mret_taken)
+            current_priv <= priv_t'(mstatus_mpp_w);
+        else if (sret_taken)
+            current_priv <= priv_t'(mstatus_spp_w ? PRIV_S : PRIV_U);
+        else if (interrupt_taken)
+            current_priv <= priv_t'(interrupt_to_s ? PRIV_S : PRIV_M);
+    end
+
+`ifdef RISCV_FORMAL
+    /*
+     * RVFI tap -- pure combinational off the same signals that already
+     * drive the real commit (reg_write_data, current_priv, mem_paddr/
+     * mem_sel/mem_wdata, etc.) at the exact commit_now cycle. No new
+     * pipeline stage needed: commit_now is already "this instruction
+     * retires this cycle" for every instruction shape this core has,
+     * including multi-cycle loads/stores/divides -- they just take
+     * longer to REACH that one commit_now cycle, which matches RVFI's
+     * documented model of exactly one rvfi_valid pulse per retired
+     * instruction regardless of cycle count.
+     *
+     * First slice only -- covers isa=rv64i base-ISA checks
+     * (verification/riscv-formal/). No CSR trace ports yet (those need
+     * per-CSR rvfi_csr_<name>_* ports added deliberately once base-ISA
+     * checks are green). rvfi_insn DOES correctly report the raw 16-bit
+     * encoding for compressed instructions (see its own assign below) --
+     * real Zca-specific check models still aren't generated yet (isa=rv64i
+     * has none), so that path remains formally unexercised except by
+     * ill_ch0, but the tap itself is already spec-compliant.
+     */
+    logic [63:0] rvfi_order_q;
+    always_ff @(posedge clk) begin
+        if (rst)
+            rvfi_order_q <= 64'b0;
+        else if (commit_now)
+            rvfi_order_q <= rvfi_order_q + 64'b1;
+    end
+
+    assign rvfi_valid     = commit_now;
+    assign rvfi_order     = rvfi_order_q;
+
+    /*
+     * rvfi_intr support: per riscv-formal's own spec (docs/source/rvfi.rst
+     * upstream), rvfi_intr must be set for the first instruction that is
+     * part of a trap handler, i.e. one whose rvfi_pc_rdata does not match
+     * the rvfi_pc_wdata of the previous (valid) retirement. Implemented
+     * mechanically -- compare THIS retirement's pc against the LAST
+     * retirement's own next_pc -- not semantically ("was the previous
+     * retirement a trap_taken/interrupt_taken event"), and deliberately
+     * so: next_pc's own mux (see its assign below) already gives
+     * trap_taken top priority (trap_taken ? trap_vector : ...), so a
+     * synchronous exception's handler-entry PC chain is ALREADY naturally
+     * consistent in this design -- no discontinuity to flag. A semantic
+     * check would needlessly over-relax an already-tight, already-
+     * correctly-passing property for that case. interrupt_taken, by
+     * contrast, bypasses next_pc entirely via its own separate PC-register
+     * arm (see the PC register always_ff below) -- a genuine discontinuity
+     * this mechanical definition catches automatically, with no need to
+     * enumerate which mechanisms can cause one (robust to any future
+     * redirect mechanism this core grows later). Purely RVFI-scoped state
+     * -- zero impact on the real non-formal build.
+     */
+    logic [63:0] rvfi_prev_pc_wdata_q;
+    always_ff @(posedge clk) begin
+        if (rst)             rvfi_prev_pc_wdata_q <= '0; // matches pc's own reset value,
+                                                          // so the very first retirement
+                                                          // after reset correctly reads
+                                                          // rvfi_intr=0, no special case.
+        else if (commit_now) rvfi_prev_pc_wdata_q <= next_pc;
+    end
+
+    /*
+     * Per the RVFI spec (docs/source/rvfi.rst upstream): "For compressed
+     * instructions the compressed instruction word must be output on
+     * this port" -- the RAW 16-bit encoding (zero-extended), not a
+     * C-expanded 32-bit equivalent. Reporting instruction (the expanded
+     * value) unconditionally was a real spec-compliance gap: harmless
+     * for isa=rv64i checks (wrapper.sv's RISCV_FORMAL_ALLOW_COMPRESSED
+     * guard keeps is_compressed=0 throughout their entire BMC trace, so
+     * this branch was never reachable there), but it made
+     * rvfi_insn == 0 architecturally unreachable for the stock
+     * rvfi_ill_check.sv template's canonical all-zero illegal-instruction
+     * test vector even when the wrapper's guard is relaxed for that one
+     * check (see wrapper.sv's RISCV_FORMAL_CHECK_ill exemption) -- a
+     * genuinely illegal compressed encoding like 16'h0000 (C.ILLEGAL)
+     * now correctly reports as 32'h00000000, not the inert 32'h13
+     * placeholder that value still uses internally (that placeholder
+     * still exists and is still correct for `instruction`'s OWN job of
+     * feeding an always-decoder-safe value -- only what RVFI reports
+     * changes here).
+     */
+    assign rvfi_insn      = is_compressed ? {16'b0, first_hw} : instruction;
+    assign rvfi_trap      = trap_taken;
+    assign rvfi_halt      = 1'b0; // no graceful-halt model exists yet
+    assign rvfi_intr      = commit_now && (pc != rvfi_prev_pc_wdata_q); // see
+                                   // rvfi_prev_pc_wdata_q's own comment above for the
+                                   // full derivation -- real wiring, no longer hardwired
+    assign rvfi_mode      = current_priv; // PRIV_U/S/M already match RVFI's 0/1/3 encoding
+    assign rvfi_ixl       = 2'd2; // always 64-bit -- this core never runs 32-bit mode
+    assign rvfi_rs1_addr  = read_gpr_A_sel;
+    assign rvfi_rs2_addr  = read_gpr_B_sel;
+    assign rvfi_rs1_rdata = read_gpr_A_data;
+    assign rvfi_rs2_rdata = read_gpr_B_data;
+    assign rvfi_rd_addr   = reg_write ? imm_3_or_dest_addr[(`L2_REG_FILE_SIZE - 1):0] : 5'b0;
+    assign rvfi_rd_wdata  = (reg_write && imm_3_or_dest_addr[(`L2_REG_FILE_SIZE - 1):0] != 5'b0)
+                             ? reg_write_data : 64'b0;
+    assign rvfi_pc_rdata  = pc;
+    assign rvfi_pc_wdata  = next_pc;
+    /*
+     * mem_paddr rounded down to a dword boundary, NOT the bus-facing
+     * mem_addr wire -- matches riscv-formal's RISCV_FORMAL_ALIGNED_MEM
+     * convention (see checks.cfg): rvfi_mem_rmask/wmask/wdata below are
+     * already byte-lane-relative to the aligned bus WORD (mem_sel/
+     * mem_wdata), and rvfi_mem_rdata is the raw unshifted bus response
+     * (wb_mem_dat_i) -- exactly what that convention expects. Deliberately
+     * NOT mem_addr ({mem_paddr[31:3],3'b0}, only 32 bits wide): that's
+     * correct for the real bus (this core's physical address space is
+     * 32-bit by design) but truncates upper address bits the formal
+     * spec model's own 64-bit spec_mem_addr computation doesn't -- a
+     * real counterexample caught rvfi_mem_addr silently dropping bits
+     * 63:32 whenever the solver picked a load/store address with any of
+     * them set. mem_paddr itself is full WORD_SIZE-wide (see its own
+     * comment above), so masking it directly here keeps the RVFI tap
+     * exact while leaving the real, deliberately-32-bit bus address
+     * (mem_addr) untouched.
+     */
+    /*
+     * A extension: is_amo_rmw MUST take priority over is_load/is_store here,
+     * same reason it must in mem_control's own read_write_data mux (see that
+     * comment) -- is_load stays high for an AMO's ENTIRE lifetime (decode-
+     * driven), including the S_AMO_WRITE cycle where rvfi_valid actually
+     * pulses, and by then mem_paddr/mem_sel are the REPURPOSED modify value,
+     * not the address (see the amo_addr_q[cur_slot]/amo_sel_q[cur_slot] capture comment above) --
+     * amo_addr_q[cur_slot]/amo_sel_q[cur_slot] (latched before repurposing begins) are the only
+     * correct source at that cycle. amo_rdata_q[cur_slot] is deliberately used for
+     * rvfi_mem_rdata instead of wb_mem_dat_i: S_AMO_WRITE issues a WRITE bus
+     * transaction, so the live wb_mem_dat_i at that cycle is unrelated bus
+     * garbage, not the old memory value -- and riscv-formal's insn_amo.v
+     * spec model expects rvfi_mem_rdata pre-extracted to bit 0 (no
+     * addr-offset shift, unlike insn_l*.v's load convention, which DOES
+     * shift the raw bus word -- two different conventions sharing one port
+     * name, confirmed by reading both generators directly), which is
+     * exactly amo_rdata_q[cur_slot]'s shape (<= load_data, already shifted/extended).
+     * Both rmask and wmask report amo_sel_q[cur_slot] per riscv-formal's own AMO
+     * modelling guidance (docs/source/rvfi.rst: "asserting bits in both
+     * rvfi_mem_rmask and rvfi_mem_wmask") -- insn_amo.v's generated
+     * spec_mem_rmask is never assigned so this isn't load-bearing for any
+     * assertion today, but it's the spec-correct choice and costs nothing.
+     */
+    assign rvfi_mem_addr  = is_amo_rmw ? amo_addr_q[cur_slot]
+                           : (is_load || is_store) ? {mem_paddr[63:3], 3'b0}
+                                                    : 64'b0;
+    assign rvfi_mem_rmask = is_amo_rmw ? amo_sel_q[cur_slot] : (is_load  ? mem_sel : 8'b0);
+    assign rvfi_mem_wmask = is_amo_rmw ? amo_sel_q[cur_slot] : (is_store ? mem_sel : 8'b0);
+    assign rvfi_mem_rdata = is_amo_rmw ? amo_rdata_q[cur_slot] : wb_mem_dat_i;
+    assign rvfi_mem_wdata = is_amo_rmw ? amo_wdata   : mem_wdata;
+
+    /*
+     * CSR trace ports: mepc/mcause/sepc/scause. All four are always fully-
+     * defined 64-bit values (no partial-validity concerns like a memory
+     * access might have), so rmask/wmask are simply all-ones. rdata is the
+     * pre-instruction value (mepc_w etc., already wired for the real fetch-
+     * redirect logic above); wdata is the post-instruction value (the
+     * *_next combinational mirrors from csr_file.sv -- see that module's
+     * header comment for why a plain registered value can't serve both
+     * roles in the same cycle).
+     */
+    assign rvfi_csr_mepc_rmask   = 64'hffff_ffff_ffff_ffff;
+    assign rvfi_csr_mepc_wmask   = 64'hffff_ffff_ffff_ffff;
+    assign rvfi_csr_mepc_rdata   = mepc_w;
+    assign rvfi_csr_mepc_wdata   = mepc_next_w;
+    assign rvfi_csr_mcause_rmask = 64'hffff_ffff_ffff_ffff;
+    assign rvfi_csr_mcause_wmask = 64'hffff_ffff_ffff_ffff;
+    assign rvfi_csr_mcause_rdata = mcause_w;
+    assign rvfi_csr_mcause_wdata = mcause_next_w;
+    assign rvfi_csr_sepc_rmask   = 64'hffff_ffff_ffff_ffff;
+    assign rvfi_csr_sepc_wmask   = 64'hffff_ffff_ffff_ffff;
+    assign rvfi_csr_sepc_rdata   = sepc_w;
+    assign rvfi_csr_sepc_wdata   = sepc_next_w;
+    assign rvfi_csr_scause_rmask = 64'hffff_ffff_ffff_ffff;
+    assign rvfi_csr_scause_wmask = 64'hffff_ffff_ffff_ffff;
+    assign rvfi_csr_scause_rdata = scause_w;
+    assign rvfi_csr_scause_wdata = scause_next_w;
+    /* pmpcfg0/pmpaddr0: see the port-list comment above -- rdata is the
+     * live control-plane export csr_file0 already drives for real PMP
+     * enforcement (pmpcfg0_w/pmpaddr0_w), wdata just mirrors it. */
+    assign rvfi_csr_pmpcfg0_rmask  = 64'hffff_ffff_ffff_ffff;
+    assign rvfi_csr_pmpcfg0_wmask  = 64'hffff_ffff_ffff_ffff;
+    assign rvfi_csr_pmpcfg0_rdata  = pmpcfg0_w;
+    assign rvfi_csr_pmpcfg0_wdata  = pmpcfg0_w;
+    assign rvfi_csr_pmpaddr0_rmask = 64'hffff_ffff_ffff_ffff;
+    assign rvfi_csr_pmpaddr0_wmask = 64'hffff_ffff_ffff_ffff;
+    assign rvfi_csr_pmpaddr0_rdata = pmpaddr0_w;
+    assign rvfi_csr_pmpaddr0_wdata = pmpaddr0_w;
+    /* medeleg: see the port-list comment above -- rdata is the live
+     * control-plane export csr_file0 already drives for real trap
+     * delegation (medeleg_w), wdata just mirrors it. */
+    assign rvfi_csr_medeleg_rmask  = 64'hffff_ffff_ffff_ffff;
+    assign rvfi_csr_medeleg_wmask  = 64'hffff_ffff_ffff_ffff;
+    assign rvfi_csr_medeleg_rdata  = medeleg_w;
+    assign rvfi_csr_medeleg_wdata  = medeleg_w;
+    /* satp: see the port-list comment above -- rdata is the live
+     * control-plane export csr_file0 already drives for real Sv39
+     * translation (satp_w), wdata just mirrors it. */
+    assign rvfi_csr_satp_rmask     = 64'hffff_ffff_ffff_ffff;
+    assign rvfi_csr_satp_wmask     = 64'hffff_ffff_ffff_ffff;
+    assign rvfi_csr_satp_rdata     = satp_w;
+    assign rvfi_csr_satp_wdata     = satp_w;
+    /* rvfi_any_trap_taken: see the port-list comment above -- the exact
+     * same expression already wired to csr_file0's own i_trap_taken
+     * input (this instantiation's own .i_trap_taken(...) line), real
+     * hardware, not new state. */
+    assign rvfi_any_trap_taken     = trap_taken || interrupt_taken;
+    /* rvfi_any_debug_entry: see the port-list comment above -- the OR of
+     * every real path that can flip dm_access_active mid-instruction,
+     * all four already-existing signals (debug_ebreak_entry/trigger_
+     * debug_entry declared near dm_access_active's own forward-declare
+     * block; debug_halt_req_entry/dm_access_active assigned in the Debug
+     * Mode section), not new state. */
+    assign rvfi_any_debug_entry    = debug_ebreak_entry || debug_halt_req_entry
+                                    || trigger_debug_entry || dm_access_active;
+`endif
+
+endmodule

@@ -10,6 +10,9 @@
 # Sm/S -- the framework's own Makefile default excludes both).
 #
 # Usage (from WSL): verification/riscv-arch-test/run_act_tests.sh [elf_dir]
+# CORE=fsm|ref (default fsm) selects design/core.sv's own 6 leaf modules
+# vs. the frozen verification/reference/ref_core.sv + its ref_* leaves
+# (P3.3) -- same env-var convention as CONFIG_FILES/WORKDIR above.
 set -u
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -17,6 +20,7 @@ ELF_DIR="${1:-$REPO_ROOT/verification/riscv-arch-test/work/quantiumv-rv64im/elfs
 HEX_DIR="/tmp/act_hex_$$"
 VVP_BIN="/tmp/act_runner_tb_$$.vvp"
 RESULTS_LOG="$REPO_ROOT/verification/riscv-arch-test/act_results.log"
+CORE="${CORE:-fsm}"
 
 if [ ! -d "$ELF_DIR" ]; then
     echo "ELF directory not found: $ELF_DIR" >&2
@@ -26,11 +30,30 @@ fi
 mkdir -p "$HEX_DIR"
 trap 'rm -rf "$HEX_DIR" "$VVP_BIN"' EXIT
 
-echo "Compiling act_runner_tb.sv against the current core..."
-iverilog -g2012 -I "$REPO_ROOT/design" -I "$REPO_ROOT/testbench" -o "$VVP_BIN" \
-    "$REPO_ROOT/design/alu.sv" "$REPO_ROOT/design/decoder.sv" "$REPO_ROOT/design/register_file.sv" \
-    "$REPO_ROOT/design/csr_file.sv" "$REPO_ROOT/design/divider.sv" "$REPO_ROOT/design/c_expand.sv" \
-    "$REPO_ROOT/design/core.sv" "$REPO_ROOT/design/wb4_sram.sv" "$REPO_ROOT/design/wb_arbiter2.sv" \
+case "$CORE" in
+    fsm)
+        CORE_FILES=("$REPO_ROOT/design/alu.sv" "$REPO_ROOT/design/decoder.sv" "$REPO_ROOT/design/register_file.sv" \
+            "$REPO_ROOT/design/csr_file.sv" "$REPO_ROOT/design/divider.sv" "$REPO_ROOT/design/c_expand.sv" \
+            "$REPO_ROOT/design/core.sv")
+        CORE_DEFINE=()
+        ;;
+    ref)
+        CORE_FILES=("$REPO_ROOT/verification/reference/ref_alu.sv" "$REPO_ROOT/verification/reference/ref_decoder.sv" \
+            "$REPO_ROOT/verification/reference/ref_register_file.sv" "$REPO_ROOT/verification/reference/ref_csr_file.sv" \
+            "$REPO_ROOT/verification/reference/ref_divider.sv" "$REPO_ROOT/verification/reference/ref_c_expand.sv" \
+            "$REPO_ROOT/verification/reference/ref_core.sv")
+        CORE_DEFINE=(-DQV_REF_AS_CORE)
+        ;;
+    *)
+        echo "Unknown CORE: $CORE (expected fsm or ref)" >&2
+        exit 1
+        ;;
+esac
+
+echo "Compiling act_runner_tb.sv against the current core (CORE=$CORE)..."
+iverilog -g2012 "${CORE_DEFINE[@]}" -I "$REPO_ROOT/design" -I "$REPO_ROOT/testbench" \
+    -I "$REPO_ROOT/verification/reference" -o "$VVP_BIN" \
+    "${CORE_FILES[@]}" "$REPO_ROOT/design/wb4_sram.sv" "$REPO_ROOT/design/wb_arbiter2.sv" \
     "$REPO_ROOT/testbench/act_runner_tb.sv"
 if [ $? -ne 0 ]; then
     echo "COMPILE FAILED"
