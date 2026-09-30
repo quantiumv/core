@@ -68,6 +68,11 @@ __pycache__/
 # seed) -- regenerated on every run, never meant to be tracked.
 verification/lockstep/gen/_sail_diff_scratch/
 
+# run_lockstep.sh's own build/run output (compiled .vvp binaries, hex
+# images, per-entry result files, build/gen logs) -- regenerated on
+# every run, never meant to be tracked.
+verification/lockstep/.results/
+
 # Internal-only reference documentation (not for the public repo)
 docs/internal/
 

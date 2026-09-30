@@ -25,11 +25,13 @@ act:
 openocd-smoke:
 	verification/openocd/run_m10_smoke_test.sh
 
-# Not implemented yet -- lockstep is built in P3.4 of the pipelining
-# track plan (verification/lockstep/), once ref_core exists (P3.3).
+# P3.4: REF-vs-REF self-proof over the whole corpus, zero bus delay (the
+# safe default -- see lockstep_wb_delay.sv's own KNOWN GAP comment before
+# passing LOCKSTEP_ARGS="--delay-max N" with N>0). Pass LOCKSTEP_ARGS for
+# anything else run_lockstep.sh takes, e.g.
+# `make lockstep LOCKSTEP_ARGS="--mode mutant --mutant 3"`.
 lockstep:
-	@echo "make lockstep: not implemented yet -- see pipelining-track-plan P3.4" >&2
-	@exit 1
+	verification/lockstep/run_lockstep.sh --mode selfproof $(LOCKSTEP_ARGS)
 
 # Not implemented yet -- syncs design/{pipe/,reference/} + wrapper.sv/
 # checks.cfg into a riscv-formal checkout. The existing manual sync

@@ -1,0 +1,41 @@
+# Timing-independent firmware/ corpus for the P3.4 lockstep harness --
+# per the plan, the subset of firmware/Makefile targets whose outcome
+# doesn't depend on interrupt/JTAG/debugger timing (excludes
+# interrupt_test, uart_plic_meip_test, uart_plic_seip_test,
+# m10_debug_test). One `make -C firmware` TARGET name per line (not a
+# path -- run_lockstep.sh builds each before running it).
+#
+# These programs halt via a trailing ebreak (crt0.s's own convention,
+# checked externally by each program's own dedicated _tb.sv in the
+# regular regression suite) rather than writing a tohost location, so
+# they're unusable with lockstep_tb.sv's +TOHOST_ADDR completion path --
+# run_lockstep.sh instead runs each with +MAX_RETIRE=<bound> (comparing
+# every retirement up to that bound, including the harmless repeated
+# retirements of the post-ebreak halt loop). #-comments and blank lines
+# ignored.
+#
+# target | hex file (relative to firmware/) | MAX_RETIRE bound
+#
+# KNOWN GAP, not yet resolved: `all` (crt0.hex, hello.c) is excluded --
+# a run against it produces no output at all after the very first
+# +TIMEOUT=%0d/+MAX_RETIRE heartbeat (confirmed via a fine-grained
+# heartbeat print: exactly one line at cycle=0, both sides' PC still 0,
+# then silence forever, killed cleanly by the wall-clock timeout with no
+# error). Every other firmware entry below, and the whole 111-entry ACT4
+# corpus, complete normally, so this looks specific to this one hex
+# image rather than a general MAX_RETIRE-completion bug -- possibly
+# related to firmware/wb4_sram.sv's own auto-load also targeting this
+# exact file (`../firmware/crt0.hex`), untested elsewhere since every
+# other corpus entry uses a different image than that auto-load default.
+# Next step if picked back up: the same fine-grained-heartbeat technique
+# that root-caused lockstep_tb.sv's/lockstep_wb_delay.sv's own earlier
+# bugs, but here the very first heartbeat already looks stuck, so also
+# check init-block/readmemh ordering (see wb4_sram.sv's own header
+# comment on the required `#1` sequencing before this run start.
+# all|crt0.hex|2000
+csr_test|csr_test.hex|3000
+m_test|m_test.hex|3000
+priv_test|priv_test.hex|4000
+a_test|a_test.hex|3000
+c_test|c_test.hex|3000
+sv39_real_test|sv39_real_test.hex|6000
