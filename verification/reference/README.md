@@ -96,9 +96,15 @@ they're defined exactly once regardless of how many cores include them.
 - **`MANIFEST.sha256`** + **`check_manifest.sh`**: SHA-256 of every
   `ref_*.sv`/`ref_macros.svh` file as of the freeze. Run
   `wsl bash -lc "verification/reference/check_manifest.sh"` to confirm
-  nothing here has changed since. A mismatch means either an accidental
-  edit (revert it) or a deliberate errata fix that forgot to
-  regenerate the manifest (regenerate it -- see below).
+  nothing here has changed since. A mismatch means an accidental edit
+  (revert it), a deliberate errata fix, or a P3.4 mutant addition (see
+  "Running mutants" below) that forgot to regenerate the manifest
+  (regenerate it -- see below). The manifest was last regenerated after
+  adding mutants 1-10 to `ref_core.sv`/`ref_c_expand.sv`; that's a real,
+  intentional diff from the original freeze snapshot, not an accidental
+  edit -- confirmed `QV_MUTANT=0` (every existing caller) behaves
+  identically before and after via the unchanged full regression suite
+  (72/72) and the unchanged default-config lockstep smoke test.
 - **`defaults_snapshot/`** + **`check_defaults.sh`**: a copy of
   `design/defaults/*.sv` as of the freeze. Run
   `wsl bash -lc "verification/reference/check_defaults.sh"` to confirm
@@ -140,8 +146,43 @@ CORE=ref wsl bash -lc "verification/riscv-arch-test/run_act_tests.sh"
 ## Running mutants
 
 `ref_core #(.QV_MUTANT(k))` in place of the default `#(.QV_MUTANT(0))`
-selects mutant `k`, once P3.4's own kill-matrix mutants are written
-into `ref_core.sv` (gated on `QV_MUTANT`'s value at the specific
-injection points each mutant targets) -- see the plan's own "Proving
-the harness catches bugs" section under P3.4. No mutants exist yet;
-`QV_MUTANT` is a declared, currently-unused parameter until then.
+selects mutant `k` -- P3.4's own kill-matrix mutants, gated on
+`QV_MUTANT`'s value at the specific injection point each one targets, so
+`QV_MUTANT=0` (the default, used everywhere outside
+verification/lockstep/) is provably identical to the pre-mutant RTL: see
+the "Guards against accidental drift" note below on why this changed
+`MANIFEST.sha256` without being an errata fix. `ref_c_expand.sv` also
+gained its own `QV_MUTANT` parameter (mutant 8 needs it; it had none
+before) -- ref_core.sv passes its own QV_MUTANT straight through at the
+`c_expand0` instantiation, same as every other leaf module already gets
+QV_MUTANT threaded to it structurally (only ref_alu.sv still doesn't --
+mutant 1 lives in ref_core.sv instead, corrupting alu_result after the
+ref_alu0 instantiation, since ref_alu.sv only ever sees operand VALUES,
+never the register indices mutant 1 needs).
+
+| k | Mutates | Where |
+|---|---|---|
+| 1 | ALU result off by one when rs1==rs2 (register index, via read_gpr_A_sel/read_gpr_B_sel) | ref_core.sv, after the ref_alu0 instantiation |
+| 2 | SB at address offset 7 writes byte lane 6 instead of 7 | ref_core.sv, `mem_sel` |
+| 3 | BLTU compares signed instead of unsigned | ref_core.sv, `branch_comparator` |
+| 4 | ECALL from U-mode reports cause 9 (S-mode's) instead of 8 | ref_core.sv, `exc_code` |
+| 5 | Interrupts sampled one retirement later than the real sampling point | ref_core.sv, `interrupt_sample_q` (double-registered `commit_now_q`) |
+| 6 | minstret wrongly skips CSR instructions | ref_core.sv, `csr_file0`'s `i_instr_retired` |
+| 7 | An ordinary store no longer clears the LR/SC reservation | ref_core.sv, the reservation-clear `always_ff` |
+| 8 | C.ADDI16SP's `i_instr16[5]`/`i_instr16[2]` bit groups swapped | ref_c_expand.sv, `c_addi16sp` |
+| 9 | FENCE.I never flushes the icache | ref_core.sv, `icache_flush_o` |
+| 10 | Data-side page-fault mtval/stval off by 8 | ref_core.sv, `trap_val`'s `mem_fault_q` arm |
+
+Confirmed caught (a REF-vs-REF run reports `LOCKSTEP_RESULT: FAIL`) for
+1-4 and 6-8 and 10, each via a corpus entry chosen to actually exercise
+that specific condition -- see `run_lockstep.sh --mode mutant --mutant
+k`. Mutants 5 and 9 are implemented and regression-clean (the full
+72/72 suite in `verification/regress/` passes unchanged at
+`QV_MUTANT=0`) but not yet proven caught by an actual run: mutant 9
+(FENCE.I's flush) has no observable effect at all without an icache
+present, and `verification/lockstep/lockstep_mem.sv`'s own cache
+memory configuration has a separate, unresolved issue (see its KNOWN
+GAP comment); mutant 5 (interrupt timing) needs a real interrupt to
+actually be TAKEN, which hits a separate stall documented in
+`lockstep_tb.sv`'s own KNOWN GAP comment (reproduce with
+`verification/lockstep/repro_irq_stall.s`).

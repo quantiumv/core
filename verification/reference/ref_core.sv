@@ -2073,7 +2073,7 @@ module ref_core
 
     wire [31:0] c_expand_out;
     wire        c_expand_illegal;
-    ref_c_expand c_expand0 (
+    ref_c_expand #(.QV_MUTANT(QV_MUTANT)) c_expand0 (
         .i_instr16 (first_hw),
         .o_instr32 (c_expand_out),
         .o_illegal (c_expand_illegal)
@@ -3358,7 +3358,10 @@ module ref_core
         end else if (commit_now && is_lr && !instr_faulted) begin
             reservation_valid_q <= 1'b1;
             reservation_addr_q  <= amo_target_addr;
-        end else if (commit_now && (is_store || is_sc || is_amo_rmw)) begin
+        // QV_MUTANT==7 (P3.4 lockstep kill-matrix mutant): an ordinary
+        // store (is_store, excluding is_sc/is_amo_rmw) no longer clears
+        // the reservation.
+        end else if (commit_now && ((is_store && !(QV_MUTANT == 7)) || is_sc || is_amo_rmw)) begin
             reservation_valid_q <= 1'b0;
         end
     end
@@ -3787,7 +3790,10 @@ module ref_core
                            (fetch_lo_fault_q[cur_slot] || fetch_hi_fault_q[cur_slot]) ? 4'd12 : // Sv39 M3: instruction page fault
                            is_illegal_instr                      ? 4'd2  :
                            (is_ebreak || trigger_exception_match) ? 4'd3  :
-                           (is_ecall && current_priv == PRIV_U)  ? 4'd8  :
+                           // QV_MUTANT==4 (P3.4 lockstep kill-matrix
+                           // mutant): U-mode ECALL reports cause 9
+                           // (S-mode's cause) instead of its own cause 8.
+                           (is_ecall && current_priv == PRIV_U)  ? (QV_MUTANT == 4 ? 4'd9 : 4'd8) :
                            (is_ecall && current_priv == PRIV_S)  ? 4'd9  :
                            (is_ecall && current_priv == PRIV_M)  ? 4'd11 :
                            mem_load_misaligned                   ? 4'd4  :
@@ -4133,11 +4139,22 @@ module ref_core
     // block (mem-side walk-start needs it there); this instantiation,
     // driving it via a port connection, is unaffected by where the bare
     // declaration lives.
+    //
+    // QV_MUTANT==1 (P3.4 lockstep kill-matrix mutant): off-by-one on
+    // alu_result whenever rs1==rs2 (the true register-index condition,
+    // via read_gpr_A_sel/read_gpr_B_sel -- ref_alu.sv itself only ever
+    // sees operand VALUES, so this can't live there without adding a new
+    // port; see verification/reference/README.md's errata policy for why
+    // a QV_MUTANT-gated addition here doesn't violate the freeze).
+    logic [(`WORD_SIZE - 1):0] alu_result_raw;
+    wire mutant1_hit = (QV_MUTANT == 1) && (read_gpr_A_sel == read_gpr_B_sel);
+    assign alu_result = mutant1_hit ? (alu_result_raw + 1'b1) : alu_result_raw;
+
     ref_alu alu0 (
         .i_operand_A(alu_operand_a),
         .i_operation(alu_op),
         .i_operand_B(alu_operand_b),
-        .o_result(alu_result)
+        .o_result(alu_result_raw)
     );
 
     /*
@@ -4254,7 +4271,10 @@ module ref_core
         // across a debug entry, unlike cause[8:6]/prv[1:0]); it was
         // simply never consulted anywhere before now. Defaults to 0 on
         // reset, so out-of-the-box behavior is unchanged: count.
-        .i_instr_retired(commit_now && !instr_faulted && !(in_debug_mode && dcsr_w[10])),
+        // QV_MUTANT==6 (P3.4 lockstep kill-matrix mutant): minstret
+        // wrongly skips CSR instructions (is_csr, already in scope).
+        .i_instr_retired(commit_now && !instr_faulted && !(in_debug_mode && dcsr_w[10])
+                          && !(QV_MUTANT == 6 && is_csr)),
 
         .i_current_priv(current_priv),
         .i_mtip(i_mtip),
@@ -4395,6 +4415,16 @@ module ref_core
         else     commit_now_q <= commit_now;
     end
 
+    // QV_MUTANT==5 (P3.4 lockstep kill-matrix mutant): interrupts sampled
+    // one retirement later than the real sampling point (commit_now_q
+    // delayed by one more cycle) -- used below only when QV_MUTANT==5.
+    logic commit_now_qq;
+    always_ff @(posedge clk) begin
+        if (rst) commit_now_qq <= 1'b0;
+        else     commit_now_qq <= commit_now_q;
+    end
+    wire interrupt_sample_q = (QV_MUTANT == 5) ? commit_now_qq : commit_now_q;
+
     // interrupt_taken/interrupt_to_s: forward-declared above -- csr_file0's
     // own i_trap_taken/i_trap_to_s need them before this section (which
     // itself needs csr_file0's own outputs) can exist.
@@ -4411,7 +4441,7 @@ module ref_core
     // Debug Mode section below for debug_halt_req_entry/stepping_q's own
     // real definitions -- both forward-declared, same reason as
     // in_debug_mode itself.
-    assign interrupt_taken = commit_now_q && int_pending_and_enabled
+    assign interrupt_taken = interrupt_sample_q && int_pending_and_enabled
                            && !in_debug_mode && !(i_debug_halt_req || stepping_q);
     assign interrupt_to_s  = interrupt_taken && int_to_s;
 
@@ -4639,7 +4669,9 @@ module ref_core
             `REF_INSTR_CODE(BNE):  take_branch = (imm_1 != imm_2);
             `REF_INSTR_CODE(BLT):  take_branch = ($signed(imm_1) <  $signed(imm_2));
             `REF_INSTR_CODE(BGE):  take_branch = ($signed(imm_1) >= $signed(imm_2));
-            `REF_INSTR_CODE(BLTU): take_branch = (imm_1 < imm_2);
+            // QV_MUTANT==3 (P3.4 lockstep kill-matrix mutant): BLTU
+            // compares signed instead of unsigned -- BGEU is untouched.
+            `REF_INSTR_CODE(BLTU): take_branch = (QV_MUTANT == 3) ? ($signed(imm_1) < $signed(imm_2)) : (imm_1 < imm_2);
             `REF_INSTR_CODE(BGEU): take_branch = (imm_1 >= imm_2);
             default:           take_branch = 1'b0;
         endcase
@@ -4698,7 +4730,12 @@ module ref_core
     /* verilator lint_off UNUSEDSIGNAL */
     wire [(`WORD_SIZE - 1):0] mem_paddr = (mem_translate_active && mem_resolved_q[cur_slot]) ? mem_resolved_paddr_q[cur_slot] : alu_result;
     /* verilator lint_on UNUSEDSIGNAL */
-    wire [7:0] mem_sel = mem_size_mask << mem_paddr[2:0];
+    // QV_MUTANT==2 (P3.4 lockstep kill-matrix mutant): a byte store
+    // (mem_size==2'b00, i.e. SB) at address offset 7 within its dword
+    // writes lane 6 instead of lane 7 -- every other size/offset
+    // combination is unaffected.
+    wire mutant2_hit = (QV_MUTANT == 2) && (mem_size == 2'b00) && (mem_paddr[2:0] == 3'b111);
+    wire [7:0] mem_sel = mutant2_hit ? 8'b0100_0000 : (mem_size_mask << mem_paddr[2:0]);
 
     /* Dword-aligned memory address -- same precompute-outside-always_comb reason as fetch_addr above. */
     wire [31:0] mem_addr = {mem_paddr[31:3], 3'b0};
@@ -4986,7 +5023,8 @@ module ref_core
         : (mem_load_misaligned || mem_store_misaligned) ? mem_paddr
         // Sv39 M4: mem-side PTE-content page fault (cause 13/15) --
         // ptw_vaddr_q[cur_slot], same reasoning as the fetch-side arm above.
-        : mem_fault_q[cur_slot] ? ptw_vaddr_q[cur_slot]
+        // QV_MUTANT==10 (P3.4 lockstep kill-matrix mutant): off by 8.
+        : mem_fault_q[cur_slot] ? (ptw_vaddr_q[cur_slot] + (QV_MUTANT == 10 ? 64'd8 : 64'd0))
         // pmp_load_fault/pmp_store_fault (and, as of M4, mem_access_fault_q[cur_slot]
         // -- a PMP-denied/bus-errored PTE read) all reuse
         // mem_access_fault_vaddr's own mem_translate_active/
@@ -5143,7 +5181,9 @@ module ref_core
 
     // See this port's own header comment (module port list, above) for
     // the timing argument.
-    assign icache_flush_o = commit_now && is_fence_i;
+    // QV_MUTANT==9 (P3.4 lockstep kill-matrix mutant): FENCE.I never
+    // flushes the icache.
+    assign icache_flush_o = commit_now && is_fence_i && !(QV_MUTANT == 9);
 
     /*
      * Pipelining P2 core-facing two-port split (prerequisite for step

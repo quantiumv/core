@@ -54,7 +54,9 @@
  * the actual arbiter of correctness -- treat every formula here as
  * provisional until that cross-check passes.
  */
-module ref_c_expand (
+module ref_c_expand #(
+    parameter int QV_MUTANT = 0   // P3.4 lockstep kill-matrix: QV_MUTANT==8, see c_addi16sp below
+) (
     input  logic [(`C_INSTR_SIZE - 1):0] i_instr16,
     output logic [(`INSTR_SIZE - 1):0]   o_instr32,
     output logic                          o_illegal
@@ -247,8 +249,16 @@ module ref_c_expand (
                          * C.LWSP/C.LDSP. */
                         logic [9:0] nzimm10;
                         logic [11:0] imm12;
-                        nzimm10 = {i_instr16[12], i_instr16[4:3], i_instr16[5],
-                                   i_instr16[2], i_instr16[6], 4'b0000};
+                        // QV_MUTANT==8 (P3.4 lockstep kill-matrix mutant):
+                        // the i_instr16[5]/i_instr16[2] bit groups (nzimm
+                        // bits 6 and 5) are swapped.
+                        if (QV_MUTANT == 8) begin
+                            nzimm10 = {i_instr16[12], i_instr16[4:3], i_instr16[2],
+                                       i_instr16[5], i_instr16[6], 4'b0000};
+                        end else begin
+                            nzimm10 = {i_instr16[12], i_instr16[4:3], i_instr16[5],
+                                       i_instr16[2], i_instr16[6], 4'b0000};
+                        end
                         imm12 = {{2{i_instr16[12]}}, nzimm10};
                         o_instr32 = mk_i(imm12, 5'd2, 3'b000, 5'd2, OPC_OP_IMM);
                         o_illegal = (nzimm10 == 10'b0);
