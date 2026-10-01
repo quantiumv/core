@@ -73,6 +73,12 @@ verification/lockstep/gen/_sail_diff_scratch/
 # every run, never meant to be tracked.
 verification/lockstep/.results/
 
+# run_perf.sh's own build/run output (compiled .vvp binaries, build
+# logs) -- regenerated on every run, never meant to be tracked.
+# baseline_fsm.csv is NOT here -- that's the actual P3.5 deliverable.
+verification/perf/.results/
+*.lst
+
 # Internal-only reference documentation (not for the public repo)
 docs/internal/
 

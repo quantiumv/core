@@ -1,0 +1,15 @@
+kernel,config,cycles,instret,cpi
+memcpy,fsm,2489,659,3.777
+memcpy,cache,2825,659,4.287
+crc32,fsm,26785,8841,3.030
+crc32,cache,26843,8841,3.036
+qsort,fsm,16404,4611,3.558
+qsort,cache,17224,4611,3.735
+matmul,fsm,15543,4285,3.627
+matmul,cache,15823,4285,3.693
+sieve,fsm,23403,5895,3.970
+sieve,cache,26253,5895,4.453
+listchase,fsm,9742,2564,3.800
+listchase,cache,10014,2564,3.906
+mixedint,fsm,17566,4393,3.999
+mixedint,cache,19048,4393,4.336
