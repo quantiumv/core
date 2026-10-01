@@ -69,19 +69,86 @@ module lockstep_mem #(
     logic [7:0]  dn_sel;
     logic        dn_we, dn_cyc, dn_stb, dn_ack, dn_err;
 
+    // LIVE decode -- used only to gate each slave's own cyc_i/stb_i this
+    // cycle (below) and to latch target_q (below), exactly like
+    // wb_addr_decoder.sv's own ram_cyc_o/uart_cyc_o (= cyc_i && sel_ram/
+    // sel_uart, both live off addr_i). Safe to stay live for THAT use: a
+    // slave only ever samples it while a fresh request is actually
+    // present this cycle.
     wire is_mmio = (dn_addr >= `QV_LOCKSTEP_MMIO_BASE) &&
                    (dn_addr <  (`QV_LOCKSTEP_MMIO_BASE + `QV_LOCKSTEP_MMIO_SIZE));
     wire is_ram  = (dn_addr < `QV_LOCKSTEP_RAM_BYTES);
 
+    /*
+     * Response routing uses a LATCHED target, not a live re-decode of
+     * dn_addr -- mirrors wb_addr_decoder.sv's own target_q and its
+     * header's "remember which slave" reasoning verbatim: both slaves
+     * below are registered (one-cycle-delayed-echo) Wishbone slaves, so
+     * by the time ack_i/dat_i need routing back, dn_addr may already
+     * reflect something else.
+     *
+     * This isn't a theoretical convenience, like it is in a lot of
+     * designs that could get away with a live re-decode most of the
+     * time -- a real, confirmed zero-delay simulation hang happened here
+     * without it. ref_core.sv's own wb_mem_addr_o/wb_mem_cyc_o
+     * (core.sv:5285-5336) are driven by a combinational
+     * `!wb_mem_done`-gated always_comb that reverts BOTH to 0 the same
+     * instant it sees a live ack/err -- exactly the "no longer
+     * re-derivable from addr_i" case wb_addr_decoder.sv's header warns
+     * about, and exactly why that module latches instead. Re-deriving
+     * is_mmio/is_ram from dn_addr at response time (this file's original
+     * version) closed a real loop: dn_addr reverting to 0 flips
+     * is_mmio/is_ram, which flips which registered ack dn_ack reads back,
+     * which (being wb_mem_ack_i to the core) flips wb_mem_done live,
+     * which flips wb_mem_addr_o/cyc_o again -- forever, in the same time
+     * step. Confirmed by a direct run hanging at 100% CPU with simulation
+     * time never advancing past the exact cycle the first real MMIO
+     * write's (firmware/hello.c's UART TX) ack arrived, and by a
+     * delta-cycle tracer catching the live oscillation in the act:
+     * dn_addr alternating 0x04008000/0x00000000 and dn_cyc/is_mmio/is_ram
+     * flipping in lockstep, all within a single, never-advancing $time.
+     * Latching, exactly like the real decoder, breaks it: once latched,
+     * the response mux no longer depends on dn_addr at all, so dn_addr's
+     * own reversion can never feed back into it.
+     */
+    typedef enum logic [1:0] { TGT_RAM, TGT_MMIO, TGT_NONE } target_t;
+    target_t target_q;
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            target_q <= TGT_RAM;
+        end else if (dn_cyc && dn_stb) begin
+            if (is_mmio)      target_q <= TGT_MMIO;
+            else if (is_ram)  target_q <= TGT_RAM;
+            else              target_q <= TGT_NONE;
+        end
+    end
+
+    // An address that is neither RAM nor MMIO faults -- matches
+    // wb4_sram.sv's own "out of range -> err_o" convention, applied one
+    // level up here. Registered, like every other ack/err in this file,
+    // rather than derived live from dn_cyc/dn_stb (which, unlike the
+    // is_mmio/is_ram case above, WOULD still close a loop even with
+    // target_q latched: dn_err -> drop_req -> cyc_o/stb_o -> dn_cyc/
+    // dn_stb -> dn_err. Not yet reachable by any current corpus entry
+    // -- every one stays inside RAM or the one MMIO UART address -- but
+    // gen/qvgen.py's generator deliberately emits out-of-range accesses,
+    // so a future random-corpus seed could reach it.
+    logic none_err_q;
+    always_ff @(posedge clk) begin
+        if (rst) none_err_q <= 1'b0;
+        else     none_err_q <= dn_cyc && dn_stb && !is_mmio && !is_ram;
+    end
+
     logic [63:0] sram_dat, mmio_dat;
     logic        sram_ack, sram_err, mmio_ack, mmio_err;
 
-    assign dn_dat_s2m = is_mmio ? mmio_dat : sram_dat;
-    assign dn_ack     = is_mmio ? mmio_ack : (is_ram ? sram_ack : 1'b0);
-    // An address that is neither RAM nor MMIO faults immediately rather
-    // than being forwarded to either slave -- matches wb4_sram.sv's own
-    // "out of range -> err_o" convention, applied one level up here.
-    assign dn_err     = is_mmio ? mmio_err : (is_ram ? sram_err : (dn_cyc && dn_stb));
+    always_comb begin
+        case (target_q)
+            TGT_MMIO: begin dn_dat_s2m = mmio_dat; dn_ack = mmio_ack; dn_err = mmio_err;  end
+            TGT_NONE: begin dn_dat_s2m = 64'b0;     dn_ack = 1'b0;    dn_err = none_err_q; end
+            default:  begin dn_dat_s2m = sram_dat;  dn_ack = sram_ack; dn_err = sram_err;  end
+        endcase
+    end
 
     /* verilator lint_off PINCONNECTEMPTY */
     wb4_sram #(.num_words(NUM_WORDS)) sram0 (

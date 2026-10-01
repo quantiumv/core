@@ -16,23 +16,14 @@
 #
 # target | hex file (relative to firmware/) | MAX_RETIRE bound
 #
-# KNOWN GAP, not yet resolved: `all` (crt0.hex, hello.c) is excluded --
-# a run against it produces no output at all after the very first
-# +TIMEOUT=%0d/+MAX_RETIRE heartbeat (confirmed via a fine-grained
-# heartbeat print: exactly one line at cycle=0, both sides' PC still 0,
-# then silence forever, killed cleanly by the wall-clock timeout with no
-# error). Every other firmware entry below, and the whole 111-entry ACT4
-# corpus, complete normally, so this looks specific to this one hex
-# image rather than a general MAX_RETIRE-completion bug -- possibly
-# related to firmware/wb4_sram.sv's own auto-load also targeting this
-# exact file (`../firmware/crt0.hex`), untested elsewhere since every
-# other corpus entry uses a different image than that auto-load default.
-# Next step if picked back up: the same fine-grained-heartbeat technique
-# that root-caused lockstep_tb.sv's/lockstep_wb_delay.sv's own earlier
-# bugs, but here the very first heartbeat already looks stuck, so also
-# check init-block/readmemh ordering (see wb4_sram.sv's own header
-# comment on the required `#1` sequencing before this run start.
-# all|crt0.hex|2000
+# `all` (crt0.hex, hello.c) was previously excluded here: lockstep_mem.sv's
+# response mux re-derived its RAM/MMIO decode live from the arbiter's
+# downstream address, which raced with ref_core.sv's own wb_mem_addr_o/
+# cyc_o combinationally reverting to 0 on ack, forming a zero-delay
+# simulation loop on hello.c's first UART write. Fixed by latching the
+# decode (target_q) instead, mirroring wb_addr_decoder.sv's own pattern.
+# Re-enabled below.
+all|crt0.hex|2000
 csr_test|csr_test.hex|3000
 m_test|m_test.hex|3000
 priv_test|priv_test.hex|4000
