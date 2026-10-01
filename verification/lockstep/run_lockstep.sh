@@ -23,7 +23,12 @@
 # tohost-terminated), fw (verification/lockstep/fw.list, firmware/
 # targets, MAX_RETIRE-terminated -- see fw.list's own header for why),
 # random (qvgen.py-generated, --random-count programs, tohost-
-# terminated), or all (default: act + fw + random).
+# terminated), irq (verification/lockstep/irq.list, real-interrupt-
+# taking programs, MAX_RETIRE-terminated -- see irq.list's own header
+# for why; needs --irq-mode 2 passed explicitly, NOT part of "all"), smc
+# (verification/lockstep/smc.list, self-modifying-code programs,
+# MAX_RETIRE-terminated -- needs --memcfg-b cache passed explicitly, NOT
+# part of "all"), or all (default: act + fw + random).
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -73,7 +78,8 @@ Usage: run_lockstep.sh --mode selfproof|mutant|corrupt [options]
 
   --mode MODE          selfproof (default), mutant, or corrupt
   --mutant N           QV_MUTANT_B value, 1-10 (--mode mutant only)
-  --memcfg-b sram|cache  side B's memory config (--mode selfproof only, default sram)
+  --memcfg-b sram|cache  side B's memory config (default sram -- also applies
+                        under --mode mutant, e.g. --mutant 9 needs cache)
   --delay-max N        max bus-delay wait states (default 0 = disabled/safe;
                         see lockstep_wb_delay.sv's KNOWN GAP comment before
                         setting this nonzero)
@@ -82,7 +88,11 @@ Usage: run_lockstep.sh --mode selfproof|mutant|corrupt [options]
                         enables mstatus.MIE, so this only matters against a
                         program that does (e.g. repro_irq_stall.s)
   --irq-seed N          seed for the injection LFSR (default 1)
-  --corpus WHICH        act, fw, random, or all (default all)
+  --corpus WHICH        act, fw, random, irq, smc, or all (default all --
+                        irq/smc are NOT part of all, since each needs a
+                        non-default flag passed explicitly -- --irq-mode 2
+                        for irq, --memcfg-b cache for smc; see each
+                        list's own header)
   --only REGEX          only run corpus entries whose path matches REGEX
   -j N                  parallel jobs (default: nproc)
   --outdir DIR           results directory (default verification/lockstep/.results)
@@ -228,12 +238,68 @@ build_random_entries() {
     done
 }
 
+# Builds directly via as/ld/objcopy (matching each program's own
+# documented build commands, e.g. repro_irq_stall.s's header) rather
+# than `make`, since these live in verification/lockstep/ itself, not
+# firmware/, and link against gen/link.ld (qvgen.py's memory map), not
+# firmware/link.ld -- no shared crt0.o either, each one is self-
+# contained starting at its own _start.
+build_irq_entries() {
+    while IFS= read -r line; do
+        line="${line%%#*}"; line="$(echo "$line" | xargs)"
+        [ -n "$line" ] || continue
+        IFS='|' read -r target max_retire <<< "$line"
+        target="$(echo "$target" | xargs)"; max_retire="$(echo "$max_retire" | xargs)"
+        [ -n "$target" ] || continue
+        local src="$REPO_ROOT/verification/lockstep/${target}.s"
+        local hex="$OUTDIR/irq_${target}.hex"
+        if [ ! -e "$hex" ] || [ "$FORCE" == "1" ]; then
+            riscv64-unknown-elf-as -march=rv64imac_zicsr -mabi=lp64 -mno-relax \
+                "$src" -o "$OUTDIR/irq_${target}.o" > "$OUTDIR/irqbuild_${target}.log" 2>&1 && \
+            riscv64-unknown-elf-ld -T "$REPO_ROOT/verification/lockstep/gen/link.ld" \
+                -o "$OUTDIR/irq_${target}.elf" "$OUTDIR/irq_${target}.o" >> "$OUTDIR/irqbuild_${target}.log" 2>&1 && \
+            riscv64-unknown-elf-objcopy -O verilog -j .text.entry -j .text.handlers -j .data.misc \
+                --verilog-data-width=8 "$OUTDIR/irq_${target}.elf" "$hex" >> "$OUTDIR/irqbuild_${target}.log" 2>&1
+        fi
+        [ -e "$hex" ] || { echo "WARN: $hex missing after build -- see $OUTDIR/irqbuild_${target}.log, skipping" >&2; continue; }
+        echo "irq_${target}|${hex}||${max_retire}" >> "$ENTRIES_FILE"
+    done < "$REPO_ROOT/verification/lockstep/irq.list"
+}
+
+# Same build shape as build_irq_entries(), one march flag different
+# (_zifencei, for fence.i) -- kept as its own function rather than a
+# parameterized helper, matching this script's existing one-function-
+# per-corpus-type style (build_act_entries/build_fw_entries/...).
+build_smc_entries() {
+    while IFS= read -r line; do
+        line="${line%%#*}"; line="$(echo "$line" | xargs)"
+        [ -n "$line" ] || continue
+        IFS='|' read -r target max_retire <<< "$line"
+        target="$(echo "$target" | xargs)"; max_retire="$(echo "$max_retire" | xargs)"
+        [ -n "$target" ] || continue
+        local src="$REPO_ROOT/verification/lockstep/${target}.s"
+        local hex="$OUTDIR/smc_${target}.hex"
+        if [ ! -e "$hex" ] || [ "$FORCE" == "1" ]; then
+            riscv64-unknown-elf-as -march=rv64imac_zicsr_zifencei -mabi=lp64 -mno-relax \
+                "$src" -o "$OUTDIR/smc_${target}.o" > "$OUTDIR/smcbuild_${target}.log" 2>&1 && \
+            riscv64-unknown-elf-ld -T "$REPO_ROOT/verification/lockstep/gen/link.ld" \
+                -o "$OUTDIR/smc_${target}.elf" "$OUTDIR/smc_${target}.o" >> "$OUTDIR/smcbuild_${target}.log" 2>&1 && \
+            riscv64-unknown-elf-objcopy -O verilog -j .text.entry -j .text.handlers -j .data.misc \
+                --verilog-data-width=8 "$OUTDIR/smc_${target}.elf" "$hex" >> "$OUTDIR/smcbuild_${target}.log" 2>&1
+        fi
+        [ -e "$hex" ] || { echo "WARN: $hex missing after build -- see $OUTDIR/smcbuild_${target}.log, skipping" >&2; continue; }
+        echo "smc_${target}|${hex}||${max_retire}" >> "$ENTRIES_FILE"
+    done < "$REPO_ROOT/verification/lockstep/smc.list"
+}
+
 case "$CORPUS" in
     act) build_act_entries ;;
     fw) build_fw_entries ;;
     random) build_random_entries ;;
+    irq) build_irq_entries ;;
+    smc) build_smc_entries ;;
     all) build_act_entries; build_fw_entries; build_random_entries ;;
-    *) echo "Unknown --corpus: $CORPUS (expected act, fw, random or all)" >&2; exit 1 ;;
+    *) echo "Unknown --corpus: $CORPUS (expected act, fw, random, irq, smc, or all)" >&2; exit 1 ;;
 esac
 
 if [ -n "$ONLY" ]; then
