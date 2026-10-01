@@ -39,6 +39,17 @@ MEMCFG_B=sram
 # root-caused. Every zero-delay run is fully proven; pass --delay-max
 # explicitly to experiment with real perturbation.
 DELAY_MAX=0
+# 0 (disabled) is the default and matches every run before --irq-mode
+# existed -- lockstep_tb.sv itself defaults +IRQ_MODE to 0 when the
+# plusarg is absent, so leaving this untouched reproduces prior behavior
+# exactly. run_one() below always passes +IRQ_MODE/+IRQ_SEED now; before
+# this, it never passed either plusarg at all, so lockstep_irq.sv's
+# injection was structurally dead through this script regardless of mode
+# or corpus -- found while characterizing QV_MUTANT==5 (see ref_core.sv's
+# interrupt_sample_q), which needs a real interrupt actually taken to be
+# provably caught at all.
+IRQ_MODE=0
+IRQ_SEED=1
 CORPUS=all
 ONLY=""
 JOBS="$(nproc 2>/dev/null || echo 4)"
@@ -66,6 +77,11 @@ Usage: run_lockstep.sh --mode selfproof|mutant|corrupt [options]
   --delay-max N        max bus-delay wait states (default 0 = disabled/safe;
                         see lockstep_wb_delay.sv's KNOWN GAP comment before
                         setting this nonzero)
+  --irq-mode N          0=disabled (default), 1=MTIP only, 2=MTIP+MEIP+SEIP
+                        (see lockstep_irq.sv) -- qvgen.py's own corpus never
+                        enables mstatus.MIE, so this only matters against a
+                        program that does (e.g. repro_irq_stall.s)
+  --irq-seed N          seed for the injection LFSR (default 1)
   --corpus WHICH        act, fw, random, or all (default all)
   --only REGEX          only run corpus entries whose path matches REGEX
   -j N                  parallel jobs (default: nproc)
@@ -85,6 +101,8 @@ while [ $# -gt 0 ]; do
         --mutant) MUTANT="$2"; shift 2 ;;
         --memcfg-b) MEMCFG_B="$2"; shift 2 ;;
         --delay-max) DELAY_MAX="$2"; shift 2 ;;
+        --irq-mode) IRQ_MODE="$2"; shift 2 ;;
+        --irq-seed) IRQ_SEED="$2"; shift 2 ;;
         --corpus) CORPUS="$2"; shift 2 ;;
         --only) ONLY="$2"; shift 2 ;;
         -j) JOBS="$2"; shift 2 ;;
@@ -149,7 +167,14 @@ fi
 
 # ---------------- corpus enumeration ----------------
 # Each corpus entry becomes one line: tag|hexfile|tohost_addr_or_empty|max_retire_or_empty
-ENTRIES_FILE="$OUTDIR/.entries_${CORPUS}"
+#
+# Keyed by mode+mutant as well as corpus -- two concurrent invocations
+# that share a --corpus but differ in --mode (or --mutant) used to
+# truncate/rewrite the SAME file, racing each other into a garbled,
+# duplicate/missing-line entries list (caught by an actual concurrent
+# `--mode mutant` + `--mode corrupt` run against the same corpus
+# producing an untrustworthy result, not by inspection).
+ENTRIES_FILE="$OUTDIR/.entries_${CORPUS}_${MODE}_m${MUTANT}"
 : > "$ENTRIES_FILE"
 
 build_act_entries() {
@@ -228,7 +253,7 @@ run_one() {
     fi
     local seed_a=$((RUN_SEED * 2 + 1))
     local seed_b=$((RUN_SEED * 2 + 2))
-    local args=(+HEXFILE="$hex" +TIMEOUT=$MAX_CYCLES +DLY_SEED_A=$seed_a +DLY_SEED_B=$seed_b)
+    local args=(+HEXFILE="$hex" +TIMEOUT=$MAX_CYCLES +DLY_SEED_A=$seed_a +DLY_SEED_B=$seed_b +IRQ_MODE=$IRQ_MODE +IRQ_SEED=$IRQ_SEED)
     [ -n "$tohost" ] && args+=(+TOHOST_ADDR=$tohost)
     [ -n "$max_retire" ] && args+=(+MAX_RETIRE=$max_retire)
     local out
