@@ -24,29 +24,34 @@
  * +CORRUPT_AT=<order> +CORRUPT_FIELD=<code> +DUMP_FROM=<cycles> (0 = no
  * VCD).
  *
- * KNOWN GAP, not yet resolved: a run where a real interrupt is actually
- * TAKEN (mstatus.MIE and mie.MTIE both enabled, not just IRQ_MODE
- * injecting a pending line that never gets consumed) silently stalls a
- * few retirements past the interrupt-enabling CSR write -- both sides'
- * retirement rings drain to empty and nothing further is ever pushed
- * (confirmed via a heartbeat print: matched count stops advancing,
- * a_rec_count/b_rec_count stay 0, no pace_a_hold/pace_b_hold, no
- * LOCKSTEP_DIVERGENCE -- the two sides agree, they've just both stopped
- * producing rvfi_valid pulses), ending in a clean exit(0) with no
- * LOCKSTEP_RESULT line at all. The project's own dedicated interrupt
- * tests (core_interrupt_tb, soc_interrupt_tb, core_sv39_irq_tb) all pass
- * in the regular regression suite, so this looks specific to this
- * harness's own wiring rather than a ref_core.sv regression -- but not
- * yet root-caused. Reproduce with verification/lockstep/
- * repro_irq_stall.s (build/run instructions in its own header) under
- * +IRQ_MODE=2 (any seed); qvgen.py's own corpus never enables
- * mstatus.MIE (per its own header comment, --irq is currently a
- * reserved no-op), so it never reaches this path and passes cleanly.
- * This is why QV_MUTANT==5 (see ref_core.sv's interrupt_sample_q) is
- * implemented and regression-clean but not yet proven caught by an
- * actual kill-matrix run. Next step if picked back up: a VCD from
- * +DUMP_FROM=0 on this exact repro, watching clk_a/clk_b and
- * commit_now/interrupt_taken around the stall point.
+ * RESOLVED: a run where a real interrupt is actually TAKEN used to
+ * silently stall (both sides' retirement rings drain to empty with
+ * nothing further ever pushed, ending in a clean exit(0) with no
+ * LOCKSTEP_RESULT line at all) -- root cause was lockstep_mmio.sv's own
+ * MAGIC_DWORD bug (see that file's header), not anything in this file;
+ * fixed there. Reproduce the old symptom's absence with verification/
+ * lockstep/repro_irq_stall.s under +IRQ_MODE=2 (any seed) -- it now
+ * reaches a clean LOCKSTEP_RESULT either way.
+ *
+ * QV_MUTANT==5 (see ref_core.sv's interrupt_sample_q) is now PROVEN
+ * caught -- but only via +MAX_RETIRE, never +TOHOST_ADDR, against a
+ * real-interrupt-taking program. See verification/lockstep/irq.list's
+ * own header for why: this mutant only skews TIMING (which retirement
+ * each side's own fetch lands on, never WHICH instruction retires), so
+ * the per-retirement RVFI stream it produces is bit-for-bit identical
+ * to QV_MUTANT_B=0's -- confirmed directly, 1000 retirements matched
+ * with zero LOCKSTEP_DIVERGENCE either way. The actual catch comes from
+ * check_final_state()'s raw register-file snapshot at a fixed
+ * MAX_RETIRE stop-point, which exposes that each side's own core has
+ * independently raced up to QV_LOCKSTEP_AHEAD_MAX retirements ahead of
+ * what's actually been popped and compared, by a different amount per
+ * side when one side is structurally slower. A +TOHOST_ADDR run instead
+ * never terminates at all once a mutant like this is active: this
+ * program's own post-completion `halt: j halt` keeps retiring (and
+ * lockstep_irq.sv keeps injecting fresh interrupts) for as long as
+ * EITHER side is still waiting on the other to also reach tohost, which
+ * a side that's permanently, structurally slower never does -- not a
+ * divergence, just an open-ended race the completion check can't win.
  */
 `include "lockstep_defs.svh"
 

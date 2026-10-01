@@ -1,0 +1,23 @@
+# Real-interrupt-taking corpus for the lockstep harness's mutant kill
+# matrix -- unlike act.list/fw.list/random (qvgen.py's own corpus never
+# enables mstatus.MIE, so --irq is a reserved no-op there), these
+# programs actually take real interrupts. Deliberately NOT part of
+# --corpus all's aggregate -- run with --irq-mode 2 explicitly, since
+# every other corpus entry expects the default irq_mode=0.
+#
+# MAX_RETIRE-based (not tohost), deliberately -- see repro_irq_stall.s's
+# own header for why a tohost-based run on a mutant that only skews
+# TIMING (not WHICH instruction retires) can grow its retirement count
+# without bound instead of ever cleanly finishing PASS or FAIL. A fixed
+# MAX_RETIRE sidesteps that: it stops both sides after a fixed amount of
+# real progress and compares final architectural state directly (via
+# lockstep_tb.sv's own check_final_state), which is what actually
+# proves this class of mutant caught -- confirmed empirically: QV_MUTANT
+# B=5 (interrupt sampled one retirement late) FAILs here with a real
+# final-register mismatch after a clean 1000-retirement RVFI stream;
+# QV_MUTANT_B=0 PASSes cleanly at the same MAX_RETIRE.
+#
+# target | max_retire (hex file is always verification/lockstep/<target>.hex,
+# built via riscv64-unknown-elf-as/ld/objcopy against gen/link.ld,
+# matching repro_irq_stall.s's own documented build commands)
+repro_irq_stall|1000
