@@ -37,8 +37,8 @@ module qv_issue #(
     input  logic                             i_flush,
 
     input  logic                             i_uop_valid,
-    // fu/code (routing to more than one unit) and xcpt (carried to the
-    // ROB for commit to trap on) aren't consumed until those land
+    // code and xcpt (carried to the ROB for commit to trap on) aren't
+    // consumed until traps land
     /* verilator lint_off UNUSEDSIGNAL */
     input  qv_pkg::uop_t                     i_uop,
     /* verilator lint_on UNUSEDSIGNAL */
@@ -67,8 +67,12 @@ module qv_issue #(
     input  logic                             i_lookup2_complete,
     input  logic [63:0]                      i_lookup2_value,
 
+    // bypass needs only valid/tag/value; next_pc/mispredict are for the ROB
+    /* verilator lint_off UNUSEDSIGNAL */
     input  qv_pkg::wb_t                      i_wb,
-    output qv_pkg::fu_req_t                  o_fu_req,
+    /* verilator lint_on UNUSEDSIGNAL */
+    output qv_pkg::fu_req_t                  o_alu_req,
+    output qv_pkg::fu_req_t                  o_bru_req,
 
     input  logic                             i_commit_valid,
     input  logic [4:0]                       i_commit_rd,
@@ -134,15 +138,24 @@ module qv_issue #(
         o_alloc_shadow.rs2_rdata = i_uop.rs2_used ? opb : 64'b0;
     end
 
-    // ---------------- dispatch ----------------
+    // ---------------- dispatch: one request port per unit ----------------
+    wire to_bru = (i_uop.fu == QV_FU_BRU);
+    fu_req_t req;
     always_comb begin
-        o_fu_req         = '0;
-        o_fu_req.valid   = o_issue;
-        o_fu_req.tag     = i_alloc_tag;
-        o_fu_req.op      = i_uop.alu_op;
-        o_fu_req.is_word = i_uop.is_word;
-        o_fu_req.a       = opa;
-        o_fu_req.b       = opb;
+        req         = '0;
+        req.tag     = i_alloc_tag;
+        req.op      = to_bru ? 5'(i_uop.bru_op) : i_uop.alu_op;
+        req.is_word = i_uop.is_word;
+        req.a       = opa;
+        req.b       = opb;
+        req.pc      = i_uop.pc;
+        req.imm     = i_uop.imm3;
+        req.rvc     = i_uop.rvc;
+
+        o_alu_req       = req;
+        o_alu_req.valid = o_issue && !to_bru;
+        o_bru_req       = req;
+        o_bru_req.valid = o_issue && to_bru;
     end
 
     // ---------------- producer table update ----------------

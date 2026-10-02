@@ -21,7 +21,10 @@ module qv_exu_alu (
 );
     import qv_pkg::*;
 
+    // pc/imm/rvc are for the BRU
+    /* verilator lint_off UNUSEDSIGNAL */
     fu_req_t     req_q;
+    /* verilator lint_on UNUSEDSIGNAL */
     logic [63:0] result;
 
     always_ff @(posedge clk) begin

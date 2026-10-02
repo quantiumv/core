@@ -13,7 +13,7 @@
 package qv_pkg;
 
     // Functional-unit routing. All six kinds are named now so the enum
-    // never needs to grow; only QV_FU_ALU is produced so far.
+    // never needs to grow; only ALU and BRU are produced so far.
     typedef enum logic [2:0] {
         QV_FU_ALU,
         QV_FU_BRU,
@@ -22,6 +22,18 @@ package qv_pkg;
         QV_FU_CSR,
         QV_FU_SYS
     } qv_fu_e;
+
+    // Branch-unit operations (fu_req_t.op for QV_FU_BRU).
+    typedef enum logic [2:0] {
+        QV_BR_BEQ,
+        QV_BR_BNE,
+        QV_BR_BLT,
+        QV_BR_BGE,
+        QV_BR_BLTU,
+        QV_BR_BGEU,
+        QV_BR_JAL,
+        QV_BR_JALR
+    } qv_bru_op_e;
 
     // ROB size is a package constant (not just a module parameter)
     // because packed-struct tag fields need a compile-time width.
@@ -50,6 +62,7 @@ package qv_pkg;
         logic [6:0]  code;         // decoder.sv's o_decoded_instruction, verbatim
         qv_fu_e      fu;
         logic [4:0]  alu_op;       // `ALU_OPSIZE
+        qv_bru_op_e  bru_op;
         logic        is_word;      // truncate the result to 32 bits and sign-extend (core.sv's is_word_arith)
         logic [4:0]  rs1;
         logic        rs1_used;
@@ -59,6 +72,7 @@ package qv_pkg;
         logic        rd_wen;
         logic [63:0] imm1;         // operand A when !rs1_used
         logic [63:0] imm2;         // operand B when !rs2_used
+        logic [63:0] imm3;         // branch/JAL pc-relative offset
         logic        xcpt;
         logic [3:0]  xcpt_cause;
     } uop_t;
@@ -72,7 +86,8 @@ package qv_pkg;
         logic [4:0]  rd;
         logic        rd_wen;
         logic [63:0] value;
-        logic [63:0] next_pc;
+        logic [63:0] next_pc;      // the predicted next pc until the result overrides it
+        logic        mispredict;   // next_pc differs from the prediction: redirect at commit
     } rob_entry_t;
 
     // RVFI source-operand capture, taken at issue: regfile0 has only two
@@ -92,10 +107,13 @@ package qv_pkg;
     typedef struct packed {
         logic                    valid;
         logic [QV_ROB_TAG_W-1:0] tag;
-        logic [4:0]              op;
+        logic [4:0]              op;       // alu_op, or a qv_bru_op_e for the BRU
         logic                    is_word;
         logic [63:0]             a;
         logic [63:0]             b;
+        logic [63:0]             pc;
+        logic [63:0]             imm;      // uop_t.imm3
+        logic                    rvc;
     } fu_req_t;
 
     // Functional unit -> ROB and bypass (the writeback bus).
@@ -103,6 +121,8 @@ package qv_pkg;
         logic                    valid;
         logic [QV_ROB_TAG_W-1:0] tag;
         logic [63:0]             value;
+        logic [63:0]             next_pc;     // meaningful only with mispredict
+        logic                    mispredict;
     } wb_t;
 
     // One producer-table entry (becomes the RAT at O1).

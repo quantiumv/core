@@ -14,8 +14,12 @@
  * from the values issue captured (rvfi_shadow_t), since regfile0's read
  * ports aren't free to re-read them here.
  *
+ * Redirect: retiring an entry marked mispredict pulses o_redirect with
+ * the entry's resolved next pc. That same cycle the entry retires
+ * normally and everything younger is flushed.
+ *
  * Not yet: traps (a faulting uop retires as a no-op -- decode already
- * cleared its rd_wen), redirects, and memory fields (always 0).
+ * cleared its rd_wen) and memory fields (always 0).
  */
 module qv_commit #(
     parameter logic [63:0] RESET_PC = 64'h0
@@ -44,6 +48,9 @@ module qv_commit #(
     output logic                             o_commit_now,
     output logic [63:0]                      o_pc,
     output logic [63:0]                      o_next_pc,
+
+    output logic                             o_redirect_valid,
+    output logic [63:0]                      o_redirect_pc,
 
     output logic [63:0]                      o_rvfi_order,
     output logic [31:0]                      o_rvfi_insn,
@@ -79,6 +86,9 @@ module qv_commit #(
     end
     assign o_pc      = arch_pc_q;
     assign o_next_pc = i_head_entry.next_pc;
+
+    assign o_redirect_valid = commit && i_head_entry.mispredict;
+    assign o_redirect_pc    = i_head_entry.next_pc;
 
     // ---------------- RVFI ----------------
     logic [63:0] order_q, prev_pc_wdata_q;

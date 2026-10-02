@@ -17,7 +17,8 @@
  * never needs a producer-table lookup.
  *
  * Classification mirrors core.sv case by case: alu_op from its
- * alu_op_sel block, rd_wen from its reg_write_control exclusion list
+ * alu_op_sel block (branches, JAL and JALR go to the BRU instead, with
+ * imm3 = the B or J offset), rd_wen from its reg_write_control exclusion list
  * (the full list, so adding an instruction later is a new arm, not a new
  * mechanism). Only the codes in `implemented` below actually execute;
  * anything else is marked as an illegal-instruction fault (cause 2) --
@@ -37,7 +38,7 @@ module qv_decode (
     input  logic              i_flush,
 
     input  logic              i_iq_valid,
-    // pred_taken/pred_tgt/xcpt_hi aren't consumed until branches and RVC land
+    // pred_taken/pred_tgt/xcpt_hi aren't consumed until prediction and RVC land
     /* verilator lint_off UNUSEDSIGNAL */
     input  qv_pkg::fe_instr_t i_iq_data,
     /* verilator lint_on UNUSEDSIGNAL */
@@ -52,10 +53,7 @@ module qv_decode (
     logic [(`L2_REG_FILE_SIZE - 1):0] sel_a, sel_b;
     logic [(`INSTR_CODE_SIZE - 1):0]  code;
     logic [(`WORD_SIZE - 1):0]        imm_1, imm_2;
-    // only the rd bits are used until stores/branches need the S/B immediate
-    /* verilator lint_off UNUSEDSIGNAL */
-    logic [(`B_IMM_SIZE - 1):0]       imm_3_or_dest_addr;
-    /* verilator lint_on UNUSEDSIGNAL */
+    logic [(`B_IMM_SIZE - 1):0]       imm_3_or_dest_addr;   // rd, or a branch's B offset
 
     decoder decoder0 (
         .i_instruction(i_iq_data.raw),
@@ -74,9 +72,9 @@ module qv_decode (
     );
 
     logic [(`ALU_OPSIZE - 1):0] alu_op;
-    logic                       implemented;
+    logic                       is_alu;
     always_comb begin: alu_op_sel
-        implemented = 1'b1;
+        is_alu = 1'b1;
         case (code)
             // LUI: imm1 + imm2(=0). AUIPC: pc + imm, see uop_d below.
             `INSTR_CODE(ADDI), `INSTR_CODE(ADD),
@@ -99,11 +97,33 @@ module qv_decode (
             `INSTR_CODE(MULHSU):                     alu_op = `MULHSU;
             `INSTR_CODE(MULHU):                      alu_op = `MULHU;
             default: begin
-                alu_op      = `ADD;
-                implemented = 1'b0;
+                alu_op = `ADD;
+                is_alu = 1'b0;
             end
         endcase
     end: alu_op_sel
+
+    logic       is_bru;
+    qv_bru_op_e bru_op;
+    always_comb begin: bru_op_sel
+        is_bru = 1'b1;
+        case (code)
+            `INSTR_CODE(BEQ):  bru_op = QV_BR_BEQ;
+            `INSTR_CODE(BNE):  bru_op = QV_BR_BNE;
+            `INSTR_CODE(BLT):  bru_op = QV_BR_BLT;
+            `INSTR_CODE(BGE):  bru_op = QV_BR_BGE;
+            `INSTR_CODE(BLTU): bru_op = QV_BR_BLTU;
+            `INSTR_CODE(BGEU): bru_op = QV_BR_BGEU;
+            `INSTR_CODE(JAL):  bru_op = QV_BR_JAL;
+            `INSTR_CODE(JALR): bru_op = QV_BR_JALR;
+            default: begin
+                bru_op = QV_BR_BEQ;
+                is_bru = 1'b0;
+            end
+        endcase
+    end: bru_op_sel
+
+    wire implemented = is_alu || is_bru;
 
     logic reg_write_ctrl;
     always_comb begin: reg_write_control
@@ -125,6 +145,10 @@ module qv_decode (
     wire is_word = (code == `INSTR_CODE(ADDW)) || (code == `INSTR_CODE(SUBW))
                 || (code == `INSTR_CODE(ADDIW)) || (code == `INSTR_CODE(MULW));
     wire is_auipc = (code == `INSTR_CODE(AUIPC));
+    wire is_jal   = (code == `INSTR_CODE(JAL));
+
+    wire [(`WORD_SIZE - 1):0] imm_b_sext =
+        {{(`WORD_SIZE - `B_IMM_SIZE){imm_3_or_dest_addr[`B_IMM_SIZE - 1]}}, imm_3_or_dest_addr};
 
     uop_t uop_d;
     always_comb begin
@@ -133,8 +157,8 @@ module qv_decode (
         uop_d.raw      = i_iq_data.raw;
         uop_d.rvc      = i_iq_data.rvc;
         uop_d.code     = code;
-        uop_d.fu       = QV_FU_ALU;
         uop_d.alu_op   = alu_op;
+        uop_d.bru_op   = bru_op;
         uop_d.is_word  = is_word;
         uop_d.rs1      = sel_a;
         uop_d.rs1_used = (sel_a != '0);
@@ -144,6 +168,7 @@ module qv_decode (
         // AUIPC uses no registers, so pc can ride in as an immediate
         uop_d.imm1     = is_auipc ? i_iq_data.pc : imm_1;
         uop_d.imm2     = is_auipc ? imm_1 : imm_2;
+        uop_d.imm3     = is_jal ? imm_1 : imm_b_sext;
         if (i_iq_data.xcpt) begin
             uop_d.xcpt       = 1'b1;
             uop_d.xcpt_cause = i_iq_data.xcpt_cause;
@@ -152,6 +177,9 @@ module qv_decode (
             uop_d.xcpt_cause = 4'd2;
         end
         uop_d.rd_wen   = reg_write_ctrl && !uop_d.xcpt;
+        // a faulting uop goes through the ALU as a no-op; it must never redirect
+        if (is_bru && !uop_d.xcpt) uop_d.fu = QV_FU_BRU;
+        else                       uop_d.fu = QV_FU_ALU;
     end
 
     logic uop_valid_q;

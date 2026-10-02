@@ -17,6 +17,10 @@
  * a result arriving on the writeback bus this same cycle is issue's
  * bypass path's job, not this module's.
  *
+ * Each entry is allocated with the frontend's predicted next pc. A
+ * writeback flagged mispredict replaces it with the resolved one and
+ * marks the entry, so commit redirects when it retires.
+ *
  * Flush (a redirect at commit) empties everything behind the head
  * entry, which may itself be committing that cycle. A pop while empty,
  * or an allocation while full, is ignored.
@@ -72,6 +76,7 @@ module qv_rob #(
     logic               rd_wen_q  [0:ROB_DEPTH-1];
     logic [63:0]        value_q   [0:ROB_DEPTH-1];
     logic [63:0]        next_pc_q [0:ROB_DEPTH-1];
+    logic               mispredict_q[0:ROB_DEPTH-1];
     logic               complete_q[0:ROB_DEPTH-1];
     rvfi_shadow_t       shadow_q  [0:ROB_DEPTH-1];
 
@@ -99,15 +104,16 @@ module qv_rob #(
     assign o_head_valid = !o_empty;
     assign o_head_tag   = QV_ROB_TAG_W'(head_q);
     always_comb begin
-        o_head_entry          = '0;
-        o_head_entry.valid    = !o_empty;
-        o_head_entry.complete = complete_q[head_idx];
-        o_head_entry.pc       = pc_q[head_idx];
-        o_head_entry.raw      = raw_q[head_idx];
-        o_head_entry.rd       = rd_q[head_idx];
-        o_head_entry.rd_wen   = rd_wen_q[head_idx];
-        o_head_entry.value    = value_q[head_idx];
-        o_head_entry.next_pc  = next_pc_q[head_idx];
+        o_head_entry            = '0;
+        o_head_entry.valid      = !o_empty;
+        o_head_entry.complete   = complete_q[head_idx];
+        o_head_entry.pc         = pc_q[head_idx];
+        o_head_entry.raw        = raw_q[head_idx];
+        o_head_entry.rd         = rd_q[head_idx];
+        o_head_entry.rd_wen     = rd_wen_q[head_idx];
+        o_head_entry.value      = value_q[head_idx];
+        o_head_entry.next_pc    = next_pc_q[head_idx];
+        o_head_entry.mispredict = mispredict_q[head_idx];
     end
     assign o_head_shadow = shadow_q[head_idx];
 
@@ -124,18 +130,23 @@ module qv_rob #(
             if (i_flush) begin
                 tail_q <= head_next;
             end else if (alloc) begin
-                tail_q               <= tail_q + PTR_W'(1);
-                pc_q[tail_idx]       <= i_alloc_pc;
-                raw_q[tail_idx]      <= i_alloc_raw;
-                rd_q[tail_idx]       <= i_alloc_rd;
-                rd_wen_q[tail_idx]   <= i_alloc_rd_wen;
-                next_pc_q[tail_idx]  <= i_alloc_next_pc;
-                shadow_q[tail_idx]   <= i_alloc_shadow;
-                complete_q[tail_idx] <= 1'b0;
+                tail_q                 <= tail_q + PTR_W'(1);
+                pc_q[tail_idx]         <= i_alloc_pc;
+                raw_q[tail_idx]        <= i_alloc_raw;
+                rd_q[tail_idx]         <= i_alloc_rd;
+                rd_wen_q[tail_idx]     <= i_alloc_rd_wen;
+                next_pc_q[tail_idx]    <= i_alloc_next_pc;
+                shadow_q[tail_idx]     <= i_alloc_shadow;
+                complete_q[tail_idx]   <= 1'b0;
+                mispredict_q[tail_idx] <= 1'b0;
             end
             if (i_wb.valid && !i_flush) begin
                 value_q[wb_idx]    <= i_wb.value;
                 complete_q[wb_idx] <= 1'b1;
+                if (i_wb.mispredict) begin
+                    next_pc_q[wb_idx]    <= i_wb.next_pc;
+                    mispredict_q[wb_idx] <= 1'b1;
+                end
             end
         end
     end

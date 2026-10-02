@@ -30,7 +30,8 @@
  *
  * Implemented so far: every single-cycle integer ALU instruction --
  * RV64I register/immediate ops including the *W forms, LUI, AUIPC, and
- * MUL/MULH/MULHSU/MULHU/MULW -- straight-line only. Everything else
+ * MUL/MULH/MULHSU/MULHU/MULW -- plus conditional branches, JAL and
+ * JALR (4-byte-aligned targets only until RVC lands). Everything else
  * decodes as an illegal-instruction fault and, until traps exist,
  * retires as a no-op. Not yet: branches, loads/stores, CSR/system ops,
  * traps, interrupts, debug, RVC, DIV/REM, A. The
@@ -38,8 +39,9 @@
  * Debug Module's GPR/CSR access mux (core.sv wires it around regfile0
  * and csr_file0) comes back with debug support.
  *
- * Redirects: one redirect signal already reaches every stage's flush
- * input; nothing drives it yet (no branches, traps or xRET).
+ * Redirects come only from commit (a retiring mispredicted branch or
+ * jump) and kill everything in flight: the same signal is every stage's
+ * flush. The frontend predicts fall-through for now.
  */
 // Testbenches instantiate `core` with no parameter overrides, so the
 // debug knobs can also be set from the command line.
@@ -181,10 +183,10 @@ module core_pipe
 
     localparam logic [63:0] RESET_PC = 64'h0;   // core.sv's own reset pc
 
-    // ---------------- redirect (nothing drives it yet) ----------------
-    wire        redirect_valid = 1'b0;
-    wire [63:0] redirect_pc    = 64'b0;
-    wire        flush          = redirect_valid;
+    // ---------------- redirect (from commit) ----------------
+    logic        redirect_valid;
+    logic [63:0] redirect_pc;
+    wire         flush = redirect_valid;
 
     // ---------------- F: fetch ----------------
     logic        fb_valid, fb_err, fb_pop;
@@ -248,7 +250,7 @@ module core_pipe
     logic                    l1_complete, l2_complete;
     logic [63:0]             l1_value, l2_value;
     wb_t                     wb_bus;
-    fu_req_t                 alu_req;
+    fu_req_t                 alu_req, bru_req;
     logic                    c_valid, c_rd_wen;
     logic [4:0]              c_rd;
     logic [QV_ROB_TAG_W-1:0] c_tag;
@@ -263,7 +265,7 @@ module core_pipe
         .i_rob_empty(rob_empty),
         .o_lookup1_tag(l1_tag), .i_lookup1_complete(l1_complete), .i_lookup1_value(l1_value),
         .o_lookup2_tag(l2_tag), .i_lookup2_complete(l2_complete), .i_lookup2_value(l2_value),
-        .i_wb(wb_bus), .o_fu_req(alu_req),
+        .i_wb(wb_bus), .o_alu_req(alu_req), .o_bru_req(bru_req),
         .i_commit_valid(c_valid), .i_commit_rd(c_rd), .i_commit_rd_wen(c_rd_wen), .i_commit_tag(c_tag)
     );
 
@@ -285,8 +287,15 @@ module core_pipe
         .o_head_shadow(head_shadow), .i_commit_pop(commit_pop)
     );
 
-    // ---------------- X: ALU ----------------
-    qv_exu_alu exu_alu0 (.clk(clk), .rst(rst), .i_flush(flush), .i_req(alu_req), .o_wb(wb_bus));
+    // ---------------- X: ALU, BRU -> writeback bus ----------------
+    wb_t alu_wb, bru_wb;
+    qv_exu_alu exu_alu0 (.clk(clk), .rst(rst), .i_flush(flush), .i_req(alu_req), .o_wb(alu_wb));
+    qv_exu_bru exu_bru0 (.clk(clk), .rst(rst), .i_flush(flush), .i_req(bru_req), .o_wb(bru_wb));
+
+    // Both units take one cycle and issue sends at most one uop per
+    // cycle, so at most one result is ever valid. A multi-cycle unit
+    // (DIV) will need a real writeback arbiter.
+    assign wb_bus = bru_wb.valid ? bru_wb : alu_wb;
 
     // ---------------- C: commit ----------------
     logic        rf_we;
@@ -310,6 +319,7 @@ module core_pipe
         .o_regfile_we(rf_we), .o_regfile_sel(rf_sel), .o_regfile_data(rf_data),
         .o_commit_valid(c_valid), .o_commit_rd(c_rd), .o_commit_rd_wen(c_rd_wen), .o_commit_tag(c_tag),
         .o_commit_now(commit_now_w), .o_pc(arch_pc), .o_next_pc(retire_next_pc),
+        .o_redirect_valid(redirect_valid), .o_redirect_pc(redirect_pc),
         .o_rvfi_order(c_order), .o_rvfi_insn(c_insn), .o_rvfi_intr(c_intr),
         .o_rvfi_rs1_addr(c_rs1_addr), .o_rvfi_rs2_addr(c_rs2_addr),
         .o_rvfi_rs1_rdata(c_rs1_rdata), .o_rvfi_rs2_rdata(c_rs2_rdata),
