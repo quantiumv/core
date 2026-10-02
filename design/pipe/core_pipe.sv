@@ -28,11 +28,12 @@
  * declared here at top-level scope too, including ones testbench/
  * rvfi_tracer.sv references unconditionally (route_to_s, trap_val).
  *
- * Implemented so far (P4a slice 1): RV64I ALU ops ADD/SUB/SLT/SLTU/XOR/
- * OR/AND/SLL/SRL/SRA and their immediate forms, straight-line only.
- * Everything else decodes as an illegal-instruction fault and, until
- * traps exist, retires as a no-op. Not yet: branches, loads/stores,
- * CSR/system ops, traps, interrupts, debug, RVC, *W forms, M/A. The
+ * Implemented so far: every single-cycle integer ALU instruction --
+ * RV64I register/immediate ops including the *W forms, LUI, AUIPC, and
+ * MUL/MULH/MULHSU/MULHU/MULW -- straight-line only. Everything else
+ * decodes as an illegal-instruction fault and, until traps exist,
+ * retires as a no-op. Not yet: branches, loads/stores, CSR/system ops,
+ * traps, interrupts, debug, RVC, DIV/REM, A. The
  * mem port, icache flush and debug/progbuf outputs are held inert. The
  * Debug Module's GPR/CSR access mux (core.sv wires it around regfile0
  * and csr_file0) comes back with debug support.

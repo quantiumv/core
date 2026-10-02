@@ -40,6 +40,6 @@ module qv_exu_alu (
         o_wb       = '0;
         o_wb.valid = req_q.valid;
         o_wb.tag   = req_q.tag;
-        o_wb.value = result;
+        o_wb.value = req_q.is_word ? {{32{result[31]}}, result[31:0]} : result;
     end
 endmodule

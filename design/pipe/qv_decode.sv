@@ -78,16 +78,26 @@ module qv_decode (
     always_comb begin: alu_op_sel
         implemented = 1'b1;
         case (code)
-            `INSTR_CODE(ADDI), `INSTR_CODE(ADD):   alu_op = `ADD;
-            `INSTR_CODE(SUB):                      alu_op = `SUB;
-            `INSTR_CODE(SLTI), `INSTR_CODE(SLT):   alu_op = `SLT;
-            `INSTR_CODE(SLTIU), `INSTR_CODE(SLTU): alu_op = `SLTU;
-            `INSTR_CODE(XORI), `INSTR_CODE(XOR):   alu_op = `XOR;
-            `INSTR_CODE(ORI), `INSTR_CODE(OR):     alu_op = `OR;
-            `INSTR_CODE(ANDI), `INSTR_CODE(AND):   alu_op = `AND;
-            `INSTR_CODE(SLLI), `INSTR_CODE(SLL):   alu_op = `SLL;
-            `INSTR_CODE(SRLI), `INSTR_CODE(SRL):   alu_op = `SRL;
-            `INSTR_CODE(SRAI), `INSTR_CODE(SRA):   alu_op = `SRA;
+            // LUI: imm1 + imm2(=0). AUIPC: pc + imm, see uop_d below.
+            `INSTR_CODE(ADDI), `INSTR_CODE(ADD),
+            `INSTR_CODE(ADDIW), `INSTR_CODE(ADDW),
+            `INSTR_CODE(LUI), `INSTR_CODE(AUIPC):    alu_op = `ADD;
+            `INSTR_CODE(SUB), `INSTR_CODE(SUBW):     alu_op = `SUB;
+            `INSTR_CODE(SLTI), `INSTR_CODE(SLT):     alu_op = `SLT;
+            `INSTR_CODE(SLTIU), `INSTR_CODE(SLTU):   alu_op = `SLTU;
+            `INSTR_CODE(XORI), `INSTR_CODE(XOR):     alu_op = `XOR;
+            `INSTR_CODE(ORI), `INSTR_CODE(OR):       alu_op = `OR;
+            `INSTR_CODE(ANDI), `INSTR_CODE(AND):     alu_op = `AND;
+            `INSTR_CODE(SLLI), `INSTR_CODE(SLL):     alu_op = `SLL;
+            `INSTR_CODE(SRLI), `INSTR_CODE(SRL):     alu_op = `SRL;
+            `INSTR_CODE(SRAI), `INSTR_CODE(SRA):     alu_op = `SRA;
+            `INSTR_CODE(SLLIW), `INSTR_CODE(SLLW):   alu_op = `SLLW;
+            `INSTR_CODE(SRLIW), `INSTR_CODE(SRLW):   alu_op = `SRLW;
+            `INSTR_CODE(SRAIW), `INSTR_CODE(SRAW):   alu_op = `SRAW;
+            `INSTR_CODE(MUL), `INSTR_CODE(MULW):     alu_op = `MUL;
+            `INSTR_CODE(MULH):                       alu_op = `MULH;
+            `INSTR_CODE(MULHSU):                     alu_op = `MULHSU;
+            `INSTR_CODE(MULHU):                      alu_op = `MULHU;
             default: begin
                 alu_op      = `ADD;
                 implemented = 1'b0;
@@ -110,6 +120,12 @@ module qv_decode (
         endcase
     end: reg_write_control
 
+    // ADDW/SUBW/ADDIW/MULW reuse the 64-bit op and get truncated after;
+    // the *W shifts have their own 32-bit ALU ops (core.sv's is_word_arith)
+    wire is_word = (code == `INSTR_CODE(ADDW)) || (code == `INSTR_CODE(SUBW))
+                || (code == `INSTR_CODE(ADDIW)) || (code == `INSTR_CODE(MULW));
+    wire is_auipc = (code == `INSTR_CODE(AUIPC));
+
     uop_t uop_d;
     always_comb begin
         uop_d          = '0;
@@ -119,14 +135,15 @@ module qv_decode (
         uop_d.code     = code;
         uop_d.fu       = QV_FU_ALU;
         uop_d.alu_op   = alu_op;
-        uop_d.is_word  = 1'b0;
+        uop_d.is_word  = is_word;
         uop_d.rs1      = sel_a;
         uop_d.rs1_used = (sel_a != '0);
         uop_d.rs2      = sel_b;
         uop_d.rs2_used = (sel_b != '0);
         uop_d.rd       = imm_3_or_dest_addr[(`L2_REG_FILE_SIZE - 1):0];
-        uop_d.imm1     = imm_1;
-        uop_d.imm2     = imm_2;
+        // AUIPC uses no registers, so pc can ride in as an immediate
+        uop_d.imm1     = is_auipc ? i_iq_data.pc : imm_1;
+        uop_d.imm2     = is_auipc ? imm_1 : imm_2;
         if (i_iq_data.xcpt) begin
             uop_d.xcpt       = 1'b1;
             uop_d.xcpt_cause = i_iq_data.xcpt_cause;

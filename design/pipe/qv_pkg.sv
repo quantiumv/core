@@ -50,7 +50,7 @@ package qv_pkg;
         logic [6:0]  code;         // decoder.sv's o_decoded_instruction, verbatim
         qv_fu_e      fu;
         logic [4:0]  alu_op;       // `ALU_OPSIZE
-        logic        is_word;
+        logic        is_word;      // truncate the result to 32 bits and sign-extend (core.sv's is_word_arith)
         logic [4:0]  rs1;
         logic        rs1_used;
         logic [4:0]  rs2;
@@ -93,6 +93,7 @@ package qv_pkg;
         logic                    valid;
         logic [QV_ROB_TAG_W-1:0] tag;
         logic [4:0]              op;
+        logic                    is_word;
         logic [63:0]             a;
         logic [63:0]             b;
     } fu_req_t;

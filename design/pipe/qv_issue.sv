@@ -136,12 +136,13 @@ module qv_issue #(
 
     // ---------------- dispatch ----------------
     always_comb begin
-        o_fu_req       = '0;
-        o_fu_req.valid = o_issue;
-        o_fu_req.tag   = i_alloc_tag;
-        o_fu_req.op    = i_uop.alu_op;
-        o_fu_req.a     = opa;
-        o_fu_req.b     = opb;
+        o_fu_req         = '0;
+        o_fu_req.valid   = o_issue;
+        o_fu_req.tag     = i_alloc_tag;
+        o_fu_req.op      = i_uop.alu_op;
+        o_fu_req.is_word = i_uop.is_word;
+        o_fu_req.a       = opa;
+        o_fu_req.b       = opb;
     end
 
     // ---------------- producer table update ----------------
