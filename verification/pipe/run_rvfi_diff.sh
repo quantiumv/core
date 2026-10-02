@@ -59,7 +59,7 @@ pass=0; fail=0
 for ((s = FIRST; s < FIRST + SEEDS; s++)); do
     base="$OUT/alu_$s"
     n=$(python3 verification/pipe/gen_alu.py --seed "$s" --len "$LEN" -o "$base.s") || exit 1
-    riscv64-unknown-elf-as -march=rv64i -mabi=lp64 -mno-relax "$base.s" -o "$base.o" &&
+    riscv64-unknown-elf-as -march=rv64im -mabi=lp64 -mno-relax "$base.s" -o "$base.o" &&
     riscv64-unknown-elf-ld -T verification/lockstep/gen/link.ld -o "$base.elf" "$base.o" &&
     riscv64-unknown-elf-objcopy -O verilog -j .text.entry --verilog-data-width=8 "$base.elf" "$base.hex" || exit 1
 

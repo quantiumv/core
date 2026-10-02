@@ -165,6 +165,7 @@ module qv_backend_tb #(
         a = u.rs1_used ? G[u.rs1] : u.imm1;
         b = u.rs2_used ? G[u.rs2] : u.imm2;
         y = golden_alu(u.alu_op, a, b);
+        if (u.is_word) y = {{32{y[31]}}, y[31:0]};
         if (u.rd_wen && u.rd != 0) G[u.rd] = y;
         exp_wdata[n_uops] = (u.rd_wen && u.rd != 0) ? y : 64'd0;
         script[n_uops]    = u;
@@ -303,6 +304,7 @@ module qv_backend_tb #(
             logic [4:0] op, rd, rs1, rs2;
             logic       use1, use2;
             logic [63:0] im1, im2;
+            uop_t       u;
             op   = ops[$urandom % 10];
             rd   = 5'($urandom % 8);                     // x0..x7 only: lots of RAW/WAW
             rs1  = 5'($urandom % 8);
@@ -311,7 +313,9 @@ module qv_backend_tb #(
             use2 = ($urandom % 3) != 0;
             im1  = {$urandom, $urandom};
             im2  = ($urandom % 2) ? {$urandom, $urandom} : 64'($urandom % 70);
-            push(mk(op, rd, rs1, use1, im1, rs2, use2, im2), ($urandom % 5 == 0) ? int'($urandom % 4) : 0);
+            u = mk(op, rd, rs1, use1, im1, rs2, use2, im2);
+            u.is_word = ($urandom % 4) == 0;                 // truncated results through bypass/ROB too
+            push(u, ($urandom % 5 == 0) ? int'($urandom % 4) : 0);
         end
         run_script("R1", 20000);
 

@@ -9,8 +9,9 @@
  *   - structural: the decoder code, alu_op, rs1/rs2/rd selects, the
  *     *_used flags, rd_wen and the fault fields;
  *   - semantic: operands resolved from the uop against a model register
- *     file (rsN_used ? R[rsN] : immN -- exactly what issue will do) and
- *     run through a real alu.sv, compared against a golden result
+ *     file (rsN_used ? R[rsN] : immN -- exactly what issue will do), run
+ *     through a real alu.sv plus qv_exu_alu's is_word truncation, and
+ *     compared against a golden result
  *     computed from the instruction's architectural meaning. This checks
  *     that imm1/imm2 carry the right value (sign extension, shift
  *     amounts) without the test depending on decoder.sv's internal
@@ -44,10 +45,15 @@ module qv_decode_tb;
 
     // ---------------- semantic check: model regfile + real ALU ----------------
     logic [63:0] R [0:31];
-    logic [63:0] op_a, op_b, alu_y;
+    function automatic logic [63:0] sx32(input logic [63:0] x);
+        return {{32{x[31]}}, x[31:0]};
+    endfunction
+
+    logic [63:0] op_a, op_b, alu_y, result;
     assign op_a = uop.rs1_used ? R[uop.rs1] : uop.imm1;
     assign op_b = uop.rs2_used ? R[uop.rs2] : uop.imm2;
     alu alu0 (.i_operand_A(op_a), .i_operation(uop.alu_op), .i_operand_B(op_b), .o_result(alu_y));
+    assign result = uop.is_word ? sx32(alu_y) : alu_y;
 
     // feed one instruction, let decode register it, leave it held in the slot
     task automatic feed(input logic [31:0] instr, input logic xcpt = 1'b0, input logic [3:0] cause = 4'd0);
@@ -82,7 +88,7 @@ module qv_decode_tb;
         check({name, ": no fault"}, {63'b0, uop.xcpt}, 64'd0);
         check({name, ": pc"}, uop.pc, 64'h1000);
         check({name, ": raw"}, {32'b0, uop.raw}, {32'b0, instr});
-        check({name, ": result"}, alu_y, golden);
+        check({name, ": result"}, result, golden);
     endtask
 
     task automatic expect_fault(input string name, input logic [31:0] instr,
@@ -94,10 +100,11 @@ module qv_decode_tb;
         check({name, ": no rd write"}, {63'b0, uop.rd_wen}, 64'd0);
     endtask
 
-    localparam logic [6:0] OP = `OPC_OP, OPI = `OPC_OP_IMM;
-    localparam logic [6:0] F7_0 = 7'b0000000, F7_1 = 7'b0100000;
+    localparam logic [6:0] OP = `OPC_OP, OPI = `OPC_OP_IMM, OP32 = `OPC_OP_32, OPI32 = `OPC_OP_IMM_32;
+    localparam logic [6:0] F7_0 = 7'b0000000, F7_1 = 7'b0100000, F7_M = 7'b0000001;
 
-    logic [63:0] a, b;
+    logic [63:0]  a, b;
+    logic [127:0] prod;
     int imm;
 
     initial begin
@@ -166,9 +173,57 @@ module qv_decode_tb;
         expect_alu("SRAI 63", encode_shift64(6'b010000, 6'd63, 6, 3'b101, 18, OPI), `INSTR_CODE(SRAI), 18, 6, 1, 0, 0,
                    64'($signed(a) >>> 63));
 
+        // ---------------- *W forms ----------------
+        // operands chosen so the 64-bit result differs from the 32-bit one
+        a = R[9];  b = R[7];                                   // 0xFFFFFFFF + 100 carries out of bit 31
+        expect_alu("ADDW", encode_r(F7_0, 7, 9, 3'b000, 19, OP32), `INSTR_CODE(ADDW), 19, 9, 1, 7, 1, sx32(a + b));
+        a = R[7];  b = R[6];
+        expect_alu("SUBW", encode_r(F7_1, 6, 7, 3'b000, 19, OP32), `INSTR_CODE(SUBW), 19, 7, 1, 6, 1, sx32(a - b));
+        a = R[10];
+        imm = 16;                                              // 0xF00F0FF0 + 16: bit 31 set -> negative
+        expect_alu("ADDIW", encode_i(imm, 10, 3'b000, 19, OPI32), `INSTR_CODE(ADDIW), 19, 10, 1, 0, 0,
+                   sx32(a + 64'(imm)));
+        a = R[10]; b = R[7];                                   // shift amount = 100 & 31 = 4
+        expect_alu("SLLW", encode_r(F7_0, 7, 10, 3'b001, 20, OP32), `INSTR_CODE(SLLW), 20, 10, 1, 7, 1,
+                   sx32(64'(a[31:0] << b[4:0])));
+        expect_alu("SRLW", encode_r(F7_0, 7, 10, 3'b101, 20, OP32), `INSTR_CODE(SRLW), 20, 10, 1, 7, 1,
+                   sx32(64'(a[31:0] >> b[4:0])));
+        expect_alu("SRAW", encode_r(F7_1, 7, 10, 3'b101, 20, OP32), `INSTR_CODE(SRAW), 20, 10, 1, 7, 1,
+                   sx32(64'($signed(a[31:0]) >>> b[4:0])));
+        expect_alu("SRLW by 0 (sign of bit 31)", encode_r(F7_0, 0, 10, 3'b101, 20, OP32), `INSTR_CODE(SRLW),
+                   20, 10, 1, 0, 0, sx32(a));
+        expect_alu("SLLIW 31", encode_shift32w(F7_0, 5'd31, 7, 3'b001, 21, OPI32), `INSTR_CODE(SLLIW),
+                   21, 7, 1, 0, 0, sx32(64'(R[7][31:0] << 31)));
+        expect_alu("SRLIW 0", encode_shift32w(F7_0, 5'd0, 10, 3'b101, 21, OPI32), `INSTR_CODE(SRLIW),
+                   21, 10, 1, 0, 0, sx32(a));
+        expect_alu("SRAIW 31", encode_shift32w(F7_1, 5'd31, 10, 3'b101, 21, OPI32), `INSTR_CODE(SRAIW),
+                   21, 10, 1, 0, 0, sx32(64'($signed(a[31:0]) >>> 31)));
+
+        // ---------------- LUI / AUIPC ----------------
+        expect_alu("LUI neg", encode_u(20'h80001, 22, `OPC_LUI), `INSTR_CODE(LUI), 22, 0, 0, 0, 0,
+                   64'hFFFF_FFFF_8000_1000);
+        expect_alu("LUI pos", encode_u(20'h12345, 22, `OPC_LUI), `INSTR_CODE(LUI), 22, 0, 0, 0, 0,
+                   64'h0000_0000_1234_5000);
+        expect_alu("AUIPC pos", encode_u(20'h12345, 23, `OPC_AUIPC), `INSTR_CODE(AUIPC), 23, 0, 0, 0, 0,
+                   64'h1000 + 64'h1234_5000);
+        expect_alu("AUIPC neg", encode_u(20'hFFFFE, 23, `OPC_AUIPC), `INSTR_CODE(AUIPC), 23, 0, 0, 0, 0,
+                   64'h1000 - 64'h2000);
+
+        // ---------------- multiply ----------------
+        a = R[6];  b = R[8];                                   // negative x negative
+        prod = $signed({{64{a[63]}}, a}) * $signed({{64{b[63]}}, b});
+        expect_alu("MUL",    encode_r(F7_M, 8, 6, 3'b000, 24, OP), `INSTR_CODE(MUL),    24, 6, 1, 8, 1, a * b);
+        expect_alu("MULH",   encode_r(F7_M, 8, 6, 3'b001, 24, OP), `INSTR_CODE(MULH),   24, 6, 1, 8, 1, prod[127:64]);
+        prod = {{64{a[63]}}, a} * {64'b0, b};
+        expect_alu("MULHSU", encode_r(F7_M, 8, 6, 3'b010, 24, OP), `INSTR_CODE(MULHSU), 24, 6, 1, 8, 1, prod[127:64]);
+        prod = {64'b0, a} * {64'b0, b};
+        expect_alu("MULHU",  encode_r(F7_M, 8, 6, 3'b011, 24, OP), `INSTR_CODE(MULHU),  24, 6, 1, 8, 1, prod[127:64]);
+        a = R[9];  b = R[10];
+        expect_alu("MULW",   encode_r(F7_M, 10, 9, 3'b000, 25, OP32), `INSTR_CODE(MULW), 25, 9, 1, 10, 1, sx32(a * b));
+
         // ---------------- not implemented / faults ----------------
         expect_fault("LW (not built yet)",    encode_i(8, 7, 3'b010, 5, `OPC_LOAD), 1'b0, 4'd0, 4'd2);
-        expect_fault("ADDIW (not built yet)", encode_i(1, 7, 3'b000, 5, `OPC_OP_IMM_32), 1'b0, 4'd0, 4'd2);
+        expect_fault("DIV (not built yet)",   encode_r(F7_M, 8, 7, 3'b100, 5, OP), 1'b0, 4'd0, 4'd2);
         expect_fault("BEQ (not built yet)",   encode_b(8, 8, 7, 3'b000, `OPC_BRANCH), 1'b0, 4'd0, 4'd2);
         expect_fault("all-zero (illegal)",    32'h0000_0000, 1'b0, 4'd0, 4'd2);
         expect_fault("fetch fault on a valid instr", encode_r(F7_0, 8, 7, 3'b000, 5, OP), 1'b1, 4'd1, 4'd1);
