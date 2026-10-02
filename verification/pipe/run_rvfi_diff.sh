@@ -5,7 +5,7 @@
 # two retirement streams with cmp_rvfi.py.
 #
 # Stands in for the lockstep harness until core_pipe can run its corpus
-# (that needs branches, memory and CSRs). Run from WSL, any cwd.
+# (that needs memory and CSRs). Run from WSL, any cwd.
 #
 #   run_rvfi_diff.sh [--seeds N] [--first S] [--len L]
 #                    [--serialize 0|1] [--bypass 0|1]
@@ -40,7 +40,7 @@ DUT_VVP="$OUT/pipe_$TAG.vvp"
 
 REF_FILES="decoder.sv alu.sv c_expand.sv core.sv csr_file.sv divider.sv register_file.sv wb4_sram.sv wb_arbiter2.sv"
 PIPE_FILES="decoder.sv pipe/qv_pkg.sv pipe/qv_fetch.sv pipe/qv_align.sv pipe/qv_fifo.sv pipe/qv_decode.sv
-            pipe/qv_issue.sv pipe/qv_rob.sv pipe/qv_exu_alu.sv pipe/qv_commit.sv pipe/core_pipe.sv
+            pipe/qv_issue.sv pipe/qv_rob.sv pipe/qv_exu_alu.sv pipe/qv_exu_bru.sv pipe/qv_commit.sv pipe/core_pipe.sv
             alu.sv register_file.sv csr_file.sv wb4_sram.sv wb_arbiter2.sv"
 
 build() {
@@ -58,20 +58,21 @@ build "$DUT_VVP" -DQV_PIPE_AS_CORE -DQV_PIPE_SERIALIZE=$SER -DQV_PIPE_BYPASS_EN=
 pass=0; fail=0
 for ((s = FIRST; s < FIRST + SEEDS; s++)); do
     base="$OUT/alu_$s"
-    n=$(python3 verification/pipe/gen_alu.py --seed "$s" --len "$LEN" -o "$base.s") || exit 1
+    read -r n dyn < <(python3 verification/pipe/gen_alu.py --seed "$s" --len "$LEN" -o "$base.s") || exit 1
     riscv64-unknown-elf-as -march=rv64im -mabi=lp64 -mno-relax "$base.s" -o "$base.o" &&
     riscv64-unknown-elf-ld -T verification/lockstep/gen/link.ld -o "$base.elf" "$base.o" &&
     riscv64-unknown-elf-objcopy -O verilog -j .text.entry --verilog-data-width=8 "$base.elf" "$base.hex" || exit 1
 
     # 0x80000 is never written, so the tracer runs to its cycle limit.
-    # Both cores retire about one instruction per 3 cycles here; a limit
-    # that turns out too tight shows up as a short-log FAIL.
-    timeout=$((n * 12 + 1000))
+    # Both cores average a few cycles per instruction (core_pipe more on
+    # taken branches); a limit that turns out too tight shows up as an
+    # "unfinished" FAIL, never a silent pass.
+    timeout=$((dyn * 12 + 1000))
     vvp -n "$REF_VVP" +HEXFILE="$base.hex" +TOHOST_ADDR=80000 +TIMEOUT=$timeout > "$base.ref.log" 2>&1
     vvp -n "$DUT_VVP" +HEXFILE="$base.hex" +TOHOST_ADDR=80000 +TIMEOUT=$timeout > "$base.$TAG.log" 2>&1
-    res=$(python3 verification/pipe/cmp_rvfi.py "$base.ref.log" "$base.$TAG.log" "$n")
+    res=$(python3 verification/pipe/cmp_rvfi.py "$base.ref.log" "$base.$TAG.log" "$(printf %x $((n * 4)))")
     if echo "$res" | tail -1 | grep -q "PASS"; then
-        pass=$((pass + 1)); echo "seed $s: PASS ($n retirements)"
+        pass=$((pass + 1)); echo "seed $s: PASS ($(echo "$res" | tail -1 | sed 's/.*n=//') retirements)"
         rm -f "$base".*
     else
         fail=$((fail + 1)); echo "seed $s: FAIL"; echo "$res" | sed 's/^/    /'

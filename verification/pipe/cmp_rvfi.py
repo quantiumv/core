@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """cmp_rvfi.py -- compare two testbench/rvfi_tracer.sv logs retirement by retirement.
 
-Usage: cmp_rvfi.py REF.log DUT.log N
+Usage: cmp_rvfi.py REF.log DUT.log END_PC
 
-Compares the first N retirements on every field the tracer prints.
+END_PC (hex) is where the program ends. Each log is cut at its first
+retirement with pc_rdata == END_PC; everything before that must match on
+every field the tracer prints, and both logs must reach END_PC (a side
+that never gets there hung, stalled, or ran off somewhere else).
 mem_rdata is ignored when mem_rmask is 0 and mem_wdata when mem_wmask is
 0: core.sv drives both unconditionally from the bus, so outside a real
-access they carry whatever the bus last held. Fewer than N retirements
-on either side is a failure (a hang or stall). Last line is
+access they carry whatever the bus last held. Last line is
 "RVFI_DIFF: PASS ..." or "RVFI_DIFF: FAIL ...".
 """
 import sys
@@ -17,26 +19,27 @@ FIELDS = ["order", "pc_rdata", "pc_wdata", "insn", "mode", "trap", "intr", "caus
           "rs2_rdata", "mem_addr", "mem_rmask", "mem_wmask", "mem_rdata", "mem_wdata"]
 
 
-def load(path, n):
+def load(path, end_pc):
+    """Records before the first one at end_pc, and whether end_pc was reached."""
     recs = []
     with open(path) as f:
         for line in f:
             if not line.startswith("rvfi "):
                 continue
             rec = dict(kv.split("=", 1) for kv in line.split()[1:])
+            if int(rec["pc_rdata"], 16) == end_pc:
+                return recs, True
             if int(rec["mem_rmask"], 16) == 0:
                 rec["mem_rdata"] = "-"
             if int(rec["mem_wmask"], 16) == 0:
                 rec["mem_wdata"] = "-"
             recs.append(rec)
-            if len(recs) == n:
-                break
-    return recs
+    return recs, False
 
 
 def main():
-    ref_path, dut_path, n = sys.argv[1], sys.argv[2], int(sys.argv[3])
-    ref, dut = load(ref_path, n), load(dut_path, n)
+    ref_path, dut_path, end_pc = sys.argv[1], sys.argv[2], int(sys.argv[3], 16)
+    (ref, ref_done), (dut, dut_done) = load(ref_path, end_pc), load(dut_path, end_pc)
     for i in range(min(len(ref), len(dut))):
         bad = [k for k in FIELDS if ref[i].get(k) != dut[i].get(k)]
         if bad:
@@ -49,10 +52,12 @@ def main():
                 print(f"  {k:10} {ref[i].get(k, '?'):>18} {dut[i].get(k, '?'):>18}{mark}")
             print(f"RVFI_DIFF: FAIL at {i} ({', '.join(bad)})")
             return 1
-    if len(ref) < n or len(dut) < n:
-        print(f"RVFI_DIFF: FAIL short log (ref={len(ref)} dut={len(dut)} want={n})")
+    if not (ref_done and dut_done) or len(ref) != len(dut):
+        print(f"RVFI_DIFF: FAIL did not both reach end pc {end_pc:x} "
+              f"(ref={len(ref)}{'' if ref_done else ' unfinished'} "
+              f"dut={len(dut)}{'' if dut_done else ' unfinished'})")
         return 1
-    print(f"RVFI_DIFF: PASS n={n}")
+    print(f"RVFI_DIFF: PASS n={len(ref)}")
     return 0
 
 

@@ -91,6 +91,27 @@ module qv_decode_tb;
         check({name, ": result"}, result, golden);
     endtask
 
+    task automatic expect_bru(
+        input string name, input logic [31:0] instr, input logic [6:0] exp_code, input qv_bru_op_e exp_op,
+        input logic [4:0] exp_rs1, input logic exp_rs1_used, input logic [4:0] exp_rs2, input logic exp_rs2_used,
+        input logic exp_rd_wen, input logic [4:0] exp_rd, input logic [63:0] exp_imm2, input logic [63:0] exp_imm3
+    );
+        feed(instr);
+        check({name, ": valid"}, {63'b0, valid}, 64'd1);
+        check({name, ": code"}, {57'b0, uop.code}, {57'b0, exp_code});
+        check({name, ": fu"}, {61'b0, uop.fu}, {61'b0, QV_FU_BRU});
+        check({name, ": bru_op"}, {61'b0, uop.bru_op}, {61'b0, exp_op});
+        check({name, ": rs1"}, {59'b0, uop.rs1}, {59'b0, exp_rs1});
+        check({name, ": rs1_used"}, {63'b0, uop.rs1_used}, {63'b0, exp_rs1_used});
+        check({name, ": rs2"}, {59'b0, uop.rs2}, {59'b0, exp_rs2});
+        check({name, ": rs2_used"}, {63'b0, uop.rs2_used}, {63'b0, exp_rs2_used});
+        check({name, ": rd_wen"}, {63'b0, uop.rd_wen}, {63'b0, exp_rd_wen});
+        if (exp_rd_wen) check({name, ": rd"}, {59'b0, uop.rd}, {59'b0, exp_rd});
+        if (!exp_rs2_used) check({name, ": imm2"}, uop.imm2, exp_imm2);
+        if (exp_op != QV_BR_JALR) check({name, ": imm3"}, uop.imm3, exp_imm3);   // JALR doesn't use imm3
+        check({name, ": no fault"}, {63'b0, uop.xcpt}, 64'd0);
+    endtask
+
     task automatic expect_fault(input string name, input logic [31:0] instr,
                                 input logic xcpt_in, input logic [3:0] cause_in, input logic [3:0] exp_cause);
         feed(instr, xcpt_in, cause_in);
@@ -221,10 +242,39 @@ module qv_decode_tb;
         a = R[9];  b = R[10];
         expect_alu("MULW",   encode_r(F7_M, 10, 9, 3'b000, 25, OP32), `INSTR_CODE(MULW), 25, 9, 1, 10, 1, sx32(a * b));
 
+        // ---------------- branches, JAL, JALR -> BRU ----------------
+        // B offsets at both ends of their range; branches never write rd
+        expect_bru("BEQ +16",     encode_b(16, 8, 7, 3'b000, `OPC_BRANCH), `INSTR_CODE(BEQ), QV_BR_BEQ,
+                   7, 1, 8, 1, 1'b0, 0, 0, 64'd16);
+        expect_bru("BNE -4096",   encode_b(-4096, 8, 7, 3'b001, `OPC_BRANCH), `INSTR_CODE(BNE), QV_BR_BNE,
+                   7, 1, 8, 1, 1'b0, 0, 0, -64'd4096);
+        expect_bru("BLT +4094",   encode_b(4094, 6, 9, 3'b100, `OPC_BRANCH), `INSTR_CODE(BLT), QV_BR_BLT,
+                   9, 1, 6, 1, 1'b0, 0, 0, 64'd4094);
+        expect_bru("BGE -2",      encode_b(-2, 6, 9, 3'b101, `OPC_BRANCH), `INSTR_CODE(BGE), QV_BR_BGE,
+                   9, 1, 6, 1, 1'b0, 0, 0, -64'd2);
+        expect_bru("BLTU rs2=x0", encode_b(32, 0, 9, 3'b110, `OPC_BRANCH), `INSTR_CODE(BLTU), QV_BR_BLTU,
+                   9, 1, 0, 0, 1'b0, 0, 0, 64'd32);
+        expect_bru("BGEU rs1=x0", encode_b(-32, 9, 0, 3'b111, `OPC_BRANCH), `INSTR_CODE(BGEU), QV_BR_BGEU,
+                   0, 0, 9, 1, 1'b0, 0, 0, -64'd32);
+        // J offsets at both ends; JAL writes the link
+        expect_bru("JAL +1048574",  encode_j(1048574, 1, `OPC_JAL), `INSTR_CODE(JAL), QV_BR_JAL,
+                   0, 0, 0, 0, 1'b1, 1, 0, 64'd1048574);
+        expect_bru("JAL -1048576",  encode_j(-1048576, 5, `OPC_JAL), `INSTR_CODE(JAL), QV_BR_JAL,
+                   0, 0, 0, 0, 1'b1, 5, 0, -64'd1048576);
+        // JALR: rs1 + I offset (on imm2), writes the link
+        expect_bru("JALR -2048(x7)", encode_i(-2048, 7, 3'b000, 5, `OPC_JALR), `INSTR_CODE(JALR), QV_BR_JALR,
+                   7, 1, 0, 0, 1'b1, 5, -64'd2048, 0);
+        expect_bru("JALR 2047(x7)",  encode_i(2047, 7, 3'b000, 7, `OPC_JALR), `INSTR_CODE(JALR), QV_BR_JALR,
+                   7, 1, 0, 0, 1'b1, 7, 64'd2047, 0);
+        // a fetch-faulted jump must not reach the BRU, so it can never redirect
+        feed(encode_j(64, 1, `OPC_JAL), 1'b1, 4'd1);
+        check("faulted JAL: routed to the ALU", {61'b0, uop.fu}, {61'b0, QV_FU_ALU});
+        check("faulted JAL: fault", {63'b0, uop.xcpt}, 64'd1);
+        check("faulted JAL: no rd write", {63'b0, uop.rd_wen}, 64'd0);
+
         // ---------------- not implemented / faults ----------------
         expect_fault("LW (not built yet)",    encode_i(8, 7, 3'b010, 5, `OPC_LOAD), 1'b0, 4'd0, 4'd2);
         expect_fault("DIV (not built yet)",   encode_r(F7_M, 8, 7, 3'b100, 5, OP), 1'b0, 4'd0, 4'd2);
-        expect_fault("BEQ (not built yet)",   encode_b(8, 8, 7, 3'b000, `OPC_BRANCH), 1'b0, 4'd0, 4'd2);
         expect_fault("all-zero (illegal)",    32'h0000_0000, 1'b0, 4'd0, 4'd2);
         expect_fault("fetch fault on a valid instr", encode_r(F7_0, 8, 7, 3'b000, 5, OP), 1'b1, 4'd1, 4'd1);
         expect_fault("fetch fault beats illegal", 32'h0000_0000, 1'b1, 4'd1, 4'd1);

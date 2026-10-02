@@ -8,7 +8,8 @@
  * but-uncommitted entry is always the head): filling the ROB, completing
  * entries out of order, looking up non-head entries by tag, tag
  * wraparound -- including reusing an index whose previous occupant
- * completed -- and flush. Run at ROB_DEPTH=8 and 4.
+ * completed -- the mispredict next-pc override, and flush. Run at
+ * ROB_DEPTH=8, 4 and 2.
  */
 module qv_rob_tb #(
     parameter int ROB_DEPTH = 8
@@ -193,6 +194,37 @@ module qv_rob_tb #(
         for (i = ROB_DEPTH / 2; i < seq; i++) pop_and_check("drain", i);
         #1;
         check("drain: empty", {63'b0, empty}, 64'd1);
+
+        // ---- mispredict: resolved next pc replaces the prediction ----
+        base = seq;
+        do_alloc();                                      // base: will mispredict
+        do_alloc();                                      // base+1: completes normally
+        @(negedge clk);
+        wb = '0; wb.valid = 1'b1; wb.tag = tag_of[base]; wb.value = val_of(base);
+        wb.mispredict = 1'b1; wb.next_pc = 64'hDEAD_BEE0;
+        @(posedge clk); #1;
+        wb = '0;
+        @(negedge clk);
+        wb = '0; wb.valid = 1'b1; wb.tag = tag_of[base + 1]; wb.value = val_of(base + 1);
+        wb.next_pc = 64'hBAD0;                           // ignored without mispredict
+        @(posedge clk); #1;
+        wb = '0;
+        check("mispredict: head flagged", {63'b0, head.mispredict}, 64'd1);
+        check("mispredict: head next_pc resolved", head.next_pc, 64'hDEAD_BEE0);
+        check("mispredict: value still written", head.value, val_of(base));
+        @(negedge clk); pop = 1'b1; @(posedge clk); #1; pop = 1'b0;
+        check("normal: head not flagged", {63'b0, head.mispredict}, 64'd0);
+        check("normal: predicted next_pc kept", head.next_pc, 64'h1004 + 64'(4 * (base + 1)));
+        @(negedge clk); pop = 1'b1; @(posedge clk); #1; pop = 1'b0;
+        // every slot, including the one that mispredicted, comes back clean
+        for (i = 0; i < ROB_DEPTH; i++) begin
+            do_alloc();
+            do_complete(seq - 1);
+            #1;
+            check($sformatf("reuse %0d: not flagged", i), {63'b0, head.mispredict}, 64'd0);
+            check($sformatf("reuse %0d: predicted next_pc", i), head.next_pc, 64'h1004 + 64'(4 * (seq - 1)));
+            @(negedge clk); pop = 1'b1; @(posedge clk); #1; pop = 1'b0;
+        end
 
         // ---- flush with the head popping the same cycle ----
         base = seq;

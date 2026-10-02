@@ -73,7 +73,7 @@ module qv_backend_tb #(
         .i_rob_empty(rob_empty),
         .o_lookup1_tag(l1_tag), .i_lookup1_complete(l1_complete), .i_lookup1_value(l1_value),
         .o_lookup2_tag(l2_tag), .i_lookup2_complete(l2_complete), .i_lookup2_value(l2_value),
-        .i_wb(wb), .o_fu_req(fu_req),
+        .i_wb(wb), .o_alu_req(fu_req), .o_bru_req(),
         .i_commit_valid(c_valid), .i_commit_rd(c_rd), .i_commit_rd_wen(c_rd_wen), .i_commit_tag(c_tag)
     );
 
