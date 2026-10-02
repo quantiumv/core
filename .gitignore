@@ -79,6 +79,9 @@ verification/lockstep/.results/
 verification/perf/.results/
 *.lst
 
+# run_rvfi_diff.sh's build/run output
+verification/pipe/.results/
+
 # Internal-only reference documentation (not for the public repo)
 docs/internal/
 
