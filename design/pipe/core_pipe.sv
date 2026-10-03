@@ -31,10 +31,11 @@
  * Implemented so far: every single-cycle integer ALU instruction --
  * RV64I register/immediate ops including the *W forms, LUI, AUIPC, and
  * MUL/MULH/MULHSU/MULHU/MULW -- plus conditional branches, JAL and
- * JALR (4-byte-aligned targets only until RVC lands). Everything else
- * decodes as an illegal-instruction fault and, until traps exist,
- * retires as a no-op. Not yet: branches, loads/stores, CSR/system ops,
- * traps, interrupts, debug, RVC, DIV/REM, A. The
+ * JALR (4-byte-aligned targets only until RVC lands), the six Zicsr
+ * instructions, ECALL, EBREAK, MRET and WFI (a no-op), with M-mode
+ * synchronous traps. Everything else decodes as an illegal-instruction
+ * trap. Not yet: loads/stores, FENCE/FENCE.I/SFENCE.VMA, U/S modes,
+ * SRET, interrupts, debug, RVC, DIV/REM, A. The
  * mem port, icache flush and debug/progbuf outputs are held inert. The
  * Debug Module's GPR/CSR access mux (core.sv wires it around regfile0
  * and csr_file0) comes back with debug support.
@@ -246,6 +247,7 @@ module core_pipe
     logic [31:0]             alloc_raw;
     logic [4:0]              alloc_rd;
     rvfi_shadow_t            alloc_shadow;
+    rob_ctrl_t               alloc_ctrl;
     logic [QV_ROB_TAG_W-1:0] alloc_tag, l1_tag, l2_tag;
     logic                    l1_complete, l2_complete;
     logic [63:0]             l1_value, l2_value;
@@ -261,7 +263,8 @@ module core_pipe
         .o_rs1_sel(rs1_sel), .o_rs2_sel(rs2_sel), .i_rs1_data(rs1_data), .i_rs2_data(rs2_data),
         .o_alloc_valid(alloc_valid), .o_alloc_pc(alloc_pc), .o_alloc_raw(alloc_raw),
         .o_alloc_rd(alloc_rd), .o_alloc_rd_wen(alloc_rd_wen), .o_alloc_next_pc(alloc_next_pc),
-        .o_alloc_shadow(alloc_shadow), .i_alloc_tag(alloc_tag), .i_alloc_ready(alloc_ready),
+        .o_alloc_shadow(alloc_shadow), .o_alloc_ctrl(alloc_ctrl),
+        .i_alloc_tag(alloc_tag), .i_alloc_ready(alloc_ready),
         .i_rob_empty(rob_empty),
         .o_lookup1_tag(l1_tag), .i_lookup1_complete(l1_complete), .i_lookup1_value(l1_value),
         .o_lookup2_tag(l2_tag), .i_lookup2_complete(l2_complete), .i_lookup2_value(l2_value),
@@ -274,17 +277,19 @@ module core_pipe
     rob_entry_t              head_entry;
     logic [QV_ROB_TAG_W-1:0] head_tag;
     rvfi_shadow_t            head_shadow;
+    rob_ctrl_t               head_ctrl;
 
     qv_rob #(.ROB_DEPTH(ROB_DEPTH)) rob0 (
         .clk(clk), .rst(rst), .i_flush(flush),
         .i_alloc_valid(alloc_valid), .i_alloc_pc(alloc_pc), .i_alloc_raw(alloc_raw),
         .i_alloc_rd(alloc_rd), .i_alloc_rd_wen(alloc_rd_wen), .i_alloc_next_pc(alloc_next_pc),
-        .i_alloc_shadow(alloc_shadow), .o_alloc_tag(alloc_tag), .o_alloc_ready(alloc_ready),
+        .i_alloc_shadow(alloc_shadow), .i_alloc_ctrl(alloc_ctrl),
+        .o_alloc_tag(alloc_tag), .o_alloc_ready(alloc_ready),
         .o_empty(rob_empty), .i_wb(wb_bus),
         .i_lookup1_tag(l1_tag), .o_lookup1_complete(l1_complete), .o_lookup1_value(l1_value),
         .i_lookup2_tag(l2_tag), .o_lookup2_complete(l2_complete), .o_lookup2_value(l2_value),
         .o_head_valid(head_valid), .o_head_entry(head_entry), .o_head_tag(head_tag),
-        .o_head_shadow(head_shadow), .i_commit_pop(commit_pop)
+        .o_head_shadow(head_shadow), .o_head_ctrl(head_ctrl), .i_commit_pop(commit_pop)
     );
 
     // ---------------- X: ALU, BRU -> writeback bus ----------------
@@ -304,23 +309,33 @@ module core_pipe
     logic        commit_now_w;
     logic [63:0] arch_pc, retire_next_pc;
     logic [4:0]  c_rs1_addr, c_rs2_addr;
+    logic [11:0] c_csr_addr;
+    logic [63:0] c_csr_wdata, c_trap_cause, c_trap_val;
+    logic        c_csr_we, c_instr_retired, c_trap_taken, c_mret_taken;
     // read only by the RISCV_FORMAL port block
     /* verilator lint_off UNUSEDSIGNAL */
+    logic        c_rvfi_trap;
     logic [63:0] c_order, c_rs1_rdata, c_rs2_rdata, c_rd_wdata, c_pc_rdata, c_pc_wdata;
     logic [31:0] c_insn;
     logic        c_intr;
     logic [4:0]  c_rd_addr;
     /* verilator lint_on UNUSEDSIGNAL */
 
+    // declared ahead of csr_file0, which drives them
+    logic [63:0] csr_rdata, mtvec_w, mepc_w;
+
     qv_commit #(.RESET_PC(RESET_PC)) commit0 (
         .clk(clk), .rst(rst),
         .i_head_valid(head_valid), .i_head_entry(head_entry), .i_head_tag(head_tag),
-        .i_head_shadow(head_shadow), .o_commit_pop(commit_pop),
+        .i_head_shadow(head_shadow), .i_head_ctrl(head_ctrl), .o_commit_pop(commit_pop),
         .o_regfile_we(rf_we), .o_regfile_sel(rf_sel), .o_regfile_data(rf_data),
         .o_commit_valid(c_valid), .o_commit_rd(c_rd), .o_commit_rd_wen(c_rd_wen), .o_commit_tag(c_tag),
+        .o_csr_addr(c_csr_addr), .i_csr_rdata(csr_rdata), .o_csr_we(c_csr_we), .o_csr_wdata(c_csr_wdata),
+        .o_instr_retired(c_instr_retired), .o_trap_taken(c_trap_taken), .o_trap_cause(c_trap_cause),
+        .o_trap_val(c_trap_val), .o_mret_taken(c_mret_taken), .i_mtvec(mtvec_w), .i_mepc(mepc_w),
         .o_commit_now(commit_now_w), .o_pc(arch_pc), .o_next_pc(retire_next_pc),
         .o_redirect_valid(redirect_valid), .o_redirect_pc(redirect_pc),
-        .o_rvfi_order(c_order), .o_rvfi_insn(c_insn), .o_rvfi_intr(c_intr),
+        .o_rvfi_order(c_order), .o_rvfi_insn(c_insn), .o_rvfi_trap(c_rvfi_trap), .o_rvfi_intr(c_intr),
         .o_rvfi_rs1_addr(c_rs1_addr), .o_rvfi_rs2_addr(c_rs2_addr),
         .o_rvfi_rs1_rdata(c_rs1_rdata), .o_rvfi_rs2_rdata(c_rs2_rdata),
         .o_rvfi_rd_addr(c_rd_addr), .o_rvfi_rd_wdata(c_rd_wdata),
@@ -336,7 +351,7 @@ module core_pipe
     );
 
     /* verilator lint_off UNUSEDSIGNAL */
-    logic [63:0] csr_rdata, mtvec_w, stvec_w, mepc_w, sepc_w, medeleg_w, mip_w, mie_w, mideleg_w;
+    logic [63:0] stvec_w, sepc_w, medeleg_w, mip_w, mie_w, mideleg_w;
     logic [63:0] dcsr_o, dpc_o, tdata1_0_w, tdata1_1_w, tdata2_0_w, tdata2_1_w;
     logic [63:0] pmpcfg0_w, pmpaddr0_w, pmpaddr1_w, pmpaddr2_w, pmpaddr3_w, satp_w;
     logic [1:0]  mstatus_mpp_w;
@@ -349,12 +364,13 @@ module core_pipe
 
     csr_file csr_file0 (
         .i_clk(clk), .i_rst(rst),
-        .i_csr_addr('0), .o_csr_rdata(csr_rdata), .i_csr_we(1'b0), .i_csr_wdata('0),
-        .i_instr_retired(commit_now_w),
+        .i_csr_addr(c_csr_addr), .o_csr_rdata(csr_rdata), .i_csr_we(c_csr_we), .i_csr_wdata(c_csr_wdata),
+        .i_instr_retired(c_instr_retired),
         .i_current_priv(2'b11),
         .i_mtip(i_mtip), .i_meip(i_meip), .i_seip(i_seip),
-        .i_trap_taken(1'b0), .i_trap_cause('0), .i_trap_val('0), .i_trap_pc(arch_pc),
-        .i_trap_to_s(1'b0), .i_mret_taken(1'b0), .i_sret_taken(1'b0),
+        .i_trap_taken(c_trap_taken), .i_trap_cause(c_trap_cause), .i_trap_val(c_trap_val),
+        .i_trap_pc(arch_pc),
+        .i_trap_to_s(1'b0), .i_mret_taken(c_mret_taken), .i_sret_taken(1'b0),
         .i_debug_entry(1'b0), .i_debug_cause(3'b0),
         .o_mtvec(mtvec_w), .o_stvec(stvec_w), .o_mepc(mepc_w), .o_sepc(sepc_w),
         .o_medeleg(medeleg_w),
@@ -388,15 +404,15 @@ module core_pipe
     wire [1:0]  current_priv   = 2'b11;
     wire [63:0] dpc_w          = dpc_o;
     wire [63:0] dcsr_w         = dcsr_o;
+    wire        trap_taken     = c_trap_taken;
+    wire [63:0] trap_val       = c_trap_val;
+    wire        csr_we         = c_csr_we;
+    wire        mret_taken     = c_mret_taken;
+    wire        is_ebreak      = head_ctrl.cls == QV_FU_SYS && head_ctrl.sys_op == QV_SYS_EBREAK;
 
-    wire        trap_taken           = 1'b0;
     wire        interrupt_taken      = 1'b0;
     wire        route_to_s           = 1'b0;
-    wire [63:0] trap_val             = 64'b0;
-    wire        csr_we               = 1'b0;
-    wire        mret_taken           = 1'b0;
     wire        sret_taken           = 1'b0;
-    wire        is_ebreak            = 1'b0;
     wire        is_div_family        = 1'b0;
     wire        div_stall            = 1'b0;
     wire        debug_halt_req_entry = 1'b0;
@@ -427,7 +443,7 @@ module core_pipe
     assign rvfi_valid     = commit_now_w;
     assign rvfi_order     = c_order;
     assign rvfi_insn      = c_insn;
-    assign rvfi_trap      = trap_taken;
+    assign rvfi_trap      = c_rvfi_trap;
     assign rvfi_halt      = 1'b0;
     assign rvfi_intr      = c_intr;
     assign rvfi_mode      = current_priv;

@@ -13,7 +13,7 @@
 package qv_pkg;
 
     // Functional-unit routing. All six kinds are named now so the enum
-    // never needs to grow; only ALU and BRU are produced so far.
+    // never needs to grow; DIV and LSU aren't produced yet.
     typedef enum logic [2:0] {
         QV_FU_ALU,
         QV_FU_BRU,
@@ -34,6 +34,22 @@ package qv_pkg;
         QV_BR_JAL,
         QV_BR_JALR
     } qv_bru_op_e;
+
+    // System operations, executed by commit at the ROB head.
+    typedef enum logic [2:0] {
+        QV_SYS_NONE,
+        QV_SYS_ECALL,
+        QV_SYS_EBREAK,
+        QV_SYS_MRET,
+        QV_SYS_WFI
+    } qv_sys_op_e;
+
+    // CSR read-modify-write kind (the I forms differ only in operand source).
+    typedef enum logic [1:0] {
+        QV_CSR_RW,
+        QV_CSR_RS,
+        QV_CSR_RC
+    } qv_csr_op_e;
 
     // ROB size is a package constant (not just a module parameter)
     // because packed-struct tag fields need a compile-time width.
@@ -73,6 +89,11 @@ package qv_pkg;
         logic [63:0] imm1;         // operand A when !rs1_used
         logic [63:0] imm2;         // operand B when !rs2_used
         logic [63:0] imm3;         // branch/JAL pc-relative offset
+        qv_sys_op_e  sys_op;
+        qv_csr_op_e  csr_op;
+        logic [11:0] csr_addr;
+        logic        csr_wsup;     // CSRRS/CSRRC(I) with a zero source: read only
+        logic        serialize;    // flush and refetch after this commits
         logic        xcpt;
         logic [3:0]  xcpt_cause;
     } uop_t;
@@ -102,6 +123,19 @@ package qv_pkg;
         logic [4:0]  rs2_addr;
         logic [63:0] rs2_rdata;
     } rvfi_shadow_t;
+
+    // What commit needs to act on an entry beyond its result: exceptions,
+    // CSR and system operations. Stored per ROB entry, set at issue.
+    typedef struct packed {
+        qv_fu_e      cls;          // QV_FU_CSR / QV_FU_SYS act at commit
+        qv_sys_op_e  sys_op;
+        qv_csr_op_e  csr_op;
+        logic [11:0] csr_addr;
+        logic        csr_wsup;
+        logic        serialize;
+        logic        xcpt;
+        logic [3:0]  cause;
+    } rob_ctrl_t;
 
     // Issue -> functional unit.
     typedef struct packed {

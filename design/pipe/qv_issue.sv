@@ -37,8 +37,7 @@ module qv_issue #(
     input  logic                             i_flush,
 
     input  logic                             i_uop_valid,
-    // code and xcpt (carried to the ROB for commit to trap on) aren't
-    // consumed until traps land
+    // code is kept for debugging only
     /* verilator lint_off UNUSEDSIGNAL */
     input  qv_pkg::uop_t                     i_uop,
     /* verilator lint_on UNUSEDSIGNAL */
@@ -56,6 +55,7 @@ module qv_issue #(
     output logic                             o_alloc_rd_wen,
     output logic [63:0]                      o_alloc_next_pc,
     output qv_pkg::rvfi_shadow_t             o_alloc_shadow,
+    output qv_pkg::rob_ctrl_t                o_alloc_ctrl,
     input  logic [qv_pkg::QV_ROB_TAG_W-1:0]  i_alloc_tag,
     input  logic                             i_alloc_ready,
     input  logic                             i_rob_empty,
@@ -138,7 +138,21 @@ module qv_issue #(
         o_alloc_shadow.rs2_rdata = i_uop.rs2_used ? opb : 64'b0;
     end
 
+    always_comb begin
+        o_alloc_ctrl           = '0;
+        o_alloc_ctrl.cls       = i_uop.fu;
+        o_alloc_ctrl.sys_op    = i_uop.sys_op;
+        o_alloc_ctrl.csr_op    = i_uop.csr_op;
+        o_alloc_ctrl.csr_addr  = i_uop.csr_addr;
+        o_alloc_ctrl.csr_wsup  = i_uop.csr_wsup;
+        o_alloc_ctrl.serialize = i_uop.serialize;
+        o_alloc_ctrl.xcpt      = i_uop.xcpt;
+        o_alloc_ctrl.cause     = i_uop.xcpt_cause;
+    end
+
     // ---------------- dispatch: one request port per unit ----------------
+    // CSR and SYS uops go through the ALU only to resolve their source
+    // operand; commit carries out the operation itself at the ROB head.
     wire to_bru = (i_uop.fu == QV_FU_BRU);
     fu_req_t req;
     always_comb begin

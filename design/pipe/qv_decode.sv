@@ -123,7 +123,55 @@ module qv_decode (
         endcase
     end: bru_op_sel
 
-    wire implemented = is_alu || is_bru;
+    logic       is_csr, csr_imm;
+    qv_csr_op_e csr_op;
+    always_comb begin: csr_op_sel
+        is_csr  = 1'b1;
+        csr_imm = 1'b0;
+        case (code)
+            `INSTR_CODE(CSRRW):  csr_op = QV_CSR_RW;
+            `INSTR_CODE(CSRRS):  csr_op = QV_CSR_RS;
+            `INSTR_CODE(CSRRC):  csr_op = QV_CSR_RC;
+            `INSTR_CODE(CSRRWI): begin csr_op = QV_CSR_RW; csr_imm = 1'b1; end
+            `INSTR_CODE(CSRRSI): begin csr_op = QV_CSR_RS; csr_imm = 1'b1; end
+            `INSTR_CODE(CSRRCI): begin csr_op = QV_CSR_RC; csr_imm = 1'b1; end
+            default: begin
+                csr_op = QV_CSR_RW;
+                is_csr = 1'b0;
+            end
+        endcase
+    end: csr_op_sel
+
+    logic       is_sys;
+    qv_sys_op_e sys_op;
+    always_comb begin: sys_op_sel
+        is_sys = 1'b1;
+        case (code)
+            `INSTR_CODE(ECALL):  sys_op = QV_SYS_ECALL;
+            `INSTR_CODE(EBREAK): sys_op = QV_SYS_EBREAK;
+            `INSTR_CODE(MRET):   sys_op = QV_SYS_MRET;
+            `INSTR_CODE(WFI):    sys_op = QV_SYS_WFI;
+            default: begin
+                sys_op = QV_SYS_NONE;
+                is_sys = 1'b0;
+            end
+        endcase
+    end: sys_op_sel
+
+    wire implemented = is_alu || is_bru || is_csr || is_sys;
+
+    // The CSR address arrives on imm_2. Write suppression and illegality
+    // mirror core.sv's csr_write_suppress / is_illegal_instr for M-mode:
+    // RS/RC suppress on the rs1 FIELD being x0, the I forms on uimm == 0;
+    // a non-suppressed write to a read-only CSR (addr[11:10] == 11) and
+    // any access to the debug (0x7B0-0x7B3) or trigger (0x7A0-0x7A4)
+    // CSRs outside debug mode are illegal. Privilege checks arrive with
+    // U/S modes.
+    wire [11:0] csr_addr = imm_2[11:0];
+    wire csr_wsup = (csr_op != QV_CSR_RW) && (csr_imm ? (imm_1 == '0) : (sel_a == '0));
+    wire csr_illegal = is_csr && ((!csr_wsup && csr_addr[11:10] == 2'b11)
+                                  || csr_addr[11:2] == 10'h1EC
+                                  || csr_addr[11:2] == 10'h1E8 || csr_addr == 12'h7A4);
 
     logic reg_write_ctrl;
     always_comb begin: reg_write_control
@@ -165,21 +213,33 @@ module qv_decode (
         uop_d.rs2      = sel_b;
         uop_d.rs2_used = (sel_b != '0);
         uop_d.rd       = imm_3_or_dest_addr[(`L2_REG_FILE_SIZE - 1):0];
-        // AUIPC uses no registers, so pc can ride in as an immediate
+        // AUIPC uses no registers, so pc can ride in as an immediate. A
+        // CSR op's ALU pass gives just its source (rs1 or uimm) + 0.
         uop_d.imm1     = is_auipc ? i_iq_data.pc : imm_1;
-        uop_d.imm2     = is_auipc ? imm_1 : imm_2;
+        uop_d.imm2     = is_auipc ? imm_1 : is_csr ? '0 : imm_2;
         uop_d.imm3     = is_jal ? imm_1 : imm_b_sext;
+        uop_d.sys_op   = sys_op;
+        uop_d.csr_op   = csr_op;
+        uop_d.csr_addr = csr_addr;
+        uop_d.csr_wsup = csr_wsup;
+        // a CSR's rd value exists only at commit, so nothing younger may
+        // run ahead on it -- flushing after every CSR op covers that too
+        uop_d.serialize = is_csr;
         if (i_iq_data.xcpt) begin
             uop_d.xcpt       = 1'b1;
             uop_d.xcpt_cause = i_iq_data.xcpt_cause;
-        end else if (!implemented) begin
+        end else if (!implemented || csr_illegal) begin
             uop_d.xcpt       = 1'b1;
             uop_d.xcpt_cause = 4'd2;
         end
         uop_d.rd_wen   = reg_write_ctrl && !uop_d.xcpt;
-        // a faulting uop goes through the ALU as a no-op; it must never redirect
-        if (is_bru && !uop_d.xcpt) uop_d.fu = QV_FU_BRU;
-        else                       uop_d.fu = QV_FU_ALU;
+        // a faulting uop goes through the ALU as a no-op for commit to
+        // trap on; it must never redirect or touch a CSR
+        if (uop_d.xcpt)  uop_d.fu = QV_FU_ALU;
+        else if (is_bru) uop_d.fu = QV_FU_BRU;
+        else if (is_csr) uop_d.fu = QV_FU_CSR;
+        else if (is_sys) uop_d.fu = QV_FU_SYS;
+        else             uop_d.fu = QV_FU_ALU;
     end
 
     logic uop_valid_q;
