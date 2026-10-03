@@ -112,6 +112,42 @@ module qv_decode_tb;
         check({name, ": no fault"}, {63'b0, uop.xcpt}, 64'd0);
     endtask
 
+    task automatic expect_csr(
+        input string name, input logic [31:0] instr, input logic [6:0] exp_code, input qv_csr_op_e exp_op,
+        input logic [11:0] exp_addr, input logic [4:0] exp_rs1, input logic exp_rs1_used,
+        input logic [63:0] exp_imm1, input logic exp_wsup, input logic [4:0] exp_rd
+    );
+        feed(instr);
+        check({name, ": valid"}, {63'b0, valid}, 64'd1);
+        check({name, ": code"}, {57'b0, uop.code}, {57'b0, exp_code});
+        check({name, ": fu"}, {61'b0, uop.fu}, {61'b0, QV_FU_CSR});
+        check({name, ": csr_op"}, {62'b0, uop.csr_op}, {62'b0, exp_op});
+        check({name, ": csr_addr"}, {52'b0, uop.csr_addr}, {52'b0, exp_addr});
+        check({name, ": rs1"}, {59'b0, uop.rs1}, {59'b0, exp_rs1});
+        check({name, ": rs1_used"}, {63'b0, uop.rs1_used}, {63'b0, exp_rs1_used});
+        if (!exp_rs1_used) check({name, ": imm1 (uimm)"}, uop.imm1, exp_imm1);
+        check({name, ": no rs2"}, {63'b0, uop.rs2_used}, 64'd0);
+        check({name, ": imm2 zeroed (ALU pass = source + 0)"}, uop.imm2, 64'd0);
+        check({name, ": alu_op ADD"}, {59'b0, uop.alu_op}, {59'b0, `ADD});
+        check({name, ": csr_wsup"}, {63'b0, uop.csr_wsup}, {63'b0, exp_wsup});
+        check({name, ": serialize"}, {63'b0, uop.serialize}, 64'd1);
+        check({name, ": rd_wen"}, {63'b0, uop.rd_wen}, 64'd1);
+        check({name, ": rd"}, {59'b0, uop.rd}, {59'b0, exp_rd});
+        check({name, ": no fault"}, {63'b0, uop.xcpt}, 64'd0);
+    endtask
+
+    task automatic expect_sys(input string name, input logic [31:0] instr, input logic [6:0] exp_code,
+                              input qv_sys_op_e exp_op);
+        feed(instr);
+        check({name, ": valid"}, {63'b0, valid}, 64'd1);
+        check({name, ": code"}, {57'b0, uop.code}, {57'b0, exp_code});
+        check({name, ": fu"}, {61'b0, uop.fu}, {61'b0, QV_FU_SYS});
+        check({name, ": sys_op"}, {61'b0, uop.sys_op}, {61'b0, exp_op});
+        check({name, ": no rd write"}, {63'b0, uop.rd_wen}, 64'd0);
+        check({name, ": no serialize"}, {63'b0, uop.serialize}, 64'd0);
+        check({name, ": no fault"}, {63'b0, uop.xcpt}, 64'd0);
+    endtask
+
     task automatic expect_fault(input string name, input logic [31:0] instr,
                                 input logic xcpt_in, input logic [3:0] cause_in, input logic [3:0] exp_cause);
         feed(instr, xcpt_in, cause_in);
@@ -271,6 +307,62 @@ module qv_decode_tb;
         check("faulted JAL: routed to the ALU", {61'b0, uop.fu}, {61'b0, QV_FU_ALU});
         check("faulted JAL: fault", {63'b0, uop.xcpt}, 64'd1);
         check("faulted JAL: no rd write", {63'b0, uop.rd_wen}, 64'd0);
+
+        // ---------------- Zicsr -> CSR ----------------
+        expect_csr("CSRRW",  encode_csr(12'h340, 6, 3'b001, 5, `OPC_SYSTEM), `INSTR_CODE(CSRRW),  QV_CSR_RW,
+                   12'h340, 6, 1, 0, 1'b0, 5);
+        expect_csr("CSRRW rs1=x0 (still writes)", encode_csr(12'h340, 0, 3'b001, 5, `OPC_SYSTEM),
+                   `INSTR_CODE(CSRRW), QV_CSR_RW, 12'h340, 0, 0, 0, 1'b0, 5);
+        expect_csr("CSRRS",  encode_csr(12'h304, 6, 3'b010, 5, `OPC_SYSTEM), `INSTR_CODE(CSRRS),  QV_CSR_RS,
+                   12'h304, 6, 1, 0, 1'b0, 5);
+        expect_csr("CSRRS rs1=x0 (read)", encode_csr(12'h304, 0, 3'b010, 5, `OPC_SYSTEM), `INSTR_CODE(CSRRS),
+                   QV_CSR_RS, 12'h304, 0, 0, 0, 1'b1, 5);
+        expect_csr("CSRRC",  encode_csr(12'h304, 9, 3'b011, 0, `OPC_SYSTEM), `INSTR_CODE(CSRRC),  QV_CSR_RC,
+                   12'h304, 9, 1, 0, 1'b0, 0);
+        expect_csr("CSRRC rs1=x0 (read)", encode_csr(12'h304, 0, 3'b011, 7, `OPC_SYSTEM), `INSTR_CODE(CSRRC),
+                   QV_CSR_RC, 12'h304, 0, 0, 0, 1'b1, 7);
+        expect_csr("CSRRWI", encode_csr(12'h340, 31, 3'b101, 5, `OPC_SYSTEM), `INSTR_CODE(CSRRWI), QV_CSR_RW,
+                   12'h340, 0, 0, 64'd31, 1'b0, 5);
+        expect_csr("CSRRWI 0 (still writes)", encode_csr(12'h340, 0, 3'b101, 5, `OPC_SYSTEM),
+                   `INSTR_CODE(CSRRWI), QV_CSR_RW, 12'h340, 0, 0, 64'd0, 1'b0, 5);
+        expect_csr("CSRRSI", encode_csr(12'h344, 17, 3'b110, 5, `OPC_SYSTEM), `INSTR_CODE(CSRRSI), QV_CSR_RS,
+                   12'h344, 0, 0, 64'd17, 1'b0, 5);
+        expect_csr("CSRRSI 0 (read)", encode_csr(12'h344, 0, 3'b110, 5, `OPC_SYSTEM), `INSTR_CODE(CSRRSI),
+                   QV_CSR_RS, 12'h344, 0, 0, 64'd0, 1'b1, 5);
+        expect_csr("CSRRCI 0 (read)", encode_csr(12'h344, 0, 3'b111, 5, `OPC_SYSTEM), `INSTR_CODE(CSRRCI),
+                   QV_CSR_RC, 12'h344, 0, 0, 64'd0, 1'b1, 5);
+        // read-only CSRs: reading is fine, a real write is illegal
+        expect_csr("read mhartid", encode_csr(12'hF14, 0, 3'b010, 5, `OPC_SYSTEM), `INSTR_CODE(CSRRS),
+                   QV_CSR_RS, 12'hF14, 0, 0, 0, 1'b1, 5);
+        expect_csr("read instret (RSI 0)", encode_csr(12'hC02, 0, 3'b110, 5, `OPC_SYSTEM), `INSTR_CODE(CSRRSI),
+                   QV_CSR_RS, 12'hC02, 0, 0, 64'd0, 1'b1, 5);
+        expect_fault("write mhartid",        encode_csr(12'hF14, 6, 3'b001, 5, `OPC_SYSTEM), 1'b0, 4'd0, 4'd2);
+        expect_fault("CSRRS mhartid, x6",    encode_csr(12'hF14, 6, 3'b010, 5, `OPC_SYSTEM), 1'b0, 4'd0, 4'd2);
+        expect_fault("CSRRSI cycle, 1",      encode_csr(12'hC00, 1, 3'b110, 5, `OPC_SYSTEM), 1'b0, 4'd0, 4'd2);
+        expect_fault("CSRRWI instret, 0",    encode_csr(12'hC02, 0, 3'b101, 5, `OPC_SYSTEM), 1'b0, 4'd0, 4'd2);
+        // debug and trigger CSRs: illegal outside debug mode, even to read
+        expect_fault("read dcsr",            encode_csr(12'h7B0, 0, 3'b010, 5, `OPC_SYSTEM), 1'b0, 4'd0, 4'd2);
+        expect_fault("read dscratch1",       encode_csr(12'h7B3, 0, 3'b010, 5, `OPC_SYSTEM), 1'b0, 4'd0, 4'd2);
+        expect_fault("read tselect",         encode_csr(12'h7A0, 0, 3'b010, 5, `OPC_SYSTEM), 1'b0, 4'd0, 4'd2);
+        expect_fault("read tinfo",           encode_csr(12'h7A4, 0, 3'b010, 5, `OPC_SYSTEM), 1'b0, 4'd0, 4'd2);
+        // the neighbours of those ranges are ordinary (unbacked) CSRs
+        expect_csr("read 0x7A5", encode_csr(12'h7A5, 0, 3'b010, 5, `OPC_SYSTEM), `INSTR_CODE(CSRRS),
+                   QV_CSR_RS, 12'h7A5, 0, 0, 0, 1'b1, 5);
+        expect_csr("write 0x7B4", encode_csr(12'h7B4, 6, 3'b001, 5, `OPC_SYSTEM), `INSTR_CODE(CSRRW),
+                   QV_CSR_RW, 12'h7B4, 6, 1, 0, 1'b0, 5);
+        // a fetch-faulted CSR op must never reach the CSR file
+        feed(encode_csr(12'h340, 6, 3'b001, 5, `OPC_SYSTEM), 1'b1, 4'd1);
+        check("faulted CSRRW: routed to the ALU", {61'b0, uop.fu}, {61'b0, QV_FU_ALU});
+        check("faulted CSRRW: fault", {63'b0, uop.xcpt}, 64'd1);
+
+        // ---------------- system -> SYS ----------------
+        expect_sys("ECALL",  32'h0000_0073, `INSTR_CODE(ECALL),  QV_SYS_ECALL);
+        expect_sys("EBREAK", 32'h0010_0073, `INSTR_CODE(EBREAK), QV_SYS_EBREAK);
+        expect_sys("MRET",   `INSTR_HEX_MRET, `INSTR_CODE(MRET), QV_SYS_MRET);
+        expect_sys("WFI",    `INSTR_HEX_WFI,  `INSTR_CODE(WFI),  QV_SYS_WFI);
+        feed(32'h0000_0073, 1'b1, 4'd1);
+        check("faulted ECALL: routed to the ALU", {61'b0, uop.fu}, {61'b0, QV_FU_ALU});
+        check("faulted ECALL: keeps the fetch cause", {60'b0, uop.xcpt_cause}, 64'd1);
 
         // ---------------- not implemented / faults ----------------
         expect_fault("LW (not built yet)",    encode_i(8, 7, 3'b010, 5, `OPC_LOAD), 1'b0, 4'd0, 4'd2);

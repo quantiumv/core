@@ -32,6 +32,7 @@ module qv_rob_tb #(
     logic [4:0]              alloc_rd;
     logic                    alloc_rd_wen;
     rvfi_shadow_t            alloc_shadow, head_shadow;
+    rob_ctrl_t               alloc_ctrl, head_ctrl;
     logic [QV_ROB_TAG_W-1:0] alloc_tag, head_tag;
     logic                    alloc_ready, empty;
     wb_t                     wb = '0;
@@ -46,12 +47,13 @@ module qv_rob_tb #(
         .clk(clk), .rst(rst), .i_flush(flush),
         .i_alloc_valid(alloc_valid), .i_alloc_pc(alloc_pc), .i_alloc_raw(alloc_raw),
         .i_alloc_rd(alloc_rd), .i_alloc_rd_wen(alloc_rd_wen), .i_alloc_next_pc(alloc_next_pc),
-        .i_alloc_shadow(alloc_shadow), .o_alloc_tag(alloc_tag), .o_alloc_ready(alloc_ready),
+        .i_alloc_shadow(alloc_shadow), .i_alloc_ctrl(alloc_ctrl),
+        .o_alloc_tag(alloc_tag), .o_alloc_ready(alloc_ready),
         .o_empty(empty), .i_wb(wb),
         .i_lookup1_tag(l1_tag), .o_lookup1_complete(l1_complete), .o_lookup1_value(l1_value),
         .i_lookup2_tag(l2_tag), .o_lookup2_complete(l2_complete), .o_lookup2_value(l2_value),
         .o_head_valid(head_valid), .o_head_entry(head), .o_head_tag(head_tag),
-        .o_head_shadow(head_shadow), .i_commit_pop(pop)
+        .o_head_shadow(head_shadow), .o_head_ctrl(head_ctrl), .i_commit_pop(pop)
     );
 
     // Entry n's fields are a pure function of n, so any slot can be
@@ -72,6 +74,10 @@ module qv_rob_tb #(
         alloc_shadow = '0;
         alloc_shadow.rs1_addr  = 5'(seq % 7);
         alloc_shadow.rs1_rdata = 64'(seq) << 8;
+        alloc_ctrl = '0;
+        alloc_ctrl.csr_addr  = 12'(seq * 37);
+        alloc_ctrl.serialize = seq[1];
+        alloc_ctrl.cause     = 4'(seq);
         #1;
         tag_of[seq] = alloc_tag;
         @(posedge clk);
@@ -116,6 +122,9 @@ module qv_rob_tb #(
         check($sformatf("%s: head %0d value", tag, n), head.value, val_of(n));
         check($sformatf("%s: head %0d shadow rs1_addr", tag, n), {59'b0, head_shadow.rs1_addr}, 64'(n % 7));
         check($sformatf("%s: head %0d shadow rs1_rdata", tag, n), head_shadow.rs1_rdata, 64'(n) << 8);
+        check($sformatf("%s: head %0d ctrl csr_addr", tag, n), {52'b0, head_ctrl.csr_addr}, 64'(12'(n * 37)));
+        check($sformatf("%s: head %0d ctrl serialize", tag, n), {63'b0, head_ctrl.serialize}, 64'((n >> 1) & 1));
+        check($sformatf("%s: head %0d ctrl cause", tag, n), {60'b0, head_ctrl.cause}, 64'(n % 16));
         @(negedge clk);
         pop = 1'b1;
         @(posedge clk);

@@ -48,6 +48,7 @@ module qv_backend_tb #(
     logic [31:0]             alloc_raw;
     logic [4:0]              alloc_rd;
     rvfi_shadow_t            alloc_shadow, head_shadow;
+    rob_ctrl_t               alloc_ctrl, head_ctrl;
     logic [QV_ROB_TAG_W-1:0] alloc_tag, l1_tag, l2_tag, head_tag, c_tag;
     logic                    l1_complete, l2_complete;
     logic [63:0]             l1_value, l2_value;
@@ -69,7 +70,8 @@ module qv_backend_tb #(
         .o_rs1_sel(rs1_sel), .o_rs2_sel(rs2_sel), .i_rs1_data(rs1_data), .i_rs2_data(rs2_data),
         .o_alloc_valid(alloc_valid), .o_alloc_pc(alloc_pc), .o_alloc_raw(alloc_raw),
         .o_alloc_rd(alloc_rd), .o_alloc_rd_wen(alloc_rd_wen), .o_alloc_next_pc(alloc_next_pc),
-        .o_alloc_shadow(alloc_shadow), .i_alloc_tag(alloc_tag), .i_alloc_ready(alloc_ready),
+        .o_alloc_shadow(alloc_shadow), .o_alloc_ctrl(alloc_ctrl),
+        .i_alloc_tag(alloc_tag), .i_alloc_ready(alloc_ready),
         .i_rob_empty(rob_empty),
         .o_lookup1_tag(l1_tag), .i_lookup1_complete(l1_complete), .i_lookup1_value(l1_value),
         .o_lookup2_tag(l2_tag), .i_lookup2_complete(l2_complete), .i_lookup2_value(l2_value),
@@ -81,12 +83,13 @@ module qv_backend_tb #(
         .clk(clk), .rst(rst), .i_flush(1'b0),
         .i_alloc_valid(alloc_valid), .i_alloc_pc(alloc_pc), .i_alloc_raw(alloc_raw),
         .i_alloc_rd(alloc_rd), .i_alloc_rd_wen(alloc_rd_wen), .i_alloc_next_pc(alloc_next_pc),
-        .i_alloc_shadow(alloc_shadow), .o_alloc_tag(alloc_tag), .o_alloc_ready(alloc_ready),
+        .i_alloc_shadow(alloc_shadow), .i_alloc_ctrl(alloc_ctrl),
+        .o_alloc_tag(alloc_tag), .o_alloc_ready(alloc_ready),
         .o_empty(rob_empty), .i_wb(wb),
         .i_lookup1_tag(l1_tag), .o_lookup1_complete(l1_complete), .o_lookup1_value(l1_value),
         .i_lookup2_tag(l2_tag), .o_lookup2_complete(l2_complete), .o_lookup2_value(l2_value),
         .o_head_valid(head_valid), .o_head_entry(head_entry), .o_head_tag(head_tag),
-        .o_head_shadow(head_shadow), .i_commit_pop(commit_pop)
+        .o_head_shadow(head_shadow), .o_head_ctrl(head_ctrl), .i_commit_pop(commit_pop)
     );
 
     qv_exu_alu exu0 (.clk(clk), .rst(rst), .i_flush(1'b0), .i_req(fu_req), .o_wb(wb));
@@ -94,7 +97,9 @@ module qv_backend_tb #(
     qv_commit commit0 (
         .clk(clk), .rst(rst),
         .i_head_valid(head_valid), .i_head_entry(head_entry), .i_head_tag(head_tag),
-        .i_head_shadow(head_shadow), .o_commit_pop(commit_pop),
+        .i_head_shadow(head_shadow), .i_head_ctrl(head_ctrl), .o_commit_pop(commit_pop),
+        // ALU-only uops: no CSR, trap or mret ever reaches commit here
+        .i_csr_rdata(64'b0), .i_mtvec(64'b0), .i_mepc(64'b0),
         .o_regfile_we(rf_we), .o_regfile_sel(rf_sel), .o_regfile_data(rf_data),
         .o_commit_valid(c_valid), .o_commit_rd(c_rd), .o_commit_rd_wen(c_rd_wen), .o_commit_tag(c_tag),
         .o_commit_now(commit_now), .o_pc(arch_pc), .o_next_pc(next_pc),

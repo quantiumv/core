@@ -1,11 +1,20 @@
 #!/usr/bin/env python3
-"""gen_alu.py -- seeded random RV64IM integer programs with control flow.
+"""gen_alu.py -- seeded random RV64IM + Zicsr programs with control flow and traps.
 
 Bring-up corpus for design/pipe/core_pipe.sv while it implements the
-single-cycle integer class: RV64I register/immediate ops including the
-*W forms, LUI, AUIPC, MUL/MULH/MULHSU/MULHU/MULW, conditional branches,
-JAL and JALR. Assemble with -march=rv64im (never C: gas would emit RVC,
-which isn't decoded yet).
+single-cycle integer class (RV64I register/immediate ops including the
+*W forms, LUI, AUIPC, MUL/MULH/MULHSU/MULHU/MULW), conditional
+branches, JAL, JALR, Zicsr, and M-mode traps. Assemble with
+-march=rv64im_zicsr (never C: gas would emit RVC, which isn't decoded
+yet).
+
+Everything runs in M-mode. A prologue points mtvec at a fixed handler
+(.text.handlers, 0x8000) that reads mcause/mtval and returns to
+mepc + 4; trap sources are ECALL, EBREAK, an all-zero word, writes to
+read-only CSRs and any access to debug/trigger CSRs. CSR accesses
+otherwise stick to CSRs whose writes can't change control flow or
+privilege (see CSR_RW/CSR_RO), and MRET only ever runs in the handler,
+so mstatus.MPP and MIE never leave their M-mode, interrupts-off state.
 
 Every register is first seeded with a value from a mix of edge cases
 (0, 1, -1, INT64_MIN, INT64_MAX) and random 64-bit patterns. The body is
@@ -46,6 +55,28 @@ EDGE_SHW = [0, 1, 15, 16, 30, 31]
 EDGE_U = [0, 1, 0x7FFFF, 0x80000, 0xFFFFF]
 LOOP_REG = 31
 MAX_K = 4
+
+# CSRs safe to write in M-mode without changing control flow or enabling
+# anything: scratch/trap CSRs, interrupt enables (mstatus.MIE stays 0),
+# delegation (never applies to M-mode traps), and an unbacked custom
+# address (reads 0, ignores writes).
+CSR_RW = [0x340, 0x341, 0x342, 0x343, 0x304, 0x302, 0x303, 0x7C0]
+# read with write-suppressed forms only: mstatus/mtvec/mip are writable
+# but must not change, the rest are read-only; never cycle/time, whose
+# values depend on timing
+CSR_RO = [0x300, 0x301, 0x305, 0x344, 0xF11, 0xF12, 0xF13, 0xF14, 0xB02, 0xC02]
+# illegal in M-mode outside debug mode: debug and trigger CSRs at all,
+# read-only CSRs when actually written
+CSR_DEBUG = [0x7B0, 0x7B1, 0x7A0, 0x7A4]
+CSR_READONLY = [0xF14, 0xC02, 0xC00]
+HANDLER = [                      # .text.handlers at 0x8000 (mtvec, direct)
+    "csrr x29, mcause",
+    "csrr x28, mtval",
+    "csrr x30, mepc",
+    "addi x30, x30, 4",          # every trap source here is 4 bytes long
+    "csrw mepc, x30",
+    "mret",
+]
 
 
 def imm12(rng):
@@ -108,6 +139,29 @@ class Gen:
             return f"{rng.choice(SHW_OPS)} x{self.dst()}, x{self.src()}, {shamt(rng, EDGE_SHW, 31)}"
         return f"{rng.choice(U_OPS)} x{self.dst()}, {imm20(rng)}"
 
+    def system(self):
+        """A CSR access or a system instruction. Returns (text, traps)."""
+        rng = self.rng
+        r = rng.random()
+        if r < 0.55:
+            csr = rng.choice(CSR_RW)
+            op = rng.choice(["csrrw", "csrrs", "csrrc", "csrrwi", "csrrsi", "csrrci"])
+            if op.endswith("i"):
+                src = 0 if rng.random() < 0.3 else rng.randint(0, 31)
+            else:
+                src = "x0" if rng.random() < 0.3 else f"x{self.src()}"
+            return f"{op} x{self.dst()}, {csr:#x}, {src}", False
+        if r < 0.80:
+            csr = rng.choice(CSR_RO)
+            op = rng.choice(["csrrs x{rd}, {csr:#x}, x0", "csrrc x{rd}, {csr:#x}, x0",
+                             "csrrsi x{rd}, {csr:#x}, 0", "csrrci x{rd}, {csr:#x}, 0"])
+            return op.format(rd=self.dst(), csr=csr), False
+        if r < 0.85:
+            return f"csrrs x{self.dst()}, {rng.choice(CSR_DEBUG):#x}, x0", True
+        if r < 0.90:
+            return f"csrrw x{self.dst()}, {rng.choice(CSR_READONLY):#x}, x{self.src()}", True
+        return rng.choice([("ecall", True), ("ebreak", True), (".word 0", True), ("wfi", False)])
+
     def branch_srcs(self):
         a = self.src()
         b = a if self.rng.random() < 0.2 else self.src()   # equal operands: BEQ/BGE/BGEU taken
@@ -119,10 +173,15 @@ class Gen:
         the segment end."""
         rng = self.rng
         items, forbidden = [], set()
+        self.seg_traps = 0
         i = 0
         while i < n:
             r = rng.random()
-            if r < 0.15:
+            if r < 0.08:
+                text, traps = self.system()
+                items.append(text); i += 1
+                self.seg_traps += traps
+            elif r < 0.15:
                 a, b = self.branch_srcs()
                 items.append(("br", rng.choice(B_OPS), a, b, None)); i += 1
             elif r < 0.20:
@@ -179,7 +238,7 @@ def main():
     rng = random.Random(a.seed)
     g = Gen(rng, a.dep_bias)
 
-    lines = []           # (slot, text)
+    lines = [(0, "lui x30, 8"), (1, "csrw mtvec, x30")]     # (slot, text); handler at 0x8000
     for r in range(1, 32):
         for t in seed_reg(rng, r):
             lines.append((len(lines), t))
@@ -199,12 +258,12 @@ def main():
             labels.setdefault(base + 1, f"L{base + 1}")
             lines.append((base + 1 + body_n, f"addi x{LOOP_REG}, x{LOOP_REG}, -1"))
             lines.append((base + 2 + body_n, f"bne x{LOOP_REG}, x0, L{base + 1}"))
-            dyn += 1 + k * (body_n + 2)
+            dyn += 1 + k * (body_n + 2 + g.seg_traps * len(HANDLER))
         else:
             n = rng.randint(4, 16)
             seg = g.segment(n)
             lines += render(rng, seg, base, labels)
-            dyn += n
+            dyn += n + g.seg_traps * len(HANDLER)
 
     count = len(lines)
     if 4 * count > 0x8000:
@@ -219,6 +278,9 @@ def main():
             f.write(f"    {text}\n")
         if count in labels:
             f.write(f"{labels[count]}:\n")
+        f.write(".section .text.handlers\ntrap_handler:\n")
+        for text in HANDLER:
+            f.write(f"    {text}\n")
     print(count, dyn)
 
 
