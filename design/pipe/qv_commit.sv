@@ -17,6 +17,8 @@
  *   CSR     the old value goes to rd, the new one (RW: src, RS: old | src,
  *           RC: old & ~src, src being the ALU pass value) to the CSR
  *           unless write-suppressed; then a serializing refetch
+ *   FENCE.I once fetch has nothing outstanding (fetch is held meanwhile):
+ *           icache flush, then a serializing refetch
  *   other   result to rd; redirect on a mispredict or serialize
  * mtval follows core.sv's trap_val: the instruction bits for an illegal
  * instruction, the pc for a fetch fault, the access address for a
@@ -79,6 +81,12 @@ module qv_commit #(
     /* verilator lint_on UNUSEDSIGNAL */
     input  logic [63:0]                      i_mepc,
 
+    // FENCE.I: fetch is held while it is the head; it retires only once
+    // fetch has nothing outstanding, flushing the icache in that cycle
+    output logic                             o_fetch_hold,
+    input  logic                             i_fetch_idle,
+    output logic                             o_icache_flush,
+
     output logic                             o_commit_now,
     output logic [63:0]                      o_pc,
     output logic [63:0]                      o_next_pc,
@@ -106,12 +114,19 @@ module qv_commit #(
 );
     import qv_pkg::*;
 
-    wire commit = i_head_valid && i_head_entry.complete;
-
     // ---------------- classify the head ----------------
     // a marked fault overrides whatever the entry would otherwise do, as
     // core.sv's instr_faulted gating does
     wire is_sys  = (i_head_ctrl.cls == QV_FU_SYS) && !i_head_ctrl.xcpt;
+    wire is_fence_i = is_sys && (i_head_ctrl.sys_op == QV_SYS_FENCE_I);
+
+    // FENCE.I waits for fetch to drain: an icache fill finishing in the
+    // flush cycle would revalidate its line (icache.sv), and anything
+    // fetched before the flush is refetched by the serializing redirect
+    wire commit = i_head_valid && i_head_entry.complete && (!is_fence_i || i_fetch_idle);
+
+    assign o_fetch_hold   = i_head_valid && is_fence_i;
+    assign o_icache_flush = commit && is_fence_i;
     wire is_lsu  = (i_head_ctrl.cls == QV_FU_LSU) && !i_head_ctrl.xcpt;
     wire mem_xcpt = is_lsu && i_lsu_res.xcpt;          // found while executing, not at decode
     wire is_trap = i_head_ctrl.xcpt || mem_xcpt

@@ -41,7 +41,8 @@ package qv_pkg;
         QV_SYS_ECALL,
         QV_SYS_EBREAK,
         QV_SYS_MRET,
-        QV_SYS_WFI
+        QV_SYS_WFI,
+        QV_SYS_FENCE_I
     } qv_sys_op_e;
 
     // CSR read-modify-write kind (the I forms differ only in operand source).

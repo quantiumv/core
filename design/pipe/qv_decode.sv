@@ -169,6 +169,7 @@ module qv_decode (
             `INSTR_CODE(EBREAK): sys_op = QV_SYS_EBREAK;
             `INSTR_CODE(MRET):   sys_op = QV_SYS_MRET;
             `INSTR_CODE(WFI):    sys_op = QV_SYS_WFI;
+            `INSTR_CODE(FENCE_I): sys_op = QV_SYS_FENCE_I;
             default: begin
                 sys_op = QV_SYS_NONE;
                 is_sys = 1'b0;
@@ -268,8 +269,9 @@ module qv_decode (
         uop_d.csr_addr = csr_addr;
         uop_d.csr_wsup = csr_wsup;
         // a CSR's rd value exists only at commit, so nothing younger may
-        // run ahead on it -- flushing after every CSR op covers that too
-        uop_d.serialize = is_csr;
+        // run ahead on it -- flushing after every CSR op covers that too.
+        // FENCE.I refetches everything after it.
+        uop_d.serialize = is_csr || (sys_op == QV_SYS_FENCE_I);
         uop_d.pred_taken = i_iq_data.pred_taken;
         uop_d.pred_tgt   = i_iq_data.pred_tgt;
         uop_d.mem_size   = mem_size;

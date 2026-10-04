@@ -46,6 +46,11 @@ module qv_fetch #(
     input  logic        i_redirect_valid,
     input  logic [63:0] i_redirect_pc,
 
+    // FENCE.I: no new request while held, so once o_idle (nothing
+    // outstanding) the icache can be flushed with no fill in flight
+    input  logic        i_hold,
+    output logic        o_idle,
+
     output logic        o_buf_valid,
     output logic [63:0] o_buf_pc,
     output logic [63:0] o_buf_data,
@@ -86,8 +91,11 @@ module qv_fetch #(
     end
 
     // Room for exactly one more response after this cycle settles, and no
-    // request left outstanding past this edge.
-    wire can_issue = (!req_valid_q || resp) && (fb_count_next < CNT_W'(FB_DEPTH));
+    // request left outstanding past this edge. A redirect while held is
+    // recorded below and fetched once the hold drops.
+    wire can_issue = (!req_valid_q || resp) && (fb_count_next < CNT_W'(FB_DEPTH)) && !i_hold;
+
+    assign o_idle = !req_valid_q;
 
     wire [63:0] issue_pc    = i_redirect_valid ? i_redirect_pc : fpc_q;
 

@@ -32,13 +32,13 @@
  * RV64I register/immediate ops including the *W forms, LUI, AUIPC, and
  * MUL/MULH/MULHSU/MULHU/MULW -- plus conditional branches, JAL, JALR,
  * loads and stores (performed one at a time, at the ROB head), FENCE,
- * the six Zicsr instructions, ECALL, EBREAK, MRET and WFI (a no-op),
+ * FENCE.I, the six Zicsr instructions, ECALL, EBREAK, MRET and WFI (a
+ * no-op),
  * with M-mode synchronous traps, and RVC: compressed instructions on any
  * 2-byte boundary, including 32-bit ones that straddle two fetched
  * dwords. Everything else decodes as an illegal-instruction trap. Not
- * yet: FENCE.I, SFENCE.VMA, U/S modes, SRET, interrupts, debug,
- * DIV/REM, A. wb_mem_lock_o, the icache flush and the debug/progbuf
- * outputs are held inert. The
+ * yet: SFENCE.VMA, U/S modes, SRET, interrupts, debug, DIV/REM, A.
+ * wb_mem_lock_o and the debug/progbuf outputs are held inert. The
  * Debug Module's GPR/CSR access mux (core.sv wires it around regfile0
  * and csr_file0) comes back with debug support.
  *
@@ -196,12 +196,14 @@ module core_pipe
     // ---------------- F: fetch ----------------
     logic        fb_valid, fb_err, fb_pop;
     logic [63:0] fb_pc, fb_data;
+    logic        fetch_hold, fetch_idle;     // FENCE.I, with commit
 
     qv_fetch #(.RESET_PC(RESET_PC)) fetch0 (
         .clk(clk), .rst(rst),
         .wb_fetch_addr_o(wb_fetch_addr_o), .wb_fetch_cyc_o(wb_fetch_cyc_o), .wb_fetch_stb_o(wb_fetch_stb_o),
         .wb_fetch_dat_i(wb_fetch_dat_i), .wb_fetch_ack_i(wb_fetch_ack_i), .wb_fetch_err_i(wb_fetch_err_i),
         .i_redirect_valid(fetch_redirect), .i_redirect_pc(fetch_redirect_pc),
+        .i_hold(fetch_hold), .o_idle(fetch_idle),
         .o_buf_valid(fb_valid), .o_buf_pc(fb_pc), .o_buf_data(fb_data), .o_buf_err(fb_err),
         .i_buf_pop(fb_pop)
     );
@@ -363,6 +365,7 @@ module core_pipe
         .o_csr_addr(c_csr_addr), .i_csr_rdata(csr_rdata), .o_csr_we(c_csr_we), .o_csr_wdata(c_csr_wdata),
         .o_instr_retired(c_instr_retired), .o_trap_taken(c_trap_taken), .o_trap_cause(c_trap_cause),
         .o_trap_val(c_trap_val), .o_mret_taken(c_mret_taken), .i_mtvec(mtvec_w), .i_mepc(mepc_w),
+        .o_fetch_hold(fetch_hold), .i_fetch_idle(fetch_idle), .o_icache_flush(icache_flush_o),
         .o_commit_now(commit_now_w), .o_pc(arch_pc), .o_next_pc(retire_next_pc),
         .o_redirect_valid(redirect_valid), .o_redirect_pc(redirect_pc),
         .o_rvfi_order(c_order), .o_rvfi_insn(c_insn), .o_rvfi_trap(c_rvfi_trap), .o_rvfi_intr(c_intr),
@@ -456,7 +459,6 @@ module core_pipe
 
     // ---------------- inert ports ----------------
     assign wb_mem_lock_o   = 1'b0;
-    assign icache_flush_o  = 1'b0;
     assign o_debug_mode    = in_debug_mode;
     assign o_dm_csr_rdata  = csr_rdata;
     assign o_dm_gpr_rdata  = rs2_data;
