@@ -32,8 +32,7 @@ Usage: run_regress.sh [--core fsm|ref|pipe] [--only REGEX] [-j N]
 
   --core fsm|ref|pipe  Which core build to test (default: fsm). "ref"
                         is verification/reference/ref_core.sv (frozen
-                        P3.3); "pipe" is wired in once P4a (design/pipe/)
-                        lands.
+                        P3.3); "pipe" is design/pipe/core_pipe.sv.
   --only REGEX         Only run tags matching this extended regex.
   -j N                  Parallel job count (default: nproc).
   --force               Re-run every selected test, ignoring cached
@@ -67,9 +66,8 @@ case "$CORE" in
         CORE_DEFINE="-DQV_REF_AS_CORE"
         ;;
     pipe)
-        echo "ERROR: --core pipe is not wired up yet -- design/pipe/ doesn't" \
-             "exist until pipelining-track-plan.md's P4a." >&2
-        exit 1
+        DESIGN_LIST="$REPO_ROOT/verification/regress/pipe_design_files.list"
+        CORE_DEFINE="-DQV_PIPE_AS_CORE"
         ;;
     *)
         echo "Unknown --core: $CORE (expected fsm, ref or pipe)" >&2
@@ -124,7 +122,7 @@ parse_verdict() {
 
 run_one() {
     # Fields per tests.list's own header comment.
-    local tag="$1" tbfile="$2" extra_csv="$3" runcwd="$4" cores_csv="$5" expect="$6" timeout_s="$7"
+    local tag="$1" tbfile="$2" extra_csv="$3" runcwd="$4" cores_csv="$5" expect="$6" timeout_s="$7" flags="$8"
     local resultf="$OUTDIR/${tag}.result"
 
     if [ "$FORCE" -ne 1 ] && [ -f "$resultf" ]; then
@@ -142,7 +140,7 @@ run_one() {
     local t0 t1
 
     t0=$(date +%s)
-    iverilog -g2012 $CORE_DEFINE $INCFLAGS -o "$vvpout" $DESIGN_FILES $extra "$REPO_ROOT/$tbfile" \
+    iverilog -g2012 $CORE_DEFINE $flags $INCFLAGS -o "$vvpout" $DESIGN_FILES $extra "$REPO_ROOT/$tbfile" \
         > "${logout}.compile" 2>&1
     if [ $? -ne 0 ]; then
         echo -e "${tag}\tCOMPILE_FAIL\t0" > "$resultf"
@@ -175,10 +173,10 @@ run_one() {
 # Build the selected tag list.
 TAGS_FILE="$OUTDIR/.selected_tags"
 > "$TAGS_FILE"
-while IFS='|' read -r tag tbfile extra runcwd cores expect timeout_s; do
+while IFS='|' read -r tag tbfile extra runcwd cores expect timeout_s flags; do
+    [[ "$tag" =~ ^[[:space:]]*# ]] && continue    # before xargs, which chokes on a comment's apostrophe
     tag="$(echo "$tag" | xargs)"
     [ -n "$tag" ] || continue
-    [[ "$tag" == \#* ]] && continue
     if [ -n "$ONLY" ] && ! [[ "$tag" =~ $ONLY ]]; then
         continue
     fi
@@ -196,7 +194,7 @@ while IFS='|' read -r tag tbfile extra runcwd cores expect timeout_s; do
     if ! echo ",$cores," | grep -q ",$CORE,"; then
         continue
     fi
-    echo -e "${tag}|${tbfile}|${extra}|${runcwd}|${cores}|${expect}|${timeout_s}" >> "$TAGS_FILE"
+    echo -e "${tag}|${tbfile}|${extra}|${runcwd}|${cores}|${expect}|${timeout_s}|${flags}" >> "$TAGS_FILE"
 done < "$REPO_ROOT/verification/regress/tests.list"
 
 TOTAL=$(wc -l < "$TAGS_FILE")
@@ -209,8 +207,8 @@ fi
 
 # Bounded-concurrency launch.
 running=0
-while IFS='|' read -r tag tbfile extra runcwd cores expect timeout_s; do
-    run_one "$tag" "$tbfile" "$extra" "$runcwd" "$cores" "$expect" "$timeout_s" &
+while IFS='|' read -r tag tbfile extra runcwd cores expect timeout_s flags; do
+    run_one "$tag" "$tbfile" "$extra" "$runcwd" "$cores" "$expect" "$timeout_s" "$flags" &
     running=$((running + 1))
     if [ "$running" -ge "$JOBS" ]; then
         wait -n

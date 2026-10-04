@@ -29,7 +29,10 @@ case "$CORE" in
         CORE_DEFINE="-DQV_REF_AS_CORE"
         ;;
     pipe)
-        echo "ERROR: --core pipe not wired up yet (P4a)." >&2; exit 1 ;;
+        DESIGN_LIST="verification/regress/pipe_design_files.list"
+        TOP=soc
+        CORE_DEFINE="-DQV_PIPE_AS_CORE"
+        ;;
     *)
         echo "Unknown --core: $CORE" >&2; exit 1 ;;
 esac

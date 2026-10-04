@@ -55,11 +55,14 @@
 `define QV_PIPE_BYPASS_EN 1'b1
 `endif
 
+// under QV_PIPE_AS_CORE the module name deliberately differs from the file's
+/* verilator lint_off DECLFILENAME */
 `ifdef QV_PIPE_AS_CORE
 module core
 `else
 module core_pipe
 `endif
+/* verilator lint_on DECLFILENAME */
 #(
     parameter bit SERIALIZE = `QV_PIPE_SERIALIZE,
     parameter bit BYPASS_EN = `QV_PIPE_BYPASS_EN,

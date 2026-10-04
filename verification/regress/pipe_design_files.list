@@ -1,0 +1,40 @@
+# Pipelined core (design/pipe/core_pipe.sv) file list, in required
+# compile order. One path per line, relative to the repo root. Blank lines
+# and #-comments ignored.
+#
+# design_files.list with design/core.sv swapped for design/pipe/: the
+# pipe reuses the FSM's own leaf modules (decoder/alu/c_expand/csr_file/
+# register_file) unmodified, and -DQV_PIPE_AS_CORE (passed by
+# run_regress.sh/lint.sh's --core pipe) names core_pipe `core`, so
+# soc.sv and every harness need no pipe-specific variant. decoder.sv
+# comes first: it defines INSTR_CODE, which qv_decode.sv uses.
+design/decoder.sv
+design/alu.sv
+design/c_expand.sv
+design/cache_complex.sv
+design/clint.sv
+design/pipe/qv_pkg.sv
+design/pipe/qv_fetch.sv
+design/pipe/qv_align.sv
+design/pipe/qv_fifo.sv
+design/pipe/qv_decode.sv
+design/pipe/qv_issue.sv
+design/pipe/qv_rob.sv
+design/pipe/qv_exu_alu.sv
+design/pipe/qv_exu_bru.sv
+design/pipe/qv_commit.sv
+design/pipe/core_pipe.sv
+design/csr_file.sv
+design/dcache.sv
+design/divider.sv
+design/dm.sv
+design/dm_dmi.sv
+design/icache.sv
+design/jtag_tap.sv
+design/plic.sv
+design/register_file.sv
+design/soc.sv
+design/uart16550.sv
+design/wb4_sram.sv
+design/wb_addr_decoder.sv
+design/wb_arbiter2.sv
