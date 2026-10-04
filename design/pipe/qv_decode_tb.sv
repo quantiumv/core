@@ -446,6 +446,54 @@ module qv_decode_tb;
         check("faulted C.ADDI: cause 1", {60'b0, uop.xcpt_cause}, 64'd1);
         check("faulted C.ADDI: placeholder, no rs1", {59'b0, uop.rs1}, 64'd0);
 
+        // ---------------- loads, stores, FENCE ----------------
+        for (int f3 = 0; f3 < 7; f3++) begin                // LB LH LW LD LBU LHU LWU
+            feed(encode_i(-24, 9, 3'(f3), 12, `OPC_LOAD));
+            check($sformatf("load f3=%0d: LSU", f3), {61'b0, uop.fu}, {61'b0, QV_FU_LSU});
+            check($sformatf("load f3=%0d: is_load", f3), {63'b0, uop.is_load}, 64'd1);
+            check($sformatf("load f3=%0d: not a store", f3), {63'b0, uop.is_store}, 64'd0);
+            check($sformatf("load f3=%0d: size", f3), {62'b0, uop.mem_size}, 64'(f3 % 4));
+            check($sformatf("load f3=%0d: signed", f3), {63'b0, uop.mem_signed}, 64'(f3 < 4));
+            check($sformatf("load f3=%0d: base rs1", f3), {59'b0, uop.rs1}, 64'd9);
+            check($sformatf("load f3=%0d: rs1 used", f3), {63'b0, uop.rs1_used}, 64'd1);
+            check($sformatf("load f3=%0d: offset on imm2", f3), uop.imm2, -64'd24);
+            check($sformatf("load f3=%0d: no rs2", f3), {63'b0, uop.rs2_used}, 64'd0);
+            check($sformatf("load f3=%0d: writes rd", f3), {63'b0, uop.rd_wen}, 64'd1);
+            check($sformatf("load f3=%0d: rd", f3), {59'b0, uop.rd}, 64'd12);
+            check($sformatf("load f3=%0d: no fault", f3), {63'b0, uop.xcpt}, 64'd0);
+        end
+        expect_fault("load f3=7 (reserved)", encode_i(0, 9, 3'd7, 12, `OPC_LOAD), 1'b0, 4'd0, 4'd2);
+        for (int f3 = 0; f3 < 4; f3++) begin                // SB SH SW SD
+            feed(encode_s(-2048, 6, 9, 3'(f3), `OPC_STORE));
+            check($sformatf("store f3=%0d: LSU", f3), {61'b0, uop.fu}, {61'b0, QV_FU_LSU});
+            check($sformatf("store f3=%0d: is_store", f3), {63'b0, uop.is_store}, 64'd1);
+            check($sformatf("store f3=%0d: not a load", f3), {63'b0, uop.is_load}, 64'd0);
+            check($sformatf("store f3=%0d: size", f3), {62'b0, uop.mem_size}, 64'(f3));
+            check($sformatf("store f3=%0d: base rs1", f3), {59'b0, uop.rs1}, 64'd9);
+            check($sformatf("store f3=%0d: data rs2", f3), {59'b0, uop.rs2}, 64'd6);
+            check($sformatf("store f3=%0d: rs2 used", f3), {63'b0, uop.rs2_used}, 64'd1);
+            check($sformatf("store f3=%0d: offset on imm3", f3), uop.imm3, -64'd2048);
+            check($sformatf("store f3=%0d: no rd write", f3), {63'b0, uop.rd_wen}, 64'd0);
+        end
+        feed(encode_s(2047, 0, 9, 3'd3, `OPC_STORE));
+        check("store x0 data: offset +2047", uop.imm3, 64'd2047);
+        check("store x0 data: rs2 not a register", {63'b0, uop.rs2_used}, 64'd0);
+        check("store x0 data: stores 0", uop.imm2, 64'd0);
+        feed({16'b0, encode_c_lw(7'd8, 3'd1, 3'd2)}, 1'b0, 4'd0, 1'b1);   // c.lw x10, 8(x9)
+        check("C.LW: LSU", {61'b0, uop.fu}, {61'b0, QV_FU_LSU});
+        check("C.LW: word, signed", {61'b0, uop.mem_signed, uop.mem_size}, 64'b110);
+        check("C.LW: offset", uop.imm2, 64'd8);
+        feed({16'b0, encode_c_sd(8'd16, 3'd1, 3'd2)}, 1'b0, 4'd0, 1'b1);  // c.sd x10, 16(x9)
+        check("C.SD: LSU", {61'b0, uop.fu}, {61'b0, QV_FU_LSU});
+        check("C.SD: dword store", {61'b0, uop.is_store, uop.mem_size}, 64'b111);
+        check("C.SD: offset", uop.imm3, 64'd16);
+        feed(32'h0FF0_000F);                                // fence iorw, iorw
+        check("FENCE: ALU no-op", {61'b0, uop.fu}, {61'b0, QV_FU_ALU});
+        check("FENCE: no rd write", {63'b0, uop.rd_wen}, 64'd0);
+        check("FENCE: no fault", {63'b0, uop.xcpt}, 64'd0);
+        feed(encode_i(8, 7, 3'b010, 5, `OPC_LOAD), 1'b1, 4'd1);
+        check("faulted LW: routed to the ALU", {61'b0, uop.fu}, {61'b0, QV_FU_ALU});
+
         // ---------------- the frontend's prediction rides along ----------------
         feed(encode_j(-64, 1, `OPC_JAL), 1'b0, 4'd0, 1'b0, 1'b1, 64'h0FC0);
         check("predicted JAL: pred_taken", {63'b0, uop.pred_taken}, 64'd1);
@@ -457,7 +505,7 @@ module qv_decode_tb;
         check("unpredicted BEQ: pred_taken", {63'b0, uop.pred_taken}, 64'd0);
 
         // ---------------- not implemented / faults ----------------
-        expect_fault("LW (not built yet)",    encode_i(8, 7, 3'b010, 5, `OPC_LOAD), 1'b0, 4'd0, 4'd2);
+        expect_fault("SRET (not built yet)",  `INSTR_HEX_SRET, 1'b0, 4'd0, 4'd2);
         expect_fault("DIV (not built yet)",   encode_r(F7_M, 8, 7, 3'b100, 5, OP), 1'b0, 4'd0, 4'd2);
         expect_fault("all-zero (illegal)",    32'h0000_0000, 1'b0, 4'd0, 4'd2);
         expect_fault("fetch fault on a valid instr", encode_r(F7_0, 8, 7, 3'b000, 5, OP), 1'b1, 4'd1, 4'd1);

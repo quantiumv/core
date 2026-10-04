@@ -9,7 +9,11 @@ every field the tracer prints, and both logs must reach END_PC (a side
 that never gets there hung, stalled, or ran off somewhere else).
 mem_rdata is ignored when mem_rmask is 0 and mem_wdata when mem_wmask is
 0: core.sv drives both unconditionally from the bus, so outside a real
-access they carry whatever the bus last held. Last line is
+access they carry whatever the bus last held. mem_rdata is ignored on
+trapping records too: a misaligned access never reaches the bus, and a
+bus error's data is whatever the slave last drove, which depends on
+each core's own fetch/load interleaving. Addresses and masks stay
+strict on every record. Last line is
 "RVFI_DIFF: PASS ..." or "RVFI_DIFF: FAIL ...".
 """
 import sys
@@ -29,7 +33,7 @@ def load(path, end_pc):
             rec = dict(kv.split("=", 1) for kv in line.split()[1:])
             if int(rec["pc_rdata"], 16) == end_pc:
                 return recs, True
-            if int(rec["mem_rmask"], 16) == 0:
+            if int(rec["mem_rmask"], 16) == 0 or rec["trap"] == "1":
                 rec["mem_rdata"] = "-"
             if int(rec["mem_wmask"], 16) == 0:
                 rec["mem_wdata"] = "-"

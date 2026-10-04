@@ -35,7 +35,7 @@ module qv_rob_tb #(
     rob_ctrl_t               alloc_ctrl, head_ctrl;
     logic [QV_ROB_TAG_W-1:0] alloc_tag, head_tag;
     logic                    alloc_ready, empty;
-    wb_t                     wb = '0;
+    wb_t                     wb = '0, wb2 = '0;
     logic [QV_ROB_TAG_W-1:0] l1_tag = '0, l2_tag = '0;
     logic                    l1_complete, l2_complete;
     logic [63:0]             l1_value, l2_value;
@@ -49,7 +49,7 @@ module qv_rob_tb #(
         .i_alloc_rd(alloc_rd), .i_alloc_rd_wen(alloc_rd_wen), .i_alloc_next_pc(alloc_next_pc),
         .i_alloc_shadow(alloc_shadow), .i_alloc_ctrl(alloc_ctrl),
         .o_alloc_tag(alloc_tag), .o_alloc_ready(alloc_ready),
-        .o_empty(empty), .i_wb(wb),
+        .o_empty(empty), .i_wb(wb), .i_wb2(wb2),
         .i_lookup1_tag(l1_tag), .o_lookup1_complete(l1_complete), .o_lookup1_value(l1_value),
         .i_lookup2_tag(l2_tag), .o_lookup2_complete(l2_complete), .o_lookup2_value(l2_value),
         .o_head_valid(head_valid), .o_head_entry(head), .o_head_tag(head_tag),
@@ -234,6 +234,42 @@ module qv_rob_tb #(
             check($sformatf("reuse %0d: predicted next_pc", i), head.next_pc, 64'h1004 + 64'(4 * (seq - 1)));
             @(negedge clk); pop = 1'b1; @(posedge clk); #1; pop = 1'b0;
         end
+
+        // ---- the second (slow) writeback port ----
+        base = seq;
+        do_alloc();                                      // base: completes on port 2
+        do_alloc();                                      // base+1: completes on port 1, same cycle
+        @(negedge clk);
+        wb  = '0; wb.valid  = 1'b1; wb.tag  = tag_of[base + 1]; wb.value  = val_of(base + 1);
+        wb2 = '0; wb2.valid = 1'b1; wb2.tag = tag_of[base];     wb2.value = val_of(base);
+        wb2.mispredict = 1'b1; wb2.next_pc = 64'hBAD0;   // port 2 never redirects: ignored
+        @(posedge clk); #1;
+        wb = '0; wb2 = '0;
+        check_lookup("port 2", base, 1'b1);
+        check_lookup("port 1 same cycle", base + 1, 1'b1);
+        #1;
+        check("port 2: head complete", {63'b0, head.complete}, 64'd1);
+        check("port 2: head value", head.value, val_of(base));
+        check("port 2: never a mispredict", {63'b0, head.mispredict}, 64'd0);
+        check("port 2: predicted next_pc kept", head.next_pc, 64'h1004 + 64'(4 * base));
+        @(negedge clk); pop = 1'b1; @(posedge clk); #1; pop = 1'b0;
+        @(negedge clk); pop = 1'b1; @(posedge clk); #1; pop = 1'b0;
+        // port 2 is ignored during a flush, like port 1
+        base = seq;
+        do_alloc();
+        @(negedge clk);
+        wb2 = '0; wb2.valid = 1'b1; wb2.tag = tag_of[base]; wb2.value = 64'hDEAD;
+        flush = 1'b1;
+        @(posedge clk); #1;
+        wb2 = '0; flush = 1'b0;
+        do_alloc();                                      // reuses the flushed index
+        #1;
+        check("port 2 during flush: reused entry not complete", {63'b0, head.complete}, 64'd0);
+        @(negedge clk);
+        wb = '0; wb.valid = 1'b1; wb.tag = tag_of[seq - 1]; wb.value = val_of(seq - 1);
+        @(posedge clk); #1;
+        wb = '0;
+        @(negedge clk); pop = 1'b1; @(posedge clk); #1; pop = 1'b0;
 
         // ---- flush with the head popping the same cycle ----
         base = seq;

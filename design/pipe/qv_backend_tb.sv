@@ -75,7 +75,7 @@ module qv_backend_tb #(
         .i_rob_empty(rob_empty),
         .o_lookup1_tag(l1_tag), .i_lookup1_complete(l1_complete), .i_lookup1_value(l1_value),
         .o_lookup2_tag(l2_tag), .i_lookup2_complete(l2_complete), .i_lookup2_value(l2_value),
-        .i_wb(wb), .o_alu_req(fu_req), .o_bru_req(),
+        .i_wb(wb), .o_alu_req(fu_req), .o_bru_req(), .o_lsu_req(), .i_lsu_free(1'b1),
         .i_commit_valid(c_valid), .i_commit_rd(c_rd), .i_commit_rd_wen(c_rd_wen), .i_commit_tag(c_tag)
     );
 
@@ -85,7 +85,7 @@ module qv_backend_tb #(
         .i_alloc_rd(alloc_rd), .i_alloc_rd_wen(alloc_rd_wen), .i_alloc_next_pc(alloc_next_pc),
         .i_alloc_shadow(alloc_shadow), .i_alloc_ctrl(alloc_ctrl),
         .o_alloc_tag(alloc_tag), .o_alloc_ready(alloc_ready),
-        .o_empty(rob_empty), .i_wb(wb),
+        .o_empty(rob_empty), .i_wb(wb), .i_wb2('0),
         .i_lookup1_tag(l1_tag), .o_lookup1_complete(l1_complete), .o_lookup1_value(l1_value),
         .i_lookup2_tag(l2_tag), .o_lookup2_complete(l2_complete), .o_lookup2_value(l2_value),
         .o_head_valid(head_valid), .o_head_entry(head_entry), .o_head_tag(head_tag),
@@ -97,7 +97,7 @@ module qv_backend_tb #(
     qv_commit commit0 (
         .clk(clk), .rst(rst),
         .i_head_valid(head_valid), .i_head_entry(head_entry), .i_head_tag(head_tag),
-        .i_head_shadow(head_shadow), .i_head_ctrl(head_ctrl), .o_commit_pop(commit_pop),
+        .i_head_shadow(head_shadow), .i_head_ctrl(head_ctrl), .i_lsu_res('0), .o_commit_pop(commit_pop),
         // ALU-only uops: no CSR, trap or mret ever reaches commit here
         .i_csr_rdata(64'b0), .i_mtvec(64'b0), .i_mepc(64'b0),
         .o_regfile_we(rf_we), .o_regfile_sel(rf_sel), .o_regfile_data(rf_data),

@@ -37,11 +37,14 @@ module qv_commit_tb;
     logic [63:0]             rf_data, csr_wdata, trap_cause, trap_val, arch_pc, next_pc, redirect_pc;
     logic [63:0]             r_order, r_rs1_rdata, r_rs2_rdata, r_rd_wdata, r_pc_rdata, r_pc_wdata;
     logic [31:0]             r_insn;
+    lsu_res_t                lres = '0;
+    logic [63:0]             r_mem_addr, r_mem_rdata, r_mem_wdata;
+    logic [7:0]              r_mem_rmask, r_mem_wmask;
 
     qv_commit #(.RESET_PC(64'h1000)) dut (
         .clk(clk), .rst(rst),
         .i_head_valid(head_valid), .i_head_entry(e), .i_head_tag(tag),
-        .i_head_shadow(sh), .i_head_ctrl(c), .o_commit_pop(pop),
+        .i_head_shadow(sh), .i_head_ctrl(c), .i_lsu_res(lres), .o_commit_pop(pop),
         .o_regfile_we(rf_we), .o_regfile_sel(rf_sel), .o_regfile_data(rf_data),
         .o_commit_valid(c_valid), .o_commit_rd(c_rd), .o_commit_rd_wen(c_rd_wen), .o_commit_tag(c_tag),
         .o_csr_addr(csr_addr), .i_csr_rdata(csr_rdata), .o_csr_we(csr_we), .o_csr_wdata(csr_wdata),
@@ -53,7 +56,9 @@ module qv_commit_tb;
         .o_rvfi_rs1_addr(r_rs1_addr), .o_rvfi_rs2_addr(r_rs2_addr),
         .o_rvfi_rs1_rdata(r_rs1_rdata), .o_rvfi_rs2_rdata(r_rs2_rdata),
         .o_rvfi_rd_addr(r_rd_addr), .o_rvfi_rd_wdata(r_rd_wdata),
-        .o_rvfi_pc_rdata(r_pc_rdata), .o_rvfi_pc_wdata(r_pc_wdata)
+        .o_rvfi_pc_rdata(r_pc_rdata), .o_rvfi_pc_wdata(r_pc_wdata),
+        .o_rvfi_mem_addr(r_mem_addr), .o_rvfi_mem_rmask(r_mem_rmask), .o_rvfi_mem_wmask(r_mem_wmask),
+        .o_rvfi_mem_rdata(r_mem_rdata), .o_rvfi_mem_wdata(r_mem_wdata)
     );
 
     function automatic logic [63:0] b(input logic x); return {63'b0, x}; endfunction
@@ -249,6 +254,76 @@ module qv_commit_tb;
         check("alu with csr fields: no we", b(csr_we), 64'd0);
         check("alu with csr fields: rd = value", rf_data, 64'd9);
         retire();
+
+        // ---- memory ops: the LSU's result decides trap vs retire ----
+        // a clean load: rd gets the value, RVFI memory fields come from the LSU
+        lres = '0;
+        lres.mem_addr = 64'h1_0010; lres.mem_rmask = 8'hF0; lres.mem_rdata = 64'hAAAA_BBBB_CCCC_DDDD;
+        lres.mem_wdata = 64'h1234;
+        set_entry(64'h445C, 32'h0108_3283, 5, 1'b1, 64'hFFFF_FFFF_AAAA_BBBB);   // lw x5, 16(x16)
+        c.cls = QV_FU_LSU;
+        expect_plain("load", 1'b0);
+        check("load: rd write", b(rf_we), 64'd1);
+        check("load: rd value", rf_data, 64'hFFFF_FFFF_AAAA_BBBB);
+        check("load: rvfi rd", r_rd_wdata, 64'hFFFF_FFFF_AAAA_BBBB);
+        check("load: rvfi mem addr", r_mem_addr, 64'h1_0010);
+        check("load: rvfi rmask", {56'b0, r_mem_rmask}, 64'hF0);
+        check("load: rvfi wmask", {56'b0, r_mem_wmask}, 64'h0);
+        check("load: rvfi rdata (raw)", r_mem_rdata, 64'hAAAA_BBBB_CCCC_DDDD);
+        retire();
+        // a misaligned load: traps with the LSU's cause and tval, and even
+        // though rd_wen is set (decode can't know) nothing is written
+        lres = '0;
+        lres.xcpt = 1'b1; lres.cause = 4'd4; lres.tval = 64'h1_0003;
+        lres.mem_addr = 64'h1_0000; lres.mem_rmask = 8'h78;
+        set_entry(64'h4460, 32'h0038_3283, 5, 1'b1, 64'h55);
+        c.cls = QV_FU_LSU;
+        expect_trap("misaligned load", 64'd4, 64'h1_0003);
+        check("misaligned load: no rvfi rd", {59'b0, r_rd_addr}, 64'd0);
+        check("misaligned load: rvfi rd data 0", r_rd_wdata, 64'd0);
+        check("misaligned load: would-be addr still reported", r_mem_addr, 64'h1_0000);
+        check("misaligned load: would-be rmask still reported", {56'b0, r_mem_rmask}, 64'h78);
+        retire();
+        // a store that hits a bus error
+        lres = '0;
+        lres.xcpt = 1'b1; lres.cause = 4'd7; lres.tval = 64'h20_0008;
+        lres.mem_addr = 64'h20_0008; lres.mem_wmask = 8'hFF; lres.mem_wdata = 64'h77;
+        set_entry(64'h8000, 32'h0062_3423, 0, 1'b0, 64'd0);   // sd x6, 8(x4)
+        c.cls = QV_FU_LSU;
+        expect_trap("store access fault", 64'd7, 64'h20_0008);
+        check("store access fault: wmask reported", {56'b0, r_mem_wmask}, 64'hFF);
+        retire();
+        // a load access fault
+        lres = '0;
+        lres.xcpt = 1'b1; lres.cause = 4'd5; lres.tval = 64'h20_0000;
+        set_entry(64'h8000, 32'h0002_3283, 5, 1'b1, 64'd1);
+        c.cls = QV_FU_LSU;
+        expect_trap("load access fault", 64'd5, 64'h20_0000);
+        retire();
+        // a misaligned store
+        lres = '0;
+        lres.xcpt = 1'b1; lres.cause = 4'd6; lres.tval = 64'h1_0001;
+        set_entry(64'h8000, 32'h0062_10A3, 0, 1'b0, 64'd0);
+        c.cls = QV_FU_LSU;
+        expect_trap("misaligned store", 64'd6, 64'h1_0001);
+        retire();
+        // a fault marked at fetch wins over whatever the LSU result says
+        lres = '0;
+        lres.xcpt = 1'b1; lres.cause = 4'd5; lres.tval = 64'hBAD;
+        set_entry(64'h9000, 32'h0, 5, 1'b0, 64'd0);
+        c.cls = QV_FU_ALU; c.xcpt = 1'b1; c.cause = 4'd1;
+        expect_trap("fetch fault beats a stale LSU result", 64'd1, 64'h9000);
+        retire();
+        // a non-memory entry ignores the LSU result entirely
+        lres = '0;
+        lres.xcpt = 1'b1; lres.cause = 4'd5; lres.mem_addr = 64'h1234; lres.mem_rmask = 8'hFF;
+        set_entry(64'h9000, 32'h13, 5, 1'b1, 64'd3);
+        expect_plain("alu with a stale LSU result", 1'b0);
+        check("alu with a stale LSU result: rd written", b(rf_we), 64'd1);
+        check("alu with a stale LSU result: mem addr 0", r_mem_addr, 64'd0);
+        check("alu with a stale LSU result: rmask 0", {56'b0, r_mem_rmask}, 64'd0);
+        retire();
+        lres = '0;
 
         $display("");
         $display("qv_commit_tb: %0d passed, %0d failed", pass_count, fail_count);

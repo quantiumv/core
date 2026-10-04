@@ -126,6 +126,7 @@ pipe_align_fifo_tb|design/pipe/qv_align_fifo_tb.sv||design|pipe|pass|600
 pipe_decode_tb|design/pipe/qv_decode_tb.sv||design|pipe|pass|
 pipe_exu_bru_tb|design/pipe/qv_exu_bru_tb.sv||design|pipe|pass|
 pipe_commit_tb|design/pipe/qv_commit_tb.sv||design|pipe|pass|
+pipe_lsu_tb|design/pipe/qv_lsu_tb.sv||design|pipe|pass|
 pipe_rob_tb_d8|design/pipe/qv_rob_tb.sv||design|pipe|pass||-Pqv_rob_tb.ROB_DEPTH=8
 pipe_rob_tb_d4|design/pipe/qv_rob_tb.sv||design|pipe|pass||-Pqv_rob_tb.ROB_DEPTH=4
 pipe_rob_tb_d2|design/pipe/qv_rob_tb.sv||design|pipe|pass||-Pqv_rob_tb.ROB_DEPTH=2

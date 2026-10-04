@@ -40,7 +40,7 @@ DUT_VVP="$OUT/pipe_$TAG.vvp"
 
 REF_FILES="decoder.sv alu.sv c_expand.sv core.sv csr_file.sv divider.sv register_file.sv wb4_sram.sv wb_arbiter2.sv"
 PIPE_FILES="decoder.sv c_expand.sv pipe/qv_pkg.sv pipe/qv_fetch.sv pipe/qv_align.sv pipe/qv_fifo.sv pipe/qv_decode.sv
-            pipe/qv_issue.sv pipe/qv_rob.sv pipe/qv_exu_alu.sv pipe/qv_exu_bru.sv pipe/qv_commit.sv pipe/core_pipe.sv
+            pipe/qv_issue.sv pipe/qv_rob.sv pipe/qv_exu_alu.sv pipe/qv_exu_bru.sv pipe/qv_lsu.sv pipe/qv_commit.sv pipe/core_pipe.sv
             alu.sv register_file.sv csr_file.sv wb4_sram.sv wb_arbiter2.sv"
 
 build() {
@@ -61,7 +61,8 @@ for ((s = FIRST; s < FIRST + SEEDS; s++)); do
     read -r n dyn < <(python3 verification/pipe/gen_alu.py --seed "$s" --len "$LEN" -o "$base.s") || exit 1
     riscv64-unknown-elf-as -march=rv64imc_zicsr -mabi=lp64 -mno-relax "$base.s" -o "$base.o" &&
     riscv64-unknown-elf-ld -T verification/lockstep/gen/link.ld -o "$base.elf" "$base.o" &&
-    riscv64-unknown-elf-objcopy -O verilog -j .text.entry -j .text.handlers --verilog-data-width=8 "$base.elf" "$base.hex" || exit 1
+    riscv64-unknown-elf-objcopy -O verilog -j .text.entry -j .text.handlers -j .data.sandbox \
+        --verilog-data-width=8 "$base.elf" "$base.hex" || exit 1
 
     # 0x80000 is never written, so the tracer runs to its cycle limit.
     # Both cores average a few cycles per instruction (core_pipe more on

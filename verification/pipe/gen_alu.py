@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
-"""gen_alu.py -- seeded random RV64IM + Zicsr programs with control flow and traps.
+"""gen_alu.py -- seeded random RV64IM + Zicsr programs with control flow, memory and traps.
 
 Bring-up corpus for design/pipe/core_pipe.sv while it implements the
 single-cycle integer class (RV64I register/immediate ops including the
 *W forms, LUI, AUIPC, MUL/MULH/MULHSU/MULHU/MULW), conditional
-branches, JAL, JALR, Zicsr, M-mode traps and RVC. Assemble with
--march=rv64imc_zicsr.
+branches, JAL, JALR, loads, stores, FENCE, Zicsr, M-mode traps and RVC.
+Assemble with -march=rv64imc_zicsr.
 
 Everything runs in M-mode. A prologue points mtvec at a fixed handler
 (.text.handlers, 0x8000) that reads mcause/mtval and returns to
 mepc + 4; trap sources are ECALL, EBREAK, an all-zero word, writes to
-read-only CSRs and any access to debug/trigger CSRs. CSR accesses
+read-only CSRs, any access to debug/trigger CSRs, and misaligned or
+out-of-range loads and stores. CSR accesses
 otherwise stick to CSRs whose writes can't change control flow or
 privilege (see CSR_RW/CSR_RO), and MRET only ever runs in the handler,
 so mstatus.MPP and MIE never leave their M-mode, interrupts-off state.
@@ -27,7 +28,17 @@ instruction, so every program terminates:
             (body branches may target the decrement but never the bne;
             x31 is written only here)
 
-No branch may land after an auipc in the sequence that uses it. Sources
+Memory ops address a 4 KiB sandbox (.data.sandbox at 0x10000, random
+dwords) through bases set after seeding and never written again:
+x27 = 0x10800 (any 12-bit offset stays inside), x9 = 0x10400 and
+x2 = 0x10000 (so gas emits C.LW/C.LD/C.SW/C.SD and the sp-relative
+forms), and x26 = 0x200000, past the tracer's 1 MiB SRAM, whose
+accesses end in a bus error. A third form computes the address from a
+random source (andi; add x27; access), so address operands come through
+the bypass and ROB paths too.
+
+No branch may land after an auipc in the sequence that uses it, or
+inside an address computation. Sources
 favour recent destinations (--dep-bias), so the bypass path feeds
 branch operands as well as ALU ones.
 
@@ -62,6 +73,13 @@ EDGE_SHW = [0, 1, 15, 16, 30, 31]
 EDGE_U = [0, 1, 0x7FFFF, 0x80000, 0xFFFFF]
 LOOP_REG = 31
 MAX_K = 4
+# memory bases (see the header): never a destination
+SANDBOX = 0x10000
+BASES = {27: SANDBOX + 0x800, 9: SANDBOX + 0x400, 2: SANDBOX, 26: 0x200000}
+FREE_REGS = [r for r in range(1, 32) if r not in BASES and r != LOOP_REG]
+LOADS = [("lb", 1), ("lbu", 1), ("lh", 2), ("lhu", 2), ("lw", 4), ("lwu", 4), ("ld", 8)]
+STORES = [("sb", 1), ("sh", 2), ("sw", 4), ("sd", 8)]
+FENCES = ["fence", "fence rw, rw", "fence r, r", "fence w, w", "fence iorw, iorw"]
 
 # CSRs safe to write in M-mode without changing control flow or enabling
 # anything: scratch/trap CSRs, interrupt enables (mstatus.MIE stays 0),
@@ -132,9 +150,53 @@ class Gen:
         return self.rng.randint(0, 31)
 
     def dst(self):
-        rd = 0 if self.rng.random() < 0.05 else self.rng.randint(1, LOOP_REG - 1)
+        rd = 0 if self.rng.random() < 0.05 else self.rng.choice(FREE_REGS)
         self.recent.append(rd)
         return rd
+
+    def mem(self, room):
+        """A load or store. Returns (slots, traps): one slot, or (when room
+        allows) three -- andi; add; access -- entered only at the first."""
+        rng = self.rng
+        store = rng.random() < 0.4
+        op, size = rng.choice(STORES if store else LOADS)
+        reg = self.src() if store else self.dst()
+        norvc = lambda t: f".option push\n    .option norvc\n    {t}\n    .option pop"
+        r = rng.random()
+        if r < 0.20 and room >= 3:
+            # t = (src & mask) + 0x10800 is in [0x10800, 0x10FFF]; off in
+            # [-2048, 0] keeps the access inside the sandbox. Mask 0x7FF
+            # leaves wider accesses misaligned at random.
+            t = rng.choice(FREE_REGS)
+            mis = size > 1 and rng.random() < 0.3
+            off = -rng.randint(0, 2048 // size) * size
+            acc = f"{op} x{reg}, {off}(x{t})"
+            self.recent.append(t)
+            return [f"andi x{t}, x{self.src()}, {0x7FF if mis or size == 1 else 0x7F8}",
+                    f"add x{t}, x{t}, x27",
+                    norvc(acc) if mis else acc], int(mis)
+        if r < 0.30:
+            # misaligned (sandbox) or bus error (x26); 4 bytes for mepc + 4
+            if size > 1 and rng.random() < 0.6:
+                base, off = 27, rng.randint(-256, 255) * size + rng.randint(1, size - 1)
+            else:
+                base, off = 26, imm12(rng)
+            return [norvc(f"{op} x{reg}, {off}(x{base})")], 1
+        if r < 0.60:
+            # x9 or sp with offsets in the C.LW/C.LD/C.SW/C.SD or C.*SP
+            # range; for x9, registers in x8-x15 make them compressible
+            base = rng.choice([9, 2])
+            if rng.random() < 0.5:           # the widths with a C form
+                op, size = rng.choice([("sw", 4), ("sd", 8)] if store else [("lw", 4), ("ld", 8)])
+            limit = (124 if size <= 4 else 248) if base == 9 else (252 if size <= 4 else 504)
+            off = rng.randint(0, limit // size) * size
+            if base == 9 and rng.random() < 0.6:
+                reg = rng.choice([8, 9, 10, 11, 12, 13, 14, 15] if store else [8, 10, 11, 12, 13, 14, 15])
+                if not store:
+                    self.recent.append(reg)
+            return [f"{op} x{reg}, {off}(x{base})"], 0
+        off = rng.randint(-2048 // size, 2047 // size) * size
+        return [f"{op} x{reg}, {off}(x27)"], 0
 
     def alu(self):
         rng = self.rng
@@ -170,6 +232,8 @@ class Gen:
             return f"csrrs x{self.dst()}, {rng.choice(CSR_DEBUG):#x}, x0", True
         if r < 0.90:
             return f"csrrw x{self.dst()}, {rng.choice(CSR_READONLY):#x}, x{self.src()}", True
+        if r < 0.93:
+            return rng.choice(FENCES), False
         return rng.choice([
             ("ecall", True),
             (".4byte 0x00100073", True),                    # EBREAK, never C.EBREAK
@@ -202,11 +266,16 @@ class Gen:
                 items.append(("br", rng.choice(B_OPS), a, b, None)); i += 1
             elif r < 0.20:
                 items.append(("jal", self.dst(), None)); i += 1
-            elif r < 0.25 and i + 2 < n:
+            elif r < 0.40:
+                slots, traps = self.mem(n - i)
+                forbidden.update(range(i + 1, i + len(slots)))
+                items += slots; i += len(slots)
+                self.seg_traps += traps
+            elif r < 0.45 and i + 2 < n:
                 # auipc %pcrel_hi(T) [; addi %pcrel_lo] ; jalr -- the odd
                 # form jumps to T+1, which JALR's bit-0 clear turns into T.
                 # Nothing may land after the auipc, whose base it needs.
-                base = rng.randint(1, LOOP_REG - 1)
+                base = rng.choice(FREE_REGS)
                 odd = rng.random() < 0.3
                 auipc = i
                 items.append(("auipc", base))
@@ -271,6 +340,10 @@ def main():
     for r in range(1, 32):
         for t in seed_reg(rng, r):
             lines.append((len(lines), t))
+    for r, v in BASES.items():
+        lines.append((len(lines), f"lui x{r}, {(v + 0x800) >> 12:#x}"))
+        if v & 0xFFF:
+            lines.append((len(lines), f"addi x{r}, x{r}, {(v & 0xFFF) - ((v & 0x800) << 1)}"))
     labels = {}
     dyn = len(lines)
     body_start = len(lines)
@@ -311,6 +384,9 @@ def main():
         f.write(".section .text.handlers\ntrap_handler:\n")
         for text in HANDLER:
             f.write(f"    {text}\n")
+        f.write(".section .data.sandbox\n")
+        for _ in range(512):
+            f.write(f"    .dword {rng.getrandbits(64):#018x}\n")
     print(count, dyn)
 
 
