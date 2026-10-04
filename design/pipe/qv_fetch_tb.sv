@@ -227,6 +227,38 @@ module qv_fetch_tb;
         check("T5: old request's address unchanged after redirect", {32'b0, addr}, {32'b0, old_addr});
         wait_log(mark + 3, 400);
         check_seq("T5 (post-redirect)", mark, 3, 64'h80);
+
+        // ---- T8: two redirects while one request is outstanding ----
+        // (an align redirect, then a trap at commit). The old response
+        // must still be dropped: the second redirect must not revive it.
+        wait_cfg = 8;
+        do_reset();
+        pop_en = 1'b1;
+        wait_log(2, 400);
+        begin
+            logic was_cyc;
+            int   tries;
+            was_cyc = 1'b1;
+            tries   = 0;
+            while (tries < 100) begin
+                @(negedge clk);
+                if (cyc && !was_cyc) break;
+                was_cyc = cyc;
+                tries++;
+            end
+            check("T8: saw a fresh request start", 64'(tries < 100), 64'd1);
+        end
+        old_addr = addr;
+        @(posedge clk); #1;
+        mark = log_n;
+        pulse_redirect(64'h80);
+        @(posedge clk); #1;
+        pulse_redirect(64'h100);
+        @(negedge clk);
+        check("T8: old request still held after both redirects", {63'b0, cyc}, 64'd1);
+        check("T8: old request's address unchanged", {32'b0, addr}, {32'b0, old_addr});
+        wait_log(mark + 3, 600);
+        check_seq("T8 (after the second redirect)", mark, 3, 64'h100);
         wait_cfg = 0;
 
         // ---- T6: redirect to a non-dword-aligned target ----
