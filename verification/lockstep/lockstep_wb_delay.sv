@@ -145,7 +145,13 @@ module lockstep_wb_delay #(
             assign dn_dat_o  = dat_q;
             assign dn_sel_o  = sel_q;
             assign dn_we_o   = we_q;
-            assign dn_lock_o = lock_q;
+            // Idle: pass the master's live lock through. lock_q only covers a
+            // request in flight; holding it after the response pinned
+            // wb_arbiter2's idle grant to this side forever once an AMO's
+            // locked write completed, starving the other master (a real
+            // hang: fw a_test at DELAY_MAX=8). An AMO's read-to-write gap
+            // stays locked because the master itself keeps lock high.
+            assign dn_lock_o = (state_q == S_IDLE) ? up_lock_i : lock_q;
             assign dn_cyc_o  = (state_q == S_REQ);
             assign dn_stb_o  = (state_q == S_REQ);
             assign up_dat_o  = dn_dat_i;
