@@ -26,6 +26,9 @@
  * rest until their features land. A fetch fault (cause from align) takes
  * priority. A faulting uop never writes rd.
  *
+ * RVC goes through c_expand.sv first; raw (and so RVFI's insn and an
+ * illegal instruction's mtval) keeps the original {16'b0, halfword}.
+ *
  * decoder.sv must come before this file in the compile order: the
  * INSTR_CODE macro is defined there, the same requirement core.sv has.
  *
@@ -38,7 +41,8 @@ module qv_decode (
     input  logic              i_flush,
 
     input  logic              i_iq_valid,
-    // pred_taken/pred_tgt/xcpt_hi aren't consumed until prediction and RVC land
+    // pred_taken/pred_tgt aren't consumed until prediction lands; xcpt_hi
+    // matters only for page faults (Sv39)
     /* verilator lint_off UNUSEDSIGNAL */
     input  qv_pkg::fe_instr_t i_iq_data,
     /* verilator lint_on UNUSEDSIGNAL */
@@ -55,8 +59,23 @@ module qv_decode (
     logic [(`WORD_SIZE - 1):0]        imm_1, imm_2;
     logic [(`B_IMM_SIZE - 1):0]       imm_3_or_dest_addr;   // rd, or a branch's B offset
 
+    // RVC expands to its 32-bit equivalent. A faulted fetch or a reserved
+    // compressed encoding decodes as core.sv's inert placeholder (addi
+    // x0, x0, 0) instead, so nothing downstream acts on the bits; the
+    // trap itself is the xcpt marking below.
+    logic [31:0] expanded;
+    logic        c_expand_illegal;
+    c_expand c_expand0 (
+        .i_instr16(i_iq_data.raw[15:0]),
+        .o_instr32(expanded),
+        .o_illegal(c_expand_illegal)
+    );
+    wire c_illegal = i_iq_data.rvc && c_expand_illegal;
+    wire [31:0] instr = (i_iq_data.xcpt || c_illegal) ? 32'h0000_0013
+                      : i_iq_data.rvc ? expanded : i_iq_data.raw;
+
     decoder decoder0 (
-        .i_instruction(i_iq_data.raw),
+        .i_instruction(instr),
         .i_instruction_address(i_iq_data.pc),
         /* verilator lint_off PINCONNECTEMPTY */
         .o_instruction_address(),
@@ -228,7 +247,7 @@ module qv_decode (
         if (i_iq_data.xcpt) begin
             uop_d.xcpt       = 1'b1;
             uop_d.xcpt_cause = i_iq_data.xcpt_cause;
-        end else if (!implemented || csr_illegal) begin
+        end else if (c_illegal || !implemented || csr_illegal) begin
             uop_d.xcpt       = 1'b1;
             uop_d.xcpt_cause = 4'd2;
         end

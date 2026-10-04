@@ -30,12 +30,13 @@
  *
  * Implemented so far: every single-cycle integer ALU instruction --
  * RV64I register/immediate ops including the *W forms, LUI, AUIPC, and
- * MUL/MULH/MULHSU/MULHU/MULW -- plus conditional branches, JAL and
- * JALR (4-byte-aligned targets only until RVC lands), the six Zicsr
- * instructions, ECALL, EBREAK, MRET and WFI (a no-op), with M-mode
- * synchronous traps. Everything else decodes as an illegal-instruction
- * trap. Not yet: loads/stores, FENCE/FENCE.I/SFENCE.VMA, U/S modes,
- * SRET, interrupts, debug, RVC, DIV/REM, A. The
+ * MUL/MULH/MULHSU/MULHU/MULW -- plus conditional branches, JAL, JALR,
+ * the six Zicsr instructions, ECALL, EBREAK, MRET and WFI (a no-op),
+ * with M-mode synchronous traps, and RVC: compressed instructions on any
+ * 2-byte boundary, including 32-bit ones that straddle two fetched
+ * dwords. Everything else decodes as an illegal-instruction trap. Not
+ * yet: loads/stores, FENCE/FENCE.I/SFENCE.VMA, U/S modes, SRET,
+ * interrupts, debug, DIV/REM, A. The
  * mem port, icache flush and debug/progbuf outputs are held inert. The
  * Debug Module's GPR/CSR access mux (core.sv wires it around regfile0
  * and csr_file0) comes back with debug support.
@@ -213,6 +214,7 @@ module core_pipe
     assign iq_head = iq_bits;
 
     qv_align align0 (
+        .clk(clk), .rst(rst), .i_flush(flush),
         .i_buf_valid(fb_valid), .i_buf_pc(fb_pc), .i_buf_data(fb_data), .i_buf_err(fb_err),
         .o_buf_pop(fb_pop),
         .o_push0_valid(p0_valid), .o_push0_data(p0_data),
