@@ -82,11 +82,11 @@
  * instruction that may be flushed before it's ever used -- delaying it
  * costs at most some latency-hiding benefit, never correctness.
  *
- * Starvation: this priority is re-evaluated COMBINATIONALLY every cycle
- * (nothing latches "locked to dcache0 until its whole transfer
- * finishes") -- icache0 is granted the very next cycle dcache0 doesn't
- * want the bus, not the cycle after dcache0's entire transaction
- * completes. Genuine indefinite starvation would need dcache0 wanting
+ * Starvation: this priority is re-evaluated COMBINATIONALLY for every
+ * beat (only the beat already on the bus holds the grant until its own
+ * response; nothing latches "locked to dcache0 until its whole transfer
+ * finishes") -- icache0 is granted the very next beat dcache0 doesn't
+ * want the bus, not after dcache0's entire transaction completes. Genuine indefinite starvation would need dcache0 wanting
  * the bus on literally every cycle forever, which this core cannot
  * produce while lookahead stays bounded to one instruction (P1/P2 step
  * 1's own SLOT_COUNT=2 scheme): the NEXT dcache0 request can't even be
@@ -253,9 +253,32 @@ module cache_complex #(
     wire want_ic = ic_mem_cyc;
     wire want_dc = dc_mem_cyc;
 
+    /*
+     * A beat forwarded downstream keeps the grant until its own ack/err
+     * (Wishbone's never-abandon rule). Re-arbitrating mid-beat would
+     * change the request under a slave that may already have latched it,
+     * and flip mem_owner_ic_q, so the first cache's response would be
+     * delivered to the other one. Unreachable with wb4_sram alone (it
+     * answers every request the next cycle, so no cycle ever has a beat
+     * outstanding without its response), reachable behind any slower
+     * slave once both caches overlap. Both caches hold cyc until their
+     * routed ack/err and drop it in that cycle, so "a beat is outstanding"
+     * is exactly "a grant was made last cycle and no response came yet".
+     * The response cycle itself arbitrates fresh, as before, so timing
+     * against wb4_sram is unchanged.
+     */
+    logic in_flight_q;
+    logic mem_owner_ic_q;
+    wire  hold = in_flight_q && !mem_ack_i && !mem_err_i;
+
     // Fixed priority: dcache0 (the retiring instruction) wins ties.
-    wire grant_dc = want_dc;
-    wire grant_ic = want_ic && !want_dc;
+    wire grant_dc = hold ? (!mem_owner_ic_q && want_dc) : want_dc;
+    wire grant_ic = hold ? ( mem_owner_ic_q && want_ic) : (want_ic && !want_dc);
+
+    always_ff @(posedge clk) begin
+        if (rst) in_flight_q <= 1'b0;
+        else     in_flight_q <= grant_dc || grant_ic;
+    end
 
     assign mem_addr_o = grant_dc ? dc_mem_addr : (grant_ic ? ic_mem_addr : 32'b0);
     assign mem_dat_o  = grant_dc ? dc_mem_dat_o : 64'b0; // icache0 never writes
@@ -278,7 +301,6 @@ module cache_complex #(
      * what mem_owner_ic_q says, the same "a stale latch value never
      * observably matters" property the old code already relied on.
      */
-    logic mem_owner_ic_q;
     always_ff @(posedge clk) begin
         if (rst)
             mem_owner_ic_q <= 1'b0;
