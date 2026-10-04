@@ -59,7 +59,7 @@ pass=0; fail=0
 for ((s = FIRST; s < FIRST + SEEDS; s++)); do
     base="$OUT/alu_$s"
     read -r n dyn < <(python3 verification/pipe/gen_alu.py --seed "$s" --len "$LEN" -o "$base.s") || exit 1
-    riscv64-unknown-elf-as -march=rv64imc_zicsr -mabi=lp64 -mno-relax "$base.s" -o "$base.o" &&
+    riscv64-unknown-elf-as -march=rv64imc_zicsr_zifencei -mabi=lp64 -mno-relax "$base.s" -o "$base.o" &&
     riscv64-unknown-elf-ld -T verification/lockstep/gen/link.ld -o "$base.elf" "$base.o" &&
     riscv64-unknown-elf-objcopy -O verilog -j .text.entry -j .text.handlers -j .data.sandbox \
         --verilog-data-width=8 "$base.elf" "$base.hex" || exit 1

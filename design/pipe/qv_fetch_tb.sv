@@ -36,12 +36,15 @@ module qv_fetch_tb;
     logic [63:0] buf_pc, buf_data;
     logic        pop_en = 1'b0;
     wire         buf_pop = pop_en && buf_valid;
+    logic        hold = 1'b0;
+    logic        idle;
 
     qv_fetch dut (
         .clk(clk), .rst(rst),
         .wb_fetch_addr_o(addr), .wb_fetch_cyc_o(cyc), .wb_fetch_stb_o(stb),
         .wb_fetch_dat_i(dat), .wb_fetch_ack_i(ack), .wb_fetch_err_i(err),
         .i_redirect_valid(redirect_valid), .i_redirect_pc(redirect_pc),
+        .i_hold(hold), .o_idle(idle),
         .o_buf_valid(buf_valid), .o_buf_pc(buf_pc), .o_buf_data(buf_data),
         .o_buf_err(buf_err), .i_buf_pop(buf_pop)
     );
@@ -259,6 +262,54 @@ module qv_fetch_tb;
         check("T8: old request's address unchanged", {32'b0, addr}, {32'b0, old_addr});
         wait_log(mark + 3, 600);
         check_seq("T8 (after the second redirect)", mark, 3, 64'h100);
+
+        // ---- T9: hold (FENCE.I) ----
+        // Raised mid-request: that request still completes, then nothing
+        // new goes out and idle stays high. A redirect while held (align's
+        // static prediction) is fetched first once the hold drops.
+        wait_cfg = 4;
+        do_reset();
+        pop_en = 1'b1;
+        wait_log(2, 400);
+        begin
+            logic was_cyc;
+            int   tries;
+            was_cyc = 1'b1;
+            tries   = 0;
+            while (tries < 100) begin
+                @(negedge clk);
+                if (cyc && !was_cyc) break;
+                was_cyc = cyc;
+                tries++;
+            end
+            check("T9: saw a fresh request start", 64'(tries < 100), 64'd1);
+        end
+        @(posedge clk); #1;
+        hold = 1'b1;
+        @(negedge clk);
+        check("T9: not idle while the request is outstanding", {63'b0, idle}, 64'd0);
+        begin
+            int c;
+            c = 0;
+            while (!idle && c < 50) begin @(negedge clk); c++; end
+            check("T9: idle once the outstanding request completes", {63'b0, idle}, 64'd1);
+        end
+        stall_bus = 0;
+        repeat (6) begin @(negedge clk); if (cyc || !idle) stall_bus++; end
+        @(posedge clk); #1;
+        mark = log_n;
+        pulse_redirect(64'h140);
+        repeat (6) begin @(negedge clk); if (cyc || !idle) stall_bus++; end
+        check("T9: no request while held, redirect included", 64'(stall_bus), 64'd0);
+        @(posedge clk); #1;
+        hold = 1'b0;
+        @(negedge clk);
+        check("T9: released: nothing out in the release cycle itself", {63'b0, cyc}, 64'd0);
+        @(negedge clk);
+        check("T9: released: the redirect target goes out first", {32'b0, addr}, 64'h140);
+        check("T9: released: request out", {63'b0, cyc}, 64'd1);
+        wait_log(mark + 3, 400);
+        check_seq("T9 (after release)", mark, 3, 64'h140);
         wait_cfg = 0;
 
         // ---- T6: redirect to a non-dword-aligned target ----

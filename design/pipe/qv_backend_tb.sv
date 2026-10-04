@@ -99,7 +99,7 @@ module qv_backend_tb #(
         .i_head_valid(head_valid), .i_head_entry(head_entry), .i_head_tag(head_tag),
         .i_head_shadow(head_shadow), .i_head_ctrl(head_ctrl), .i_lsu_res('0), .o_commit_pop(commit_pop),
         // ALU-only uops: no CSR, trap or mret ever reaches commit here
-        .i_csr_rdata(64'b0), .i_mtvec(64'b0), .i_mepc(64'b0),
+        .i_csr_rdata(64'b0), .i_mtvec(64'b0), .i_mepc(64'b0), .i_fetch_idle(1'b1),
         .o_regfile_we(rf_we), .o_regfile_sel(rf_sel), .o_regfile_data(rf_data),
         .o_commit_valid(c_valid), .o_commit_rd(c_rd), .o_commit_rd_wen(c_rd_wen), .o_commit_tag(c_tag),
         .o_commit_now(commit_now), .o_pc(arch_pc), .o_next_pc(next_pc),

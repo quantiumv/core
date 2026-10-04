@@ -4,8 +4,8 @@
 Bring-up corpus for design/pipe/core_pipe.sv while it implements the
 single-cycle integer class (RV64I register/immediate ops including the
 *W forms, LUI, AUIPC, MUL/MULH/MULHSU/MULHU/MULW), conditional
-branches, JAL, JALR, loads, stores, FENCE, Zicsr, M-mode traps and RVC.
-Assemble with -march=rv64imc_zicsr.
+branches, JAL, JALR, loads, stores, FENCE, FENCE.I, Zicsr, M-mode traps and RVC.
+Assemble with -march=rv64imc_zicsr_zifencei.
 
 Everything runs in M-mode. A prologue points mtvec at a fixed handler
 (.text.handlers, 0x8000) that reads mcause/mtval and returns to
@@ -234,6 +234,8 @@ class Gen:
             return f"csrrw x{self.dst()}, {rng.choice(CSR_READONLY):#x}, x{self.src()}", True
         if r < 0.93:
             return rng.choice(FENCES), False
+        if r < 0.95:
+            return "fence.i", False
         return rng.choice([
             ("ecall", True),
             (".4byte 0x00100073", True),                    # EBREAK, never C.EBREAK

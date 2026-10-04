@@ -40,6 +40,8 @@ module qv_commit_tb;
     lsu_res_t                lres = '0;
     logic [63:0]             r_mem_addr, r_mem_rdata, r_mem_wdata;
     logic [7:0]              r_mem_rmask, r_mem_wmask;
+    logic                    fetch_idle = 1'b1;
+    logic                    fetch_hold, icache_flush;
 
     qv_commit #(.RESET_PC(64'h1000)) dut (
         .clk(clk), .rst(rst),
@@ -50,6 +52,7 @@ module qv_commit_tb;
         .o_csr_addr(csr_addr), .i_csr_rdata(csr_rdata), .o_csr_we(csr_we), .o_csr_wdata(csr_wdata),
         .o_instr_retired(instr_retired), .o_trap_taken(trap_taken), .o_trap_cause(trap_cause),
         .o_trap_val(trap_val), .o_mret_taken(mret_taken), .i_mtvec(mtvec), .i_mepc(mepc),
+        .o_fetch_hold(fetch_hold), .i_fetch_idle(fetch_idle), .o_icache_flush(icache_flush),
         .o_commit_now(commit_now), .o_pc(arch_pc), .o_next_pc(next_pc),
         .o_redirect_valid(redirect), .o_redirect_pc(redirect_pc),
         .o_rvfi_order(r_order), .o_rvfi_insn(r_insn), .o_rvfi_trap(r_trap), .o_rvfi_intr(r_intr),
@@ -324,6 +327,52 @@ module qv_commit_tb;
         check("alu with a stale LSU result: rmask 0", {56'b0, r_mem_rmask}, 64'd0);
         retire();
         lres = '0;
+
+        // ---- FENCE.I: fetch held until idle, then flush + serializing refetch ----
+        check("no fence.i head: no hold", b(fetch_hold), 64'd0);
+        fetch_idle = 1'b0;
+        set_entry(64'h5000, 32'h0000_100F, 0, 1'b0, 64'd0);
+        c.cls = QV_FU_SYS; c.sys_op = QV_SYS_FENCE_I; c.serialize = 1'b1;
+        e.complete = 1'b0;
+        #1;
+        check("fence.i incomplete: fetch already held", b(fetch_hold), 64'd1);
+        e.complete = 1'b1;
+        repeat (2) begin
+            #1;
+            check("fence.i, fetch busy: held", b(fetch_hold), 64'd1);
+            check("fence.i, fetch busy: no commit", b(commit_now), 64'd0);
+            check("fence.i, fetch busy: no pop", b(pop), 64'd0);
+            check("fence.i, fetch busy: no flush", b(icache_flush), 64'd0);
+            check("fence.i, fetch busy: no redirect", b(redirect), 64'd0);
+            check("fence.i, fetch busy: not counted", b(instr_retired), 64'd0);
+            @(posedge clk);
+        end
+        fetch_idle = 1'b1;
+        expect_plain("fence.i, fetch idle", 1'b1);
+        check("fence.i: flush pulse", b(icache_flush), 64'd1);
+        check("fence.i: fetch still held in its commit cycle", b(fetch_hold), 64'd1);
+        check("fence.i: no rd write", b(rf_we), 64'd0);
+        check("fence.i: rvfi rd 0", {59'b0, r_rd_addr}, 64'd0);
+        retire();
+        #1;
+        check("after fence.i: no flush", b(icache_flush), 64'd0);
+        check("after fence.i: hold released", b(fetch_hold), 64'd0);
+
+        // a FENCE.I marked with a fetch fault just traps, fetch busy or not
+        fetch_idle = 1'b0;
+        set_entry(64'h5004, 32'h0000_100F, 0, 1'b0, 64'd0);
+        c.cls = QV_FU_SYS; c.sys_op = QV_SYS_FENCE_I; c.xcpt = 1'b1; c.cause = 4'd1;
+        expect_trap("faulted fence.i", 64'd1, 64'h5004);
+        check("faulted fence.i: no flush", b(icache_flush), 64'd0);
+        check("faulted fence.i: no hold", b(fetch_hold), 64'd0);
+        retire();
+
+        // other heads ignore fetch_idle
+        set_entry(64'h8000, 32'h13, 1, 1'b1, 64'd3);
+        expect_plain("alu, fetch busy", 1'b0);
+        check("alu, fetch busy: no hold", b(fetch_hold), 64'd0);
+        retire();
+        fetch_idle = 1'b1;
 
         $display("");
         $display("qv_commit_tb: %0d passed, %0d failed", pass_count, fail_count);

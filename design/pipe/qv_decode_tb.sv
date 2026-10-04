@@ -491,6 +491,14 @@ module qv_decode_tb;
         check("FENCE: ALU no-op", {61'b0, uop.fu}, {61'b0, QV_FU_ALU});
         check("FENCE: no rd write", {63'b0, uop.rd_wen}, 64'd0);
         check("FENCE: no fault", {63'b0, uop.xcpt}, 64'd0);
+        check("FENCE: no serialize", {63'b0, uop.serialize}, 64'd0);
+
+        feed(32'h0000_100F);                                // fence.i
+        check("FENCE.I: SYS", {61'b0, uop.fu}, {61'b0, QV_FU_SYS});
+        check("FENCE.I: sys op", {61'b0, uop.sys_op}, {61'b0, QV_SYS_FENCE_I});
+        check("FENCE.I: serializes", {63'b0, uop.serialize}, 64'd1);
+        check("FENCE.I: no rd write", {63'b0, uop.rd_wen}, 64'd0);
+        check("FENCE.I: no fault", {63'b0, uop.xcpt}, 64'd0);
         feed(encode_i(8, 7, 3'b010, 5, `OPC_LOAD), 1'b1, 4'd1);
         check("faulted LW: routed to the ALU", {61'b0, uop.fu}, {61'b0, QV_FU_ALU});
 

@@ -109,7 +109,7 @@ tb_core_zicsr_tb|testbench/core_zicsr_tb.sv|testbench/core_wb4_sram_harness.sv,t
 tb_core_a_ext_cache_tb|testbench/core_a_ext_cache_tb.sv|testbench/core_cache_harness.sv|design|fsm,ref|pass|
 tb_core_bus_fault_cache_tb|testbench/core_bus_fault_cache_tb.sv|testbench/core_cache_harness.sv,testbench/state_reached_monitor.sv|design|fsm,ref|pass|
 tb_core_c_ext_cache_tb|testbench/core_c_ext_cache_tb.sv|testbench/core_cache_harness.sv|design|fsm,ref|pass|
-tb_core_fence_i_tb|testbench/core_fence_i_tb.sv|testbench/core_cache_harness.sv|design|fsm,ref|pass|
+tb_core_fence_i_tb|testbench/core_fence_i_tb.sv|testbench/core_cache_harness.sv|design|fsm,ref,pipe|pass|
 tb_core_interrupt_icache_miss_tb|testbench/core_interrupt_icache_miss_tb.sv|testbench/core_cache_harness.sv|design|fsm,ref|pass|
 tb_core_m_ext_cache_tb|testbench/core_m_ext_cache_tb.sv|testbench/core_cache_harness.sv|design|fsm,ref|pass|
 
