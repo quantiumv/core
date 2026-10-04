@@ -33,25 +33,22 @@
  * lockstep/repro_irq_stall.s under +IRQ_MODE=2 (any seed) -- it now
  * reaches a clean LOCKSTEP_RESULT either way.
  *
- * QV_MUTANT==5 (see ref_core.sv's interrupt_sample_q) is now PROVEN
- * caught -- but only via +MAX_RETIRE, never +TOHOST_ADDR, against a
- * real-interrupt-taking program. See verification/lockstep/irq.list's
- * own header for why: this mutant only skews TIMING (which retirement
- * each side's own fetch lands on, never WHICH instruction retires), so
- * the per-retirement RVFI stream it produces is bit-for-bit identical
- * to QV_MUTANT_B=0's -- confirmed directly, 1000 retirements matched
- * with zero LOCKSTEP_DIVERGENCE either way. The actual catch comes from
- * check_final_state()'s raw register-file snapshot at a fixed
- * MAX_RETIRE stop-point, which exposes that each side's own core has
- * independently raced up to QV_LOCKSTEP_AHEAD_MAX retirements ahead of
- * what's actually been popped and compared, by a different amount per
- * side when one side is structurally slower. A +TOHOST_ADDR run instead
- * never terminates at all once a mutant like this is active: this
- * program's own post-completion `halt: j halt` keeps retiring (and
- * lockstep_irq.sv keeps injecting fresh interrupts) for as long as
- * EITHER side is still waiting on the other to also reach tohost, which
- * a side that's permanently, structurally slower never does -- not a
- * divergence, just an open-ended race the completion check can't win.
+ * Completion is an exact stop (see stop_at below): each side's clock
+ * freezes after the same number of retirements -- +MAX_RETIRE, or one
+ * past the first retired store to tohost -- so sides running at
+ * different speeds (different delays, a cache, a different core) end in
+ * identical states and the final register-file/RAM diff is exact. The
+ * old rule (tohost visible in both RAMs with both rings drained) only
+ * converged when both sides ran at the same speed, and a MAX_RETIRE
+ * diff ran while the faster side was up to QV_LOCKSTEP_AHEAD_MAX
+ * retirements ahead.
+ *
+ * QV_MUTANT==5 (ref_core.sv's interrupt_sample_q) samples interrupts
+ * one CYCLE late, not one retirement late. Against IRQ_MODE 1/2, whose
+ * levels are visible from the cycle right after a retirement, it takes
+ * every interrupt at the same retirement boundary as the real core, so
+ * its retirement stream and its exact-stop final state both match; it
+ * was only ever "caught" by the skew of the old stop.
  */
 `include "lockstep_defs.svh"
 
@@ -96,6 +93,7 @@ module lockstep_tb #(
     logic clk_a = 1'b0, clk_b = 1'b0, clk_mon = 1'b0;
     logic rst   = 1'b1;
     logic pace_a_hold, pace_b_hold;
+    logic a_stopped, b_stopped;         // see "exact stop" below
 
     always #5 if (!pace_a_hold) clk_a = ~clk_a;
     always #5 if (!pace_b_hold) clk_b = ~clk_b;
@@ -440,13 +438,46 @@ module lockstep_tb #(
 
         .a_dbg_avail(a_dbg_avail), .b_dbg_avail(b_dbg_avail), .a_dbg_pop(a_dbg_pop), .b_dbg_pop(b_dbg_pop),
 
+        .a_stopped(a_stopped), .b_stopped(b_stopped),
         .corrupt_at(corrupt_at[63:0]), .corrupt_field(corrupt_field),
         .result_fail(result_fail), .fail_order(fail_order), .match_count(match_count)
     );
 
-    // ---------------- pacing: hold a side's clock once it's too far ahead ----------------
-    assign pace_a_hold = (a_rec_count >= `QV_LOCKSTEP_AHEAD_MAX);
-    assign pace_b_hold = (b_rec_count >= `QV_LOCKSTEP_AHEAD_MAX);
+    // ---------------- exact stop ----------------
+    // stop_at is the number of retirements both sides must make before the
+    // run ends: MAX_RETIRE, or one past the first retired store of nonzero
+    // data to tohost's dword, whichever side retires it first (the faster
+    // side always does). Each side's clock freezes the moment it has pushed
+    // stop_at records, so both end at exactly the same retirement however
+    // different their speeds, and the final register/RAM diff is exact.
+    // That needs every store's bus write to land before (or as) it
+    // retires, which both cores guarantee.
+    longint stop_at;
+    initial stop_at = 0;
+
+    function automatic logic tohost_store(input logic valid, input logic trap, input logic [7:0] wmask,
+                                          input logic [63:0] addr, input logic [63:0] wdata);
+        logic [63:0] lanes;
+        for (int i = 0; i < 8; i++) lanes[8*i +: 8] = {8{wmask[i]}};
+        return valid && !trap && wmask != 8'b0 && tohost_addr != 32'b0
+            && addr[31:3] == tohost_addr[31:3] && (wdata & lanes) != 64'b0;
+    endfunction
+
+    always @(posedge clk_a)
+        if (!rst && tohost_store(a_rvfi_valid, a_rvfi_trap, a_rvfi_mem_wmask, a_rvfi_mem_addr, a_rvfi_mem_wdata)
+                 && (stop_at == 0 || longint'(a_rvfi_order) + 1 < stop_at))
+            stop_at = longint'(a_rvfi_order) + 1;
+    always @(posedge clk_b)
+        if (!rst && tohost_store(b_rvfi_valid, b_rvfi_trap, b_rvfi_mem_wmask, b_rvfi_mem_addr, b_rvfi_mem_wdata)
+                 && (stop_at == 0 || longint'(b_rvfi_order) + 1 < stop_at))
+            stop_at = longint'(b_rvfi_order) + 1;
+
+    assign a_stopped = (stop_at != 0) && (longint'(a_rec_total) >= stop_at);
+    assign b_stopped = (stop_at != 0) && (longint'(b_rec_total) >= stop_at);
+
+    // ---------------- pacing: hold a side's clock once it's too far ahead or done ----------------
+    assign pace_a_hold = (a_rec_count >= `QV_LOCKSTEP_AHEAD_MAX) || a_stopped;
+    assign pace_b_hold = (b_rec_count >= `QV_LOCKSTEP_AHEAD_MAX) || b_stopped;
 
     // ---------------- image load, run control, final report ----------------
     // Anchored to clk_mon throughout, deliberately -- never to clk_a/
@@ -454,7 +485,6 @@ module lockstep_tb #(
     // comment). A control loop tied to a holdable clock can itself
     // deadlock the same way the ring pop-pointer did.
     longint cycle_q;
-    logic [63:0] tohost_val_a, tohost_val_b;
     always_ff @(posedge clk_mon) if (!rst) cycle_q <= cycle_q + 1;
 
     initial begin
@@ -473,6 +503,7 @@ module lockstep_tb #(
             $readmemh(hex_path, side_b.mem0.sram0.memory);
         end
         @(posedge clk_mon); #1;
+        if (max_retire != 0) stop_at = max_retire;
         rst = 1'b0;
 
         forever begin
@@ -485,31 +516,29 @@ module lockstep_tb #(
                 $display("LOCKSTEP_RESULT: FAIL at retirement order=%0d (matched %0d before it)", fail_order, match_count);
                 $finish;
             end
-            if (tohost_addr != 32'b0) begin
-                // Both sides must show tohost written, AND the comparator
-                // must have fully drained both rings, before declaring
-                // done. Side A reaching tohost first is the ordinary
-                // case, not a bug: the two cores run on independently
-                // paced clocks (different delay seeds), so one is
-                // routinely a few retirements ahead of the other at any
-                // instant even with a perfectly clean retirement stream.
-                // Snapshotting final state right when ONLY side A has
-                // written tohost caught side B mid-flight and reported a
-                // false "divergence" that was really just "hasn't gotten
-                // there yet" -- caught by an actual run, not by
-                // inspection.
-                tohost_val_a = side_a.mem0.sram0.memory[tohost_addr[31:3]];
-                tohost_val_b = side_b.mem0.sram0.memory[tohost_addr[31:3]];
-                if (tohost_val_a != 64'b0 && tohost_val_b != 64'b0 &&
-                    !a_rec_avail && !b_rec_avail) begin
-                    check_final_state();
-                    $display("LOCKSTEP_RESULT: PASS (%0d retirements matched, tohost=%0h)", match_count, tohost_val_a);
+            // Done once both sides have stopped at stop_at and every record
+            // has been compared. The bus-write, MMIO-read and debug-event
+            // logs only pop in pairs, so anything left over on one side
+            // (an extra or missing access) is a divergence of its own.
+            if (a_stopped && b_stopped && !a_rec_avail && !b_rec_avail
+                    && longint'(match_count) >= stop_at) begin
+                repeat (4) @(posedge clk_mon);
+                if (result_fail) begin
+                    $display("LOCKSTEP_RESULT: FAIL at retirement order=%0d (matched %0d before it)", fail_order, match_count);
                     $finish;
                 end
-            end
-            if (max_retire != 0 && match_count >= max_retire) begin
+                if (a_wr_avail || b_wr_avail || a_rda_avail || b_rda_avail || a_dbg_avail || b_dbg_avail) begin
+                    $display("LOCKSTEP_DIVERGENCE: unmatched log entries at the stop (wr a=%0d b=%0d, mmio-rd a=%0d b=%0d, dbg a=%0d b=%0d)",
+                             a_wr_avail, b_wr_avail, a_rda_avail, b_rda_avail, a_dbg_avail, b_dbg_avail);
+                    $display("LOCKSTEP_RESULT: FAIL (unmatched bus-write/MMIO-read/debug log entries after %0d retirements)", match_count);
+                    $finish;
+                end
                 check_final_state();
-                $display("LOCKSTEP_RESULT: PASS (%0d retirements matched, MAX_RETIRE reached)", match_count);
+                if (tohost_addr != 32'b0 && max_retire == 0)
+                    $display("LOCKSTEP_RESULT: PASS (%0d retirements matched, tohost=%0h)", match_count,
+                             side_a.mem0.sram0.memory[tohost_addr[31:3]]);
+                else
+                    $display("LOCKSTEP_RESULT: PASS (%0d retirements matched, MAX_RETIRE reached)", match_count);
                 $finish;
             end
             if (cycle_q >= max_cycles) begin

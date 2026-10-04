@@ -12,35 +12,11 @@
  * before it can be reissued -- deliberate, and harmless for the timing
  * perturbation this exists to provide.
  *
- * RESOLVED (characterization, not an RTL bug): with DELAY_MAX>0, some
- * DLY_SEED_A/DLY_SEED_B pairs make a REF-vs-REF run (both sides
- * QV_MUTANT=0, flat SRAM both sides) retire far more instructions than
- * the program actually needs -- e.g. verification/riscv-arch-test's
- * I-add-00.elf, confirmed via the standalone testbench/rvfi_tracer.sv to
- * need exactly 4327 retirements, instead passes 19699 and still climbing
- * at a 300,000-cycle timeout under DELAY_MAX=8 DLY_SEED_A=3 DLY_SEED_B=4
- * (reproduced exactly: same seed pair, same 19699) -- yet DLY_SEED_A=11
- * DLY_SEED_B=97 at the same DELAY_MAX completes cleanly in 4399. This is
- * the exact same mechanism as lockstep_mem.sv's own (resolved) cache-
- * config KNOWN GAP comment, not a protocol hazard in the FSM below --
- * see that comment for the full explanation. In short: this module makes
- * one side's bus transactions randomly slower than the other's, which
- * lets the relatively-faster side keep retiring past its own tohost
- * write while lockstep_tb.sv's completion check (deliberately) waits for
- * BOTH sides' comparator rings to drain. I-add-00.elf's own RVMODEL_HALT
- * epilogue ends in a bare EBREAK with mtvec never configured, so running
- * past completion means re-taking that EBREAK to mtvec's reset value of
- * 0 -- the reset vector -- restarting the whole program, rather than a
- * harmless few extra cycles. DLY_SEED_A=11/DLY_SEED_B=97 simply doesn't
- * skew the two sides far enough apart to reach that EBREAK before the
- * rings drain; DLY_SEED_A=3/DLY_SEED_B=4 does. No LOCKSTEP_DIVERGENCE is
- * ever reported in the overrun case because both sides independently
- * re-run the identical program, so they never disagree with each other.
- * run_lockstep.sh defaults to DELAY_MAX=0 for exactly this reason --
- * every zero-delay run is unaffected by this (no relative skew to
- * exploit); DELAY_MAX>0 remains off by default pending a deliberate
- * decision on completion-detection semantics (see lockstep_mem.sv's
- * comment), not because this module's own FSM is suspect.
+ * With DELAY_MAX>0 the two sides run at different speeds. lockstep_tb.sv
+ * stops both at the same retirement, so that is harmless; before that
+ * exact stop the faster side could run on past its tohost write (on
+ * ACT tests through an EBREAK to mtvec=0 and round the whole program
+ * again) while it waited for the other side.
  */
 
 module lockstep_wb_delay #(

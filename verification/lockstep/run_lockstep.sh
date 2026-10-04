@@ -6,10 +6,8 @@
 # Three modes:
 #   --mode selfproof   REF-vs-REF (both sides QV_MUTANT=0), one side on
 #                       flat SRAM, the other with independently perturbed
-#                       bus delay (and, unless --memcfg-b sram, the cache
-#                       memory configuration -- see lockstep_mem.sv's own
-#                       KNOWN GAP comment on g_cache_cfg before relying on
-#                       that combination). Every corpus entry must PASS.
+#                       bus delay (and, with --memcfg-b cache, the cache
+#                       memory configuration). Every corpus entry must PASS.
 #   --mode mutant       ref_core #(QV_MUTANT_B=N) vs #(0), no bus delay by
 #                       default. At least one corpus entry must FAIL --
 #                       the whole point is proving the comparator catches
@@ -38,11 +36,8 @@ cd "$REPO_ROOT" || exit 1
 MODE=selfproof
 MUTANT=0
 MEMCFG_B=sram
-# 0 (no delay injection) is the safe default -- see lockstep_wb_delay.sv's
-# own KNOWN GAP comment: some DLY_SEED_A/DLY_SEED_B pairs at DELAY_MAX>0
-# make a REF-vs-REF run retire far more than the program needs, not yet
-# root-caused. Every zero-delay run is fully proven; pass --delay-max
-# explicitly to experiment with real perturbation.
+# 0: no delay injection. --delay-max N perturbs each side's bus timing;
+# lockstep_tb.sv's exact stop keeps the resulting skew harmless.
 DELAY_MAX=0
 # 0 (disabled) is the default and matches every run before --irq-mode
 # existed -- lockstep_tb.sv itself defaults +IRQ_MODE to 0 when the
@@ -65,12 +60,13 @@ RUN_SEED=1
 # Sized for the corpus's own largest outlier: ACT4's U-00 (privilege
 # test) needs 393,509 retirements to complete -- confirmed both
 # standalone (testbench/rvfi_tracer.sv) and through this harness -- well
-# above every other ACT4 entry (a few thousand at most). A bigger
-# ceiling costs nothing for the other ~110 entries, which all terminate
-# via tohost long before reaching it; it only affects how long a
-# genuinely hung entry takes to report TIMEOUT.
-MAX_CYCLES=5000000
-WALL_TIMEOUT=600
+# above every other ACT4 entry (a few thousand at most), and about 5.6M
+# cycles behind the cache at --delay-max 8 (some 15+ minutes of wall
+# time). A bigger ceiling costs nothing for the other ~110 entries,
+# which all terminate via tohost long before reaching it; it only
+# affects how long a genuinely hung entry takes to report TIMEOUT.
+MAX_CYCLES=10000000
+WALL_TIMEOUT=3600
 
 usage() {
     cat <<EOF
@@ -80,9 +76,7 @@ Usage: run_lockstep.sh --mode selfproof|mutant|corrupt [options]
   --mutant N           QV_MUTANT_B value, 1-10 (--mode mutant only)
   --memcfg-b sram|cache  side B's memory config (default sram -- also applies
                         under --mode mutant, e.g. --mutant 9 needs cache)
-  --delay-max N        max bus-delay wait states (default 0 = disabled/safe;
-                        see lockstep_wb_delay.sv's KNOWN GAP comment before
-                        setting this nonzero)
+  --delay-max N        max bus-delay wait states (default 0 = disabled)
   --irq-mode N          0=disabled (default), 1=MTIP only, 2=MTIP+MEIP+SEIP
                         (see lockstep_irq.sv) -- qvgen.py's own corpus never
                         enables mstatus.MIE, so this only matters against a
@@ -99,8 +93,8 @@ Usage: run_lockstep.sh --mode selfproof|mutant|corrupt [options]
   --force               ignore cached per-entry results, rerun everything
   --random-count N       how many qvgen.py programs to generate for --corpus random (default 10)
   --seed N               base seed for delay/qvgen seeding (default 1)
-  --timeout N             per-entry cycle budget passed as +TIMEOUT (default 5000000)
-  --wall-timeout N        real seconds per entry before it's killed (default 600)
+  --timeout N             per-entry cycle budget passed as +TIMEOUT (default 10000000)
+  --wall-timeout N        real seconds per entry before it's killed (default 3600)
   -h, --help
 EOF
 }
@@ -157,6 +151,9 @@ RUN_DELAY_MAX=$DELAY_MAX
 [ "$MODE" == "mutant" ] && RUN_DELAY_MAX=0   # kill matrix: isolate the mutant, no timing noise
 [ "$MODE" == "corrupt" ] && RUN_DELAY_MAX=0  # corruption self-test: deterministic, no timing noise
 
+# Everything that changes a run's outcome is in the key, so a cached result
+# from a different configuration is never reused.
+RUN_KEY="${MODE}_m${QV_MUTANT_B}_${MEMCFG_B}_d${RUN_DELAY_MAX}_i${IRQ_MODE}"
 VVP_BIN="$OUTDIR/lockstep_${MODE}_m${QV_MUTANT_B}_${MEMCFG_B}_d${RUN_DELAY_MAX}.vvp"
 BUILD_LOG="$OUTDIR/build_${MODE}_m${QV_MUTANT_B}.log"
 if [ ! -e "$VVP_BIN" ] || [ "$FORCE" == "1" ]; then
@@ -313,7 +310,7 @@ echo "=== $total corpus entries selected (mode=$MODE corpus=$CORPUS) ==="
 # ---------------- run ----------------
 run_one() {
     local tag="$1" hex="$2" tohost="$3" max_retire="$4"
-    local resfile="$OUTDIR/result_${MODE}_m${QV_MUTANT_B}_${tag}"
+    local resfile="$OUTDIR/result_${RUN_KEY}_${tag}"
     if [ -e "$resfile" ] && [ "$FORCE" != "1" ]; then
         return
     fi
@@ -392,7 +389,7 @@ fi
 # an earlier run's leftover PASS files).
 pass=0; fail=0; timeout_n=0; error=0
 while IFS='|' read -r tag _hex _tohost _max_retire; do
-    f="$OUTDIR/result_${MODE}_m${QV_MUTANT_B}_${tag}"
+    f="$OUTDIR/result_${RUN_KEY}_${tag}"
     [ -e "$f" ] || { error=$((error+1)); continue; }
     line=$(head -1 "$f")
     case "$line" in
@@ -405,7 +402,7 @@ done < "$ENTRIES_FILE"
 echo "=== lockstep $MODE (QV_MUTANT_B=$QV_MUTANT_B, memcfg_b=$MEMCFG_B, delay_max=$RUN_DELAY_MAX): pass=$pass fail=$fail timeout=$timeout_n error=$error (of $total) ==="
 
 if [ "$MODE" == "selfproof" ]; then
-    [ "$fail" == "0" ] && [ "$error" == "0" ] || { echo "selfproof FAILED: expected zero fail/error" >&2; exit 1; }
+    [ "$fail" == "0" ] && [ "$error" == "0" ] && [ "$timeout_n" == "0" ] || { echo "selfproof FAILED: expected zero fail/timeout/error" >&2; exit 1; }
 elif [ "$MODE" == "mutant" ]; then
     [ "$fail" -ge "1" ] || { echo "mutant $MUTANT NOT CAUGHT by any corpus entry" >&2; exit 1; }
 fi

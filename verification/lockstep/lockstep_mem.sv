@@ -224,54 +224,11 @@ module lockstep_mem #(
                 .ack_i(dn_ack), .err_i(dn_err), .o_grant()
             );
         end else begin : g_cache_cfg
-            // RESOLVED (characterization, not an RTL bug): a REF-vs-REF
-            // run with this side on MEMCFG_CACHE=1 doesn't reach tohost in
-            // the expected retirement count -- I-add-00.elf (confirmed via
-            // testbench/rvfi_tracer.sv to need exactly 4327 retirements
-            // standalone) instead re-executes the whole program roughly 30
-            // times before timing out. This is NOT a cache coherency bug
-            // (the original suspicion here) -- direct instruction-level
-            // tracing of side A (always flat SRAM, unaffected by this
-            // generate branch) shows it tracks byte-for-byte identically
-            // on both the plain SRAM/SRAM selfproof (where it finishes
-            // cleanly right at the retirement that makes tohost nonzero)
-            // and this cache-config run (where, with an otherwise-IDENTICAL
-            // side A, it instead keeps retiring: a second tohost store, an
-            // EBREAK, then a clean (trap=0) redirect straight to address
-            // 0x0 -- the reset vector -- re-running the whole program).
-            // Root cause: lockstep_tb.sv's own tohost-completion check
-            // requires BOTH sides' comparator rings to be simultaneously
-            // empty (see that file's own comment on why ONE side reaching
-            // tohost first is deliberately not enough), and QV_LOCKSTEP_
-            // AHEAD_MAX (64) gives a side far more slack to keep retiring
-            // than the ~4-5 extra retirements this specific test needs to
-            // run from its own tohost write into its own EBREAK -- so
-            // whenever side B is meaningfully slower than side A (here:
-            // real cache-miss latency), side A keeps going well past its
-            // own functional completion while waiting for B to catch up.
-            // That alone would just cost a few harmless extra cycles on
-            // almost any other program; it's only unbounded here because
-            // I-add-00.elf's own RVMODEL_HALT epilogue ends in a bare
-            // EBREAK with mtvec never configured (reset value 0) and no
-            // trap handler installed -- ref_core.sv correctly takes EBREAK
-            // as a real synchronous trap (see the EBREAK Real-Trap
-            // Milestone) and vectors to mtvec=0, which happens to BE the
-            // reset vector, so "ran past completion" means "restarted the
-            // whole program" instead of a harmless spin. Confirmed
-            // deterministic and not a divergence: both sides always agree,
-            // because they're both independently re-running the identical
-            // program. Not fixed here -- the right fix (tighten AHEAD_MAX?
-            // stop a side's clock the instant ITS OWN tohost write is seen,
-            // pending only the other side's catch-up? something else?) is
-            // a real completion-semantics decision that could affect
-            // timing across the whole ACT4 corpus, left for a deliberate
-            // follow-up rather than a quick patch here. See
-            // lockstep_wb_delay.sv's own KNOWN GAP comment -- its
-            // DELAY_MAX>0 overrun is the same mechanism (relative-speed
-            // skew from random per-transaction delay instead of cache-miss
-            // latency), confirmed by reproducing its own documented
-            // DLY_SEED_A=3/DLY_SEED_B=4 case and getting the exact same
-            // 19699-retirement count.
+            // A side B slowed by cache misses runs at a different speed;
+            // lockstep_tb.sv's exact stop ends both sides at the same
+            // retirement (before it, the faster side could run on past
+            // its tohost write, through an EBREAK to mtvec=0 and round
+            // the whole program again).
             logic [31:0] cm_addr;
             logic [63:0] cm_dat_m2s, cm_dat_s2m;
             logic [7:0]  cm_sel;

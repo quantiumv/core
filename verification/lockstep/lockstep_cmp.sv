@@ -95,6 +95,9 @@ module lockstep_cmp #(
     input  logic         a_dbg_avail, b_dbg_avail,
     output logic         a_dbg_pop, b_dbg_pop,
 
+    // a side frozen at the run's stop point isn't stalled
+    input  logic         a_stopped, b_stopped,
+
     // corruption self-test (0 = disabled)
     input  logic [63:0]  corrupt_at,
     input  int           corrupt_field,
@@ -334,11 +337,11 @@ module lockstep_cmp #(
             a_stall_cnt_q  <= (a_rec_total != a_total_prev_q) ? 32'b0 : a_stall_cnt_q + 1'b1;
             b_stall_cnt_q  <= (b_rec_total != b_total_prev_q) ? 32'b0 : b_stall_cnt_q + 1'b1;
             if (!stall_fail_q && !val_mismatch_q) begin
-                if ((b_rec_total == b_total_prev_q) && (a_rec_total != a_total_prev_q) &&
+                if (!b_stopped && (b_rec_total == b_total_prev_q) && (a_rec_total != a_total_prev_q) &&
                     (b_stall_cnt_q > STALL_CYCLES[31:0])) begin
                     stall_fail_q <= 1'b1;
                     $display("LOCKSTEP_DIVERGENCE: side B has not retired in %0d cycles while side A keeps retiring", STALL_CYCLES);
-                end else if ((a_rec_total == a_total_prev_q) && (b_rec_total != b_total_prev_q) &&
+                end else if (!a_stopped && (a_rec_total == a_total_prev_q) && (b_rec_total != b_total_prev_q) &&
                              (a_stall_cnt_q > STALL_CYCLES[31:0])) begin
                     stall_fail_q <= 1'b1;
                     $display("LOCKSTEP_DIVERGENCE: side A has not retired in %0d cycles while side B keeps retiring", STALL_CYCLES);
