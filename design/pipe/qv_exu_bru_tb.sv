@@ -57,13 +57,15 @@ module qv_exu_bru_tb;
 
     // present one request, check the writeback the following cycle
     task automatic run(input string name, input qv_bru_op_e op, input logic [63:0] a, input logic [63:0] b,
-                       input logic [63:0] pc, input logic [63:0] imm, input logic rvc = 1'b0);
-        logic [63:0] ft, tgt, nxt;
+                       input logic [63:0] pc, input logic [63:0] imm, input logic rvc = 1'b0,
+                       input int pred = 0);   // frontend went: 0 fall-through, 1 the real target, 2 elsewhere
+        logic [63:0] ft, tgt, nxt, pn;
         logic [QV_ROB_TAG_W-1:0] tag;
         tag = QV_ROB_TAG_W'(n_req++);
         ft  = pc + (rvc ? 64'd2 : 64'd4);
         tgt = (op == QV_BR_JALR) ? ((a + b) & ~64'd1) : pc + imm;
         nxt = golden_taken(op, a, b) ? tgt : ft;
+        pn  = (pred == 1) ? tgt : (pred == 2) ? tgt + 64'd8 : ft;
         repeat (2) @(negedge clk);                       // an idle cycle drains the previous request
         req       = '0;
         req.valid = 1'b1;
@@ -74,6 +76,7 @@ module qv_exu_bru_tb;
         req.pc    = pc;
         req.imm   = imm;
         req.rvc   = rvc;
+        req.pred_next = pn;
         #1;
         check({name, ": no writeback in the issue cycle"}, {63'b0, wb.valid}, 64'd0);
         @(posedge clk); #1;
@@ -82,7 +85,7 @@ module qv_exu_bru_tb;
         check({name, ": tag"}, {60'b0, wb.tag}, {60'b0, tag});
         check({name, ": link"}, wb.value, ft);
         check({name, ": next_pc"}, wb.next_pc, nxt);
-        check({name, ": mispredict"}, {63'b0, wb.mispredict}, {63'b0, nxt != ft});
+        check({name, ": mispredict"}, {63'b0, wb.mispredict}, {63'b0, nxt != pn});
     endtask
 
     localparam logic [63:0] MIN = 64'h8000_0000_0000_0000, MAX = 64'h7FFF_FFFF_FFFF_FFFF;
@@ -130,21 +133,31 @@ module qv_exu_bru_tb;
         run("BEQ taken to pc+2 rvc", QV_BR_BEQ, 64'd1, 64'd1, PC, 64'd2, 1'b1);
         run("JAL rvc link", QV_BR_JAL, 64'd0, 64'd0, PC, 64'd100, 1'b1);
 
+        // ---- against a taken prediction ----
+        run("BNE predicted taken, falls through", QV_BR_BNE, 64'd5, 64'd5, PC, -64'd32, 1'b0, 1);
+        run("BLT predicted taken, taken", QV_BR_BLT, '1, 64'd0, PC, -64'd32, 1'b0, 1);
+        run("C.BEQZ predicted taken, falls through", QV_BR_BEQ, 64'd1, 64'd0, PC, -64'd16, 1'b1, 1);
+        run("JAL predicted taken", QV_BR_JAL, 64'd0, 64'd0, PC, 64'd2048, 1'b0, 1);
+        run("JAL predicted to the wrong place", QV_BR_JAL, 64'd0, 64'd0, PC, 64'd2048, 1'b0, 2);
+        run("JALR predicted elsewhere", QV_BR_JALR, 64'h2000, 64'd16, PC, 64'd0, 1'b0, 2);
+
         // ---- random ----
         for (int i = 0; i < 2000; i++) begin
             logic [63:0] a, b, imm;
             a   = {$urandom, $urandom};
             b   = ($urandom % 4 == 0) ? a : {$urandom, $urandom};
             imm = 64'($signed(13'($urandom)) & ~64'd1);
-            run($sformatf("random %0d", i), ops[$urandom % 8], a, b, {$urandom, $urandom}, imm, 1'($urandom));
+            run($sformatf("random %0d", i), ops[$urandom % 8], a, b, {$urandom, $urandom}, imm, 1'($urandom),
+                int'($urandom % 3));
         end
 
         // ---- back-to-back requests: each result lands exactly one cycle later ----
         @(negedge clk);
         req = '0; req.valid = 1'b1; req.tag = 1; req.op = 5'(QV_BR_JAL); req.pc = PC; req.imm = 64'd64;
+        req.pred_next = PC + 64'd64;
         @(negedge clk);
         check("back-to-back: first result", wb.next_pc, PC + 64'd64);
-        req.tag = 2; req.pc = PC + 64'd64; req.imm = 64'd4;
+        req.tag = 2; req.pc = PC + 64'd64; req.imm = 64'd4; req.pred_next = PC + 64'd68;
         @(negedge clk);
         check("back-to-back: second result tag", {60'b0, wb.tag}, 64'd2);
         check("back-to-back: second not a mispredict", {63'b0, wb.mispredict}, 64'd0);

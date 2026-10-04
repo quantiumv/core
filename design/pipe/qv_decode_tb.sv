@@ -57,7 +57,7 @@ module qv_decode_tb;
 
     // feed one instruction, let decode register it, leave it held in the slot
     task automatic feed(input logic [31:0] instr, input logic xcpt = 1'b0, input logic [3:0] cause = 4'd0,
-                        input logic rvc = 1'b0);
+                        input logic rvc = 1'b0, input logic pred = 1'b0, input logic [63:0] tgt = '0);
         @(negedge clk);
         issue_ready        = 1'b1;
         iq_valid           = 1'b1;
@@ -65,6 +65,8 @@ module qv_decode_tb;
         iq_data.pc         = 64'h1000;
         iq_data.raw        = rvc ? {16'b0, instr[15:0]} : instr;
         iq_data.rvc        = rvc;
+        iq_data.pred_taken = pred;
+        iq_data.pred_tgt   = tgt;
         iq_data.xcpt       = xcpt;
         iq_data.xcpt_cause = cause;
         @(posedge clk);
@@ -443,6 +445,16 @@ module qv_decode_tb;
         feed({16'b0, encode_c_addi(1, 8)}, 1'b1, 4'd1, 1'b1);
         check("faulted C.ADDI: cause 1", {60'b0, uop.xcpt_cause}, 64'd1);
         check("faulted C.ADDI: placeholder, no rs1", {59'b0, uop.rs1}, 64'd0);
+
+        // ---------------- the frontend's prediction rides along ----------------
+        feed(encode_j(-64, 1, `OPC_JAL), 1'b0, 4'd0, 1'b0, 1'b1, 64'h0FC0);
+        check("predicted JAL: pred_taken", {63'b0, uop.pred_taken}, 64'd1);
+        check("predicted JAL: pred_tgt", uop.pred_tgt, 64'h0FC0);
+        feed({16'b0, encode_c_beqz(-8, 3'd0)}, 1'b0, 4'd0, 1'b1, 1'b1, 64'h0FF8);
+        check("predicted C.BEQZ: pred_taken", {63'b0, uop.pred_taken}, 64'd1);
+        check("predicted C.BEQZ: pred_tgt", uop.pred_tgt, 64'h0FF8);
+        feed(encode_b(8, 1, 2, 3'b000, `OPC_BRANCH));
+        check("unpredicted BEQ: pred_taken", {63'b0, uop.pred_taken}, 64'd0);
 
         // ---------------- not implemented / faults ----------------
         expect_fault("LW (not built yet)",    encode_i(8, 7, 3'b010, 5, `OPC_LOAD), 1'b0, 4'd0, 4'd2);
