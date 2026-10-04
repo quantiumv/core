@@ -243,8 +243,13 @@ build_fw_entries() {
         IFS='|' read -r target hexname max_retire <<< "$line"
         target="$(echo "$target" | xargs)"; hexname="$(echo "$hexname" | xargs)"; max_retire="$(echo "$max_retire" | xargs)"
         [ -n "$target" ] || continue
-        (cd "$REPO_ROOT/firmware" && make "$target" > "$OUTDIR/fwbuild_${target}.log" 2>&1)
-        local hex="$REPO_ROOT/firmware/$hexname"
+        # firmware/'s targets always rebuild, so another run's make can
+        # rewrite a hex while this run loads it: build under a lock and run
+        # from a private copy
+        local hex="$OUTDIR/fw_${target}.hex"
+        rm -f "$hex"
+        (cd "$REPO_ROOT/firmware" && flock "${TMPDIR:-/tmp}/qv_lockstep_fw.lock" \
+            sh -c "make '$target' > '$OUTDIR/fwbuild_${target}.log' 2>&1 && cp '$hexname' '$hex'")
         [ -e "$hex" ] || { echo "WARN: $hex missing after 'make $target', skipping" >&2; continue; }
         echo "fw_${target}|${hex}||${max_retire}" >> "$ENTRIES_FILE"
     done < "$REPO_ROOT/verification/lockstep/fw.list"
