@@ -2,7 +2,8 @@
 # Columns (| separated, no | inside a field): tag | testbench | extra
 # files (comma-separated, may be empty) | cwd (design or testbench) |
 # cores (comma-separated subset of fsm,ref,pipe) | expect (pass, or
-# xfail:<reason>) | timeout seconds (blank = script default).
+# xfail:<reason>) | timeout seconds (blank = script default) | extra
+# iverilog flags (optional, e.g. -P parameter overrides).
 # Blank lines and #-comments ignored.
 #
 # "cores" tracks which of the three core builds (see run_regress.sh
@@ -12,7 +13,12 @@
 # X actually SKIPS any row not listing X (wired up as part of P3.3,
 # which is also when the "ref" value first became real). "pipe" rows
 # get added as design/pipe/ comes online (P4a onward), per the
-# ARCH/RET/STIM/UARCH test-class breakdown in that plan.
+# ARCH/RET/STIM/UARCH test-class breakdown in that plan. At the P4a
+# gate: core_pipe's own module tests plus every core-level test whose
+# program stays within what core_pipe implements. The rest need loads/
+# stores, FENCE, A, M divide, U/S modes, interrupts, debug or Sv39, or
+# are white-box tests reading core.sv internals (state, fstate, TLB
+# registers) that get a QV_PIPE_AS_CORE variant when their feature lands.
 #
 # 8 rows stay fsm-only: the design/*_tb.sv unit tests that instantiate
 # a leaf module (alu/c_expand/csr_file/divider/register_file) directly
@@ -48,15 +54,15 @@ design_wb_arbiter2_tb|design/wb_arbiter2_tb.sv||design|fsm,ref|pass|
 tb_a_encode_crosscheck_tb|testbench/a_encode_crosscheck_tb.sv||testbench|fsm,ref|pass|
 tb_c_encode_crosscheck_tb|testbench/c_encode_crosscheck_tb.sv||testbench|fsm,ref|pass|
 tb_core_a_toolchain_tb|testbench/core_a_toolchain_tb.sv||design|fsm,ref|pass|
-tb_core_alu_ops_tb|testbench/core_alu_ops_tb.sv||design|fsm,ref|pass|
-tb_core_branch_jump_tb|testbench/core_branch_jump_tb.sv||design|fsm,ref|pass|
+tb_core_alu_ops_tb|testbench/core_alu_ops_tb.sv||design|fsm,ref,pipe|pass|
+tb_core_branch_jump_tb|testbench/core_branch_jump_tb.sv||design|fsm,ref,pipe|pass|
 tb_core_c_toolchain_tb|testbench/core_c_toolchain_tb.sv||design|fsm,ref|pass|
-tb_core_csr_toolchain_tb|testbench/core_csr_toolchain_tb.sv||design|fsm,ref|pass|
+tb_core_csr_toolchain_tb|testbench/core_csr_toolchain_tb.sv||design|fsm,ref,pipe|pass|
 tb_core_load_store_tb|testbench/core_load_store_tb.sv||design|fsm,ref|pass|
 tb_core_m_toolchain_tb|testbench/core_m_toolchain_tb.sv||design|fsm,ref|pass|
 tb_core_priv_toolchain_tb|testbench/core_priv_toolchain_tb.sv||design|fsm,ref|pass|
-tb_core_rv64_word_ops_tb|testbench/core_rv64_word_ops_tb.sv||design|fsm,ref|pass|
-tb_core_upper_imm_tb|testbench/core_upper_imm_tb.sv||design|fsm,ref|pass|
+tb_core_rv64_word_ops_tb|testbench/core_rv64_word_ops_tb.sv||design|fsm,ref,pipe|pass|
+tb_core_upper_imm_tb|testbench/core_upper_imm_tb.sv||design|fsm,ref,pipe|pass|
 tb_core_wb_tb|testbench/core_wb_tb.sv||design|fsm,ref|pass|
 tb_jtag_dmi_e2e_tb|testbench/jtag_dmi_e2e_tb.sv||design|fsm,ref|pass|
 tb_jtag_tap_tb|testbench/jtag_tap_tb.sv||design|fsm,ref|pass|
@@ -74,8 +80,8 @@ tb_soc_sba_running_tb|testbench/soc_sba_running_tb.sv||design|fsm,ref|pass|
 tb_core_a_ext_tb|testbench/core_a_ext_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm,ref|pass|
 tb_core_bus_fault_trap_tb|testbench/core_bus_fault_trap_tb.sv|testbench/core_wb4_sram_harness.sv,testbench/state_reached_monitor.sv|design|fsm,ref|pass|
 tb_core_c_ext_tb|testbench/core_c_ext_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm,ref|pass|
-tb_core_c_illegal_trap_tb|testbench/core_c_illegal_trap_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm,ref|pass|
-tb_core_csr_readonly_trap_tb|testbench/core_csr_readonly_trap_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm,ref|pass|
+tb_core_c_illegal_trap_tb|testbench/core_c_illegal_trap_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm,ref,pipe|pass|
+tb_core_csr_readonly_trap_tb|testbench/core_csr_readonly_trap_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm,ref,pipe|pass|
 tb_core_debug_csr_violation_tb|testbench/core_debug_csr_violation_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm,ref|pass|
 tb_core_debug_halt_tb|testbench/core_debug_halt_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm,ref|pass|
 tb_core_ebreak_trap_tb|testbench/core_ebreak_trap_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm,ref|pass|
@@ -111,3 +117,19 @@ tb_core_pmp_tb|testbench/core_pmp_tb.sv|testbench/core_wb4_sram_harness.sv|desig
 tb_core_amo_write_fault_tb|testbench/core_amo_write_fault_tb.sv|testbench/core_amo_write_fault_harness.sv|design|fsm,ref|pass|
 tb_dm_tb|testbench/dm_tb.sv|testbench/dm_core_harness.sv|design|fsm,ref|pass|
 tb_core_trigger_tb|testbench/core_trigger_tb.sv|testbench/dm_core_harness.sv|design|fsm,ref|pass|
+
+# === design/pipe/*_tb.sv (core_pipe modules) ===
+# Module-level tests; the pipe file list compiles every module they use.
+pipe_fetch_tb|design/pipe/qv_fetch_tb.sv||design|pipe|pass|
+pipe_align_fifo_tb|design/pipe/qv_align_fifo_tb.sv||design|pipe|pass|600
+pipe_decode_tb|design/pipe/qv_decode_tb.sv||design|pipe|pass|
+pipe_exu_bru_tb|design/pipe/qv_exu_bru_tb.sv||design|pipe|pass|
+pipe_commit_tb|design/pipe/qv_commit_tb.sv||design|pipe|pass|
+pipe_rob_tb_d8|design/pipe/qv_rob_tb.sv||design|pipe|pass||-Pqv_rob_tb.ROB_DEPTH=8
+pipe_rob_tb_d4|design/pipe/qv_rob_tb.sv||design|pipe|pass||-Pqv_rob_tb.ROB_DEPTH=4
+pipe_rob_tb_d2|design/pipe/qv_rob_tb.sv||design|pipe|pass||-Pqv_rob_tb.ROB_DEPTH=2
+pipe_backend_tb_b1s0r8|design/pipe/qv_backend_tb.sv||design|pipe|pass||-Pqv_backend_tb.BYPASS_EN=1 -Pqv_backend_tb.SERIALIZE=0 -Pqv_backend_tb.ROB_DEPTH=8
+pipe_backend_tb_b0s0r8|design/pipe/qv_backend_tb.sv||design|pipe|pass||-Pqv_backend_tb.BYPASS_EN=0 -Pqv_backend_tb.SERIALIZE=0 -Pqv_backend_tb.ROB_DEPTH=8
+pipe_backend_tb_b1s1r8|design/pipe/qv_backend_tb.sv||design|pipe|pass||-Pqv_backend_tb.BYPASS_EN=1 -Pqv_backend_tb.SERIALIZE=1 -Pqv_backend_tb.ROB_DEPTH=8
+pipe_backend_tb_b1s0r4|design/pipe/qv_backend_tb.sv||design|pipe|pass||-Pqv_backend_tb.BYPASS_EN=1 -Pqv_backend_tb.SERIALIZE=0 -Pqv_backend_tb.ROB_DEPTH=4
+pipe_backend_tb_b0s0r4|design/pipe/qv_backend_tb.sv||design|pipe|pass||-Pqv_backend_tb.BYPASS_EN=0 -Pqv_backend_tb.SERIALIZE=0 -Pqv_backend_tb.ROB_DEPTH=4
