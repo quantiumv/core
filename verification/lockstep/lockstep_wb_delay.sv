@@ -152,8 +152,11 @@ module lockstep_wb_delay #(
             // hang: fw a_test at DELAY_MAX=8). An AMO's read-to-write gap
             // stays locked because the master itself keeps lock high.
             assign dn_lock_o = (state_q == S_IDLE) ? up_lock_i : lock_q;
-            assign dn_cyc_o  = (state_q == S_REQ);
-            assign dn_stb_o  = (state_q == S_REQ);
+            // Dropped in the response cycle, like every master here: held,
+            // wb4_sram serves the request a second time (a duplicate write,
+            // a second MMIO access) and re-acks the cycle after.
+            assign dn_cyc_o  = (state_q == S_REQ) && !dn_ack_i && !dn_err_i;
+            assign dn_stb_o  = dn_cyc_o;
             assign up_dat_o  = dn_dat_i;
             assign up_ack_o  = (state_q == S_REQ) && dn_ack_i;
             assign up_err_o  = (state_q == S_REQ) && dn_err_i;
