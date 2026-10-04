@@ -41,8 +41,7 @@ module qv_decode (
     input  logic              i_flush,
 
     input  logic              i_iq_valid,
-    // pred_taken/pred_tgt aren't consumed until prediction lands; xcpt_hi
-    // matters only for page faults (Sv39)
+    // xcpt_hi matters only for page faults (Sv39)
     /* verilator lint_off UNUSEDSIGNAL */
     input  qv_pkg::fe_instr_t i_iq_data,
     /* verilator lint_on UNUSEDSIGNAL */
@@ -244,6 +243,8 @@ module qv_decode (
         // a CSR's rd value exists only at commit, so nothing younger may
         // run ahead on it -- flushing after every CSR op covers that too
         uop_d.serialize = is_csr;
+        uop_d.pred_taken = i_iq_data.pred_taken;
+        uop_d.pred_tgt   = i_iq_data.pred_tgt;
         if (i_iq_data.xcpt) begin
             uop_d.xcpt       = 1'b1;
             uop_d.xcpt_cause = i_iq_data.xcpt_cause;

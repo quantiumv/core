@@ -128,7 +128,9 @@ module qv_issue #(
     assign o_alloc_raw     = i_uop.raw;
     assign o_alloc_rd      = i_uop.rd;
     assign o_alloc_rd_wen  = i_uop.rd_wen;
-    assign o_alloc_next_pc = i_uop.pc + (i_uop.rvc ? 64'd2 : 64'd4);
+    // the frontend's choice; the BRU checks it against the resolved one
+    wire [63:0] pred_next  = i_uop.pred_taken ? i_uop.pred_tgt : i_uop.pc + (i_uop.rvc ? 64'd2 : 64'd4);
+    assign o_alloc_next_pc = pred_next;
 
     always_comb begin
         o_alloc_shadow           = '0;
@@ -165,6 +167,7 @@ module qv_issue #(
         req.pc      = i_uop.pc;
         req.imm     = i_uop.imm3;
         req.rvc     = i_uop.rvc;
+        req.pred_next = pred_next;
 
         o_alu_req       = req;
         o_alu_req.valid = o_issue && !to_bru;

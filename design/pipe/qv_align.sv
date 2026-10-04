@@ -24,6 +24,15 @@
  * latter) -- and is dropped. Nothing after it matters: that instruction
  * traps at commit and everything younger is flushed.
  *
+ * Static prediction happens here too: JAL and C.J are predicted taken,
+ * conditional branches (including C.BEQZ/C.BNEZ) taken when their offset
+ * is negative -- loops. A predicted-taken instruction carries pred_taken
+ * and pred_tgt, is the last one emitted that cycle, and redirects fetch
+ * to the target (o_redirect); that drops the rest of the fetched stream
+ * and this module's own state, but nothing already in the IQ. JALR isn't
+ * predicted (its target is a register). The BRU checks every prediction
+ * and commit corrects a wrong one.
+ *
  * Instructions are emitted only when the IQ has room for two.
  */
 module qv_align (
@@ -44,7 +53,10 @@ module qv_align (
     output qv_pkg::fe_instr_t o_push0_data,
     output logic              o_push1_valid,
     output qv_pkg::fe_instr_t o_push1_data,
-    input  logic              i_push_ready
+    input  logic              i_push_ready,
+
+    output logic              o_redirect_valid,
+    output logic [63:0]       o_redirect_pc
 );
     import qv_pkg::*;
 
@@ -67,11 +79,41 @@ module qv_align (
         endcase
     endfunction
 
+    // Static prediction: JAL/C.J always taken, conditional branches
+    // (32-bit and C.BEQZ/C.BNEZ) taken when backward. Returns {taken, target}.
+    function automatic logic [64:0] predict(input logic [31:0] raw, input logic rvc, input logic [63:0] pc);
+        logic        taken;
+        logic [63:0] off;
+        taken = 1'b0;
+        off   = '0;
+        if (rvc) begin
+            if (raw[1:0] == 2'b01 && raw[15:13] == 3'b101) begin                    // C.J
+                taken = 1'b1;
+                off   = {{52{raw[12]}}, raw[12], raw[8], raw[10:9], raw[6], raw[7], raw[2],
+                         raw[11], raw[5:3], 1'b0};
+            end else if (raw[1:0] == 2'b01 && raw[15:14] == 2'b11) begin            // C.BEQZ/C.BNEZ
+                taken = raw[12];
+                off   = {{55{raw[12]}}, raw[12], raw[6:5], raw[2], raw[11:10], raw[4:3], 1'b0};
+            end
+        end else if (raw[6:0] == 7'b1101111) begin                                  // JAL
+            taken = 1'b1;
+            off   = {{43{raw[31]}}, raw[31], raw[19:12], raw[20], raw[30:21], 1'b0};
+        end else if (raw[6:0] == 7'b1100011 && raw[14:13] != 2'b01) begin           // branch
+            taken = raw[31];
+            off   = {{51{raw[31]}}, raw[31], raw[7], raw[30:25], raw[11:8], 1'b0};
+        end
+        return {taken, pc + off};
+    endfunction
+
     function automatic fe_instr_t mk(input logic [63:0] pc, input logic [31:0] raw, input logic rvc);
-        mk     = '0;
-        mk.pc  = pc;
-        mk.raw = raw;
-        mk.rvc = rvc;
+        logic [64:0] p;
+        p             = predict(raw, rvc, pc);
+        mk            = '0;
+        mk.pc         = pc;
+        mk.raw        = raw;
+        mk.rvc        = rvc;
+        mk.pred_taken = p[64];
+        mk.pred_tgt   = p[63:0];
     endfunction
 
     logic [2:0]  cur;            // next halfword of the head dword, 4 = used up
@@ -84,6 +126,8 @@ module qv_align (
         o_push1_valid = 1'b0;
         o_push0_data  = '0;
         o_push1_data  = '0;
+        o_redirect_valid = 1'b0;
+        o_redirect_pc    = '0;
         stash         = 1'b0;
         stash_hw      = '0;
         cur           = {1'b0, start};
@@ -118,8 +162,12 @@ module qv_align (
                     cur = cur + 3'd2;
                 end
             end
+            if (o_push0_valid && o_push0_data.pred_taken) begin
+                o_redirect_valid = 1'b1;
+                o_redirect_pc    = o_push0_data.pred_tgt;
+            end
             // slot 1: one more, if this dword has any left
-            if (o_push0_valid && cur != 3'd4) begin
+            if (o_push0_valid && !o_redirect_valid && cur != 3'd4) begin
                 h = hw(i_buf_data, cur[1:0]);
                 if (h[1:0] != 2'b11) begin
                     o_push1_valid = 1'b1;
@@ -134,14 +182,19 @@ module qv_align (
                     o_push1_data  = mk(base + {61'b0, cur[1:0], 1'b0}, {hw(i_buf_data, cur[1:0] + 2'd1), h}, 1'b0);
                     cur = cur + 3'd2;
                 end
+                if (o_push1_valid && o_push1_data.pred_taken) begin
+                    o_redirect_valid = 1'b1;
+                    o_redirect_pc    = o_push1_data.pred_tgt;
+                end
             end
         end
     end
 
-    assign o_buf_pop = go && (cur == 3'd4);
+    // on a redirect, fetch drops the whole buffer itself
+    assign o_buf_pop = go && (cur == 3'd4) && !o_redirect_valid;
 
     always_ff @(posedge clk) begin
-        if (rst || i_flush) begin
+        if (rst || i_flush || o_redirect_valid) begin
             mid_q  <= 1'b0;
             pend_q <= 1'b0;
         end else if (go) begin

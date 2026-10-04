@@ -14,9 +14,10 @@
  * the link (pc + instruction length); branches don't write rd, so it's
  * ignored for them.
  *
- * The frontend always predicts fall-through so far, so mispredict means
- * the resolved next pc isn't pc + length. A taken branch whose target
- * happens to be the next instruction is therefore not a mispredict.
+ * mispredict means the resolved next pc differs from the one the
+ * frontend went to (pred_next: its static prediction's target, or
+ * pc + length). A taken branch whose target happens to be the next
+ * instruction is therefore not a mispredict when predicted not-taken.
  */
 module qv_exu_bru (
     input  logic            clk,
@@ -64,6 +65,6 @@ module qv_exu_bru (
         o_wb.tag        = req_q.tag;
         o_wb.value      = fallthrough;
         o_wb.next_pc    = next_pc;
-        o_wb.mispredict = req_q.valid && (next_pc != fallthrough);
+        o_wb.mispredict = req_q.valid && (next_pc != req_q.pred_next);
     end
 endmodule

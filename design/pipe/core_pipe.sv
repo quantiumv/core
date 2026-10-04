@@ -41,9 +41,10 @@
  * Debug Module's GPR/CSR access mux (core.sv wires it around regfile0
  * and csr_file0) comes back with debug support.
  *
- * Redirects come only from commit (a retiring mispredicted branch or
- * jump) and kill everything in flight: the same signal is every stage's
- * flush. The frontend predicts fall-through for now.
+ * Redirects: commit's (a trap, xRET, serialize, or a retiring
+ * mispredicted branch or jump) kill everything in flight -- the same
+ * signal is every stage's flush. Align's (a statically predicted-taken
+ * branch or jump) only restart fetch; commit's wins a tie.
  */
 // Testbenches instantiate `core` with no parameter overrides, so the
 // debug knobs can also be set from the command line.
@@ -185,10 +186,12 @@ module core_pipe
 
     localparam logic [63:0] RESET_PC = 64'h0;   // core.sv's own reset pc
 
-    // ---------------- redirect (from commit) ----------------
-    logic        redirect_valid;
-    logic [63:0] redirect_pc;
+    // ---------------- redirects ----------------
+    logic        redirect_valid, fe_redirect_valid;
+    logic [63:0] redirect_pc, fe_redirect_pc;
     wire         flush = redirect_valid;
+    wire         fetch_redirect    = redirect_valid || fe_redirect_valid;
+    wire [63:0]  fetch_redirect_pc = redirect_valid ? redirect_pc : fe_redirect_pc;
 
     // ---------------- F: fetch ----------------
     logic        fb_valid, fb_err, fb_pop;
@@ -198,7 +201,7 @@ module core_pipe
         .clk(clk), .rst(rst),
         .wb_fetch_addr_o(wb_fetch_addr_o), .wb_fetch_cyc_o(wb_fetch_cyc_o), .wb_fetch_stb_o(wb_fetch_stb_o),
         .wb_fetch_dat_i(wb_fetch_dat_i), .wb_fetch_ack_i(wb_fetch_ack_i), .wb_fetch_err_i(wb_fetch_err_i),
-        .i_redirect_valid(redirect_valid), .i_redirect_pc(redirect_pc),
+        .i_redirect_valid(fetch_redirect), .i_redirect_pc(fetch_redirect_pc),
         .o_buf_valid(fb_valid), .o_buf_pc(fb_pc), .o_buf_data(fb_data), .o_buf_err(fb_err),
         .i_buf_pop(fb_pop)
     );
@@ -219,7 +222,8 @@ module core_pipe
         .o_buf_pop(fb_pop),
         .o_push0_valid(p0_valid), .o_push0_data(p0_data),
         .o_push1_valid(p1_valid), .o_push1_data(p1_data),
-        .i_push_ready(iq_push_ready)
+        .i_push_ready(iq_push_ready),
+        .o_redirect_valid(fe_redirect_valid), .o_redirect_pc(fe_redirect_pc)
     );
 
     qv_fifo #(.WIDTH(FE_W), .DEPTH(4)) iq0 (

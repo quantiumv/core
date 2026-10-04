@@ -94,6 +94,8 @@ package qv_pkg;
         logic [11:0] csr_addr;
         logic        csr_wsup;     // CSRRS/CSRRC(I) with a zero source: read only
         logic        serialize;    // flush and refetch after this commits
+        logic        pred_taken;   // the frontend redirected to pred_tgt after this
+        logic [63:0] pred_tgt;
         logic        xcpt;
         logic [3:0]  xcpt_cause;
     } uop_t;
@@ -148,6 +150,7 @@ package qv_pkg;
         logic [63:0]             pc;
         logic [63:0]             imm;      // uop_t.imm3
         logic                    rvc;
+        logic [63:0]             pred_next; // where the frontend went after this
     } fu_req_t;
 
     // Functional unit -> ROB and bypass (the writeback bus).
