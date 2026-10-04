@@ -31,6 +31,7 @@
 design_alu_tb|design/alu_tb.sv||design|fsm|pass|
 design_c_expand_tb|design/c_expand_tb.sv||design|fsm|pass|
 design_cache_complex_tb|design/cache_complex_tb.sv||design|fsm,ref|pass|
+design_cache_complex_slow_tb|design/cache_complex_tb.sv||design|fsm,ref|pass||-Pcache_complex_tb.DN_WAIT=3
 design_clint_tb|design/clint_tb.sv||design|fsm,ref|pass|
 design_csr_file_priv_random_tb|design/csr_file_priv_random_tb.sv||design|fsm|pass|
 design_csr_file_random_tb|design/csr_file_random_tb.sv||design|fsm|pass|

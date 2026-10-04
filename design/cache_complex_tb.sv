@@ -20,8 +20,18 @@
  * shared downstream arbiter. Each port is driven as a proper Wishbone
  * classic master (cyc/stb held until its OWN ack/err), and the concurrent
  * cases run both masters at once and check each port independently.
+ *
+ * DN_WAIT > 0 puts a slow slave in front of the SRAM: it latches each
+ * downstream request on its first cycle and answers DN_WAIT+1 cycles
+ * later, like a real slave that starts work as soon as it sees a request.
+ * The concurrent cases then land a second request while a beat is
+ * outstanding, so a grant that moves mid-beat (sending one cache's
+ * response to the other) shows up as wrong data and port counts, and the
+ * stability monitor below flags the moved request itself.
  */
-module cache_complex_tb;
+module cache_complex_tb #(
+    parameter int DN_WAIT = 0
+);
 
     localparam NUM_LINES  = 4;
     localparam LINE_WORDS = 4;
@@ -62,11 +72,44 @@ module cache_complex_tb;
         .mem_ack_i(mem_ack), .mem_err_i(mem_err)
     );
 
+    // Slow-slave model (DN_WAIT > 0): latch, wait DN_WAIT cycles, then
+    // present the latched request to mem0 until it answers.
+    logic [31:0] dn_addr_q;
+    logic [63:0] dn_dat_q;
+    logic [7:0]  dn_sel_q;
+    logic        dn_we_q, dn_busy_q;
+    int          dn_cnt_q;
+    logic        s_ack, s_err;
+    wire         dn_go = dn_busy_q && dn_cnt_q == DN_WAIT && !s_ack && !s_err;
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            dn_busy_q <= 1'b0;
+        end else if (!dn_busy_q) begin
+            if (mem_cyc && mem_stb) begin
+                dn_busy_q <= 1'b1;
+                dn_cnt_q  <= 0;
+                dn_addr_q <= mem_addr;
+                dn_dat_q  <= mem_dat_m2s;
+                dn_sel_q  <= mem_sel;
+                dn_we_q   <= mem_we;
+            end
+        end else if (s_ack || s_err) begin
+            dn_busy_q <= 1'b0;
+        end else if (dn_cnt_q < DN_WAIT) begin
+            dn_cnt_q <= dn_cnt_q + 1;
+        end
+    end
+
+    wire slow = (DN_WAIT > 0);
     wb4_sram #(.num_words(NUM_WORDS)) mem0 (
         .clk(clk), .rst(rst),
-        .addr_i(mem_addr), .dat_i(mem_dat_m2s), .dat_o(mem_dat_s2m), .sel_i(mem_sel),
-        .ack_o(mem_ack), .err_o(mem_err), .cyc_i(mem_cyc), .stb_i(mem_stb), .we_i(mem_we)
+        .addr_i(slow ? dn_addr_q : mem_addr), .dat_i(slow ? dn_dat_q : mem_dat_m2s),
+        .dat_o(mem_dat_s2m), .sel_i(slow ? dn_sel_q : mem_sel),
+        .ack_o(s_ack), .err_o(s_err),
+        .cyc_i(slow ? dn_go : mem_cyc), .stb_i(slow ? dn_go : mem_stb), .we_i(slow ? dn_we_q : mem_we)
     );
+    assign mem_ack = s_ack;
+    assign mem_err = s_err;
 
     int pass_count = 0;
     int fail_count = 0;
@@ -90,8 +133,40 @@ module cache_complex_tb;
      */
     int   fp_acks = 0, fp_errs = 0, dp_acks = 0, dp_errs = 0, mem_resps = 0;
     int   mem_base, ties_base;
-    int   ties = 0, tie_violations = 0;
+    int   ties = 0, tie_violations = 0, dn_violations = 0;
     logic both_busy_seen = 1'b0;
+
+    /*
+     * Downstream request stability. A request starts in a cycle with cyc
+     * high and nothing outstanding, or in the response cycle of the one
+     * before; it is outstanding from the next cycle until its own ack/err.
+     * While outstanding with no response this cycle, cyc must stay high
+     * and addr/we/sel (and write data) must not change.
+     */
+    logic        dn_out_q = 1'b0;
+    logic [31:0] dn_cap_addr;
+    logic [63:0] dn_cap_dat;
+    logic [7:0]  dn_cap_sel;
+    logic        dn_cap_we;
+    wire         dn_resp = mem_ack || mem_err;
+    wire         dn_hold = dn_out_q && !dn_resp;
+    always @(posedge clk) begin
+        if (rst) begin
+            dn_out_q <= 1'b0;
+        end else begin
+            if (dn_hold && !(mem_cyc && mem_stb && mem_addr == dn_cap_addr && mem_we == dn_cap_we
+                             && mem_sel == dn_cap_sel && (!mem_we || mem_dat_m2s == dn_cap_dat)))
+                dn_violations++;
+            if (mem_cyc && !dn_hold) begin
+                dn_cap_addr <= mem_addr;
+                dn_cap_dat  <= mem_dat_m2s;
+                dn_cap_sel  <= mem_sel;
+                dn_cap_we   <= mem_we;
+            end
+            dn_out_q <= mem_cyc;
+        end
+    end
+
     always @(negedge clk) begin
         if (fp_ack) fp_acks++;
         if (fp_err) fp_errs++;
@@ -101,8 +176,9 @@ module cache_complex_tb;
         // Proof of genuine dual-outstanding: both sub-caches mid-transaction at once.
         if (dut.icache0.state_q != 0 && dut.dcache0.state_q != 0) both_busy_seen = 1'b1;
         // Priority invariant: whenever both sub-caches request the shared bus
-        // in the same cycle, the bus must carry dcache0's request.
-        if (dut.icache0.mem_cyc_o && dut.dcache0.mem_cyc_o) begin
+        // in a cycle where it is free to choose (no beat outstanding), the
+        // bus must carry dcache0's request.
+        if (dut.icache0.mem_cyc_o && dut.dcache0.mem_cyc_o && !dn_hold) begin
             ties++;
             if (!(mem_cyc && mem_stb && mem_addr === dut.dcache0.mem_addr_o && mem_we === dut.dcache0.mem_we_o))
                 tie_violations++;
@@ -163,6 +239,7 @@ module cache_complex_tb;
         check($sformatf("%s: fetch port err count", tag), fp_errs, exp_fp_errs);
         check($sformatf("%s: data port err count", tag), dp_errs, exp_dp_errs);
         check($sformatf("%s: every downstream tie granted to dcache0", tag), tie_violations, 0);
+        check($sformatf("%s: every outstanding downstream request held stable", tag), dn_violations, 0);
     endtask
 
     // All four words of an I$ line and a D$ line, read back as same-cycle
