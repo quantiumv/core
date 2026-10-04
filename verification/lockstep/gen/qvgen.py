@@ -249,6 +249,7 @@ _EDGE_VALUES = [0, 1, -1, 0x7FFFFFFFFFFFFFFF, -0x8000000000000000,
 
 _M_OPS = ["mul", "mulh", "mulhu", "mulhsu", "div", "divu", "rem", "remu",
           "mulw", "divw", "divuw", "remw", "remuw"]
+_M_MUL_OPS = ["mul", "mulh", "mulhu", "mulhsu", "mulw"]
 
 _LOADS = [("ld", 8), ("lw", 4), ("lh", 2), ("lb", 1),
           ("lwu", 4), ("lhu", 2), ("lbu", 1)]
@@ -277,7 +278,7 @@ def emit_alu(p: Program, recent: list[int]):
 
 
 def emit_m_ext(p: Program, recent: list[int]):
-    op = p.rng.choice(_M_OPS)
+    op = p.rng.choice(_M_MUL_OPS if p.args.no_div else _M_OPS)
     rd, rs1, rs2 = p.reg_biased(recent), p.reg_biased(recent), p.reg_biased(recent)
     if p.rng.random() < 0.15:
         # Divide-by-zero is legal, well-defined RISC-V behavior (not a
@@ -435,20 +436,22 @@ def emit_fault(p: Program, kind: str):
 
 def emit_smc_fence_i(p: Program, recent: list[int]):
     """FENCE.I after a genuine self-modifying store: overwrite the NEXT
-    instruction's own dword with something harmless-but-different (a
-    NOP), fence.i, then fall through and actually fetch what was just
-    written -- proves I$/D$ coherence, not just that FENCE.I assembles."""
+    instruction with a different one, fence.i, then fall through and
+    actually fetch what was just written -- proves I$/D$ coherence, not
+    just that FENCE.I assembles. The old and new instructions write
+    different values to x14 (111 vs 222), so a stale fetch shows up in
+    the retirement stream; storing a nop over a nop never could."""
     tgt = Label("smc")
     p.e(f"    la      x13, {tgt}")
-    p.li(14, 0x00000013)  # nop
+    p.li(14, 0x0DE00713)  # addi x14, x0, 222
     p.e("    sw      x14, 0(x13)")
     p.e("    fence.i")
     p.e(f"{tgt}:")
-    # `.option norvc`: the `sw` above writes a full 4-byte NOP, so the
-    # target must ALSO be a real 4-byte instruction -- under RVC (the
-    # default for --isa imac), a bare `nop` assembles as a 2-byte
-    # `c.nop`, and the store's other 2 bytes then land on and corrupt
-    # whatever instruction happens to follow.
+    # `.option norvc`: the `sw` above writes a full 4-byte instruction,
+    # so the target must ALSO be a real 4-byte instruction -- under RVC
+    # (the default for --isa imac) gas would compress it to 2 bytes, and
+    # the store's other 2 bytes would then land on and corrupt whatever
+    # instruction happens to follow.
     #
     # A REAL bug this fixes, found by direct simulation (an illegal-
     # instruction fault a few instructions after a SMC site, under
@@ -457,7 +460,7 @@ def emit_smc_fence_i(p: Program, recent: list[int]):
     # leading nop plus two orphaned zero bytes that don't decode as
     # anything.
     p.e("    .option norvc")
-    p.e("    nop")
+    p.e("    addi    x14, x0, 111")
     p.e("    .option rvc")
     p.smc_done = True
 
@@ -1188,6 +1191,8 @@ def main():
                           "which is always emitted regardless of this "
                           "flag (see emit_handlers)")
     ap.add_argument("--smc", action="store_true")
+    ap.add_argument("--no-div", action="store_true", dest="no_div",
+                    help="keep M to the multiplies (for cores without a divider yet)")
     ap.add_argument("--len", type=int, default=200)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--dep-bias", type=float, default=0.3, dest="dep_bias")
