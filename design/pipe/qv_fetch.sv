@@ -10,11 +10,14 @@
  * sees the request held into a second cycle and never produces a stale
  * "ghost" ack that a following request could mistake for its own.
  *
- * A request is never abandoned: on a redirect the epoch flips and any
- * outstanding request keeps cyc/stb/addr asserted until its own response
- * arrives, which is then dropped because its epoch no longer matches.
- * Dropping cyc early instead would let wb_arbiter2 release the grant and
- * route the late ack to the other master.
+ * A request is never abandoned: a redirect marks the outstanding request
+ * stale, it keeps cyc/stb/addr asserted until its own response arrives,
+ * and that response is dropped. Dropping cyc early instead would let
+ * wb_arbiter2 release the grant and route the late ack to the other
+ * master. With one request outstanding a stale bit on it is exact; a
+ * flipping epoch is not, since two redirects (align, then a trap at
+ * commit) can land while one slow request is outstanding and flip it
+ * back.
  *
  * A new request is issued only when the fetch buffer is guaranteed room
  * for its response (occupancy after this cycle's push/pop < FB_DEPTH) --
@@ -55,13 +58,12 @@ module qv_fetch #(
     // ---------------- outstanding request ----------------
     logic        req_valid_q;
     logic [63:0] req_pc_q;
-    logic        req_epoch_q;
+    logic        req_stale_q;    // redirected away from since it was issued
 
-    logic        epoch_q;
     logic [63:0] fpc_q;          // next sequential fetch pc
 
     wire resp     = req_valid_q && (wb_fetch_ack_i || wb_fetch_err_i);
-    wire resp_ok  = resp && (req_epoch_q == epoch_q) && !i_redirect_valid;
+    wire resp_ok  = resp && !req_stale_q && !i_redirect_valid;
 
     assign wb_fetch_cyc_o  = req_valid_q && !(wb_fetch_ack_i || wb_fetch_err_i);
     assign wb_fetch_stb_o  = wb_fetch_cyc_o;
@@ -88,7 +90,6 @@ module qv_fetch #(
     wire can_issue = (!req_valid_q || resp) && (fb_count_next < CNT_W'(FB_DEPTH));
 
     wire [63:0] issue_pc    = i_redirect_valid ? i_redirect_pc : fpc_q;
-    wire        issue_epoch = i_redirect_valid ? ~epoch_q : epoch_q;
 
     function automatic logic [PTR_W-1:0] ptr_inc(input logic [PTR_W-1:0] p);
         ptr_inc = (p == PTR_W'(FB_DEPTH - 1)) ? '0 : p + 1'b1;
@@ -98,23 +99,23 @@ module qv_fetch #(
         if (rst) begin
             req_valid_q <= 1'b0;
             req_pc_q    <= '0;
-            req_epoch_q <= 1'b0;
-            epoch_q     <= 1'b0;
+            req_stale_q <= 1'b0;
             fpc_q       <= RESET_PC;
             fb_rd_q     <= '0;
             fb_wr_q     <= '0;
             fb_count_q  <= '0;
         end else begin
-            if (i_redirect_valid) epoch_q <= ~epoch_q;
-
             if (can_issue) begin
                 req_valid_q <= 1'b1;
                 req_pc_q    <= issue_pc;
-                req_epoch_q <= issue_epoch;
+                req_stale_q <= 1'b0;
                 fpc_q       <= {issue_pc[63:3], 3'b000} + 64'd8;
             end else begin
                 if (resp) req_valid_q <= 1'b0;
-                if (i_redirect_valid) fpc_q <= i_redirect_pc;
+                if (i_redirect_valid) begin
+                    req_stale_q <= 1'b1;
+                    fpc_q       <= i_redirect_pc;
+                end
             end
 
             if (i_redirect_valid) begin
