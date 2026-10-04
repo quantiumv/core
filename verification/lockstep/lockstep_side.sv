@@ -35,6 +35,7 @@ module lockstep_side #(
     input  logic [31:0] delay_seed_mem_i,    // runtime
     input  logic [31:0] irq_mode_i,          // runtime
     input  logic [31:0] irq_seed_i,          // runtime
+    input  logic        irq_late_i,          // runtime, see lockstep_irq.sv
 
     // RVFI passthrough (core/ref_core always built with -DRISCV_FORMAL
     // by this harness -- see run_lockstep.sh)
@@ -173,7 +174,7 @@ module lockstep_side #(
 
     lockstep_irq irq0 (
         .clk(clk), .rst(rst),
-        .irq_mode_i(irq_mode_i), .seed_i(irq_seed_i),
+        .irq_mode_i(irq_mode_i), .seed_i(irq_seed_i), .late_i(irq_late_i),
         .rvfi_valid(rvfi_valid),
         .magic_clr_we(magic_clr_we), .magic_clr_wdata(magic_clr_wdata),
         .o_mtip(i_mtip), .o_meip(i_meip), .o_seip(i_seip)

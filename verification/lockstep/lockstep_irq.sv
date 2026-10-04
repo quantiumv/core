@@ -13,6 +13,14 @@
  * IRQ_MODE: 0 = disabled (never asserts; this is the default, and
  * matches every pre-P3.4 corpus run byte for byte), 1 = MTIP only,
  * 2 = MTIP+MEIP+SEIP.
+ *
+ * late_i delays every level change by one more cycle, so a new level is
+ * first visible two cycles after the retirement that raised it instead
+ * of one. A core that samples interrupts only in the cycle right after a
+ * retirement (the rule both ref_core and core_pipe follow) then misses it
+ * there and takes it after the NEXT retirement; one that samples a cycle
+ * late (QV_MUTANT==5) takes it a retirement earlier, so the retirement
+ * streams differ. Without late_i both kinds take it at the same boundary.
  */
 module lockstep_irq #(
     parameter int DENSITY  = 32'd4   // ~DENSITY/256 chance of a new assert per retirement, per line
@@ -22,6 +30,7 @@ module lockstep_irq #(
 
     input  logic [31:0]  irq_mode_i,       // runtime: 0=disabled, 1=MTIP only, 2=MTIP+MEIP+SEIP
     input  logic [31:0]  seed_i,           // runtime: re-seeds the LFSR at reset
+    input  logic         late_i,           // runtime: level changes visible one cycle later
 
     input  logic         rvfi_valid,       // this side's own retirement pulse
     input  logic         magic_clr_we,     // this side's own retired store to MAGIC_CLR
@@ -66,7 +75,20 @@ module lockstep_irq #(
         end
     end
 
-    assign o_mtip = pending_mtip_q;
-    assign o_meip = pending_meip_q;
-    assign o_seip = pending_seip_q;
+    logic late_mtip_q, late_meip_q, late_seip_q;
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            late_mtip_q <= 1'b0;
+            late_meip_q <= 1'b0;
+            late_seip_q <= 1'b0;
+        end else begin
+            late_mtip_q <= pending_mtip_q;
+            late_meip_q <= pending_meip_q;
+            late_seip_q <= pending_seip_q;
+        end
+    end
+
+    assign o_mtip = late_i ? late_mtip_q : pending_mtip_q;
+    assign o_meip = late_i ? late_meip_q : pending_meip_q;
+    assign o_seip = late_i ? late_seip_q : pending_seip_q;
 endmodule

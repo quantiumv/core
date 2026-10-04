@@ -20,7 +20,7 @@
  * plan's own "kill matrix of ref_core #(k) against #(0)" framing.
  * Everything else is genuine runtime data and comes in as a plusarg:
  * +HEXFILE=<path> +TOHOST_ADDR=<hex> +MAX_RETIRE=<n> +TIMEOUT=<cycles>
- * +IRQ_MODE=<0|1|2> +IRQ_SEED=<n> +DLY_SEED_A=<n> +DLY_SEED_B=<n>
+ * +IRQ_MODE=<0|1|2> +IRQ_SEED=<n> +IRQ_LATE=<0|1> +DLY_SEED_A=<n> +DLY_SEED_B=<n>
  * +CORRUPT_AT=<order> +CORRUPT_FIELD=<code> +DUMP_FROM=<cycles> (0 = no
  * VCD).
  *
@@ -48,7 +48,9 @@
  * levels are visible from the cycle right after a retirement, it takes
  * every interrupt at the same retirement boundary as the real core, so
  * its retirement stream and its exact-stop final state both match; it
- * was only ever "caught" by the skew of the old stop.
+ * was only ever "caught" by the skew of the old stop. +IRQ_LATE=1
+ * shows each level a cycle later still: the real core then takes it
+ * only after the next retirement, mutant 5 already after this one.
  */
 `include "lockstep_defs.svh"
 
@@ -62,7 +64,7 @@ module lockstep_tb #(
     logic [31:0] tohost_addr;
     longint      max_retire;
     longint      max_cycles;
-    int          irq_mode, irq_seed;
+    int          irq_mode, irq_seed, irq_late;
     int          dly_seed_a, dly_seed_b;
     longint      corrupt_at;
     int          corrupt_field;
@@ -75,6 +77,7 @@ module lockstep_tb #(
         if (!$value$plusargs("TIMEOUT=%d", max_cycles))     max_cycles     = 2000000;
         if (!$value$plusargs("IRQ_MODE=%d", irq_mode))      irq_mode       = 0;
         if (!$value$plusargs("IRQ_SEED=%d", irq_seed))      irq_seed       = 1;
+        if (!$value$plusargs("IRQ_LATE=%d", irq_late))      irq_late       = 0;
         if (!$value$plusargs("DLY_SEED_A=%d", dly_seed_a))  dly_seed_a     = 1;
         if (!$value$plusargs("DLY_SEED_B=%d", dly_seed_b))  dly_seed_b     = 2;
         if (!$value$plusargs("CORRUPT_AT=%d", corrupt_at))  corrupt_at     = 0;       // 0 = disabled
@@ -128,7 +131,7 @@ module lockstep_tb #(
     ) side_a (
         .clk(clk_a), .rst(rst),
         .delay_seed_fetch_i(dly_seed_a[31:0]), .delay_seed_mem_i(dly_seed_a[31:0] + 32'h1000),
-        .irq_mode_i(irq_mode[31:0]), .irq_seed_i(irq_seed[31:0]),
+        .irq_mode_i(irq_mode[31:0]), .irq_seed_i(irq_seed[31:0]), .irq_late_i(irq_late != 0),
         .rvfi_valid(a_rvfi_valid), .rvfi_order(a_rvfi_order), .rvfi_insn(a_rvfi_insn),
         .rvfi_trap(a_rvfi_trap), .rvfi_halt(a_rvfi_halt), .rvfi_intr(a_rvfi_intr),
         .rvfi_mode(a_rvfi_mode), .rvfi_ixl(a_rvfi_ixl),
@@ -193,7 +196,7 @@ module lockstep_tb #(
     ) side_b (
         .clk(clk_b), .rst(rst),
         .delay_seed_fetch_i(dly_seed_b[31:0]), .delay_seed_mem_i(dly_seed_b[31:0] + 32'h1000),
-        .irq_mode_i(irq_mode[31:0]), .irq_seed_i(irq_seed[31:0]),
+        .irq_mode_i(irq_mode[31:0]), .irq_seed_i(irq_seed[31:0]), .irq_late_i(irq_late != 0),
         .rvfi_valid(b_rvfi_valid), .rvfi_order(b_rvfi_order), .rvfi_insn(b_rvfi_insn),
         .rvfi_trap(b_rvfi_trap), .rvfi_halt(b_rvfi_halt), .rvfi_intr(b_rvfi_intr),
         .rvfi_mode(b_rvfi_mode), .rvfi_ixl(b_rvfi_ixl),

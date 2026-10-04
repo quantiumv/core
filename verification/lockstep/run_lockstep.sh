@@ -50,6 +50,7 @@ DELAY_MAX=0
 # provably caught at all.
 IRQ_MODE=0
 IRQ_SEED=1
+IRQ_LATE=0
 CORPUS=all
 ONLY=""
 JOBS="$(nproc 2>/dev/null || echo 4)"
@@ -82,6 +83,9 @@ Usage: run_lockstep.sh --mode selfproof|mutant|corrupt [options]
                         enables mstatus.MIE, so this only matters against a
                         program that does (e.g. repro_irq_stall.s)
   --irq-seed N          seed for the injection LFSR (default 1)
+  --irq-late            make each injected level visible one cycle later
+                        (separates a core that samples a cycle late, e.g.
+                        QV_MUTANT 5, from one that samples on time)
   --corpus WHICH        act, fw, random, irq, smc, or all (default all --
                         irq/smc are NOT part of all, since each needs a
                         non-default flag passed explicitly -- --irq-mode 2
@@ -107,6 +111,7 @@ while [ $# -gt 0 ]; do
         --delay-max) DELAY_MAX="$2"; shift 2 ;;
         --irq-mode) IRQ_MODE="$2"; shift 2 ;;
         --irq-seed) IRQ_SEED="$2"; shift 2 ;;
+        --irq-late) IRQ_LATE=1; shift ;;
         --corpus) CORPUS="$2"; shift 2 ;;
         --only) ONLY="$2"; shift 2 ;;
         -j) JOBS="$2"; shift 2 ;;
@@ -153,7 +158,7 @@ RUN_DELAY_MAX=$DELAY_MAX
 
 # Everything that changes a run's outcome is in the key, so a cached result
 # from a different configuration is never reused.
-RUN_KEY="${MODE}_m${QV_MUTANT_B}_${MEMCFG_B}_d${RUN_DELAY_MAX}_i${IRQ_MODE}"
+RUN_KEY="${MODE}_m${QV_MUTANT_B}_${MEMCFG_B}_d${RUN_DELAY_MAX}_i${IRQ_MODE}_l${IRQ_LATE}"
 VVP_BIN="$OUTDIR/lockstep_${MODE}_m${QV_MUTANT_B}_${MEMCFG_B}_d${RUN_DELAY_MAX}.vvp"
 BUILD_LOG="$OUTDIR/build_${MODE}_m${QV_MUTANT_B}.log"
 if [ ! -e "$VVP_BIN" ] || [ "$FORCE" == "1" ]; then
@@ -316,7 +321,7 @@ run_one() {
     fi
     local seed_a=$((RUN_SEED * 2 + 1))
     local seed_b=$((RUN_SEED * 2 + 2))
-    local args=(+HEXFILE="$hex" +TIMEOUT=$MAX_CYCLES +DLY_SEED_A=$seed_a +DLY_SEED_B=$seed_b +IRQ_MODE=$IRQ_MODE +IRQ_SEED=$IRQ_SEED)
+    local args=(+HEXFILE="$hex" +TIMEOUT=$MAX_CYCLES +DLY_SEED_A=$seed_a +DLY_SEED_B=$seed_b +IRQ_MODE=$IRQ_MODE +IRQ_SEED=$IRQ_SEED +IRQ_LATE=$IRQ_LATE)
     [ -n "$tohost" ] && args+=(+TOHOST_ADDR=$tohost)
     [ -n "$max_retire" ] && args+=(+MAX_RETIRE=$max_retire)
     local out
