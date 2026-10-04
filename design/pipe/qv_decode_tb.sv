@@ -56,13 +56,15 @@ module qv_decode_tb;
     assign result = uop.is_word ? sx32(alu_y) : alu_y;
 
     // feed one instruction, let decode register it, leave it held in the slot
-    task automatic feed(input logic [31:0] instr, input logic xcpt = 1'b0, input logic [3:0] cause = 4'd0);
+    task automatic feed(input logic [31:0] instr, input logic xcpt = 1'b0, input logic [3:0] cause = 4'd0,
+                        input logic rvc = 1'b0);
         @(negedge clk);
         issue_ready        = 1'b1;
         iq_valid           = 1'b1;
         iq_data            = '0;
         iq_data.pc         = 64'h1000;
-        iq_data.raw        = instr;
+        iq_data.raw        = rvc ? {16'b0, instr[15:0]} : instr;
+        iq_data.rvc        = rvc;
         iq_data.xcpt       = xcpt;
         iq_data.xcpt_cause = cause;
         @(posedge clk);
@@ -88,6 +90,28 @@ module qv_decode_tb;
         check({name, ": no fault"}, {63'b0, uop.xcpt}, 64'd0);
         check({name, ": pc"}, uop.pc, 64'h1000);
         check({name, ": raw"}, {32'b0, uop.raw}, {32'b0, instr});
+        check({name, ": result"}, result, golden);
+    endtask
+
+    // a compressed instruction: decoded as its expansion, raw kept as {16'b0, hw}
+    task automatic expect_c_alu(
+        input string name, input logic [15:0] hw, input logic [6:0] exp_code,
+        input logic [4:0] exp_rd, input logic [4:0] exp_rs1, input logic exp_rs1_used,
+        input logic [4:0] exp_rs2, input logic exp_rs2_used, input logic [63:0] golden
+    );
+        feed({16'b0, hw}, 1'b0, 4'd0, 1'b1);
+        check({name, ": valid"}, {63'b0, valid}, 64'd1);
+        check({name, ": code"}, {57'b0, uop.code}, {57'b0, exp_code});
+        check({name, ": rd"}, {59'b0, uop.rd}, {59'b0, exp_rd});
+        check({name, ": rs1"}, {59'b0, uop.rs1}, {59'b0, exp_rs1});
+        check({name, ": rs1_used"}, {63'b0, uop.rs1_used}, {63'b0, exp_rs1_used});
+        check({name, ": rs2"}, {59'b0, uop.rs2}, {59'b0, exp_rs2});
+        check({name, ": rs2_used"}, {63'b0, uop.rs2_used}, {63'b0, exp_rs2_used});
+        check({name, ": rd_wen"}, {63'b0, uop.rd_wen}, 64'd1);
+        check({name, ": fu"}, {61'b0, uop.fu}, {61'b0, QV_FU_ALU});
+        check({name, ": rvc"}, {63'b0, uop.rvc}, 64'd1);
+        check({name, ": raw keeps the halfword"}, {32'b0, uop.raw}, {48'b0, hw});
+        check({name, ": no fault"}, {63'b0, uop.xcpt}, 64'd0);
         check({name, ": result"}, result, golden);
     endtask
 
@@ -163,6 +187,9 @@ module qv_decode_tb;
     logic [63:0]  a, b;
     logic [127:0] prod;
     int imm;
+    // reserved compressed encodings (c_expand.sv flags each illegal)
+    logic [15:0] c_res [0:7] = '{16'h0000, 16'h0008, 16'h6101, 16'h2001,
+                                  16'h4002, 16'h6002, 16'h8002, 16'h8000};
 
     initial begin
         for (int i = 0; i < 32; i++) R[i] = 64'h0123_4567_89AB_CDEF ^ (64'(i) * 64'h9E37_79B9_7F4A_7C15);
@@ -363,6 +390,59 @@ module qv_decode_tb;
         feed(32'h0000_0073, 1'b1, 4'd1);
         check("faulted ECALL: routed to the ALU", {61'b0, uop.fu}, {61'b0, QV_FU_ALU});
         check("faulted ECALL: keeps the fetch cause", {60'b0, uop.xcpt_cause}, 64'd1);
+
+        // ---------------- RVC: expanded by c_expand.sv ----------------
+        // compressed registers x8..x15 are R[8..15]; R[8] = -5, R[9] = 0xFFFFFFFF, R[10] = pattern
+        expect_c_alu("C.ADDI", encode_c_addi(-3, 8), `INSTR_CODE(ADDI), 8, 8, 1, 0, 0, R[8] - 64'd3);
+        expect_c_alu("C.LI", encode_c_li(-32, 11), `INSTR_CODE(ADDI), 11, 0, 0, 0, 0, -64'd32);
+        expect_c_alu("C.LUI", encode_c_lui(6'b100001, 12), `INSTR_CODE(LUI), 12, 0, 0, 0, 0,
+                     64'hFFFF_FFFF_FFFE_1000);
+        expect_c_alu("C.ADDIW", encode_c_addiw(1, 9), `INSTR_CODE(ADDIW), 9, 9, 1, 0, 0, sx32(R[9] + 64'd1));
+        expect_c_alu("C.SLLI 33", encode_c_slli(6'd33, 10), `INSTR_CODE(SLLI), 10, 10, 1, 0, 0, R[10] << 33);
+        expect_c_alu("C.SRAI 63", encode_c_srai(6'd63, 3'd0), `INSTR_CODE(SRAI), 8, 8, 1, 0, 0,
+                     64'($signed(R[8]) >>> 63));
+        expect_c_alu("C.ANDI", encode_c_andi(-6, 3'd2), `INSTR_CODE(ANDI), 10, 10, 1, 0, 0, R[10] & -64'd6);
+        expect_c_alu("C.MV", encode_c_mv(13, 10), `INSTR_CODE(ADD), 13, 0, 0, 10, 1, R[10]);
+        expect_c_alu("C.ADD", encode_c_add(14, 7), `INSTR_CODE(ADD), 14, 14, 1, 7, 1, R[14] + R[7]);
+        expect_c_alu("C.SUB", encode_c_ca(1'b0, 2'b00, 3'd1, 3'd2), `INSTR_CODE(SUB), 9, 9, 1, 10, 1,
+                     R[9] - R[10]);
+        expect_c_alu("C.SUBW", encode_c_ca(1'b1, 2'b00, 3'd0, 3'd1), `INSTR_CODE(SUBW), 8, 8, 1, 9, 1,
+                     sx32(R[8] - R[9]));
+        // control flow and EBREAK
+        feed({16'b0, encode_c_j(-64)}, 1'b0, 4'd0, 1'b1);
+        check("C.J: BRU", {61'b0, uop.fu}, {61'b0, QV_FU_BRU});
+        check("C.J: JAL op", {61'b0, uop.bru_op}, {61'b0, QV_BR_JAL});
+        check("C.J: offset", uop.imm3, -64'd64);
+        check("C.J: no link (rd x0)", {59'b0, uop.rd}, 64'd0);
+        check("C.J: rvc", {63'b0, uop.rvc}, 64'd1);
+        feed({16'b0, encode_c_beqz(-16, 3'd3)}, 1'b0, 4'd0, 1'b1);
+        check("C.BEQZ: BRU", {61'b0, uop.fu}, {61'b0, QV_FU_BRU});
+        check("C.BEQZ: BEQ op", {61'b0, uop.bru_op}, {61'b0, QV_BR_BEQ});
+        check("C.BEQZ: rs1 x11", {59'b0, uop.rs1}, 64'd11);
+        check("C.BEQZ: offset", uop.imm3, -64'd16);
+        feed({16'b0, encode_c_jalr(5'd7)}, 1'b0, 4'd0, 1'b1);
+        check("C.JALR: JALR op", {61'b0, uop.bru_op}, {61'b0, QV_BR_JALR});
+        check("C.JALR: links x1", {59'b0, uop.rd}, 64'd1);
+        check("C.JALR: rs1 x7", {59'b0, uop.rs1}, 64'd7);
+        feed({16'b0, `INSTR_C_EBREAK}, 1'b0, 4'd0, 1'b1);
+        check("C.EBREAK: SYS", {61'b0, uop.fu}, {61'b0, QV_FU_SYS});
+        check("C.EBREAK: op", {61'b0, uop.sys_op}, {61'b0, QV_SYS_EBREAK});
+        check("C.EBREAK: no fault", {63'b0, uop.xcpt}, 64'd0);
+        // reserved encodings trap, decoding as the placeholder (no register reads)
+        for (int i = 0; i < 8; i++) begin
+            feed({16'b0, c_res[i]}, 1'b0, 4'd0, 1'b1);
+            check($sformatf("reserved C %04h: fault", c_res[i]), {63'b0, uop.xcpt}, 64'd1);
+            check($sformatf("reserved C %04h: cause 2", c_res[i]), {60'b0, uop.xcpt_cause}, 64'd2);
+            check($sformatf("reserved C %04h: no rd write", c_res[i]), {63'b0, uop.rd_wen}, 64'd0);
+            check($sformatf("reserved C %04h: rs1 0", c_res[i]), {59'b0, uop.rs1}, 64'd0);
+            check($sformatf("reserved C %04h: rs2 0", c_res[i]), {59'b0, uop.rs2}, 64'd0);
+            check($sformatf("reserved C %04h: raw kept", c_res[i]), {32'b0, uop.raw}, {48'b0, c_res[i]});
+            check($sformatf("reserved C %04h: routed to the ALU", c_res[i]), {61'b0, uop.fu}, {61'b0, QV_FU_ALU});
+        end
+        // a fetch fault on a compressed slot keeps cause 1
+        feed({16'b0, encode_c_addi(1, 8)}, 1'b1, 4'd1, 1'b1);
+        check("faulted C.ADDI: cause 1", {60'b0, uop.xcpt_cause}, 64'd1);
+        check("faulted C.ADDI: placeholder, no rs1", {59'b0, uop.rs1}, 64'd0);
 
         // ---------------- not implemented / faults ----------------
         expect_fault("LW (not built yet)",    encode_i(8, 7, 3'b010, 5, `OPC_LOAD), 1'b0, 4'd0, 4'd2);

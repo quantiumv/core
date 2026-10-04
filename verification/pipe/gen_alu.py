@@ -4,9 +4,8 @@
 Bring-up corpus for design/pipe/core_pipe.sv while it implements the
 single-cycle integer class (RV64I register/immediate ops including the
 *W forms, LUI, AUIPC, MUL/MULH/MULHSU/MULHU/MULW), conditional
-branches, JAL, JALR, Zicsr, and M-mode traps. Assemble with
--march=rv64im_zicsr (never C: gas would emit RVC, which isn't decoded
-yet).
+branches, JAL, JALR, Zicsr, M-mode traps and RVC. Assemble with
+-march=rv64imc_zicsr.
 
 Everything runs in M-mode. A prologue points mtvec at a fixed handler
 (.text.handlers, 0x8000) that reads mcause/mtval and returns to
@@ -21,19 +20,27 @@ Every register is first seeded with a value from a mix of edge cases
 a sequence of segments, each of which can only be entered at its first
 instruction, so every program terminates:
 
-  straight  ALU ops, forward branches, JAL, and auipc+JALR pairs, all
-            targeting a later instruction of the same segment or the
-            segment's end
+  straight  ALU ops, forward branches, JAL, and auipc(+addi)+JALR
+            sequences, all targeting a later instruction of the same
+            segment or the segment's end
   loop      li x31, K; body; addi x31, x31, -1; bne x31, x0, body
             (body branches may target the decrement but never the bne;
             x31 is written only here)
 
-No branch may land between an auipc and the jalr that uses it. Sources
+No branch may land after an auipc in the sequence that uses it. Sources
 favour recent destinations (--dep-bias), so the bypass path feeds
 branch operands as well as ALU ones.
 
-The program ends at 4 * count; core_pipe has no way to stop, so
-run_rvfi_diff.sh compares retirements up to the first one at that pc.
+RVC is on: gas compresses whatever it can, so 16- and 32-bit
+instructions mix freely and 32-bit ones regularly straddle a dword. All
+addressing is by label (%pcrel_hi/%pcrel_lo for JALR). Trap sources
+stay 4 bytes long for the handler's mepc + 4 (EBREAK is emitted as
+.4byte so gas can't pick C.EBREAK; a reserved compressed encoding is
+paired with a C.NOP).
+
+The program ends at the end_of_test symbol; core_pipe has no way to
+stop, so run_rvfi_diff.sh compares retirements up to the first one at
+that pc.
 
 Usage: gen_alu.py --seed N --len L -o prog.s
 Prints "<static instruction count> <upper bound on dynamic count>".
@@ -69,6 +76,9 @@ CSR_RO = [0x300, 0x301, 0x305, 0x344, 0xF11, 0xF12, 0xF13, 0xF14, 0xB02, 0xC02]
 # read-only CSRs when actually written
 CSR_DEBUG = [0x7B0, 0x7B1, 0x7A0, 0x7A4]
 CSR_READONLY = [0xF14, 0xC02, 0xC00]
+# reserved compressed encodings c_expand.sv flags illegal; each is
+# followed by a C.NOP so the trap source stays 4 bytes long
+C_RESERVED = [0x0008, 0x6101, 0x2001, 0x4002, 0x6002, 0x8002, 0x8000, 0x2000]
 HANDLER = [                      # .text.handlers at 0x8000 (mtvec, direct)
     "csrr x29, mcause",
     "csrr x28, mtval",
@@ -160,7 +170,13 @@ class Gen:
             return f"csrrs x{self.dst()}, {rng.choice(CSR_DEBUG):#x}, x0", True
         if r < 0.90:
             return f"csrrw x{self.dst()}, {rng.choice(CSR_READONLY):#x}, x{self.src()}", True
-        return rng.choice([("ecall", True), ("ebreak", True), (".word 0", True), ("wfi", False)])
+        return rng.choice([
+            ("ecall", True),
+            (".4byte 0x00100073", True),                    # EBREAK, never C.EBREAK
+            (".4byte 0", True),
+            (f".2byte {rng.choice(C_RESERVED):#06x}\n    .2byte 0x0001", True),
+            ("wfi", False),
+        ])
 
     def branch_srcs(self):
         a = self.src()
@@ -186,18 +202,27 @@ class Gen:
                 items.append(("br", rng.choice(B_OPS), a, b, None)); i += 1
             elif r < 0.20:
                 items.append(("jal", self.dst(), None)); i += 1
-            elif r < 0.25 and i + 1 < n:
+            elif r < 0.25 and i + 2 < n:
+                # auipc %pcrel_hi(T) [; addi %pcrel_lo] ; jalr -- the odd
+                # form jumps to T+1, which JALR's bit-0 clear turns into T.
+                # Nothing may land after the auipc, whose base it needs.
                 base = rng.randint(1, LOOP_REG - 1)
-                items.append(f"auipc x{base}, 0")
-                forbidden.add(i + 1)                    # never land on the jalr
-                items.append(("jalr", self.dst(), base, None)); i += 2
+                odd = rng.random() < 0.3
+                auipc = i
+                items.append(("auipc", base))
+                if odd:
+                    items.append(("addi_lo", base, auipc))
+                    forbidden.add(i + 1)
+                forbidden.add(i + 1 + odd)
+                items.append(("jalr", self.dst(), base, odd, auipc, None))
+                i += 2 + odd
                 self.recent.append(base)
             else:
                 items.append(self.alu()); i += 1
         # resolve targets now that every slot exists
         out = []
         for slot, it in enumerate(items):
-            if isinstance(it, tuple):
+            if isinstance(it, tuple) and it[0] in ("br", "jal", "jalr"):
                 cands = [t for t in range(slot + 1, min(slot + 8, n) + 1) if t not in forbidden]
                 t = rng.choice(cands) if cands else n
                 it = it[:-1] + (t,)
@@ -205,8 +230,11 @@ class Gen:
         return out
 
 
-def render(rng, items, base_slot, labels):
+def render(items, base_slot, labels):
     """Turn a segment's items into asm lines; labels maps absolute slot -> name."""
+    lab = lambda s: labels.setdefault(s, f"L{s}")
+    # each auipc needs its jalr's target
+    jalr_tgt = {it[4]: it[-1] for it in items if isinstance(it, tuple) and it[0] == "jalr"}
     lines = []
     for k, it in enumerate(items):
         slot = base_slot + k
@@ -214,17 +242,18 @@ def render(rng, items, base_slot, labels):
             lines.append((slot, it))
             continue
         kind = it[0]
-        tgt = base_slot + it[-1]
-        name = labels.setdefault(tgt, f"L{tgt}")
-        if kind == "br":
-            lines.append((slot, f"{it[1]} x{it[2]}, x{it[3]}, {name}"))
+        if kind == "auipc":
+            lines.append((slot, f"auipc x{it[1]}, %pcrel_hi({lab(base_slot + jalr_tgt[k])})"))
+        elif kind == "addi_lo":
+            lines.append((slot, f"addi x{it[1]}, x{it[1]}, %pcrel_lo({lab(base_slot + it[2])})"))
+        elif kind == "br":
+            lines.append((slot, f"{it[1]} x{it[2]}, x{it[3]}, {lab(base_slot + it[-1])}"))
         elif kind == "jal":
-            lines.append((slot, f"jal x{it[1]}, {name}"))
-        else:  # jalr: base was set by the auipc in the previous slot
-            off = 4 * (tgt - (slot - 1))
-            if rng.random() < 0.3:
-                off += 1                                # bit 0 is cleared by JALR
-            lines.append((slot, f"jalr x{it[1]}, {off}(x{it[2]})"))
+            lines.append((slot, f"jal x{it[1]}, {lab(base_slot + it[-1])}"))
+        else:  # jalr
+            _, rd, base, odd, auipc, _ = it
+            off = "1" if odd else f"%pcrel_lo({lab(base_slot + auipc)})"
+            lines.append((slot, f"jalr x{rd}, {off}(x{base})"))
     return lines
 
 
@@ -254,7 +283,7 @@ def main():
             # slots: 0 = li, 1..body_n = body, body_n+1 = addi, body_n+2 = bne
             lines.append((base, f"addi x{LOOP_REG}, x0, {k}"))
             body = g.segment(body_n)
-            lines += render(rng, body, base + 1, labels)
+            lines += render(body, base + 1, labels)
             labels.setdefault(base + 1, f"L{base + 1}")
             lines.append((base + 1 + body_n, f"addi x{LOOP_REG}, x{LOOP_REG}, -1"))
             lines.append((base + 2 + body_n, f"bne x{LOOP_REG}, x0, L{base + 1}"))
@@ -262,7 +291,7 @@ def main():
         else:
             n = rng.randint(4, 16)
             seg = g.segment(n)
-            lines += render(rng, seg, base, labels)
+            lines += render(seg, base, labels)
             dyn += n + g.seg_traps * len(HANDLER)
 
     count = len(lines)
@@ -271,13 +300,14 @@ def main():
 
     with open(a.out, "w") as f:
         f.write(f"# gen_alu.py --seed {a.seed} --len {a.len} --dep-bias {a.dep_bias}\n")
-        f.write(".option norvc\n.section .text.entry\n.globl _start\n_start:\n")
+        f.write(".section .text.entry\n.globl _start\n_start:\n")
         for slot, text in lines:
             if slot in labels:
                 f.write(f"{labels[slot]}:\n")
             f.write(f"    {text}\n")
         if count in labels:
             f.write(f"{labels[count]}:\n")
+        f.write(".globl end_of_test\nend_of_test:\n")
         f.write(".section .text.handlers\ntrap_handler:\n")
         for text in HANDLER:
             f.write(f"    {text}\n")
