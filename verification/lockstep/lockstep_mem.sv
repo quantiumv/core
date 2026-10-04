@@ -168,12 +168,38 @@ module lockstep_mem #(
         .o_rd_valid(o_rd_valid), .o_rd_addr(o_rd_addr), .o_rd_data(o_rd_data)
     );
 
-    // Ordered committed-write log: one pulse per accepted write, taken at
-    // the single downstream port so it sees both RAM and MMIO writes.
-    assign o_wr_valid = dn_cyc && dn_stb && dn_we && dn_ack;
-    assign o_wr_addr  = dn_addr;
-    assign o_wr_sel   = dn_sel;
-    assign o_wr_data  = dn_dat_m2s;
+    /*
+     * Ordered committed-write log: one entry per acked core store (RAM or
+     * MMIO), taken at the core-facing mem port. The request is latched on
+     * its first cycle and logged on its own ack. A downstream tap of
+     * cyc&&we&&ack, as this used to be, logs nothing: every master here
+     * drops cyc in its ack cycle, so the log stayed empty except where a
+     * delay shim holds cyc into the ack cycle (cache config, side B), and
+     * there wb4_sram also re-acks once more. Every core here holds a
+     * request until its ack and never starts the next one in that cycle,
+     * so "outstanding" is just "cyc was high last cycle".
+     */
+    logic        wr_out_q, wr_we_q;
+    logic [31:0] wr_addr_q;
+    logic [7:0]  wr_sel_q;
+    logic [63:0] wr_data_q;
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            wr_out_q <= 1'b0;
+        end else begin
+            wr_out_q <= mem_cyc_i && mem_stb_i;
+            if (mem_cyc_i && mem_stb_i && !wr_out_q) begin
+                wr_we_q   <= mem_we_i;
+                wr_addr_q <= mem_addr_i;
+                wr_sel_q  <= mem_sel_i;
+                wr_data_q <= mem_dat_i;
+            end
+        end
+    end
+    assign o_wr_valid = wr_out_q && wr_we_q && mem_ack_o;
+    assign o_wr_addr  = wr_addr_q;
+    assign o_wr_sel   = wr_sel_q;
+    assign o_wr_data  = wr_data_q;
 
     generate
         if (!MEMCFG_CACHE) begin : g_sram_cfg
