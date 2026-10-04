@@ -27,6 +27,12 @@
 # (verification/lockstep/smc.list, self-modifying-code programs,
 # MAX_RETIRE-terminated -- needs --memcfg-b cache passed explicitly, NOT
 # part of "all"), or all (default: act + fw + random).
+#
+# --dut pipe puts design/pipe/core_pipe.sv on side B (pipe-vs-ref; side
+# A stays ref_core). Selfproof and corrupt only, and the random corpus
+# switches to what core_pipe implements (--isa imc --priv m --no-div
+# --smc). --pipe-dir points the build at a modified copy of design/pipe/
+# (pipe mutants).
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -34,6 +40,8 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$REPO_ROOT" || exit 1
 
 MODE=selfproof
+DUT=ref
+PIPE_DIR=design/pipe
 MUTANT=0
 MEMCFG_B=sram
 # 0: no delay injection. --delay-max N perturbs each side's bus timing;
@@ -74,6 +82,8 @@ usage() {
 Usage: run_lockstep.sh --mode selfproof|mutant|corrupt [options]
 
   --mode MODE          selfproof (default), mutant, or corrupt
+  --dut ref|pipe       side B's core (default ref; pipe = core_pipe, not with --mode mutant)
+  --pipe-dir DIR       design/pipe/ replacement for --dut pipe (default design/pipe)
   --mutant N           QV_MUTANT_B value, 1-10 (--mode mutant only)
   --memcfg-b sram|cache  side B's memory config (default sram -- also applies
                         under --mode mutant, e.g. --mutant 9 needs cache)
@@ -106,6 +116,8 @@ EOF
 while [ $# -gt 0 ]; do
     case "$1" in
         --mode) MODE="$2"; shift 2 ;;
+        --dut) DUT="$2"; shift 2 ;;
+        --pipe-dir) PIPE_DIR="$2"; shift 2 ;;
         --mutant) MUTANT="$2"; shift 2 ;;
         --memcfg-b) MEMCFG_B="$2"; shift 2 ;;
         --delay-max) DELAY_MAX="$2"; shift 2 ;;
@@ -133,6 +145,11 @@ esac
 if [ "$MODE" == "mutant" ] && { [ "$MUTANT" -lt 1 ] || [ "$MUTANT" -gt 10 ]; }; then
     echo "ERROR: --mode mutant needs --mutant N with N in 1..10" >&2; exit 1
 fi
+case "$DUT" in
+    ref) ;;
+    pipe) [ "$MODE" == "mutant" ] && { echo "ERROR: --mode mutant mutates ref_core; use --pipe-dir for core_pipe" >&2; exit 1; } ;;
+    *) echo "Unknown --dut: $DUT (expected ref or pipe)" >&2; exit 1 ;;
+esac
 
 mkdir -p "$OUTDIR"
 
@@ -147,6 +164,15 @@ LOCKSTEP_FILES="verification/lockstep/lockstep_wb_delay.sv verification/lockstep
 verification/lockstep/lockstep_mem.sv verification/lockstep/lockstep_irq.sv \
 verification/lockstep/lockstep_side.sv verification/lockstep/lockstep_rec.sv \
 verification/lockstep/lockstep_cmp.sv verification/lockstep/lockstep_tb.sv"
+# core_pipe and the design/ leaf modules it reuses, in pipe_design_files.list
+# order (decoder.sv first: qv_decode.sv uses its INSTR_CODE macro)
+PIPE_FILES=""
+B_PIPE=0
+if [ "$DUT" == "pipe" ]; then
+    B_PIPE=1
+    PIPE_FILES=$(grep -E '^design/(pipe/|decoder\.sv|alu\.sv|c_expand\.sv|csr_file\.sv|register_file\.sv)' \
+                     verification/regress/pipe_design_files.list | sed "s#^design/pipe/#$PIPE_DIR/#" | tr '\n' ' ')
+fi
 
 MEMCFG_B_CACHE=0
 [ "$MEMCFG_B" == "cache" ] && MEMCFG_B_CACHE=1
@@ -158,9 +184,10 @@ RUN_DELAY_MAX=$DELAY_MAX
 
 # Everything that changes a run's outcome is in the key, so a cached result
 # from a different configuration is never reused.
-RUN_KEY="${MODE}_m${QV_MUTANT_B}_${MEMCFG_B}_d${RUN_DELAY_MAX}_i${IRQ_MODE}_l${IRQ_LATE}"
-VVP_BIN="$OUTDIR/lockstep_${MODE}_m${QV_MUTANT_B}_${MEMCFG_B}_d${RUN_DELAY_MAX}.vvp"
-BUILD_LOG="$OUTDIR/build_${MODE}_m${QV_MUTANT_B}.log"
+# --pipe-dir isn't: point --outdir somewhere else for a modified copy.
+RUN_KEY="${MODE}_${DUT}_m${QV_MUTANT_B}_${MEMCFG_B}_d${RUN_DELAY_MAX}_i${IRQ_MODE}_l${IRQ_LATE}"
+VVP_BIN="$OUTDIR/lockstep_${MODE}_${DUT}_m${QV_MUTANT_B}_${MEMCFG_B}_d${RUN_DELAY_MAX}.vvp"
+BUILD_LOG="$OUTDIR/build_${MODE}_${DUT}_m${QV_MUTANT_B}.log"
 if [ ! -e "$VVP_BIN" ] || [ "$FORCE" == "1" ]; then
     echo "=== building $VVP_BIN ==="
     iverilog -g2012 -DRISCV_FORMAL \
@@ -168,8 +195,9 @@ if [ ! -e "$VVP_BIN" ] || [ "$FORCE" == "1" ]; then
         -Plockstep_tb.QV_MUTANT_B=$QV_MUTANT_B \
         -Plockstep_tb.MEMCFG_B_CACHE=$MEMCFG_B_CACHE \
         -Plockstep_tb.DELAY_MAX=$RUN_DELAY_MAX \
+        -Plockstep_tb.B_PIPE=$B_PIPE \
         -o "$VVP_BIN" \
-        $REF_FILES $SUPPORT_FILES $LOCKSTEP_FILES > "$BUILD_LOG" 2>&1
+        $PIPE_FILES $REF_FILES $SUPPORT_FILES $LOCKSTEP_FILES > "$BUILD_LOG" 2>&1
     if [ $? -ne 0 ] || ! [ -e "$VVP_BIN" ]; then
         echo "BUILD FAILED -- see $BUILD_LOG" >&2
         tail -40 "$BUILD_LOG" >&2
@@ -186,7 +214,7 @@ fi
 # duplicate/missing-line entries list (caught by an actual concurrent
 # `--mode mutant` + `--mode corrupt` run against the same corpus
 # producing an untrustworthy result, not by inspection).
-ENTRIES_FILE="$OUTDIR/.entries_${CORPUS}_${MODE}_m${MUTANT}"
+ENTRIES_FILE="$OUTDIR/.entries_${CORPUS}_${MODE}_${DUT}_m${MUTANT}"
 : > "$ENTRIES_FILE"
 
 build_act_entries() {
@@ -222,15 +250,20 @@ build_fw_entries() {
     done < "$REPO_ROOT/verification/lockstep/fw.list"
 }
 
+# what each side-B core implements
+RANDOM_PROFILE="--isa imac --priv msu --sv39 --smc"
+[ "$DUT" == "pipe" ] && RANDOM_PROFILE="--isa imc --priv m --no-div --smc"
+
 build_random_entries() {
     for i in $(seq 1 "$RANDOM_COUNT"); do
         local seed=$((RUN_SEED * 10000 + i))
         local tag="random_${seed}"
-        local base="$OUTDIR/rand_${tag}"
+        local base="$OUTDIR/rand_${DUT}_${tag}"
         if [ ! -e "${base}.hex" ] || [ "$FORCE" == "1" ]; then
+            # shellcheck disable=SC2086
             python3 "$REPO_ROOT/verification/lockstep/gen/qvgen.py" \
-                --isa imac --priv msu --sv39 --smc --len 500 --seed "$seed" \
-                --dep-bias 0.3 -o "$base" --build > "$OUTDIR/gen_${tag}.log" 2>&1
+                $RANDOM_PROFILE --len 500 --seed "$seed" \
+                --dep-bias 0.3 -o "$base" --build > "$OUTDIR/gen_${DUT}_${tag}.log" 2>&1
         fi
         [ -e "${base}.elf" ] || { echo "WARN: qvgen seed $seed failed to build, skipping" >&2; continue; }
         local tohost

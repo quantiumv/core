@@ -1,11 +1,18 @@
 /*
  * lockstep_side.sv -- one full side of the lockstep comparison: a core
- * instance (ref_core, optionally mutated via QV_MUTANT -- core_pipe is
- * wired in starting P4a, once it exists) plus its own bus fabric,
- * memory, delay injection, MMIO and interrupt injection.
+ * instance (ref_core, optionally mutated via QV_MUTANT, or with
+ * CORE_PIPE=1 design/pipe/core_pipe.sv) plus its own bus fabric, memory,
+ * delay injection, MMIO and interrupt injection.
+ *
+ * Both cores have the same port list and the same internal net names
+ * for everything read below, so the two generate branches share one
+ * label (g_core) and one instance name (core0), and the references below
+ * work for either. core_pipe keeps its native name here: it reuses
+ * design/'s leaf modules, ref_core its ref_* copies, so both can sit in
+ * one compilation unit.
  *
  * This is the only module in verification/lockstep/ that reaches into
- * core0's internals by hierarchical reference (always legal: a module
+ * g_core.core0's internals by hierarchical reference (always legal: a module
  * may reference its own child instance's ports and internal signals).
  * Every other lockstep_*.sv file consumes those values as plain flat
  * ports, so nothing downstream needs a hierarchical reference of its
@@ -24,7 +31,8 @@
 `include "lockstep_defs.svh"
 
 module lockstep_side #(
-    parameter int QV_MUTANT        = 0,    // structural: selects a generate-gated RTL mutant
+    parameter int QV_MUTANT        = 0,    // structural: selects a generate-gated RTL mutant (ref_core)
+    parameter bit CORE_PIPE        = 1'b0, // structural: core_pipe instead of ref_core
     parameter bit MEMCFG_CACHE     = 1'b0, // structural: selects the memory topology
     parameter int DELAY_MAX        = 0     // structural: 0 disables both delay-shim FSMs
 ) (
@@ -104,50 +112,54 @@ module lockstep_side #(
     logic [7:0]  wb_mem_sel;
     logic        wb_mem_we, wb_mem_cyc, wb_mem_stb, wb_mem_ack, wb_mem_err, wb_mem_lock;
 
-    /* verilator lint_off PINCONNECTEMPTY */
-    ref_core #(.QV_MUTANT(QV_MUTANT)) core0 (
-        .clk(clk), .rst(rst),
-
-        .wb_fetch_addr_o(wb_fetch_addr), .wb_fetch_cyc_o(wb_fetch_cyc), .wb_fetch_stb_o(wb_fetch_stb),
-        .wb_fetch_dat_i(wb_fetch_dat), .wb_fetch_ack_i(wb_fetch_ack), .wb_fetch_err_i(wb_fetch_err),
-
-        .wb_mem_addr_o(wb_mem_addr), .wb_mem_dat_o(wb_mem_dat_o), .wb_mem_dat_i(wb_mem_dat_i),
-        .wb_mem_sel_o(wb_mem_sel), .wb_mem_we_o(wb_mem_we),
-        .wb_mem_cyc_o(wb_mem_cyc), .wb_mem_stb_o(wb_mem_stb),
-        .wb_mem_ack_i(wb_mem_ack), .wb_mem_err_i(wb_mem_err), .wb_mem_lock_o(wb_mem_lock),
-
-        .icache_flush_o(icache_flush),
-
-        .i_mtip(i_mtip), .i_meip(i_meip), .i_seip(i_seip),
-
-        .rvfi_valid(rvfi_valid), .rvfi_order(rvfi_order), .rvfi_insn(rvfi_insn),
-        .rvfi_trap(rvfi_trap), .rvfi_halt(rvfi_halt), .rvfi_intr(rvfi_intr),
-        .rvfi_mode(rvfi_mode), .rvfi_ixl(rvfi_ixl),
-        .rvfi_rs1_addr(rvfi_rs1_addr), .rvfi_rs2_addr(rvfi_rs2_addr),
-        .rvfi_rs1_rdata(rvfi_rs1_rdata), .rvfi_rs2_rdata(rvfi_rs2_rdata),
-        .rvfi_rd_addr(rvfi_rd_addr), .rvfi_rd_wdata(rvfi_rd_wdata),
-        .rvfi_pc_rdata(rvfi_pc_rdata), .rvfi_pc_wdata(rvfi_pc_wdata),
-        .rvfi_mem_addr(rvfi_mem_addr), .rvfi_mem_rmask(rvfi_mem_rmask),
-        .rvfi_mem_wmask(rvfi_mem_wmask), .rvfi_mem_rdata(rvfi_mem_rdata),
-        .rvfi_mem_wdata(rvfi_mem_wdata),
-        .rvfi_csr_mepc_rmask(rvfi_csr_mepc_rmask), .rvfi_csr_mepc_wmask(rvfi_csr_mepc_wmask),
-        .rvfi_csr_mepc_rdata(rvfi_csr_mepc_rdata), .rvfi_csr_mepc_wdata(rvfi_csr_mepc_wdata),
-        .rvfi_csr_mcause_rmask(rvfi_csr_mcause_rmask), .rvfi_csr_mcause_wmask(rvfi_csr_mcause_wmask),
-        .rvfi_csr_mcause_rdata(rvfi_csr_mcause_rdata), .rvfi_csr_mcause_wdata(rvfi_csr_mcause_wdata),
-        .rvfi_csr_sepc_rmask(rvfi_csr_sepc_rmask), .rvfi_csr_sepc_wmask(rvfi_csr_sepc_wmask),
-        .rvfi_csr_sepc_rdata(rvfi_csr_sepc_rdata), .rvfi_csr_sepc_wdata(rvfi_csr_sepc_wdata),
-        .rvfi_csr_scause_rmask(rvfi_csr_scause_rmask), .rvfi_csr_scause_wmask(rvfi_csr_scause_wmask),
-        .rvfi_csr_scause_rdata(rvfi_csr_scause_rdata), .rvfi_csr_scause_wdata(rvfi_csr_scause_wdata),
-        .rvfi_csr_pmpcfg0_rmask(rvfi_csr_pmpcfg0_rmask), .rvfi_csr_pmpcfg0_wmask(rvfi_csr_pmpcfg0_wmask),
-        .rvfi_csr_pmpcfg0_rdata(rvfi_csr_pmpcfg0_rdata), .rvfi_csr_pmpcfg0_wdata(rvfi_csr_pmpcfg0_wdata),
-        .rvfi_csr_pmpaddr0_rmask(rvfi_csr_pmpaddr0_rmask), .rvfi_csr_pmpaddr0_wmask(rvfi_csr_pmpaddr0_wmask),
-        .rvfi_csr_pmpaddr0_rdata(rvfi_csr_pmpaddr0_rdata), .rvfi_csr_pmpaddr0_wdata(rvfi_csr_pmpaddr0_wdata),
-        .rvfi_csr_medeleg_rmask(rvfi_csr_medeleg_rmask), .rvfi_csr_medeleg_wmask(rvfi_csr_medeleg_wmask),
-        .rvfi_csr_medeleg_rdata(rvfi_csr_medeleg_rdata), .rvfi_csr_medeleg_wdata(rvfi_csr_medeleg_wdata),
-        .rvfi_csr_satp_rmask(rvfi_csr_satp_rmask), .rvfi_csr_satp_wmask(rvfi_csr_satp_wmask),
-        .rvfi_csr_satp_rdata(rvfi_csr_satp_rdata), .rvfi_csr_satp_wdata(rvfi_csr_satp_wdata),
+    // the port list both branches share
+`define LS_CORE_PORTS \
+        .clk(clk), .rst(rst), \
+        .wb_fetch_addr_o(wb_fetch_addr), .wb_fetch_cyc_o(wb_fetch_cyc), .wb_fetch_stb_o(wb_fetch_stb), \
+        .wb_fetch_dat_i(wb_fetch_dat), .wb_fetch_ack_i(wb_fetch_ack), .wb_fetch_err_i(wb_fetch_err), \
+        .wb_mem_addr_o(wb_mem_addr), .wb_mem_dat_o(wb_mem_dat_o), .wb_mem_dat_i(wb_mem_dat_i), \
+        .wb_mem_sel_o(wb_mem_sel), .wb_mem_we_o(wb_mem_we), \
+        .wb_mem_cyc_o(wb_mem_cyc), .wb_mem_stb_o(wb_mem_stb), \
+        .wb_mem_ack_i(wb_mem_ack), .wb_mem_err_i(wb_mem_err), .wb_mem_lock_o(wb_mem_lock), \
+        .icache_flush_o(icache_flush), \
+        .i_mtip(i_mtip), .i_meip(i_meip), .i_seip(i_seip), \
+        .rvfi_valid(rvfi_valid), .rvfi_order(rvfi_order), .rvfi_insn(rvfi_insn), \
+        .rvfi_trap(rvfi_trap), .rvfi_halt(rvfi_halt), .rvfi_intr(rvfi_intr), \
+        .rvfi_mode(rvfi_mode), .rvfi_ixl(rvfi_ixl), \
+        .rvfi_rs1_addr(rvfi_rs1_addr), .rvfi_rs2_addr(rvfi_rs2_addr), \
+        .rvfi_rs1_rdata(rvfi_rs1_rdata), .rvfi_rs2_rdata(rvfi_rs2_rdata), \
+        .rvfi_rd_addr(rvfi_rd_addr), .rvfi_rd_wdata(rvfi_rd_wdata), \
+        .rvfi_pc_rdata(rvfi_pc_rdata), .rvfi_pc_wdata(rvfi_pc_wdata), \
+        .rvfi_mem_addr(rvfi_mem_addr), .rvfi_mem_rmask(rvfi_mem_rmask), \
+        .rvfi_mem_wmask(rvfi_mem_wmask), .rvfi_mem_rdata(rvfi_mem_rdata), \
+        .rvfi_mem_wdata(rvfi_mem_wdata), \
+        .rvfi_csr_mepc_rmask(rvfi_csr_mepc_rmask), .rvfi_csr_mepc_wmask(rvfi_csr_mepc_wmask), \
+        .rvfi_csr_mepc_rdata(rvfi_csr_mepc_rdata), .rvfi_csr_mepc_wdata(rvfi_csr_mepc_wdata), \
+        .rvfi_csr_mcause_rmask(rvfi_csr_mcause_rmask), .rvfi_csr_mcause_wmask(rvfi_csr_mcause_wmask), \
+        .rvfi_csr_mcause_rdata(rvfi_csr_mcause_rdata), .rvfi_csr_mcause_wdata(rvfi_csr_mcause_wdata), \
+        .rvfi_csr_sepc_rmask(rvfi_csr_sepc_rmask), .rvfi_csr_sepc_wmask(rvfi_csr_sepc_wmask), \
+        .rvfi_csr_sepc_rdata(rvfi_csr_sepc_rdata), .rvfi_csr_sepc_wdata(rvfi_csr_sepc_wdata), \
+        .rvfi_csr_scause_rmask(rvfi_csr_scause_rmask), .rvfi_csr_scause_wmask(rvfi_csr_scause_wmask), \
+        .rvfi_csr_scause_rdata(rvfi_csr_scause_rdata), .rvfi_csr_scause_wdata(rvfi_csr_scause_wdata), \
+        .rvfi_csr_pmpcfg0_rmask(rvfi_csr_pmpcfg0_rmask), .rvfi_csr_pmpcfg0_wmask(rvfi_csr_pmpcfg0_wmask), \
+        .rvfi_csr_pmpcfg0_rdata(rvfi_csr_pmpcfg0_rdata), .rvfi_csr_pmpcfg0_wdata(rvfi_csr_pmpcfg0_wdata), \
+        .rvfi_csr_pmpaddr0_rmask(rvfi_csr_pmpaddr0_rmask), .rvfi_csr_pmpaddr0_wmask(rvfi_csr_pmpaddr0_wmask), \
+        .rvfi_csr_pmpaddr0_rdata(rvfi_csr_pmpaddr0_rdata), .rvfi_csr_pmpaddr0_wdata(rvfi_csr_pmpaddr0_wdata), \
+        .rvfi_csr_medeleg_rmask(rvfi_csr_medeleg_rmask), .rvfi_csr_medeleg_wmask(rvfi_csr_medeleg_wmask), \
+        .rvfi_csr_medeleg_rdata(rvfi_csr_medeleg_rdata), .rvfi_csr_medeleg_wdata(rvfi_csr_medeleg_wdata), \
+        .rvfi_csr_satp_rmask(rvfi_csr_satp_rmask), .rvfi_csr_satp_wmask(rvfi_csr_satp_wmask), \
+        .rvfi_csr_satp_rdata(rvfi_csr_satp_rdata), .rvfi_csr_satp_wdata(rvfi_csr_satp_wdata), \
         .rvfi_any_trap_taken(rvfi_any_trap_taken), .rvfi_any_debug_entry(rvfi_any_debug_entry)
-    );
+
+    /* verilator lint_off PINCONNECTEMPTY */
+    generate
+        if (CORE_PIPE) begin : g_core
+            core_pipe core0 (`LS_CORE_PORTS);
+        end else begin : g_core
+            ref_core #(.QV_MUTANT(QV_MUTANT)) core0 (`LS_CORE_PORTS);
+        end
+    endgenerate
+    `undef LS_CORE_PORTS
     /* verilator lint_on PINCONNECTEMPTY */
 
     logic        magic_set_we, magic_clr_we;
@@ -203,48 +215,48 @@ module lockstep_side #(
     // the relevant wmask makes both sides deterministically settle on 0
     // instead of reading whatever stale value happened to be sitting on
     // that wire.
-    wire cause_wmask_relevant = core0.route_to_s ? (|rvfi_csr_scause_wmask) : (|rvfi_csr_mcause_wmask);
-    assign o_cause = (rvfi_trap && cause_wmask_relevant) ? (core0.route_to_s ? rvfi_csr_scause_wdata : rvfi_csr_mcause_wdata) : 64'b0;
-    assign o_tval  = rvfi_trap ? core0.trap_val : 64'b0;
+    wire cause_wmask_relevant = g_core.core0.route_to_s ? (|rvfi_csr_scause_wmask) : (|rvfi_csr_mcause_wmask);
+    assign o_cause = (rvfi_trap && cause_wmask_relevant) ? (g_core.core0.route_to_s ? rvfi_csr_scause_wdata : rvfi_csr_mcause_wdata) : 64'b0;
+    assign o_tval  = rvfi_trap ? g_core.core0.trap_val : 64'b0;
 
     // Full CSR/privilege snapshot. Most of these are already exposed as
     // ref_core.sv's own internal top-level nets (see its csr_file0
     // instantiation); only current_priv and the 5 CSRs csr_file.sv never
     // re-exports need a peek past csr_file0 itself.
-    assign o_current_priv = core0.current_priv;
-    assign o_mtvec    = core0.mtvec_w;
-    assign o_stvec     = core0.stvec_w;
-    assign o_mepc      = core0.mepc_w;
-    assign o_sepc      = core0.sepc_w;
-    assign o_mcause    = core0.mcause_w;
-    assign o_scause    = core0.scause_w;
-    assign o_satp      = core0.satp_w;
-    assign o_medeleg   = core0.medeleg_w;
-    assign o_mideleg   = core0.mideleg_w;
-    assign o_mie       = core0.mie_w;
-    assign o_mip       = core0.mip_w;
-    assign o_dcsr      = core0.dcsr_w;
-    assign o_dpc       = core0.dpc_w;
-    assign o_pmpcfg0   = core0.pmpcfg0_w;
-    assign o_pmpaddr0  = core0.pmpaddr0_w;
-    assign o_pmpaddr1  = core0.pmpaddr1_w;
-    assign o_pmpaddr2  = core0.pmpaddr2_w;
-    assign o_pmpaddr3  = core0.pmpaddr3_w;
-    assign o_mstatus_mpp  = core0.mstatus_mpp_w;
-    assign o_mstatus_spp  = core0.mstatus_spp_w;
-    assign o_mstatus_tsr  = core0.mstatus_tsr_w;
-    assign o_mstatus_mie  = core0.mstatus_mie_w;
-    assign o_mstatus_sie  = core0.mstatus_sie_w;
-    assign o_mstatus_mprv = core0.mstatus_mprv_w;
-    assign o_mstatus_sum  = core0.mstatus_sum_w;
-    assign o_mstatus_mxr  = core0.mstatus_mxr_w;
-    assign o_mstatus_tvm  = core0.mstatus_tvm_w;
+    assign o_current_priv = g_core.core0.current_priv;
+    assign o_mtvec    = g_core.core0.mtvec_w;
+    assign o_stvec     = g_core.core0.stvec_w;
+    assign o_mepc      = g_core.core0.mepc_w;
+    assign o_sepc      = g_core.core0.sepc_w;
+    assign o_mcause    = g_core.core0.mcause_w;
+    assign o_scause    = g_core.core0.scause_w;
+    assign o_satp      = g_core.core0.satp_w;
+    assign o_medeleg   = g_core.core0.medeleg_w;
+    assign o_mideleg   = g_core.core0.mideleg_w;
+    assign o_mie       = g_core.core0.mie_w;
+    assign o_mip       = g_core.core0.mip_w;
+    assign o_dcsr      = g_core.core0.dcsr_w;
+    assign o_dpc       = g_core.core0.dpc_w;
+    assign o_pmpcfg0   = g_core.core0.pmpcfg0_w;
+    assign o_pmpaddr0  = g_core.core0.pmpaddr0_w;
+    assign o_pmpaddr1  = g_core.core0.pmpaddr1_w;
+    assign o_pmpaddr2  = g_core.core0.pmpaddr2_w;
+    assign o_pmpaddr3  = g_core.core0.pmpaddr3_w;
+    assign o_mstatus_mpp  = g_core.core0.mstatus_mpp_w;
+    assign o_mstatus_spp  = g_core.core0.mstatus_spp_w;
+    assign o_mstatus_tsr  = g_core.core0.mstatus_tsr_w;
+    assign o_mstatus_mie  = g_core.core0.mstatus_mie_w;
+    assign o_mstatus_sie  = g_core.core0.mstatus_sie_w;
+    assign o_mstatus_mprv = g_core.core0.mstatus_mprv_w;
+    assign o_mstatus_sum  = g_core.core0.mstatus_sum_w;
+    assign o_mstatus_mxr  = g_core.core0.mstatus_mxr_w;
+    assign o_mstatus_tvm  = g_core.core0.mstatus_tvm_w;
 
     // Not re-exported anywhere in csr_file0's own port list -- a true
     // peek past it.
-    assign o_mtval    = core0.csr_file0.mtval_q;
-    assign o_stval     = core0.csr_file0.stval_q;
-    assign o_mscratch  = core0.csr_file0.mscratch_q;
-    assign o_sscratch  = core0.csr_file0.sscratch_q;
-    assign o_minstret  = core0.csr_file0.minstret_q;
+    assign o_mtval    = g_core.core0.csr_file0.mtval_q;
+    assign o_stval     = g_core.core0.csr_file0.stval_q;
+    assign o_mscratch  = g_core.core0.csr_file0.mscratch_q;
+    assign o_sscratch  = g_core.core0.csr_file0.sscratch_q;
+    assign o_minstret  = g_core.core0.csr_file0.minstret_q;
 endmodule

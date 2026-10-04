@@ -10,12 +10,11 @@
  * ref_core #(0) instance with an independently perturbed bus-delay seed
  * and optionally the cache memory configuration (the REF-vs-REF self-
  * proof), or a ref_core #(QV_MUTANT_B) instance for the mutant kill
- * matrix. core_pipe is wired in as an alternative side B starting P4a,
- * once it exists.
+ * matrix, or (B_PIPE=1) design/pipe/core_pipe.sv for pipe-vs-ref.
  *
- * QV_MUTANT_B/MEMCFG_B_CACHE/DELAY_MAX select RTL structure (a
+ * QV_MUTANT_B/MEMCFG_B_CACHE/DELAY_MAX/B_PIPE select RTL structure (a
  * generate-gated mutant, a memory topology, whether the delay-shim FSMs
- * exist at all), so they're module parameters, overridden at compile
+ * exist at all, which core is side B), so they're module parameters, overridden at compile
  * time -- e.g. `iverilog ... -Plockstep_tb.QV_MUTANT_B=3`, matching the
  * plan's own "kill matrix of ref_core #(k) against #(0)" framing.
  * Everything else is genuine runtime data and comes in as a plusarg:
@@ -57,7 +56,8 @@
 module lockstep_tb #(
     parameter int QV_MUTANT_B     = 0,
     parameter bit MEMCFG_B_CACHE  = 1'b0,
-    parameter int DELAY_MAX       = 0
+    parameter int DELAY_MAX       = 0,
+    parameter bit B_PIPE          = 1'b0
 );
     // ---------------- plusargs ----------------
     string       hex_path;
@@ -191,7 +191,7 @@ module lockstep_tb #(
     logic [63:0] b_wr_data, b_mmio_rd_data;
 
     lockstep_side #(
-        .QV_MUTANT(QV_MUTANT_B), .MEMCFG_CACHE(MEMCFG_B_CACHE),
+        .QV_MUTANT(QV_MUTANT_B), .CORE_PIPE(B_PIPE), .MEMCFG_CACHE(MEMCFG_B_CACHE),
         .DELAY_MAX(DELAY_MAX)
     ) side_b (
         .clk(clk_b), .rst(rst),
@@ -559,9 +559,9 @@ module lockstep_tb #(
         int mismatches;
         mismatches = 0;
         for (int r = 0; r < 32; r++) begin
-            if (side_a.core0.regfile0.gp_registers[r] != side_b.core0.regfile0.gp_registers[r]) begin
+            if (side_a.g_core.core0.regfile0.gp_registers[r] != side_b.g_core.core0.regfile0.gp_registers[r]) begin
                 $display("LOCKSTEP_DIVERGENCE: final x%0d a=%016h b=%016h",
-                         r, side_a.core0.regfile0.gp_registers[r], side_b.core0.regfile0.gp_registers[r]);
+                         r, side_a.g_core.core0.regfile0.gp_registers[r], side_b.g_core.core0.regfile0.gp_registers[r]);
                 mismatches++;
             end
         end
