@@ -73,6 +73,8 @@ module qv_issue #(
     /* verilator lint_on UNUSEDSIGNAL */
     output qv_pkg::fu_req_t                  o_alu_req,
     output qv_pkg::fu_req_t                  o_bru_req,
+    output qv_pkg::fu_req_t                  o_lsu_req,
+    input  logic                             i_lsu_free,   // registered: one memory op at a time
 
     input  logic                             i_commit_valid,
     input  logic [4:0]                       i_commit_rd,
@@ -119,7 +121,10 @@ module qv_issue #(
         end
     end
 
-    assign o_issue = i_uop_valid && a_ready && b_ready && i_alloc_ready
+    wire to_bru = (i_uop.fu == QV_FU_BRU);
+    wire to_lsu = (i_uop.fu == QV_FU_LSU);
+
+    assign o_issue = i_uop_valid && a_ready && b_ready && i_alloc_ready && (!to_lsu || i_lsu_free)
                   && (!SERIALIZE || i_rob_empty) && !i_flush;
 
     // ---------------- ROB allocation ----------------
@@ -155,12 +160,16 @@ module qv_issue #(
     // ---------------- dispatch: one request port per unit ----------------
     // CSR and SYS uops go through the ALU only to resolve their source
     // operand; commit carries out the operation itself at the ROB head.
-    wire to_bru = (i_uop.fu == QV_FU_BRU);
+    // Memory uops go to the LSU (op = {store, signed, size}; a = rs1,
+    // b = rs2 or the I-immediate, imm = the S-immediate), which takes one
+    // at a time -- the next waits here until it is free.
     fu_req_t req;
     always_comb begin
         req         = '0;
         req.tag     = i_alloc_tag;
-        req.op      = to_bru ? 5'(i_uop.bru_op) : i_uop.alu_op;
+        if (to_bru)      req.op = 5'(i_uop.bru_op);
+        else if (to_lsu) req.op = {1'b0, i_uop.is_store, i_uop.mem_signed, i_uop.mem_size};
+        else             req.op = i_uop.alu_op;
         req.is_word = i_uop.is_word;
         req.a       = opa;
         req.b       = opb;
@@ -170,9 +179,11 @@ module qv_issue #(
         req.pred_next = pred_next;
 
         o_alu_req       = req;
-        o_alu_req.valid = o_issue && !to_bru;
+        o_alu_req.valid = o_issue && !to_bru && !to_lsu;
         o_bru_req       = req;
         o_bru_req.valid = o_issue && to_bru;
+        o_lsu_req       = req;
+        o_lsu_req.valid = o_issue && to_lsu;
     end
 
     // ---------------- producer table update ----------------

@@ -22,6 +22,7 @@ design/pipe/qv_issue.sv
 design/pipe/qv_rob.sv
 design/pipe/qv_exu_alu.sv
 design/pipe/qv_exu_bru.sv
+design/pipe/qv_lsu.sv
 design/pipe/qv_commit.sv
 design/pipe/core_pipe.sv
 design/csr_file.sv

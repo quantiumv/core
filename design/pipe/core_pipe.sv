@@ -31,13 +31,14 @@
  * Implemented so far: every single-cycle integer ALU instruction --
  * RV64I register/immediate ops including the *W forms, LUI, AUIPC, and
  * MUL/MULH/MULHSU/MULHU/MULW -- plus conditional branches, JAL, JALR,
+ * loads and stores (performed one at a time, at the ROB head), FENCE,
  * the six Zicsr instructions, ECALL, EBREAK, MRET and WFI (a no-op),
  * with M-mode synchronous traps, and RVC: compressed instructions on any
  * 2-byte boundary, including 32-bit ones that straddle two fetched
  * dwords. Everything else decodes as an illegal-instruction trap. Not
- * yet: loads/stores, FENCE/FENCE.I/SFENCE.VMA, U/S modes, SRET,
- * interrupts, debug, DIV/REM, A. The
- * mem port, icache flush and debug/progbuf outputs are held inert. The
+ * yet: FENCE.I, SFENCE.VMA, U/S modes, SRET, interrupts, debug,
+ * DIV/REM, A. wb_mem_lock_o, the icache flush and the debug/progbuf
+ * outputs are held inert. The
  * Debug Module's GPR/CSR access mux (core.sv wires it around regfile0
  * and csr_file0) comes back with debug support.
  *
@@ -80,17 +81,13 @@ module core_pipe
 
     output logic [31:0] wb_mem_addr_o,
     output logic [63:0] wb_mem_dat_o,
-    /* verilator lint_off UNUSEDSIGNAL */
     input  logic [63:0] wb_mem_dat_i,
-    /* verilator lint_on UNUSEDSIGNAL */
     output logic [7:0]  wb_mem_sel_o,
     output logic        wb_mem_we_o,
     output logic        wb_mem_cyc_o,
     output logic        wb_mem_stb_o,
-    /* verilator lint_off UNUSEDSIGNAL */
     input  logic        wb_mem_ack_i,
     input  logic        wb_mem_err_i,
-    /* verilator lint_on UNUSEDSIGNAL */
     output logic        wb_mem_lock_o,
     output logic        icache_flush_o,
     input  logic         i_mtip = 1'b0,
@@ -261,7 +258,8 @@ module core_pipe
     logic                    l1_complete, l2_complete;
     logic [63:0]             l1_value, l2_value;
     wb_t                     wb_bus;
-    fu_req_t                 alu_req, bru_req;
+    fu_req_t                 alu_req, bru_req, lsu_req;
+    logic                    lsu_free;
     logic                    c_valid, c_rd_wen;
     logic [4:0]              c_rd;
     logic [QV_ROB_TAG_W-1:0] c_tag;
@@ -278,8 +276,13 @@ module core_pipe
         .o_lookup1_tag(l1_tag), .i_lookup1_complete(l1_complete), .i_lookup1_value(l1_value),
         .o_lookup2_tag(l2_tag), .i_lookup2_complete(l2_complete), .i_lookup2_value(l2_value),
         .i_wb(wb_bus), .o_alu_req(alu_req), .o_bru_req(bru_req),
+        .o_lsu_req(lsu_req), .i_lsu_free(lsu_free),
         .i_commit_valid(c_valid), .i_commit_rd(c_rd), .i_commit_rd_wen(c_rd_wen), .i_commit_tag(c_tag)
     );
+
+    // LSU outputs, declared ahead of the ROB and commit, which take them
+    wb_t      lsu_wb;
+    lsu_res_t lsu_res;
 
     // ---------------- ROB ----------------
     logic                    head_valid, commit_pop;
@@ -294,7 +297,7 @@ module core_pipe
         .i_alloc_rd(alloc_rd), .i_alloc_rd_wen(alloc_rd_wen), .i_alloc_next_pc(alloc_next_pc),
         .i_alloc_shadow(alloc_shadow), .i_alloc_ctrl(alloc_ctrl),
         .o_alloc_tag(alloc_tag), .o_alloc_ready(alloc_ready),
-        .o_empty(rob_empty), .i_wb(wb_bus),
+        .o_empty(rob_empty), .i_wb(wb_bus), .i_wb2(lsu_wb),
         .i_lookup1_tag(l1_tag), .o_lookup1_complete(l1_complete), .o_lookup1_value(l1_value),
         .i_lookup2_tag(l2_tag), .o_lookup2_complete(l2_complete), .o_lookup2_value(l2_value),
         .o_head_valid(head_valid), .o_head_entry(head_entry), .o_head_tag(head_tag),
@@ -310,6 +313,22 @@ module core_pipe
     // cycle, so at most one result is ever valid. A multi-cycle unit
     // (DIV) will need a real writeback arbiter.
     assign wb_bus = bru_wb.valid ? bru_wb : alu_wb;
+
+    // ---------------- X: LSU -> slow writeback port ----------------
+    // No bypass from it: a dependent reads the ROB the next cycle, which
+    // keeps wb_mem_dat_i out of issue's combinational paths.
+    qv_lsu lsu0 (
+        .clk(clk), .rst(rst), .i_flush(flush),
+        .i_req(lsu_req), .o_free(lsu_free),
+        .i_head_valid(head_valid), .i_head_tag(head_tag),
+        .wb_mem_addr_o(wb_mem_addr_o), .wb_mem_dat_o(wb_mem_dat_o), .wb_mem_sel_o(wb_mem_sel_o),
+        .wb_mem_we_o(wb_mem_we_o), .wb_mem_cyc_o(wb_mem_cyc_o), .wb_mem_stb_o(wb_mem_stb_o),
+        .wb_mem_dat_i(wb_mem_dat_i), .wb_mem_ack_i(wb_mem_ack_i), .wb_mem_err_i(wb_mem_err_i),
+        .o_wb(lsu_wb), .o_res(lsu_res),
+        /* verilator lint_off PINCONNECTEMPTY */
+        .o_head_started()          // interrupts/debug (P5) will wait on this
+        /* verilator lint_on PINCONNECTEMPTY */
+    );
 
     // ---------------- C: commit ----------------
     logic        rf_we;
@@ -328,6 +347,8 @@ module core_pipe
     logic [31:0] c_insn;
     logic        c_intr;
     logic [4:0]  c_rd_addr;
+    logic [63:0] c_mem_addr, c_mem_rdata, c_mem_wdata;
+    logic [7:0]  c_mem_rmask, c_mem_wmask;
     /* verilator lint_on UNUSEDSIGNAL */
 
     // declared ahead of csr_file0, which drives them
@@ -336,7 +357,7 @@ module core_pipe
     qv_commit #(.RESET_PC(RESET_PC)) commit0 (
         .clk(clk), .rst(rst),
         .i_head_valid(head_valid), .i_head_entry(head_entry), .i_head_tag(head_tag),
-        .i_head_shadow(head_shadow), .i_head_ctrl(head_ctrl), .o_commit_pop(commit_pop),
+        .i_head_shadow(head_shadow), .i_head_ctrl(head_ctrl), .i_lsu_res(lsu_res), .o_commit_pop(commit_pop),
         .o_regfile_we(rf_we), .o_regfile_sel(rf_sel), .o_regfile_data(rf_data),
         .o_commit_valid(c_valid), .o_commit_rd(c_rd), .o_commit_rd_wen(c_rd_wen), .o_commit_tag(c_tag),
         .o_csr_addr(c_csr_addr), .i_csr_rdata(csr_rdata), .o_csr_we(c_csr_we), .o_csr_wdata(c_csr_wdata),
@@ -348,7 +369,9 @@ module core_pipe
         .o_rvfi_rs1_addr(c_rs1_addr), .o_rvfi_rs2_addr(c_rs2_addr),
         .o_rvfi_rs1_rdata(c_rs1_rdata), .o_rvfi_rs2_rdata(c_rs2_rdata),
         .o_rvfi_rd_addr(c_rd_addr), .o_rvfi_rd_wdata(c_rd_wdata),
-        .o_rvfi_pc_rdata(c_pc_rdata), .o_rvfi_pc_wdata(c_pc_wdata)
+        .o_rvfi_pc_rdata(c_pc_rdata), .o_rvfi_pc_wdata(c_pc_wdata),
+        .o_rvfi_mem_addr(c_mem_addr), .o_rvfi_mem_rmask(c_mem_rmask), .o_rvfi_mem_wmask(c_mem_wmask),
+        .o_rvfi_mem_rdata(c_mem_rdata), .o_rvfi_mem_wdata(c_mem_wdata)
     );
 
     // ---------------- architectural state ----------------
@@ -432,12 +455,6 @@ module core_pipe
     /* verilator lint_on UNUSEDSIGNAL */
 
     // ---------------- inert ports ----------------
-    assign wb_mem_addr_o   = 32'b0;
-    assign wb_mem_dat_o    = 64'b0;
-    assign wb_mem_sel_o    = 8'b0;
-    assign wb_mem_we_o     = 1'b0;
-    assign wb_mem_cyc_o    = 1'b0;
-    assign wb_mem_stb_o    = 1'b0;
     assign wb_mem_lock_o   = 1'b0;
     assign icache_flush_o  = 1'b0;
     assign o_debug_mode    = in_debug_mode;
@@ -465,11 +482,11 @@ module core_pipe
     assign rvfi_rd_wdata  = c_rd_wdata;
     assign rvfi_pc_rdata  = c_pc_rdata;
     assign rvfi_pc_wdata  = c_pc_wdata;
-    assign rvfi_mem_addr  = 64'b0;
-    assign rvfi_mem_rmask = 8'b0;
-    assign rvfi_mem_wmask = 8'b0;
-    assign rvfi_mem_rdata = 64'b0;
-    assign rvfi_mem_wdata = 64'b0;
+    assign rvfi_mem_addr  = c_mem_addr;
+    assign rvfi_mem_rmask = c_mem_rmask;
+    assign rvfi_mem_wmask = c_mem_wmask;
+    assign rvfi_mem_rdata = c_mem_rdata;
+    assign rvfi_mem_wdata = c_mem_wdata;
 
     assign rvfi_csr_mepc_rmask     = 64'hffff_ffff_ffff_ffff;
     assign rvfi_csr_mepc_wmask     = 64'hffff_ffff_ffff_ffff;

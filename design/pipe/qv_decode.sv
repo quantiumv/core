@@ -176,7 +176,34 @@ module qv_decode (
         endcase
     end: sys_op_sel
 
-    wire implemented = is_alu || is_bru || is_csr || is_sys;
+    // loads/stores (core.sv's mem_control); FENCE retires as a no-op
+    // through the ALU, since memory ops already complete in order
+    logic       is_load, is_store, mem_signed;
+    logic [1:0] mem_size;
+    always_comb begin: mem_control
+        is_load    = 1'b0;
+        is_store   = 1'b0;
+        mem_signed = 1'b0;
+        mem_size   = 2'd0;
+        case (code)
+            `INSTR_CODE(LB):  begin is_load  = 1'b1; mem_size = 2'd0; mem_signed = 1'b1; end
+            `INSTR_CODE(LH):  begin is_load  = 1'b1; mem_size = 2'd1; mem_signed = 1'b1; end
+            `INSTR_CODE(LW):  begin is_load  = 1'b1; mem_size = 2'd2; mem_signed = 1'b1; end
+            `INSTR_CODE(LD):  begin is_load  = 1'b1; mem_size = 2'd3; mem_signed = 1'b1; end
+            `INSTR_CODE(LBU): begin is_load  = 1'b1; mem_size = 2'd0; end
+            `INSTR_CODE(LHU): begin is_load  = 1'b1; mem_size = 2'd1; end
+            `INSTR_CODE(LWU): begin is_load  = 1'b1; mem_size = 2'd2; end
+            `INSTR_CODE(SB):  begin is_store = 1'b1; mem_size = 2'd0; end
+            `INSTR_CODE(SH):  begin is_store = 1'b1; mem_size = 2'd1; end
+            `INSTR_CODE(SW):  begin is_store = 1'b1; mem_size = 2'd2; end
+            `INSTR_CODE(SD):  begin is_store = 1'b1; mem_size = 2'd3; end
+            default: ;
+        endcase
+    end: mem_control
+    wire is_mem   = is_load || is_store;
+    wire is_fence = (code == `INSTR_CODE(FENCE));
+
+    wire implemented = is_alu || is_bru || is_csr || is_sys || is_mem || is_fence;
 
     // The CSR address arrives on imm_2. Write suppression and illegality
     // mirror core.sv's csr_write_suppress / is_illegal_instr for M-mode:
@@ -245,6 +272,10 @@ module qv_decode (
         uop_d.serialize = is_csr;
         uop_d.pred_taken = i_iq_data.pred_taken;
         uop_d.pred_tgt   = i_iq_data.pred_tgt;
+        uop_d.mem_size   = mem_size;
+        uop_d.mem_signed = mem_signed;
+        uop_d.is_load    = is_load;
+        uop_d.is_store   = is_store;
         if (i_iq_data.xcpt) begin
             uop_d.xcpt       = 1'b1;
             uop_d.xcpt_cause = i_iq_data.xcpt_cause;
@@ -258,6 +289,7 @@ module qv_decode (
         if (uop_d.xcpt)  uop_d.fu = QV_FU_ALU;
         else if (is_bru) uop_d.fu = QV_FU_BRU;
         else if (is_csr) uop_d.fu = QV_FU_CSR;
+        else if (is_mem) uop_d.fu = QV_FU_LSU;
         else if (is_sys) uop_d.fu = QV_FU_SYS;
         else             uop_d.fu = QV_FU_ALU;
     end

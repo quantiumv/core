@@ -88,7 +88,11 @@ package qv_pkg;
         logic        rd_wen;
         logic [63:0] imm1;         // operand A when !rs1_used
         logic [63:0] imm2;         // operand B when !rs2_used
-        logic [63:0] imm3;         // branch/JAL pc-relative offset
+        logic [63:0] imm3;         // branch/JAL pc-relative offset, store offset
+        logic [1:0]  mem_size;     // bytes = 1 << mem_size
+        logic        mem_signed;
+        logic        is_load;
+        logic        is_store;
         qv_sys_op_e  sys_op;
         qv_csr_op_e  csr_op;
         logic [11:0] csr_addr;
@@ -125,6 +129,21 @@ package qv_pkg;
         logic [4:0]  rs2_addr;
         logic [63:0] rs2_rdata;
     } rvfi_shadow_t;
+
+    // A memory op's outcome, held by the LSU from its completion until it
+    // commits (only the ROB head ever sits in between): its exception, if
+    // any, and the RVFI memory fields, following core.sv's conventions
+    // (dword-aligned addr, shifted masks, raw bus rdata, shifted wdata).
+    typedef struct packed {
+        logic        xcpt;
+        logic [3:0]  cause;
+        logic [63:0] tval;
+        logic [63:0] mem_addr;
+        logic [7:0]  mem_rmask;
+        logic [7:0]  mem_wmask;
+        logic [63:0] mem_rdata;
+        logic [63:0] mem_wdata;
+    } lsu_res_t;
 
     // What commit needs to act on an entry beyond its result: exceptions,
     // CSR and system operations. Stored per ROB entry, set at issue.
