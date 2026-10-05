@@ -1,0 +1,15 @@
+kernel,config,cycles,instret,cpi
+memcpy,sram,1593,659,2.417
+memcpy,cache,1555,659,2.360
+crc32,sram,11170,8841,1.263
+crc32,cache,11091,8841,1.254
+qsort,sram,11540,4611,2.503
+qsort,cache,11385,4611,2.469
+matmul,sram,8359,4285,1.951
+matmul,cache,7661,4285,1.788
+sieve,sram,14627,5895,2.481
+sieve,cache,11823,5895,2.006
+listchase,sram,5148,2564,2.008
+listchase,cache,4909,2564,1.915
+mixedint,sram,9877,4393,2.248
+mixedint,cache,9415,4393,2.143
