@@ -29,6 +29,8 @@ CHECKS="$RVFORMAL/cores/$NAME/checks"
 [ -d "$CHECKS" ] || { echo "no $CHECKS -- run sync_core.sh first" >&2; exit 1; }
 cd "$CHECKS" || exit 1
 export PYTHONPATH="$HOME/yosys-py-patch${PYTHONPATH:+:$PYTHONPATH}"   # smtio.py fix for bitwuzla
+export PATH="$HOME/.local/bin:$PATH"     # sby, solvers; not on a systemd unit's PATH
+command -v sby > /dev/null || { echo "sby not found" >&2; exit 1; }
 
 status() {
     local log="$1/logfile.txt"
