@@ -55,6 +55,14 @@
 `ifndef QV_PIPE_BYPASS_EN
 `define QV_PIPE_BYPASS_EN 1'b1
 `endif
+// QV_FORMAL_SMALL: a smaller ROB and IQ, to keep riscv-formal's models small
+`ifdef QV_FORMAL_SMALL
+`define QV_PIPE_ROB_DEPTH 4
+`define QV_PIPE_IQ_DEPTH  2
+`else
+`define QV_PIPE_ROB_DEPTH qv_pkg::QV_ROB_DEPTH
+`define QV_PIPE_IQ_DEPTH  4
+`endif
 
 // under QV_PIPE_AS_CORE the module name deliberately differs from the file's
 /* verilator lint_off DECLFILENAME */
@@ -67,7 +75,8 @@ module core_pipe
 #(
     parameter bit SERIALIZE = `QV_PIPE_SERIALIZE,
     parameter bit BYPASS_EN = `QV_PIPE_BYPASS_EN,
-    parameter int ROB_DEPTH = qv_pkg::QV_ROB_DEPTH
+    parameter int ROB_DEPTH = `QV_PIPE_ROB_DEPTH,   // power of 2, <= qv_pkg::QV_ROB_DEPTH
+    parameter int IQ_DEPTH  = `QV_PIPE_IQ_DEPTH     // power of 2, >= 2
 ) (
     input logic clk,
     input logic rst,
@@ -228,7 +237,7 @@ module core_pipe
         .o_redirect_valid(fe_redirect_valid), .o_redirect_pc(fe_redirect_pc)
     );
 
-    qv_fifo #(.WIDTH(FE_W), .DEPTH(4)) iq0 (
+    qv_fifo #(.WIDTH(FE_W), .DEPTH(IQ_DEPTH)) iq0 (
         .clk(clk), .rst(rst), .i_flush(flush),
         .i_push0_valid(p0_valid), .i_push0_data(p0_data),
         .i_push1_valid(p1_valid), .i_push1_data(p1_data),
