@@ -6,10 +6,10 @@
 # Builds all seven kernels (verification/perf/Makefile), builds the two
 # perf_tb.sv configurations ONCE (CACHE_CFG=0/1 -- the testbench itself
 # doesn't change per kernel, only +HEXFILE/+PERF_RESULT_ADDR do), runs
-# every kernel against both, and writes baseline_fsm.csv: the FSM core's
-# own baseline (both the plain SRAM harness and the real SoC with
-# caches), named for later comparison against a future core_pipe
-# baseline once one exists.
+# every kernel against both, and writes baseline_<core>.csv (config
+# "sram": the plain SRAM harness; "cache": the real SoC with caches).
+# --core fsm (default) is design/core.sv, --core pipe design/pipe/
+# core_pipe.sv.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -17,6 +17,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$REPO_ROOT" || exit 1
 
 OUTDIR="$SCRIPT_DIR/.results"
+CORE=fsm
 WALL_TIMEOUT=120
 MAX_CYCLES=2000000
 FORCE=0
@@ -25,6 +26,7 @@ usage() {
     cat <<EOF
 Usage: run_perf.sh [options]
 
+  --core fsm|pipe     which core (default fsm)
   --outdir DIR        results directory (default verification/perf/.results)
   --force             rebuild kernels/testbenches even if cached
   --timeout N          per-run cycle budget passed as +TIMEOUT (default 2000000)
@@ -35,6 +37,7 @@ EOF
 
 while [ $# -gt 0 ]; do
     case "$1" in
+        --core) CORE="$2"; shift 2 ;;
         --outdir) OUTDIR="$2"; shift 2 ;;
         --force) FORCE=1; shift ;;
         --timeout) MAX_CYCLES="$2"; shift 2 ;;
@@ -61,11 +64,12 @@ if [ $? -ne 0 ]; then
 fi
 
 # ---------------- build the two testbench configurations ----------------
-DESIGN_FILES="design/decoder.sv design/alu.sv design/c_expand.sv design/cache_complex.sv \
-design/clint.sv design/core.sv design/csr_file.sv design/dcache.sv design/divider.sv \
-design/dm.sv design/dm_dmi.sv design/icache.sv design/jtag_tap.sv design/plic.sv \
-design/register_file.sv design/soc.sv design/uart16550.sv design/wb4_sram.sv \
-design/wb_addr_decoder.sv design/wb_arbiter2.sv"
+case "$CORE" in
+    fsm)  DESIGN_LIST=design_files.list;      CORE_DEFINE="" ;;
+    pipe) DESIGN_LIST=pipe_design_files.list; CORE_DEFINE="-DQV_PIPE_AS_CORE" ;;
+    *) echo "Unknown --core: $CORE (expected fsm or pipe)" >&2; exit 1 ;;
+esac
+DESIGN_FILES=$(grep -vE '^\s*(#|$)' "verification/regress/$DESIGN_LIST" | tr '\n' ' ')
 HARNESS_FILES="testbench/core_wb4_sram_harness.sv"
 PERF_FILES="verification/perf/perf_tb.sv"
 
@@ -75,7 +79,7 @@ build_tb() {
         return
     fi
     echo "=== building $vvp ==="
-    iverilog -g2012 -I design -I design/defaults -I testbench -I verification/perf \
+    iverilog -g2012 $CORE_DEFINE -I design -I design/defaults -I testbench -I verification/perf \
         -Pperf_tb.CACHE_CFG=$cfg \
         -o "$vvp" \
         $DESIGN_FILES $HARNESS_FILES $PERF_FILES > "$log" 2>&1
@@ -91,11 +95,11 @@ build_tb() {
     fi
 }
 
-build_tb 0 "$OUTDIR/perf_tb_fsm.vvp"   "$OUTDIR/build_fsm.log"
-build_tb 1 "$OUTDIR/perf_tb_cache.vvp" "$OUTDIR/build_cache.log"
+build_tb 0 "$OUTDIR/perf_tb_${CORE}_sram.vvp"  "$OUTDIR/build_${CORE}_sram.log"
+build_tb 1 "$OUTDIR/perf_tb_${CORE}_cache.vvp" "$OUTDIR/build_${CORE}_cache.log"
 
 # ---------------- run every kernel against both configs ----------------
-CSV="$SCRIPT_DIR/baseline_fsm.csv"
+CSV="$SCRIPT_DIR/baseline_${CORE}.csv"
 echo "kernel,config,cycles,instret,cpi" > "$CSV"
 
 run_one() {
@@ -127,8 +131,8 @@ run_one() {
 
 echo "=== running kernels ==="
 for kernel in $KERNELS; do
-    run_one "$kernel" "fsm"   "$OUTDIR/perf_tb_fsm.vvp"
-    run_one "$kernel" "cache" "$OUTDIR/perf_tb_cache.vvp"
+    run_one "$kernel" "sram"  "$OUTDIR/perf_tb_${CORE}_sram.vvp"
+    run_one "$kernel" "cache" "$OUTDIR/perf_tb_${CORE}_cache.vvp"
 done
 
 echo "=== wrote $CSV ==="
