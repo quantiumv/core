@@ -1,0 +1,27 @@
+# qv_lsu properties (lsu_props.sv): k-induction proof, deep BMC, covers.
+# Run with run.sh, or: sby -f lsu.sby
+[tasks]
+prove
+bmc
+cover
+
+[options]
+prove: mode prove
+prove: depth 12
+bmc: mode bmc
+bmc: depth 30
+cover: mode cover
+cover: depth 16
+
+[engines]
+smtbmc boolector
+
+[script]
+plugin -i /home/potato/yosys-slang-src/build/slang.so
+read_slang --single-unit qv_pkg.sv qv_lsu.sv lsu_props.sv --top lsu_props
+prep -top lsu_props
+
+[files]
+../../../design/pipe/qv_pkg.sv
+../../../design/pipe/qv_lsu.sv
+lsu_props.sv

@@ -1,0 +1,4 @@
+# SymbiYosys work directories
+*_prove/
+*_bmc/
+*_cover/
