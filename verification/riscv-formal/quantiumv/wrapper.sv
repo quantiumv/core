@@ -109,6 +109,23 @@ module rvfi_wrapper (
     (* keep *) `rvformal_rand_reg i_debug_halt_req;
     (* keep *) `rvformal_rand_reg i_debug_resume_req;
 
+`ifdef RISCV_FORMAL_FAIRNESS
+    // liveness/hang only (genchecks defines RISCV_FORMAL_FAIRNESS for
+    // them): every bus request is answered within 3 cycles, and no debug
+    // halt is requested -- a halted hart legitimately retires nothing.
+    reg [2:0] fetch_wait = 3'b0, mem_wait = 3'b0;
+    always @(posedge clock) begin
+        fetch_wait <= {fetch_wait[1:0], wb_fetch_cyc && wb_fetch_stb && !wb_fetch_ack && !wb_fetch_err};
+        mem_wait   <= {mem_wait[1:0],   wb_mem_cyc && wb_mem_stb && !wb_mem_ack && !wb_mem_err};
+    end
+    always @* begin
+        assume (fetch_wait != 3'b111);
+        assume (mem_wait != 3'b111);
+        assume (!i_debug_halt_req);
+        assume (!i_debug_resume_req);
+    end
+`endif
+
     core uut (
         .clk(clock),
         .rst(reset),

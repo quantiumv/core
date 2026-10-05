@@ -44,8 +44,7 @@ lockstep:
 # checks.cfg into a riscv-formal checkout. The existing manual sync
 # process (for today's single FSM core) is documented in
 # verification/riscv-formal/quantiumv/README.md.
+# riscv-formal: copy CORE=fsm|pipe into ~/riscv-formal and generate its
+# checks; run them with verification/riscv-formal/run_sweep.sh
 formal-sync:
-	@echo "make formal-sync: not implemented yet for ref/pipe cores -- see" >&2
-	@echo "verification/riscv-formal/quantiumv/README.md for the current" >&2
-	@echo "manual FSM-only sync steps." >&2
-	@exit 1
+	bash verification/riscv-formal/sync_core.sh $(CORE)
