@@ -9,11 +9,12 @@
  * Ghost state follows the one uop the LSU holds: accepted (live), how many
  * bus requests it has started, whether it completed. Properties:
  *   - an access starts only when its uop is the ROB head (and not in a
- *     flush cycle), never for a misaligned one;
+ *     flush cycle), never for a misaligned one and never one the PMP denies;
  *   - a started access stays on the bus, unchanged, until answered;
  *   - each uop completes (o_wb) at most once, with its own tag, and not
  *     after a flush; a misaligned one completes with cause 4/6 (6 for every
- *     atomic, LR included);
+ *     atomic, LR included), one the PMP denies with cause 5/7 (7 for every
+ *     store, SC, LR and AMO) and no request at all;
  *   - a free LSU is off the bus.
  * The A extension:
  *   - a load or LR makes one read; a store one write; an SC one write, and
@@ -37,7 +38,12 @@ module lsu_props (
     input logic                             res_valid,
     input logic [63:0]                      res_addr,
     input logic [63:0]                      dat,
-    input logic                             ack, err
+    input logic                             ack, err,
+    // PMP state: free, like everything else the LSU reads
+    input logic [1:0]                       priv,
+    input logic                             mprv,
+    input logic [1:0]                       mpp,
+    input logic [63:0]                      pmpcfg0, pmpaddr0, pmpaddr1, pmpaddr2, pmpaddr3
 );
     import qv_pkg::*;
 
@@ -53,6 +59,9 @@ module lsu_props (
         .i_req(req), .o_free(free),
         .i_head_valid(head_valid), .i_head_tag(head_tag),
         .i_res_valid(res_valid), .i_res_addr(res_addr),
+        .i_priv(priv), .i_mprv(mprv), .i_mpp(mpp),
+        .i_pmpcfg0(pmpcfg0), .i_pmpaddr0(pmpaddr0), .i_pmpaddr1(pmpaddr1),
+        .i_pmpaddr2(pmpaddr2), .i_pmpaddr3(pmpaddr3),
         .wb_mem_addr_o(addr), .wb_mem_dat_o(wdat), .wb_mem_sel_o(sel),
         .wb_mem_we_o(we), .wb_mem_cyc_o(cyc), .wb_mem_stb_o(stb), .wb_mem_lock_o(lock),
         .wb_mem_dat_i(dat), .wb_mem_ack_i(ack), .wb_mem_err_i(err),
@@ -72,7 +81,7 @@ module lsu_props (
                        : (sz == 2'd3) ? (ra[2:0] != 3'd0) : 1'b0;
 
     reg                  init = 1'b1;
-    reg                  p_valid = 1'b0, p_out = 1'b0, p_we, p_wbmis = 1'b0;
+    reg                  p_valid = 1'b0, p_out = 1'b0, p_we, p_wbmis = 1'b0, p_wbpmp = 1'b0;
     reg [31:0]           p_addr;
     reg [63:0]           p_wdat;
     reg [7:0]            p_sel;
@@ -99,6 +108,7 @@ module lsu_props (
         p_sel   <= sel;
         p_we    <= we;
         p_wbmis <= !rst && wb.valid && g_mis;
+        p_wbpmp <= !rst && wb.valid && nreq == 2'd0 && !g_mis && dut.pmp_deny;
         if (rst) begin
             live <= 1'b0; nreq <= 2'd0; done <= 1'b0; read_ok <= 1'b0; amo_seq <= 1'b0;
             g_mis <= 1'b0; g_st <= 1'b0; g_atom <= 1'b0; g_sc <= 1'b0; g_amo <= 1'b0;
@@ -139,7 +149,7 @@ module lsu_props (
                 if (nreq == 2'd0) begin
                     // the first request: only at the head, once, never misaligned
                     assert (head_valid && head_tag == g_tag && !flush);
-                    assert (live && !g_mis);
+                    assert (live && !g_mis && !dut.pmp_deny);
                     // an SC goes out only with its reservation
                     if (g_sc) assert (sc_match);
                     // its direction: stores and SC write; loads, LR and the AMO's first half read
@@ -155,13 +165,18 @@ module lsu_props (
                 assert (addr == p_addr && we == p_we && sel == p_sel && wdat == p_wdat);
             end
             if (wb.valid) assert (live && !done && wb.tag == g_tag);
-            // a completion with no request at all: misaligned, or an SC without its reservation
-            if (wb.valid && nreq == 2'd0) assert (g_mis || g_sc);
-            // an AMO completes after both requests, or after a faulting read (a pulse in a flush cycle is ignored by the ROB)
-            if (wb.valid && g_amo && !g_mis && !flush) assert (nreq == 2'd2 || (nreq == 2'd1 && err));
+            // a completion with no request at all: misaligned, denied by the PMP, or an SC without its reservation
+            if (wb.valid && nreq == 2'd0) assert (g_mis || g_sc || dut.pmp_deny);
+
+            // an AMO completes after both requests, after a faulting read, or without any if the PMP denied it (a pulse in a flush cycle is ignored by the ROB)
+            if (wb.valid && g_amo && !g_mis && !flush) assert (nreq == 2'd2 || (nreq == 2'd1 && err) || (nreq == 2'd0 && dut.pmp_deny));
             if (p_wbmis) begin
                 assert (res.xcpt);
                 assert (g_atom ? (res.cause == 4'd6) : (res.cause == (g_st ? 4'd6 : 4'd4)));
+            end
+            if (p_wbpmp) begin
+                assert (res.xcpt);
+                assert (res.cause == ((g_atom || g_st) ? 4'd7 : 4'd5));
             end
             if (free) assert (!cyc);
             // lock: exactly an AMO's own sequence
@@ -210,6 +225,8 @@ module lsu_props (
         if (!rst) begin
             cover (wb.valid && !g_mis && !g_st && !g_atom && !err);   // a load completes
             cover (p_wbmis && res.cause == 4'd6);          // a misaligned store traps
+            cover (p_wbpmp && res.cause == 4'd5);          // a load the PMP denies traps
+            cover (p_wbpmp && res.cause == 4'd7);          // a store (or atomic) the PMP denies traps
             cover (ack && drain_s);                        // a flushed access drains
             cover (err && bus_s);                          // a bus error
             cover (start && nreq == 2'd1 && g_amo);        // an AMO's write goes out

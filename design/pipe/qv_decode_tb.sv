@@ -38,10 +38,15 @@ module qv_decode_tb;
     logic      flush = 1'b0;
     logic [1:0] priv = 2'b11;         // the privilege state the illegal-instruction rules read
     logic       tsr = 1'b0, tvm = 1'b0;
+    // PMP state (reset: region 0 NAPOT over everything, rwx) and the pc the next instruction is fed at
+    logic [63:0] pmpcfg0 = 64'h1F, pmpaddr0 = 64'h003F_FFFF_FFFF_FFFF, pmpaddr1 = '0, pmpaddr2 = '0, pmpaddr3 = '0;
+    logic [63:0] feed_pc = 64'h1000;
 
     qv_decode dut (
         .clk(clk), .rst(rst), .i_flush(flush),
         .i_priv(priv), .i_tsr(tsr), .i_tvm(tvm),
+        .i_pmpcfg0(pmpcfg0), .i_pmpaddr0(pmpaddr0), .i_pmpaddr1(pmpaddr1),
+        .i_pmpaddr2(pmpaddr2), .i_pmpaddr3(pmpaddr3),
         .i_iq_valid(iq_valid), .i_iq_data(iq_data), .o_iq_pop(iq_pop),
         .o_valid(valid), .o_uop(uop), .i_issue_ready(issue_ready)
     );
@@ -65,7 +70,7 @@ module qv_decode_tb;
         issue_ready        = 1'b1;
         iq_valid           = 1'b1;
         iq_data            = '0;
-        iq_data.pc         = 64'h1000;
+        iq_data.pc         = feed_pc;
         iq_data.raw        = rvc ? {16'b0, instr[15:0]} : instr;
         iq_data.rvc        = rvc;
         iq_data.pred_taken = pred;
@@ -675,6 +680,95 @@ module qv_decode_tb;
         expect_fault("all-zero (illegal)",    32'h0000_0000, 1'b0, 4'd0, 4'd2);
         expect_fault("fetch fault on a valid instr", encode_r(F7_0, 8, 7, 3'b000, 5, OP), 1'b1, 4'd1, 4'd1);
         expect_fault("fetch fault beats illegal", 32'h0000_0000, 1'b1, 4'd1, 4'd1);
+
+        // ---------------- PMP on the fetch ----------------
+        // region 0: TOR [0, 0x1010), read + execute; the other regions are off. Below M a fetch needs the whole
+        // dword span [pc, pc+7] inside it (and [pc+8, pc+15] too for a 32-bit instruction at pc[2:1] == 3),
+        // however short the instruction really is; M is never denied by an unlocked region.
+        pmpcfg0 = 64'h0D; pmpaddr0 = 64'h1010 >> 2;
+        priv = 2'b01;
+        feed_pc = 64'h1000; feed(encode_i(1, 7, 3'b000, 5, OPI));
+        check("pmp: span inside the region", {63'b0, uop.xcpt}, 64'd0);
+        feed_pc = 64'h1008; feed(encode_i(1, 7, 3'b000, 5, OPI));
+        check("pmp: last dword of the region", {63'b0, uop.xcpt}, 64'd0);
+        feed_pc = 64'h100C; feed(encode_i(1, 7, 3'b000, 5, OPI));
+        check("pmp: span runs past the top", {63'b0, uop.xcpt}, 64'd1);
+        check("pmp: fetch access fault cause", {60'b0, uop.xcpt_cause}, 64'd1);
+        feed_pc = 64'h1008; feed({16'b0, 16'h0001}, 1'b0, 4'd0, 1'b1);               // c.nop
+        check("pmp: compressed, span inside", {63'b0, uop.xcpt}, 64'd0);
+        feed_pc = 64'h100E; feed({16'b0, 16'h0001}, 1'b0, 4'd0, 1'b1);
+        check("pmp: a 2-byte instruction still needs the whole 8-byte span", {63'b0, uop.xcpt}, 64'd1);
+        check("pmp: ... as a fetch access fault", {60'b0, uop.xcpt_cause}, 64'd1);
+        // crossing into the next dword: pc[2:1] == 3 and a 32-bit instruction
+        feed_pc = 64'h0FFE; feed(encode_i(1, 7, 3'b000, 5, OPI));
+        check("pmp: crossing instruction, both spans inside", {63'b0, uop.xcpt}, 64'd0);
+        feed_pc = 64'h1006; feed(encode_i(1, 7, 3'b000, 5, OPI));
+        check("pmp: crossing instruction, the second span runs past the top", {63'b0, uop.xcpt}, 64'd1);
+        check("pmp: ... cause 1", {60'b0, uop.xcpt_cause}, 64'd1);
+        feed_pc = 64'h1006; feed({16'b0, 16'h0001}, 1'b0, 4'd0, 1'b1);               // 16-bit at the same pc: no second dword
+        check("pmp: 16-bit instruction at pc[2:1] == 3 needs no second span", {63'b0, uop.xcpt}, 64'd0);
+        feed_pc = 64'h1002; feed(encode_i(1, 7, 3'b000, 5, OPI));                    // pc[2:1] == 1: no crossing
+        check("pmp: 32-bit instruction at pc[2:1] == 1 needs one span", {63'b0, uop.xcpt}, 64'd0);
+        // a denied fetch is inert: the real instruction's bits must not leak through
+        feed_pc = 64'h100C; feed(encode_s(0, 6, 9, 3'd3, `OPC_STORE));
+        check("pmp: denied store is no store", {63'b0, uop.is_store}, 64'd0);
+        check("pmp: denied store goes to the ALU", {61'b0, uop.fu}, {61'b0, QV_FU_ALU});
+        check("pmp: denied store: no rd write", {63'b0, uop.rd_wen}, 64'd0);
+        feed(encode_csr(12'h340, 5'd5, `FUNCT3_CSRRW, 5'd6, `OPC_SYSTEM));
+        check("pmp: denied CSR op does not serialize", {63'b0, uop.serialize}, 64'd0);
+        check("pmp: denied CSR op is a fault", {63'b0, uop.xcpt}, 64'd1);
+        feed(32'h0000_0000);
+        check("pmp: beats illegal-instruction", {60'b0, uop.xcpt_cause}, 64'd1);
+        feed(encode_i(1, 7, 3'b000, 5, OPI), 1'b1, 4'd12);
+        check("pmp: a page-fault marker from the fetch keeps its cause", {60'b0, uop.xcpt_cause}, 64'd12);
+        // privilege decides: M is not denied by an unlocked region, privilege 2 is checked like S
+        priv = 2'b11; feed_pc = 64'h100C; feed(encode_i(1, 7, 3'b000, 5, OPI));
+        check("pmp: M, unlocked region, no denial", {63'b0, uop.xcpt}, 64'd0);
+        priv = 2'b10; feed(encode_i(1, 7, 3'b000, 5, OPI));
+        check("pmp: privilege 2 is denied like S", {63'b0, uop.xcpt}, 64'd1);
+        priv = 2'b00; feed_pc = 64'h1000; feed(encode_i(1, 7, 3'b000, 5, OPI));
+        check("pmp: U inside the region", {63'b0, uop.xcpt}, 64'd0);
+        feed_pc = 64'h2000; feed(encode_i(1, 7, 3'b000, 5, OPI));
+        check("pmp: U outside every region", {63'b0, uop.xcpt}, 64'd1);
+        // the execute permission: the same region without X denies S, and a locked one denies M too
+        pmpcfg0 = 64'h09; priv = 2'b01; feed_pc = 64'h1000; feed(encode_i(1, 7, 3'b000, 5, OPI));
+        check("pmp: no execute permission", {63'b0, uop.xcpt}, 64'd1);
+        pmpcfg0 = 64'h89; priv = 2'b11; feed(encode_i(1, 7, 3'b000, 5, OPI));
+        check("pmp: locked region without X denies M", {63'b0, uop.xcpt}, 64'd1);
+        pmpcfg0 = 64'h0D; feed(encode_i(1, 7, 3'b000, 5, OPI));
+        check("pmp: unlocked: M fine", {63'b0, uop.xcpt}, 64'd0);
+        // nothing configured: below M everything is denied, M is not
+        pmpcfg0 = 64'h0; priv = 2'b01; feed(encode_i(1, 7, 3'b000, 5, OPI));
+        check("pmp: no region matches, S denied", {63'b0, uop.xcpt}, 64'd1);
+        priv = 2'b11; feed(encode_i(1, 7, 3'b000, 5, OPI));
+        check("pmp: no region matches, M allowed", {63'b0, uop.xcpt}, 64'd0);
+        // a 32-bit instruction at pc[2:1] == 2 (pc[2] set, pc[1] clear) does not cross: one span only
+        pmpcfg0 = 64'h0D; pmpaddr0 = 64'h1010 >> 2; priv = 2'b01;
+        feed_pc = 64'h1004; feed(encode_i(1, 7, 3'b000, 5, OPI));
+        check("pmp: 32-bit instruction at pc[2:1] == 2 does not cross", {63'b0, uop.xcpt}, 64'd0);
+        // the second span is exactly [pc+8, pc+15]: a region that starts inside the first span's tail but
+        // holds all of it, and ends past pc+11, decides it
+        pmpaddr0 = 64'h1010 >> 2; pmpaddr1 = 64'h100C >> 2; pmpaddr2 = 64'h2000 >> 2;
+        pmpcfg0 = {32'b0, 8'h00, 8'h0D, 8'h00, 8'h0D};                      // 0: TOR [0,0x1010); 1: OFF; 2: TOR [0x100C,0x2000)
+        feed_pc = 64'h1006; feed(encode_i(1, 7, 3'b000, 5, OPI));
+        check("pmp: the second span [pc+8, pc+15] fits region 2, which starts at pc+6", {63'b0, uop.xcpt}, 64'd0);
+        // a fault in the second span is judged against that span's own region, not the first one's
+        pmpaddr2 = 64'h1014 >> 2;                                          // region 2 now ends inside [pc+8, pc+15] but past pc+11
+        feed_pc = 64'h1006; feed(encode_i(1, 7, 3'b000, 5, OPI));
+        check("pmp: the second span ends past region 2's top", {63'b0, uop.xcpt}, 64'd1);
+        // a reserved compressed encoding at a denied pc is still a fetch fault, not an illegal instruction
+        pmpcfg0 = 64'h0D; pmpaddr0 = 64'h1010 >> 2; pmpaddr1 = '0; pmpaddr2 = '0;
+        feed_pc = 64'h100C; feed({16'b0, 16'h0000}, 1'b0, 4'd0, 1'b1);
+        check("pmp: beats a reserved compressed encoding", {60'b0, uop.xcpt_cause}, 64'd1);
+        // the lower regions also feed the first span: region 1 alone permits this fetch
+        pmpcfg0 = {48'b0, 8'h0D, 8'h00};                                    // 0: OFF (its address is region 1's lower bound); 1: TOR
+        pmpaddr0 = 64'h1000 >> 2; pmpaddr1 = 64'h1010 >> 2;
+        feed_pc = 64'h1008; feed(encode_i(1, 7, 3'b000, 5, OPI));
+        check("pmp: region 1 (TOR over region 0's address) permits the fetch", {63'b0, uop.xcpt}, 64'd0);
+        feed_pc = 64'h0FF8; feed(encode_i(1, 7, 3'b000, 5, OPI));
+        check("pmp: below region 1's lower bound", {63'b0, uop.xcpt}, 64'd1);
+        // back to the reset state for the rest
+        pmpcfg0 = 64'h1F; pmpaddr0 = 64'h003F_FFFF_FFFF_FFFF; pmpaddr1 = '0; pmpaddr2 = '0; feed_pc = 64'h1000; priv = 2'b11;
 
         // ---------------- pipeline register behavior ----------------
         // held while issue isn't ready; IQ not popped meanwhile

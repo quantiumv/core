@@ -3,6 +3,7 @@
  "tb": "design/pipe/qv_lsu_tb.sv",
  "files": [
   "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_pmp.sv",
   "design/pipe/qv_lsu.sv"
  ],
  "flags": [

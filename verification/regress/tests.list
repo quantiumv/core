@@ -113,7 +113,7 @@ tb_core_fence_i_tb|testbench/core_fence_i_tb.sv|testbench/core_cache_harness.sv|
 tb_core_interrupt_icache_miss_tb|testbench/core_interrupt_icache_miss_tb.sv|testbench/core_cache_harness.sv|design|fsm,ref,pipe|pass|
 tb_core_m_ext_cache_tb|testbench/core_m_ext_cache_tb.sv|testbench/core_cache_harness.sv|design|fsm,ref,pipe|pass|
 
-tb_core_pmp_tb|testbench/core_pmp_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm,ref|pass|
+tb_core_pmp_tb|testbench/core_pmp_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm,ref,pipe|pass|
 
 # === special harnesses ===
 tb_core_amo_write_fault_tb|testbench/core_amo_write_fault_tb.sv|testbench/core_amo_write_fault_harness.sv|design|fsm,ref,pipe|pass|
@@ -125,6 +125,7 @@ tb_core_trigger_tb|testbench/core_trigger_tb.sv|testbench/dm_core_harness.sv|des
 pipe_fetch_tb|design/pipe/qv_fetch_tb.sv||design|pipe|pass|
 pipe_align_fifo_tb|design/pipe/qv_align_fifo_tb.sv||design|pipe|pass|600
 pipe_decode_tb|design/pipe/qv_decode_tb.sv||design|pipe|pass|
+pipe_pmp_tb|design/pipe/qv_pmp_tb.sv||design|pipe|pass||
 pipe_exu_bru_tb|design/pipe/qv_exu_bru_tb.sv||design|pipe|pass|
 pipe_exu_div_tb|design/pipe/qv_exu_div_tb.sv||design|pipe|pass|
 pipe_commit_tb|design/pipe/qv_commit_tb.sv||design|pipe|pass|

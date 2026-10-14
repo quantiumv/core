@@ -1,7 +1,7 @@
 {
  "dut": "design/pipe/qv_decode.sv",
  "tb": "design/pipe/qv_decode_tb.sv",
- "files": ["design/decoder.sv", "design/c_expand.sv", "design/alu.sv", "design/pipe/qv_pkg.sv", "design/pipe/qv_decode.sv"],
+ "files": ["design/decoder.sv", "design/c_expand.sv", "design/alu.sv", "design/pipe/qv_pkg.sv", "design/pipe/qv_pmp.sv", "design/pipe/qv_decode.sv"],
  "flags": ["-g2012", "-I", ".", "-I", "defaults", "-I", "../testbench"],
  "cwd": "design",
  "timeout": 600,

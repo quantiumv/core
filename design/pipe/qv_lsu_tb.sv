@@ -21,6 +21,13 @@
  * request cycle through the write's response cycle with no gap, and never
  * for anything that isn't an AMO; a write-phase bus error; a flush while
  * an AMO's read is in flight (no write follows).
+ *
+ * PMP: loads need R and everything that writes (stores, SC, LR, AMOs) needs
+ * W, checked on the access's own span [addr, addr + size - 1] at the
+ * effective privilege (M runs at MPP when MPRV is set); a denial is cause
+ * 5/7 with the address as tval, no bus access, the would-be RVFI fields; a
+ * misaligned access still traps first (4/6) and an SC is judged by the PMP
+ * before its reservation.
  */
 module qv_lsu_tb;
     import qv_pkg::*;
@@ -49,12 +56,19 @@ module qv_lsu_tb;
     logic                    res_valid = 1'b0;
     logic [63:0]             res_addr  = '0;
     logic                    lock;
+    // PMP state: the reset state (region 0 NAPOT over everything, rwx), M mode
+    logic [1:0]              priv = 2'b11, mpp = 2'b11;
+    logic                    mprv = 1'b0;
+    logic [63:0]             pmpcfg0 = 64'h1F, pmpaddr0 = 64'h003F_FFFF_FFFF_FFFF, pmpaddr1 = '0, pmpaddr2 = '0, pmpaddr3 = '0;
 
     qv_lsu dut (
         .clk(clk), .rst(rst), .i_flush(flush),
         .i_req(req), .o_free(free),
         .i_head_valid(head_valid), .i_head_tag(head_tag),
         .i_res_valid(res_valid), .i_res_addr(res_addr),
+        .i_priv(priv), .i_mprv(mprv), .i_mpp(mpp),
+        .i_pmpcfg0(pmpcfg0), .i_pmpaddr0(pmpaddr0), .i_pmpaddr1(pmpaddr1),
+        .i_pmpaddr2(pmpaddr2), .i_pmpaddr3(pmpaddr3),
         .wb_mem_addr_o(addr), .wb_mem_dat_o(dat_o), .wb_mem_sel_o(sel), .wb_mem_we_o(we),
         .wb_mem_cyc_o(cyc), .wb_mem_stb_o(stb), .wb_mem_lock_o(lock),
         .wb_mem_dat_i(dat_i), .wb_mem_ack_i(ack), .wb_mem_err_i(err),
@@ -427,6 +441,68 @@ module qv_lsu_tb;
         lock_cycles = 0;
     endtask
 
+    // One data access under whatever PMP state the caller has set. kind: 0 load, 1 store, 2 LR, 3 SC, 4 AMOADD.
+    // exp_deny: the PMP must deny it (judged by the caller from the regions). The bus must stay silent for a
+    // denied or misaligned access; the cause is 4/6 for a misaligned one (that comes first), else 5 for a load
+    // and 7 for every access that writes (LR included); tval is the address; the RVFI fields are the would-be ones.
+    task automatic run_pmp(input string name, input int kind, input logic [1:0] size, input logic [63:0] a,
+                           input logic exp_deny, input logic res_ok = 1'b1);
+        logic [QV_ROB_TAG_W-1:0] tg;
+        logic        mis, trap, store_cls, got_wb, sc_fail;
+        logic [7:0]  exp_sel;
+        logic [63:0] wb_value;
+        int          acc0, c, n_exp;
+        mis       = misaligned(a, size);
+        trap      = mis || exp_deny;
+        store_cls = (kind != 0);
+        sc_fail   = (kind == 3) && !res_ok && !trap;
+        exp_sel   = golden_sel(a, size);
+        n_exp     = trap ? 0 : sc_fail ? 0 : (kind == 4) ? 2 : 1;
+        acc0 = accesses;
+        res_valid = res_ok; res_addr = a;
+        cur_test = name;
+        @(negedge clk); #1;
+        tg = next_tag; next_tag = next_tag + 1'b1;
+        req = '0; req.valid = 1'b1; req.tag = tg;
+        case (kind)
+            0: begin req.op = {1'b0, 1'b0, 1'b1, size};  req.a = a; req.b = 64'd0;  req.imm = 64'hDEAD; end
+            1: begin req.op = {1'b0, 1'b1, 1'b0, size};  req.a = a; req.b = 64'h1234_5678_9ABC_DEF0; req.imm = 64'd0; end
+            2: begin req.op = {1'b1, 4'(QV_AMO_LR)};     req.a = a; req.is_word = (size == 2'd2); end
+            3: begin req.op = {1'b1, 4'(QV_AMO_SC)};     req.a = a; req.b = 64'hAAAA_5555_AAAA_5555; req.is_word = (size == 2'd2); end
+            default: begin req.op = {1'b1, 4'(QV_AMO_ADD)}; req.a = a; req.b = 64'd1; req.is_word = (size == 2'd2); end
+        endcase
+        amo_window_en = (kind == 4) && !trap;
+        @(posedge clk); #1;
+        req = '0;
+        @(negedge clk);
+        head_valid = 1'b1; head_tag = tg;
+        got_wb = 1'b0;
+        for (c = 0; c < 90 && !got_wb; c++) begin
+            #1;
+            if (wb.valid) begin got_wb = 1'b1; wb_value = wb.value; end
+            @(posedge clk);
+        end
+        #1;
+        head_valid = 1'b0;
+        repeat (3) @(posedge clk);
+        #1;
+        amo_window_en = 1'b0;
+        check({name, ": completed"}, {63'b0, got_wb}, 64'd1);
+        check({name, ": bus accesses"}, 64'(accesses - acc0), 64'(n_exp));
+        check({name, ": trapped"}, {63'b0, res.xcpt}, {63'b0, trap});
+        if (trap) begin
+            check({name, ": cause"}, {60'b0, res.cause},
+                  mis ? (store_cls ? 64'd6 : 64'd4) : (store_cls ? 64'd7 : 64'd5));
+            check({name, ": tval = the address"}, res.tval, a);
+            check({name, ": rd = 0"}, wb_value, 64'd0);
+            check({name, ": would-be RVFI addr"}, res.mem_addr, {a[63:3], 3'b000});
+            check({name, ": would-be RVFI rmask"}, {56'b0, res.mem_rmask}, (kind == 0 || kind == 2 || kind == 4) ? {56'b0, exp_sel} : 64'd0);
+            check({name, ": would-be RVFI wmask"}, {56'b0, res.mem_wmask}, (kind == 1 || kind == 3 || kind == 4) ? {56'b0, exp_sel} : 64'd0);
+        end else if (sc_fail) begin
+            check({name, ": SC without its reservation: rd = 1"}, wb_value, 64'd1);
+        end
+    endtask
+
     int s, k;
     logic [QV_ROB_TAG_W-1:0] t;
     logic [63:0] v;
@@ -705,6 +781,93 @@ module qv_lsu_tb;
 
         check("bus protocol held throughout", {63'b0, proto_ok}, 64'd1);
         for (int i = 0; i < WORDS; i++) check($sformatf("final memory dword %0d", i), mem[i], gold[i]);
+
+        // ---------------- PMP ----------------
+        wait_max = 1;
+        // region 0: TOR [0, 0x100) read-only; 1: TOR [0x100, 0x200) read+write; 2: NAPOT [0x200, 0x240) write-only
+        pmpcfg0  = {32'b0, 8'h00, 8'h1A, 8'h0B, 8'h09};
+        pmpaddr0 = 64'h100 >> 2; pmpaddr1 = 64'h200 >> 2; pmpaddr2 = (64'h200 >> 2) | 64'h7;
+        priv = 2'b01; mprv = 1'b0; mpp = 2'b11;
+        for (int sz = 0; sz < 4; sz++) begin
+            logic [63:0] a_ro, a_rw, a_wo;
+            a_ro = 64'h40 + 64'(sz) * 8; a_rw = 64'h140 + 64'(sz) * 8; a_wo = 64'h210 + 64'(sz) * 8;
+            run_pmp($sformatf("S load sz%0d in R region", sz),  0, 2'(sz), a_ro, 1'b0);
+            run_pmp($sformatf("S store sz%0d in R region", sz), 1, 2'(sz), a_ro, 1'b1);
+            run_pmp($sformatf("S load sz%0d in RW region", sz),  0, 2'(sz), a_rw, 1'b0);
+            run_pmp($sformatf("S store sz%0d in RW region", sz), 1, 2'(sz), a_rw, 1'b0);
+            run_pmp($sformatf("S load sz%0d in W region", sz),  0, 2'(sz), a_wo, 1'b1);
+            run_pmp($sformatf("S store sz%0d in W region", sz), 1, 2'(sz), a_wo, 1'b0);
+        end
+        // LR, SC and the AMOs write as far as the PMP is concerned (core.sv), so the R-only region denies them
+        run_pmp("S LR.D in R region",  2, 2'd3, 64'h40, 1'b1);
+        run_pmp("S LR.W in RW region", 2, 2'd2, 64'h144, 1'b0);
+        run_pmp("S LR.D in W region",  2, 2'd3, 64'h210, 1'b0);
+        run_pmp("S AMOADD.D in R region", 4, 2'd3, 64'h48, 1'b1);
+        run_pmp("S AMOADD.W in RW region", 4, 2'd2, 64'h148, 1'b0);
+        run_pmp("S SC.D in R region, with its reservation", 3, 2'd3, 64'h40, 1'b1, 1'b1);
+        run_pmp("S SC.D in R region, without one: the PMP is judged first", 3, 2'd3, 64'h40, 1'b1, 1'b0);
+        run_pmp("S SC.D in RW region, with its reservation", 3, 2'd3, 64'h150, 1'b0, 1'b1);
+        run_pmp("S SC.D in RW region, without one: rd = 1, no access", 3, 2'd3, 64'h150, 1'b0, 1'b0);
+        // an odd address inside the region still reports itself as tval
+        run_pmp("S LH at an odd halfword in R region", 0, 2'd1, 64'h42, 1'b0);
+        run_pmp("S SH at an odd halfword in R region", 1, 2'd1, 64'h42, 1'b1);
+        // misaligned comes first, whatever the PMP says
+        run_pmp("S SW misaligned in R region: 6, not 7", 1, 2'd2, 64'h42, 1'b1);
+        run_pmp("S LD misaligned in W region: 4, not 5", 0, 2'd3, 64'h214, 1'b1);
+        run_pmp("S AMOADD.D misaligned in R region: 6", 4, 2'd3, 64'h44, 1'b1);
+        // outside every region: nothing below M gets in
+        run_pmp("S load, no region", 0, 2'd3, 64'h300, 1'b1);
+        run_pmp("S store, no region", 1, 2'd3, 64'h300, 1'b1);
+        // a span that leaves its region is no match at all: pmpaddr0 on a 4-byte boundary that is not a dword's
+        pmpaddr0 = 64'h104 >> 2; pmpaddr1 = 64'h200 >> 2;
+        run_pmp("S LD at 0xF8, span inside region 0", 0, 2'd3, 64'hF8, 1'b0);
+        run_pmp("S LW at 0x100, inside region 0", 0, 2'd2, 64'h100, 1'b0);
+        run_pmp("S LD at 0x100, span [0x100,0x107] leaves region 0", 0, 2'd3, 64'h100, 1'b1);
+        pmpaddr0 = 64'h100 >> 2;
+        // other privileges
+        priv = 2'b00;
+        run_pmp("U store in R region", 1, 2'd3, 64'h40, 1'b1);
+        run_pmp("U load in R region", 0, 2'd3, 64'h40, 1'b0);
+        priv = 2'b10;
+        run_pmp("privilege 2 store in R region", 1, 2'd3, 64'h40, 1'b1);
+        priv = 2'b11;
+        run_pmp("M store in R region: unlocked, no denial", 1, 2'd3, 64'h40, 1'b0);
+        run_pmp("M load, no region: no denial", 0, 2'd3, 64'h300, 1'b0);
+        pmpcfg0[7] = 1'b1;                                                    // lock region 0
+        run_pmp("M store in a locked R region: denied", 1, 2'd3, 64'h40, 1'b1);
+        run_pmp("M load in a locked R region", 0, 2'd3, 64'h40, 1'b0);
+        run_pmp("M store, region 1 unlocked", 1, 2'd3, 64'h140, 1'b0);
+        pmpcfg0[7] = 1'b0;
+        // MPRV: M-mode data accesses run at MPP
+        mprv = 1'b1; mpp = 2'b01;
+        run_pmp("M with MPRV, MPP = S: store in R region denied", 1, 2'd3, 64'h40, 1'b1);
+        run_pmp("M with MPRV, MPP = S: load in R region", 0, 2'd3, 64'h40, 1'b0);
+        run_pmp("M with MPRV, MPP = S: no region", 0, 2'd3, 64'h300, 1'b1);
+        mpp = 2'b11;
+        run_pmp("M with MPRV, MPP = M: store in R region fine", 1, 2'd3, 64'h40, 1'b0);
+        mpp = 2'b01; priv = 2'b01;
+        run_pmp("S with MPRV set: MPRV is for M only (S store in RW region)", 1, 2'd3, 64'h140, 1'b0);
+        run_pmp("S with MPRV set: still checked as S (R region)", 1, 2'd3, 64'h40, 1'b1);
+        mpp = 2'b11; priv = 2'b01;
+        run_pmp("S with MPRV set and MPP = M: still checked as S (R region)", 1, 2'd3, 64'h40, 1'b1);
+        mprv = 1'b0; priv = 2'b11; mpp = 2'b11;
+        // the span starts at the access itself, not at its dword: a region that begins at a word inside a dword
+        priv = 2'b01;
+        pmpcfg0 = {32'b0, 8'h00, 8'h00, 8'h0B, 8'h08};                        // 0: TOR [0, 0x104) no permissions; 1: TOR [0x104, 0x200) RW
+        pmpaddr0 = 64'h104 >> 2; pmpaddr1 = 64'h200 >> 2;
+        run_pmp("S LW at 0x104: the region starts mid-dword", 0, 2'd2, 64'h104, 1'b0);
+        run_pmp("S SW at 0x104", 1, 2'd2, 64'h104, 1'b0);
+        run_pmp("S LW at 0x100: below the region", 0, 2'd2, 64'h100, 1'b1);
+        pmpcfg0 = {32'b0, 8'h00, 8'h1A, 8'h0B, 8'h09}; pmpaddr0 = 64'h100 >> 2; pmpaddr1 = 64'h200 >> 2;
+        // a denied access leaves the unit free and in order: a normal op right after works
+        priv = 2'b01;
+        run_pmp("S store denied ...", 1, 2'd3, 64'h40, 1'b1);
+        run_pmp("... and the next load is fine", 0, 2'd3, 64'h48, 1'b0);
+        // back to the reset state
+        priv = 2'b11; mpp = 2'b11; mprv = 1'b0;
+        pmpcfg0 = 64'h1F; pmpaddr0 = 64'h003F_FFFF_FFFF_FFFF; pmpaddr1 = '0; pmpaddr2 = '0;
+        check("PMP section: bus protocol held", {63'b0, proto_ok}, 64'd1);
+        check("PMP section: no lock errors", 64'(lock_errors), 64'd0);
 
         $display("");
         $display("qv_lsu_tb: %0d passed, %0d failed", pass_count, fail_count);

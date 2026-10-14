@@ -18,10 +18,11 @@ smtbmc boolector
 
 [script]
 plugin -i /home/potato/yosys-slang-src/build/slang.so
-read_slang --single-unit qv_pkg.sv qv_lsu.sv lsu_props.sv --top lsu_props
+read_slang --single-unit qv_pkg.sv qv_pmp.sv qv_lsu.sv lsu_props.sv --top lsu_props
 prep -top lsu_props
 
 [files]
 ../../../design/pipe/qv_pkg.sv
+../../../design/pipe/qv_pmp.sv
 ../../../design/pipe/qv_lsu.sv
 lsu_props.sv

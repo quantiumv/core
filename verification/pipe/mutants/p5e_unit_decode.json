@@ -1,0 +1,27 @@
+{
+ "dut": "design/pipe/qv_decode.sv",
+ "tb": "design/pipe/qv_decode_tb.sv",
+ "files": ["design/decoder.sv", "design/c_expand.sv", "design/alu.sv", "design/pipe/qv_pkg.sv", "design/pipe/qv_pmp.sv", "design/pipe/qv_decode.sv"],
+ "flags": ["-g2012", "-I", ".", "-I", "defaults", "-I", "../testbench"],
+ "cwd": "design",
+ "timeout": 600,
+ "mutants": [
+  {"name": "the second dword is never checked", "old": "wire pmp_fault = !exec_ok_lo || (fetch_hi_taken && !exec_ok_hi);", "new": "wire pmp_fault = !exec_ok_lo;"},
+  {"name": "the second dword is checked for 16-bit instructions too", "old": "wire        fetch_hi_taken = !i_iq_data.rvc && (i_iq_data.pc[2:1] == 2'b11);", "new": "wire        fetch_hi_taken = (i_iq_data.pc[2:1] == 2'b11);"},
+  {"name": "crossing is decided by pc[2] alone", "old": "(i_iq_data.pc[2:1] == 2'b11);\n    logic       exec_ok_lo", "new": "(i_iq_data.pc[2] == 1'b1);\n    logic       exec_ok_lo"},
+  {"name": "crossing only for 16-bit alignment 1", "old": "(i_iq_data.pc[2:1] == 2'b11);\n    logic       exec_ok_lo", "new": "(i_iq_data.pc[2:1] == 2'b01);\n    logic       exec_ok_lo"},
+  {"name": "first span is 4 bytes", "old": ".i_addr(i_iq_data.pc), .i_end(i_iq_data.pc + 64'd7)", "new": ".i_addr(i_iq_data.pc), .i_end(i_iq_data.pc + 64'd3)"},
+  {"name": "first span is dword aligned", "old": ".i_addr(i_iq_data.pc), .i_end(i_iq_data.pc + 64'd7)", "new": ".i_addr({i_iq_data.pc[63:3], 3'b000}), .i_end({i_iq_data.pc[63:3], 3'b111})"},
+  {"name": "second span is 4 bytes", "old": ".i_end(i_iq_data.pc + 64'd15)", "new": ".i_end(i_iq_data.pc + 64'd11)"},
+  {"name": "second span starts at pc+4", "old": ".i_addr(i_iq_data.pc + 64'd8)", "new": ".i_addr(i_iq_data.pc + 64'd4)"},
+  {"name": "a denial reports cause 2", "old": "end else if (pmp_fault) begin\n            uop_d.xcpt       = 1'b1;\n            uop_d.xcpt_cause = 4'd1;", "new": "end else if (pmp_fault) begin\n            uop_d.xcpt       = 1'b1;\n            uop_d.xcpt_cause = 4'd2;"},
+  {"name": "illegal-instruction beats the denial", "old": "end else if (pmp_fault) begin", "new": "end else if (pmp_fault && !(c_illegal || !implemented || csr_illegal || priv_illegal)) begin"},
+  {"name": "the denial beats a fetch marker", "old": "if (i_iq_data.xcpt) begin\n            uop_d.xcpt       = 1'b1;\n            uop_d.xcpt_cause = i_iq_data.xcpt_cause;", "new": "if (i_iq_data.xcpt && !pmp_fault) begin\n            uop_d.xcpt       = 1'b1;\n            uop_d.xcpt_cause = i_iq_data.xcpt_cause;"},
+  {"name": "a denied fetch keeps the real instruction", "old": "(i_iq_data.xcpt || pmp_fault || c_illegal) ? 32'h0000_0013", "new": "(i_iq_data.xcpt || c_illegal) ? 32'h0000_0013"},
+  {"name": "the first span ignores the privilege (always M)", "old": ".i_addr(i_iq_data.pc), .i_end(i_iq_data.pc + 64'd7), .i_priv(i_priv)", "new": ".i_addr(i_iq_data.pc), .i_end(i_iq_data.pc + 64'd7), .i_priv(2'b11)"},
+  {"name": "the second span ignores the privilege (always M)", "old": ".i_end(i_iq_data.pc + 64'd15), .i_priv(i_priv)", "new": ".i_end(i_iq_data.pc + 64'd15), .i_priv(2'b11)"},
+  {"name": "compressed instructions are not checked", "old": "wire pmp_fault = !exec_ok_lo || (fetch_hi_taken && !exec_ok_hi);", "new": "wire pmp_fault = (!i_iq_data.rvc && !exec_ok_lo) || (fetch_hi_taken && !exec_ok_hi);"},
+  {"name": "pmpaddr1 not passed to the first span", "old": "qv_pmp pmp_lo (\n        .i_pmpcfg0(i_pmpcfg0), .i_pmpaddr0(i_pmpaddr0), .i_pmpaddr1(i_pmpaddr1),", "new": "qv_pmp pmp_lo (\n        .i_pmpcfg0(i_pmpcfg0), .i_pmpaddr0(i_pmpaddr0), .i_pmpaddr1(64'b0),"},
+  {"name": "a denial still lets the instruction write rd", "old": "uop_d.rd_wen   = reg_write_ctrl && !uop_d.xcpt;", "new": "uop_d.rd_wen   = reg_write_ctrl && !(i_iq_data.xcpt || c_illegal);"}
+ ]
+}

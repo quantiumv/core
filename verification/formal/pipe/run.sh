@@ -33,7 +33,7 @@ if [ "${1:-}" == "--mutants" ]; then
         local name=$1 unit=$2 src=$3 defs=${4:-}
         local d=$T/$name
         mkdir -p "$d"
-        cp "$REPO/design/pipe/qv_pkg.sv" "$HERE/${unit}_props.sv" "$d/"
+        cp "$REPO/design/pipe/qv_pkg.sv" "$REPO/design/pipe/qv_pmp.sv" "$HERE/${unit}_props.sv" "$d/"
         if [ -f "$src" ]; then
             cp "$src" "$d/qv_$unit.sv"
         else
@@ -50,10 +50,11 @@ depth 24
 smtbmc boolector
 [script]
 plugin -i /home/potato/yosys-slang-src/build/slang.so
-read_slang --single-unit $defs qv_pkg.sv qv_$unit.sv ${unit}_props.sv --top ${unit}_props
+read_slang --single-unit $defs qv_pkg.sv qv_pmp.sv qv_$unit.sv ${unit}_props.sv --top ${unit}_props
 prep -top ${unit}_props
 [files]
 qv_pkg.sv
+qv_pmp.sv
 qv_$unit.sv
 ${unit}_props.sv
 EOF
