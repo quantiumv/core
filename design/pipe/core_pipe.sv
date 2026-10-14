@@ -503,6 +503,15 @@ module core_pipe
     wire        debug_progbuf_active = 1'b0;
     /* verilator lint_on UNUSEDSIGNAL */
 
+    // Sv39 is a later stage: until it lands, a program that turns translation on would silently run
+    // untranslated. Simulation builds say so; the formal flows leave satp free, so they don't.
+`ifndef RISCV_FORMAL
+    always @(posedge clk) begin
+        if (!rst && satp_w[63:60] != 4'd0)
+            $error("core_pipe: satp.MODE is not Bare, but there is no address translation yet");
+    end
+`endif
+
     // ---------------- inert ports ----------------
     assign o_debug_mode    = in_debug_mode;
     assign o_dm_csr_rdata  = csr_rdata;
