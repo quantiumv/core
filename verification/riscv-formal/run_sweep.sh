@@ -1,5 +1,5 @@
 #!/bin/bash
-# run_sweep.sh fsm|pipe [-j N] [--only REGEX] [--timeout SECONDS] [--rerun]
+# run_sweep.sh fsm|pipe|pipe-full [-j N] [--only REGEX] [--timeout SECONDS] [--rerun]
 #
 # Runs a core's generated riscv-formal checks (see sync_core.sh), N at a
 # time with a 4 s stagger between launches (simultaneous launches killed
@@ -12,7 +12,8 @@ JOBS=4; ONLY="."; TIMEOUT=7000; RERUN=0
 case "${1:-}" in
     fsm)  NAME=quantiumv ;;
     pipe) NAME=quantiumv_pipe ;;
-    *) echo "usage: run_sweep.sh fsm|pipe [-j N] [--only REGEX] [--timeout S] [--rerun]" >&2; exit 2 ;;
+    pipe-full) NAME=quantiumv_pipe_full ;;
+    *) echo "usage: run_sweep.sh fsm|pipe|pipe-full [-j N] [--only REGEX] [--timeout S] [--rerun]" >&2; exit 2 ;;
 esac
 shift
 while [ $# -gt 0 ]; do
