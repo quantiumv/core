@@ -204,7 +204,28 @@ module qv_decode (
     wire is_mem   = is_load || is_store;
     wire is_fence = (code == `INSTR_CODE(FENCE));
 
-    wire implemented = is_alu || is_bru || is_csr || is_sys || is_mem || is_fence;
+    // DIV/DIVU/REM/REMU and the W forms (core.sv's is_div_family): a
+    // multi-cycle unit of its own, qv_exu_div
+    logic is_div, div_signed, div_quot, div_word;
+    always_comb begin: div_control
+        is_div     = 1'b1;
+        div_signed = 1'b0;
+        div_quot   = 1'b0;
+        div_word   = 1'b0;
+        case (code)
+            `INSTR_CODE(DIV):   begin div_signed = 1'b1; div_quot = 1'b1; end
+            `INSTR_CODE(DIVU):  begin div_quot = 1'b1; end
+            `INSTR_CODE(REM):   begin div_signed = 1'b1; end
+            `INSTR_CODE(REMU):  ;
+            `INSTR_CODE(DIVW):  begin div_signed = 1'b1; div_quot = 1'b1; div_word = 1'b1; end
+            `INSTR_CODE(DIVUW): begin div_quot = 1'b1; div_word = 1'b1; end
+            `INSTR_CODE(REMW):  begin div_signed = 1'b1; div_word = 1'b1; end
+            `INSTR_CODE(REMUW): begin div_word = 1'b1; end
+            default:            is_div = 1'b0;
+        endcase
+    end: div_control
+
+    wire implemented = is_alu || is_bru || is_csr || is_sys || is_mem || is_fence || is_div;
 
     // The CSR address arrives on imm_2. Write suppression and illegality
     // mirror core.sv's csr_write_suppress / is_illegal_instr for M-mode:
@@ -235,9 +256,11 @@ module qv_decode (
     end: reg_write_control
 
     // ADDW/SUBW/ADDIW/MULW reuse the 64-bit op and get truncated after;
-    // the *W shifts have their own 32-bit ALU ops (core.sv's is_word_arith)
+    // the *W shifts have their own 32-bit ALU ops (core.sv's is_word_arith).
+    // The W divides also work on 32-bit operands and a sign-extended result.
     wire is_word = (code == `INSTR_CODE(ADDW)) || (code == `INSTR_CODE(SUBW))
-                || (code == `INSTR_CODE(ADDIW)) || (code == `INSTR_CODE(MULW));
+                || (code == `INSTR_CODE(ADDIW)) || (code == `INSTR_CODE(MULW))
+                || div_word;
     wire is_auipc = (code == `INSTR_CODE(AUIPC));
     wire is_jal   = (code == `INSTR_CODE(JAL));
 
@@ -278,6 +301,8 @@ module qv_decode (
         uop_d.mem_signed = mem_signed;
         uop_d.is_load    = is_load;
         uop_d.is_store   = is_store;
+        uop_d.div_signed = div_signed;
+        uop_d.div_quot   = div_quot;
         if (i_iq_data.xcpt) begin
             uop_d.xcpt       = 1'b1;
             uop_d.xcpt_cause = i_iq_data.xcpt_cause;
@@ -292,6 +317,7 @@ module qv_decode (
         else if (is_bru) uop_d.fu = QV_FU_BRU;
         else if (is_csr) uop_d.fu = QV_FU_CSR;
         else if (is_mem) uop_d.fu = QV_FU_LSU;
+        else if (is_div) uop_d.fu = QV_FU_DIV;
         else if (is_sys) uop_d.fu = QV_FU_SYS;
         else             uop_d.fu = QV_FU_ALU;
     end

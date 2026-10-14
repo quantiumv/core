@@ -45,12 +45,14 @@ module qv_rob #(
     output logic                             o_alloc_ready,
     output logic                             o_empty,
 
-    // complete: the fast writeback bus (ALU/BRU) and the slow one (LSU);
-    // a tag only ever has one producer, so they never hit the same entry
+    // complete: the fast writeback bus (ALU/BRU) and the slow ones (LSU,
+    // divider); a tag only ever has one producer, so they never hit the
+    // same entry
     input  qv_pkg::wb_t                      i_wb,
     // value only: the slow units never redirect
     /* verilator lint_off UNUSEDSIGNAL */
     input  qv_pkg::wb_t                      i_wb2,
+    input  qv_pkg::wb_t                      i_wb3,
     /* verilator lint_on UNUSEDSIGNAL */
 
     // operand lookups (issue) -- indexing only needs the low bits; the
@@ -129,6 +131,7 @@ module qv_rob #(
     wire [PTR_W-1:0] head_next = pop ? head_q + PTR_W'(1) : head_q;
     wire [IDX_W-1:0] wb_idx    = i_wb.tag[IDX_W-1:0];
     wire [IDX_W-1:0] wb2_idx   = i_wb2.tag[IDX_W-1:0];
+    wire [IDX_W-1:0] wb3_idx   = i_wb3.tag[IDX_W-1:0];
 
     always_ff @(posedge clk) begin
         if (rst) begin
@@ -162,6 +165,10 @@ module qv_rob #(
             if (i_wb2.valid && !i_flush) begin
                 value_q[wb2_idx]    <= i_wb2.value;
                 complete_q[wb2_idx] <= 1'b1;
+            end
+            if (i_wb3.valid && !i_flush) begin
+                value_q[wb3_idx]    <= i_wb3.value;
+                complete_q[wb3_idx] <= 1'b1;
             end
         end
     end

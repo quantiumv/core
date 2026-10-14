@@ -12,8 +12,10 @@
  */
 package qv_pkg;
 
-    // Functional-unit routing. All six kinds are named now so the enum
-    // never needs to grow; DIV and LSU aren't produced yet.
+    // Functional-unit routing. All six kinds are named so the enum never
+    // needs to grow. ALU is also where CSR/SYS operands and faulting uops
+    // are resolved, so a unit not listed in issue's dispatch (DIV included)
+    // would silently execute on the ALU.
     typedef enum logic [2:0] {
         QV_FU_ALU,
         QV_FU_BRU,
@@ -94,6 +96,8 @@ package qv_pkg;
         logic        mem_signed;
         logic        is_load;
         logic        is_store;
+        logic        div_signed;   // DIV/REM(W): signed operands
+        logic        div_quot;     // DIV(U)(W): the quotient; REM(U)(W): the remainder
         qv_sys_op_e  sys_op;
         qv_csr_op_e  csr_op;
         logic [11:0] csr_addr;
@@ -163,7 +167,7 @@ package qv_pkg;
     typedef struct packed {
         logic                    valid;
         logic [QV_ROB_TAG_W-1:0] tag;
-        logic [4:0]              op;       // alu_op, or a qv_bru_op_e for the BRU
+        logic [4:0]              op;       // alu_op; a qv_bru_op_e (BRU); {quot, signed} (DIV); see qv_lsu (LSU)
         logic                    is_word;
         logic [63:0]             a;
         logic [63:0]             b;

@@ -35,6 +35,11 @@
  *  i_signed: 1 for DIV/REM-family (and DIVW/REMW), 0 for DIVU/REMU-family
  *            (and DIVUW/REMUW). Selects magnitude-then-sign-correct
  *            handling internally; unsigned operands pass through as-is.
+ *  i_kill:   abandon the division in progress (and any start in this same
+ *            cycle): busy and done drop, no done pulse ever follows. The
+ *            pipelined core kills on every flush, since a result for an
+ *            instruction that no longer exists must never arrive. Defaults
+ *            to 0, so core.sv's instance is unchanged.
  *  o_busy:   high from the cycle after i_start until o_done.
  *  o_done:   one-cycle pulse the same cycle o_quotient/o_remainder become
  *            valid (this is also the correct cycle for a caller to latch
@@ -95,6 +100,7 @@ module divider (
     input  logic [(`WORD_SIZE - 1):0] i_dividend,
     input  logic [(`WORD_SIZE - 1):0] i_divisor,
     input  logic i_signed,
+    input  logic i_kill = 1'b0,
 
     output logic o_busy,
     output logic o_done,
@@ -136,7 +142,7 @@ module divider (
     wire subtract_ok = !trial_diff[`WORD_SIZE];   /* sign bit of the (WORD_SIZE+1)-bit trial result */
 
     always_ff @(posedge i_clk) begin
-        if (i_rst) begin
+        if (i_rst || i_kill) begin
             busy_q        <= 1'b0;
             cycles_left_q <= '0;
             o_done        <= 1'b0;

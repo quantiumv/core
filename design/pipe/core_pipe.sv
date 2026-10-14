@@ -19,6 +19,7 @@
  *   D  qv_decode   decoder.sv + uop builder
  *   I  qv_issue    operand resolution, producer table, ROB allocation
  *   X  qv_exu_alu  alu.sv
+ *      qv_exu_div  divider.sv, one divide at a time
  *   C  qv_commit   in-order retirement, regfile0 write, RVFI
  *
  * regfile0 and csr_file0 live here at top level (regfile0 is written
@@ -30,14 +31,15 @@
  *
  * Implemented so far: every single-cycle integer ALU instruction --
  * RV64I register/immediate ops including the *W forms, LUI, AUIPC, and
- * MUL/MULH/MULHSU/MULHU/MULW -- plus conditional branches, JAL, JALR,
+ * MUL/MULH/MULHSU/MULHU/MULW -- DIV/DIVU/REM/REMU and the W forms (one at
+ * a time, on the divider), conditional branches, JAL, JALR,
  * loads and stores (performed one at a time, at the ROB head), FENCE,
  * FENCE.I, the six Zicsr instructions, ECALL, EBREAK, MRET and WFI (a
  * no-op),
  * with M-mode synchronous traps, and RVC: compressed instructions on any
  * 2-byte boundary, including 32-bit ones that straddle two fetched
  * dwords. Everything else decodes as an illegal-instruction trap. Not
- * yet: SFENCE.VMA, U/S modes, SRET, interrupts, debug, DIV/REM, A.
+ * yet: SFENCE.VMA, U/S modes, SRET, interrupts, debug, A.
  * wb_mem_lock_o and the debug/progbuf outputs are held inert. The
  * Debug Module's GPR/CSR access mux (core.sv wires it around regfile0
  * and csr_file0) comes back with debug support.
@@ -269,8 +271,8 @@ module core_pipe
     logic                    l1_complete, l2_complete;
     logic [63:0]             l1_value, l2_value;
     wb_t                     wb_bus;
-    fu_req_t                 alu_req, bru_req, lsu_req;
-    logic                    lsu_free;
+    fu_req_t                 alu_req, bru_req, lsu_req, div_req;
+    logic                    lsu_free, div_free;
     logic                    c_valid, c_rd_wen;
     logic [4:0]              c_rd;
     logic [QV_ROB_TAG_W-1:0] c_tag;
@@ -288,11 +290,12 @@ module core_pipe
         .o_lookup2_tag(l2_tag), .i_lookup2_complete(l2_complete), .i_lookup2_value(l2_value),
         .i_wb(wb_bus), .o_alu_req(alu_req), .o_bru_req(bru_req),
         .o_lsu_req(lsu_req), .i_lsu_free(lsu_free),
+        .o_div_req(div_req), .i_div_free(div_free),
         .i_commit_valid(c_valid), .i_commit_rd(c_rd), .i_commit_rd_wen(c_rd_wen), .i_commit_tag(c_tag)
     );
 
-    // LSU outputs, declared ahead of the ROB and commit, which take them
-    wb_t      lsu_wb;
+    // slow-unit outputs, declared ahead of the ROB and commit, which take them
+    wb_t      lsu_wb, div_wb;
     lsu_res_t lsu_res;
 
     // ---------------- ROB ----------------
@@ -308,7 +311,7 @@ module core_pipe
         .i_alloc_rd(alloc_rd), .i_alloc_rd_wen(alloc_rd_wen), .i_alloc_next_pc(alloc_next_pc),
         .i_alloc_shadow(alloc_shadow), .i_alloc_ctrl(alloc_ctrl),
         .o_alloc_tag(alloc_tag), .o_alloc_ready(alloc_ready),
-        .o_empty(rob_empty), .i_wb(wb_bus), .i_wb2(lsu_wb),
+        .o_empty(rob_empty), .i_wb(wb_bus), .i_wb2(lsu_wb), .i_wb3(div_wb),
         .i_lookup1_tag(l1_tag), .o_lookup1_complete(l1_complete), .o_lookup1_value(l1_value),
         .i_lookup2_tag(l2_tag), .o_lookup2_complete(l2_complete), .o_lookup2_value(l2_value),
         .o_head_valid(head_valid), .o_head_entry(head_entry), .o_head_tag(head_tag),
@@ -321,9 +324,15 @@ module core_pipe
     qv_exu_bru exu_bru0 (.clk(clk), .rst(rst), .i_flush(flush), .i_req(bru_req), .o_wb(bru_wb));
 
     // Both units take one cycle and issue sends at most one uop per
-    // cycle, so at most one result is ever valid. A multi-cycle unit
-    // (DIV) will need a real writeback arbiter.
+    // cycle, so at most one result is ever valid. The multi-cycle units
+    // (LSU, divider) each have a writeback port of their own into the ROB
+    // instead, so they never contend for this one.
     assign wb_bus = bru_wb.valid ? bru_wb : alu_wb;
+
+    // ---------------- X: divider -> slow writeback port ----------------
+    // Like the LSU, no bypass: a dependent reads the ROB the next cycle.
+    // Every flush kills a divide in flight.
+    qv_exu_div exu_div0 (.clk(clk), .rst(rst), .i_flush(flush), .i_req(div_req), .o_free(div_free), .o_wb(div_wb));
 
     // ---------------- X: LSU -> slow writeback port ----------------
     // No bypass from it: a dependent reads the ROB the next cycle, which
@@ -453,12 +462,14 @@ module core_pipe
     wire        csr_we         = c_csr_we;
     wire        mret_taken     = c_mret_taken;
     wire        is_ebreak      = head_ctrl.cls == QV_FU_SYS && head_ctrl.sys_op == QV_SYS_EBREAK;
+    // the head is a divide (high through its commit cycle) / is still waiting
+    // for its result; a faulting uop is classed ALU, so cls == DIV is a real divide
+    wire        is_div_family  = head_valid && head_ctrl.cls == QV_FU_DIV;
+    wire        div_stall      = is_div_family && !head_entry.complete;
 
     wire        interrupt_taken      = 1'b0;
     wire        route_to_s           = 1'b0;
     wire        sret_taken           = 1'b0;
-    wire        is_div_family        = 1'b0;
-    wire        div_stall            = 1'b0;
     wire        debug_halt_req_entry = 1'b0;
     wire        debug_ebreak_entry   = 1'b0;
     wire        trigger_debug_entry  = 1'b0;
