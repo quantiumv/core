@@ -135,12 +135,18 @@ module lockstep_cmp #(
     assign cb_cause       = b_cause       ^ ((do_corrupt && corrupt_field == 8) ? 64'h1 : 64'h0);
 
     // -------------------- field-by-field comparison --------------------
+    // insn isn't compared on a fetch-fault trap (cause 1): the reference
+    // reports whatever its line register last held (core.sv rvfi_insn for
+    // a faulted fetch), not the placeholder instruction, so it depends on
+    // fetch history the pipelined core doesn't share. sail_diff.py skips
+    // it for the same reason.
+    wire insn_dontcare = a_trap && (a_cause == 64'd1);
     logic mismatch;
     always_comb begin
         mismatch = (a_order        != b_order)
                 || (a_pc_rdata     != cb_pc_rdata)
                 || (a_pc_wdata     != b_pc_wdata)
-                || (a_insn         != cb_insn)
+                || (!insn_dontcare && (a_insn != cb_insn))
                 || (a_trap         != cb_trap)
                 || (a_intr         != b_intr)
                 || (a_mode         != b_mode)

@@ -170,7 +170,7 @@ PIPE_FILES=""
 B_PIPE=0
 if [ "$DUT" == "pipe" ]; then
     B_PIPE=1
-    PIPE_FILES=$(grep -E '^design/(pipe/|decoder\.sv|alu\.sv|c_expand\.sv|csr_file\.sv|register_file\.sv)' \
+    PIPE_FILES=$(grep -E '^design/(pipe/|decoder\.sv|alu\.sv|c_expand\.sv|csr_file\.sv|register_file\.sv|divider\.sv)' \
                      verification/regress/pipe_design_files.list | sed "s#^design/pipe/#$PIPE_DIR/#" | tr '\n' ' ')
 fi
 
@@ -183,10 +183,15 @@ RUN_DELAY_MAX=$DELAY_MAX
 [ "$MODE" == "corrupt" ] && RUN_DELAY_MAX=0  # corruption self-test: deterministic, no timing noise
 
 # Everything that changes a run's outcome is in the key, so a cached result
-# from a different configuration is never reused.
-# --pipe-dir isn't: point --outdir somewhere else for a modified copy.
-RUN_KEY="${MODE}_${DUT}_m${QV_MUTANT_B}_${MEMCFG_B}_d${RUN_DELAY_MAX}_i${IRQ_MODE}_l${IRQ_LATE}"
-VVP_BIN="$OUTDIR/lockstep_${MODE}_${DUT}_m${QV_MUTANT_B}_${MEMCFG_B}_d${RUN_DELAY_MAX}.vvp"
+# from a different configuration is never reused. That includes the RTL and
+# testbench sources themselves (SRC_HASH, which also covers a --pipe-dir
+# copy), the interrupt and delay seeds, and (see result_path) the program.
+# shellcheck disable=SC2086
+SRC_HASH=$(cat $PIPE_FILES $REF_FILES $SUPPORT_FILES $LOCKSTEP_FILES \
+               design/defaults/*.sv verification/reference/*.svh verification/lockstep/*.svh \
+               2>/dev/null | sha1sum | cut -c1-8)
+RUN_KEY="${MODE}_${DUT}_m${QV_MUTANT_B}_${MEMCFG_B}_d${RUN_DELAY_MAX}_i${IRQ_MODE}_l${IRQ_LATE}_q${IRQ_SEED}_s${RUN_SEED}_${SRC_HASH}"
+VVP_BIN="$OUTDIR/lockstep_${MODE}_${DUT}_m${QV_MUTANT_B}_${MEMCFG_B}_d${RUN_DELAY_MAX}_${SRC_HASH}.vvp"
 BUILD_LOG="$OUTDIR/build_${MODE}_${DUT}_m${QV_MUTANT_B}.log"
 if [ ! -e "$VVP_BIN" ] || [ "$FORCE" == "1" ]; then
     echo "=== building $VVP_BIN ==="
@@ -260,10 +265,14 @@ RANDOM_PROFILE="--isa imac --priv msu --sv39 --smc"
 [ "$DUT" == "pipe" ] && RANDOM_PROFILE="--isa imc --priv m --no-div --smc"
 
 build_random_entries() {
+    # programs are regenerated whenever the generator or the profile changes
+    local gen_hash
+    gen_hash=$( (cat "$REPO_ROOT/verification/lockstep/gen/qvgen.py" "$REPO_ROOT/verification/lockstep/gen/link.ld"; echo "$RANDOM_PROFILE") \
+                | sha1sum | cut -c1-8)
     for i in $(seq 1 "$RANDOM_COUNT"); do
         local seed=$((RUN_SEED * 10000 + i))
         local tag="random_${seed}"
-        local base="$OUTDIR/rand_${DUT}_${tag}"
+        local base="$OUTDIR/rand_${DUT}_${gen_hash}_${tag}"
         if [ ! -e "${base}.hex" ] || [ "$FORCE" == "1" ]; then
             # shellcheck disable=SC2086
             python3 "$REPO_ROOT/verification/lockstep/gen/qvgen.py" \
@@ -351,9 +360,16 @@ total=$(wc -l < "$ENTRIES_FILE" | xargs)
 echo "=== $total corpus entries selected (mode=$MODE corpus=$CORPUS) ==="
 
 # ---------------- run ----------------
+# A verdict is only reused for the same configuration (RUN_KEY) AND the same
+# program bytes: the hash of the hex image is part of the file name.
+result_path() {
+    echo "$OUTDIR/result_${RUN_KEY}_${1}_$(sha1sum "$2" | cut -c1-8)"
+}
+
 run_one() {
     local tag="$1" hex="$2" tohost="$3" max_retire="$4"
-    local resfile="$OUTDIR/result_${RUN_KEY}_${tag}"
+    local resfile
+    resfile=$(result_path "$tag" "$hex")
     if [ -e "$resfile" ] && [ "$FORCE" != "1" ]; then
         return
     fi
@@ -432,7 +448,7 @@ fi
 # an earlier run's leftover PASS files).
 pass=0; fail=0; timeout_n=0; error=0
 while IFS='|' read -r tag _hex _tohost _max_retire; do
-    f="$OUTDIR/result_${RUN_KEY}_${tag}"
+    f=$(result_path "$tag" "$_hex")
     [ -e "$f" ] || { error=$((error+1)); continue; }
     line=$(head -1 "$f")
     case "$line" in
