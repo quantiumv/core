@@ -25,7 +25,7 @@ case "${1:-}" in
     pipe|pipe-full)
         NAME=quantiumv_pipe
         [ "$1" == "pipe-full" ] && SUFFIX=_full
-        FILES=$(grep -E '^design/(pipe/|decoder\.sv|alu\.sv|c_expand\.sv|csr_file\.sv|register_file\.sv)' \
+        FILES=$(grep -E '^design/(pipe/|decoder\.sv|alu\.sv|c_expand\.sv|csr_file\.sv|register_file\.sv|divider\.sv)' \
                     verification/regress/pipe_design_files.list) ;;
     *) echo "usage: sync_core.sh fsm|pipe|pipe-full" >&2; exit 2 ;;
 esac
@@ -40,5 +40,11 @@ cp -r "$REPO/design/defaults" "$DST/design/"
 cp "$REPO/verification/riscv-formal/quantiumv/wrapper.sv" "$DST/"
 cp "$REPO/verification/riscv-formal/$NAME/checks.cfg" "$DST/"
 [ -z "$SUFFIX" ] || sed -i 's/ -D QV_FORMAL_SMALL//' "$DST/checks.cfg"
+if [ "$1" != "fsm" ]; then
+    # the cfg's read_slang line takes the file list from here, not a copy of its own
+    RTL=""
+    for f in $FILES; do RTL="$RTL @basedir@/cores/@core@/$f"; done
+    sed -i "s#@PIPE_RTL@#${RTL# }#" "$DST/checks.cfg"
+fi
 (cd "$DST" && python3 ../../checks/genchecks.py > /dev/null)
 echo "synced $NAME$SUFFIX: $(ls "$DST/checks"/*.sby | wc -l) checks in $DST/checks"
