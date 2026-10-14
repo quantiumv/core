@@ -111,13 +111,13 @@
   },
   {
    "name": "trap_to_s output stuck low",
-   "old": "assign o_trap_to_s     = trap_to_s;",
-   "new": "assign o_trap_to_s     = 1'b0;"
+   "old": "assign o_trap_to_s     = irq ? int_to_s : trap_to_s;",
+   "new": "assign o_trap_to_s     = irq ? int_to_s : 1'b0;"
   },
   {
    "name": "privilege not reset to M",
-   "old": "            priv_q <= QV_PRIV_M;\n        end else if (commit) begin",
-   "new": "            priv_q <= QV_PRIV_U;\n        end else if (commit) begin"
+   "old": "            priv_q <= QV_PRIV_M;\n        end else if (irq) begin",
+   "new": "            priv_q <= QV_PRIV_U;\n        end else if (irq) begin"
   }
  ]
 }

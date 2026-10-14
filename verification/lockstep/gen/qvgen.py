@@ -91,6 +91,8 @@ BAD_ADDR_BASE = 0x00090000      # inside the RAM region but never mapped
                                 # SRAM has no protection to violate.
 EPILOGUE_MAGIC = 0x51757645      # "QuVE", arbitrary/recognizable
 MAGIC_BASE = 0x0400F000          # the lockstep harness's MAGIC dword (tohost-style set/clear registers)
+FAR_BASE = 0x08000000            # outside the RAM image and the MMIO window: the harness answers with a bus error
+HOT_SIZE = 0x400                 # the start of the sandbox that accesses favor, where --pmp puts its small pockets
 POCKET_X = BAD_ADDR_BASE + 0xC00 # --pmp: a `jr x25` lives here; a jump to it is a fetch from a PMP pocket
                                  # (past x26 + 2047, so the random bad-address stores can't overwrite it)
 
@@ -313,14 +315,15 @@ def _sandbox_addr(p: Program, reg: int, misaligned=False, width=8):
     """Load a real, in-sandbox address into `reg`, either via
     base+imm (x27 + a small offset) or and/add-masked from a computed
     value -- both forms the plan calls for."""
+    hot = p.args.pmp and p.rng.random() < 0.3        # small PMP pockets live in the hot zone: hit them often
     if p.rng.random() < 0.5:
-        off = p.rng.randrange(0, SANDBOX_SIZE - 64, width)
+        off = p.rng.randrange(0, HOT_SIZE if hot else SANDBOX_SIZE - 64, width)
         if misaligned and width > 1:
             off += 1
         p.e(f"    addi    x{reg}, x27, {sign12(off)}")
     else:
         p.li(reg, p.rng.randrange(0, 1 << 20))
-        mask = (SANDBOX_SIZE - 1) & ~(width - 1)
+        mask = ((HOT_SIZE if hot else SANDBOX_SIZE) - 1) & ~(width - 1)
         # `mask` needs 15 bits (SANDBOX_SIZE-1 = 0x7FFF) -- too wide for
         # ANDI's 12-bit signed immediate, so it goes through a real `li`
         # into a scratch register instead of a truncated `andi`.
@@ -351,6 +354,10 @@ def emit_mem(p: Program, recent: list[int], misalign_rate: float, badaddr_rate: 
     if r < badaddr_rate:
         off = p.rng.randrange(0, 0x1000, 8)
         p.e(f"    addi    x{addr_r}, x26, {sign12(off)}")
+        misaligned = False
+    elif r < badaddr_rate * 1.5:
+        # nothing is there: a bus error (or, below M with --pmp, a PMP denial first)
+        p.li(addr_r, FAR_BASE + p.rng.randrange(0, 0x1000, 8))
         misaligned = False
     else:
         misaligned = p.rng.random() < misalign_rate
@@ -953,9 +960,13 @@ def emit_pmp(p: Program):
     def sandbox_pocket():
         """An NA4 word or a NAPOT block (16 bytes .. 16 KiB) in the sandbox."""
         if rng.random() < 0.3:
-            return pocket_cfg(_PMP_A_NA4), (SANDBOX_BASE + rng.randrange(0, SANDBOX_SIZE, 4)) >> 2
+            area = HOT_SIZE if rng.random() < 0.7 else SANDBOX_SIZE
+            return pocket_cfg(_PMP_A_NA4), (SANDBOX_BASE + rng.randrange(0, area, 4)) >> 2
         size = 1 << rng.randint(4, 14)
-        base = SANDBOX_BASE + rng.randrange(0, SANDBOX_SIZE, size) if size < SANDBOX_SIZE else SANDBOX_BASE
+        if size <= HOT_SIZE and rng.random() < 0.7:
+            base = SANDBOX_BASE + rng.randrange(0, HOT_SIZE, size)
+        else:
+            base = SANDBOX_BASE + rng.randrange(0, SANDBOX_SIZE, size) if size < SANDBOX_SIZE else SANDBOX_BASE
         return pocket_cfg(_PMP_A_NAPOT), napot_pmpaddr(base, size)
 
     def bad_page_pocket():
@@ -1291,9 +1302,9 @@ def emit_entry_preamble(p: Program):
     else:
         if a.pmp and p.rng.random() < 0.5:
             # M-mode data accesses run at MPP while MPRV is set: the PMP pockets then bind them too
-            mpp = p.rng.choice([0, 1])
+            mpp = p.rng.choice([0, 1, 3])
             p.li(6, (1 << 17) | (mpp << 11))
-            p.e("    csrs    mstatus, x6")        # MPRV, MPP = U or S
+            p.e("    csrs    mstatus, x6")        # MPRV, MPP = U, S or M (M: MPRV changes nothing)
         if p.irq:
             p.e("    csrsi   mstatus, 8")          # MIE: the body runs in M
     p.e("recovery_point:")

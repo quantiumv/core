@@ -196,7 +196,9 @@ module lockstep_mem #(
             end
         end
     end
-    assign o_wr_valid = wr_out_q && wr_we_q && mem_ack_o;
+    // a store that errors is not a committed write: the caches raise ack together with err, a bare SRAM
+    // raises err alone, and the two configurations' logs must agree
+    assign o_wr_valid = wr_out_q && wr_we_q && mem_ack_o && !mem_err_o;
     assign o_wr_addr  = wr_addr_q;
     assign o_wr_sel   = wr_sel_q;
     assign o_wr_data  = wr_data_q;
