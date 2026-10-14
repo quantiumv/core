@@ -20,7 +20,7 @@ JOBS=3
 OUT=/tmp/qv_kill_matrix
 SIM=iverilog
 ONLY="1,2,3,4,5,6,7,8,9,10"
-ENTRIES='fw_|random_|act_(I-add-00|I-sb-00|I-bltu-00|I-fence-00|ExceptionsZc-00|U-00|S-00)' 
+ENTRIES='fw_|random_|act_(I-add-00|I-sb-00|I-bltu-00|I-fence-00|ExceptionsZc-00|U-00|S-00|Zca-c.addi16sp-00)'
 while [ $# -gt 0 ]; do
     case "$1" in
         --random-count) COUNT="$2"; shift 2 ;;
