@@ -50,4 +50,14 @@ its lock). The `--mutants` run shows each property set fails on known-bad versio
 
 ## Results
 
-RESULTS_PLACEHOLDER
+**Not final yet.** The sweep of the P5 RTL (everything through the interrupt and PMP work, core_pipe at the
+commit that added `sweep_status.sh`) was started on 2026-10-14 with `run_sweep.sh pipe -j 8 --timeout 86400`
+and takes on the order of a day; `verification/riscv-formal/sweep_status.sh pipe` prints the live table.
+When it finishes, this section gets the table, the `liveness`/`hang` runs against the FSM baseline (the FSM's
+`hang` passes under the same no-divide assumption), and the five full-size spot checks (`reg`, `causal`,
+`insn_lw`, `insn_jalr`, `insn_c_lw` on `sync_core.sh pipe-full`).
+
+The earlier sweep, of the pre-P5 RTL (no divider, atomics, privilege, interrupts or PMP yet), reached 89 of 93
+PASS with 0 FAIL before it was stopped; `unique_ch0` was an `ERROR (PREUNSAT)` from the trigger described above,
+and `reg_ch0`, `liveness_ch0` and `hang` had not finished. Those results were discarded when the checks were
+regenerated for the new RTL.
