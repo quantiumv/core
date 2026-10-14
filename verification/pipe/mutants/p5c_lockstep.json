@@ -40,7 +40,10 @@
     12,
     13,
     14
-   ]
+   ],
+   "unit_only": {
+    "3": "a trap taken in M mode with its medeleg bit set needs a fault inside an M handler; none of the generated handlers can fault"
+   }
   }
  ]
 }

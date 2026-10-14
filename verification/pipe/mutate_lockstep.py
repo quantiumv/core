@@ -7,7 +7,10 @@ SPEC: {"counts": [8, 24, 64], "memcfg": "sram", "delay": 0, "jobs": 3, "inner_jo
                    {"from": "p5c_unit_decode.json", "only": [2, 5]}]}
 A "from" entry pulls mutants (name/old/new) out of a unit-mutation spec in this directory; the
 target file is the basename of that spec's "dut". Both kinds of entry may carry their own "profile"
-and "extra", which replace the spec's for that mutant (the lock bit, say, needs an M-mode body). Each mutant gets a private copy of design/pipe/
+and "extra", which replace the spec's for that mutant (the lock bit, say, needs an M-mode body).
+A "from" entry may also carry "unit_only": {"12": "why"}: a mutant the generated programs cannot reach
+(they never put the core in the state it needs), covered by the unit testbench instead. It is expected to
+survive here, and is reported as such. Each mutant gets a private copy of design/pipe/
 and its own outdir, and runs verification/lockstep/run_lockstep.sh --mode selfproof --dut pipe
 --pipe-dir on it over the random corpus with the spec's profile. KILLED = any corpus entry failed
 or the build failed; SURVIVED = every entry passed. "counts" escalates: a mutant is first run
@@ -37,6 +40,8 @@ def expand(spec):
                 for k in ("profile", "extra"):
                     if k in m:
                         e[k] = m[k]
+                if str(i) in m.get("unit_only", {}):
+                    e["unit_only"] = m["unit_only"][str(i)]
                 out.append(e)
         else:
             out.append(m)
@@ -98,11 +103,11 @@ def main():
     with ThreadPoolExecutor(max_workers=spec.get("jobs", 3)) as ex:
         for i, status, info in ex.map(run_one, jobs):
             m = muts[i]
-            equiv = m.get("equivalent", False)
+            equiv = m.get("equivalent", False) or "unit_only" in m
             if status != "killed" and not equiv:
                 survived += 1
             if status != "killed" and equiv:
-                status = "equivalent (survives, as expected)"
+                status = ("unit-test only: " + m["unit_only"]) if "unit_only" in m else "equivalent (survives, as expected)"
             print(f"  [{i}] {m['name']}: {status} {info[:110]}", flush=True)
     shutil.rmtree(tmp, ignore_errors=True)
     print(f"LOCKSTEP MUTANTS: {len(jobs) - survived}/{len(jobs)} killed")

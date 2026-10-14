@@ -19,7 +19,11 @@
  ],
  "mutants": [
   {
-   "from": "p5d_unit_commit.json"
+   "from": "p5d_unit_commit.json",
+   "unit_only": {
+    "12": "needs M mode running with MIE set and a delegated source: an M-mode body has no S mode to delegate to, an S/U body never has MIE=1 in M",
+    "25": "the stale architectural pc shows only if the handler's very first instruction traps (mepc), and none of the generated handlers' first instructions can"
+   }
   }
  ]
 }

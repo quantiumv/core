@@ -1169,15 +1169,16 @@ def emit_trap_delegation(p: Program):
     if p.priv_ext and p.rng.random() < 0.15:
         p.tsr = True
     # a body at the reserved privilege 2 (MPP = 2'b10 is legal to load): its ECALL has cause 0, which the M
-    # handler recognizes as the epilogue's, so cause 0 must not be delegated away from it
-    p.body_priv2 = p.priv_ext and p.rng.random() < 0.07
+    # handler recognizes as the epilogue's. Nothing is delegated for it: a delegated trap would take it out
+    # of privilege 2 (sret only returns to S or U), and the epilogue should run there
+    p.body_priv2 = p.priv_ext and p.rng.random() < 0.12
     bits = 0
     if not p.tsr:
         for c in causes:
             if p.rng.random() < 0.5:
                 bits |= (1 << c)
     if p.body_priv2:
-        bits &= ~1
+        bits = 0
     p.li(6, bits)
     p.e("    csrw    medeleg, x6")
     mideleg = 0 if p.tsr else 0x222   # STIP|SEIP|SSIP delegated
