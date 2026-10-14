@@ -1,6 +1,6 @@
 # Real-interrupt-taking corpus for the lockstep harness's mutant kill
-# matrix -- unlike act.list/fw.list/random (qvgen.py's own corpus never
-# enables mstatus.MIE, so --irq is a reserved no-op there), these
+# matrix -- unlike act.list/fw.list/random (qvgen.py's default corpus
+# never enables interrupts; only programs generated with --irq do), these
 # programs actually take real interrupts. Deliberately NOT part of
 # --corpus all's aggregate -- run with --irq-mode 2 explicitly, since
 # every other corpus entry expects the default irq_mode=0.

@@ -26,6 +26,9 @@ SECTIONS
 
     .data.sandbox 0x10000 : { *(.data.sandbox) }
 
+    /* --pmp: a `jr x25` inside the bad-address page (qvgen.py POCKET_X), the target of its fetch-fault idiom */
+    .text.pocket 0x90C00 : { *(.text.pocket) }
+
     .data.pagetables 0x20000 : { *(.data.pagetables) }
 
     .data.misc 0x30000 : { *(.data.misc) *(.data) *(.data.*) *(.rodata) *(.rodata.*) *(.bss) *(.bss.*) *(COMMON) }

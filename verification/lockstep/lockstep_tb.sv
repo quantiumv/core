@@ -64,7 +64,7 @@ module lockstep_tb #(
     logic [31:0] tohost_addr;
     longint      max_retire;
     longint      max_cycles;
-    int          irq_mode, irq_seed, irq_late;
+    int          irq_mode, irq_seed, irq_late, irq_density;
     int          dly_seed_a, dly_seed_b;
     longint      corrupt_at;
     int          corrupt_field;
@@ -78,6 +78,7 @@ module lockstep_tb #(
         if (!$value$plusargs("IRQ_MODE=%d", irq_mode))      irq_mode       = 0;
         if (!$value$plusargs("IRQ_SEED=%d", irq_seed))      irq_seed       = 1;
         if (!$value$plusargs("IRQ_LATE=%d", irq_late))      irq_late       = 0;
+        if (!$value$plusargs("IRQ_DENSITY=%d", irq_density)) irq_density   = 4;
         if (!$value$plusargs("DLY_SEED_A=%d", dly_seed_a))  dly_seed_a     = 1;
         if (!$value$plusargs("DLY_SEED_B=%d", dly_seed_b))  dly_seed_b     = 2;
         if (!$value$plusargs("CORRUPT_AT=%d", corrupt_at))  corrupt_at     = 0;       // 0 = disabled
@@ -131,7 +132,7 @@ module lockstep_tb #(
     ) side_a (
         .clk(clk_a), .rst(rst),
         .delay_seed_fetch_i(dly_seed_a[31:0]), .delay_seed_mem_i(dly_seed_a[31:0] + 32'h1000),
-        .irq_mode_i(irq_mode[31:0]), .irq_seed_i(irq_seed[31:0]), .irq_late_i(irq_late != 0),
+        .irq_mode_i(irq_mode[31:0]), .irq_seed_i(irq_seed[31:0]), .irq_density_i(irq_density[31:0]), .irq_late_i(irq_late != 0),
         .rvfi_valid(a_rvfi_valid), .rvfi_order(a_rvfi_order), .rvfi_insn(a_rvfi_insn),
         .rvfi_trap(a_rvfi_trap), .rvfi_halt(a_rvfi_halt), .rvfi_intr(a_rvfi_intr),
         .rvfi_mode(a_rvfi_mode), .rvfi_ixl(a_rvfi_ixl),
@@ -196,7 +197,7 @@ module lockstep_tb #(
     ) side_b (
         .clk(clk_b), .rst(rst),
         .delay_seed_fetch_i(dly_seed_b[31:0]), .delay_seed_mem_i(dly_seed_b[31:0] + 32'h1000),
-        .irq_mode_i(irq_mode[31:0]), .irq_seed_i(irq_seed[31:0]), .irq_late_i(irq_late != 0),
+        .irq_mode_i(irq_mode[31:0]), .irq_seed_i(irq_seed[31:0]), .irq_density_i(irq_density[31:0]), .irq_late_i(irq_late != 0),
         .rvfi_valid(b_rvfi_valid), .rvfi_order(b_rvfi_order), .rvfi_insn(b_rvfi_insn),
         .rvfi_trap(b_rvfi_trap), .rvfi_halt(b_rvfi_halt), .rvfi_intr(b_rvfi_intr),
         .rvfi_mode(b_rvfi_mode), .rvfi_ixl(b_rvfi_ixl),
@@ -391,7 +392,7 @@ module lockstep_tb #(
     logic [63:0] fail_order, match_count;
 
     lockstep_cmp cmp0 (
-        .clk(clk_mon), .rst(rst),
+        .clk(clk_mon), .rst(rst), .irq_late_i(irq_late != 0),
         .a_rec_avail(a_rec_avail), .a_rec_total(a_rec_total), .a_rec_pop(a_rec_pop),
         .a_order(a_rp_order), .a_pc_rdata(a_rp_pc_rdata), .a_pc_wdata(a_rp_pc_wdata), .a_insn(a_rp_insn),
         .a_trap(a_rp_trap), .a_intr(a_rp_intr), .a_mode(a_rp_mode),
@@ -478,6 +479,12 @@ module lockstep_tb #(
     assign a_stopped = (stop_at != 0) && (longint'(a_rec_total) >= stop_at);
     assign b_stopped = (stop_at != 0) && (longint'(b_rec_total) >= stop_at);
 
+    // interrupt entries seen (retirements flagged rvfi_intr), side A: shown in the PASS line so a run
+    // that was supposed to take interrupts can be told from one that never did
+    longint intr_count_a;
+    initial intr_count_a = 0;
+    always @(posedge clk_a) if (!rst && a_rvfi_valid && a_rvfi_intr) intr_count_a = intr_count_a + 1;
+
     // ---------------- pacing: hold a side's clock once it's too far ahead or done ----------------
     assign pace_a_hold = (a_rec_count >= `QV_LOCKSTEP_AHEAD_MAX) || a_stopped;
     assign pace_b_hold = (b_rec_count >= `QV_LOCKSTEP_AHEAD_MAX) || b_stopped;
@@ -538,10 +545,11 @@ module lockstep_tb #(
                 end
                 check_final_state();
                 if (tohost_addr != 32'b0 && max_retire == 0)
-                    $display("LOCKSTEP_RESULT: PASS (%0d retirements matched, tohost=%0h)", match_count,
-                             side_a.mem0.sram0.memory[tohost_addr[31:3]]);
+                    $display("LOCKSTEP_RESULT: PASS (%0d retirements matched, %0d interrupt entries, tohost=%0h)",
+                             match_count, intr_count_a, side_a.mem0.sram0.memory[tohost_addr[31:3]]);
                 else
-                    $display("LOCKSTEP_RESULT: PASS (%0d retirements matched, MAX_RETIRE reached)", match_count);
+                    $display("LOCKSTEP_RESULT: PASS (%0d retirements matched, %0d interrupt entries, MAX_RETIRE reached)",
+                             match_count, intr_count_a);
                 $finish;
             end
             if (cycle_q >= max_cycles) begin

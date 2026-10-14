@@ -1,0 +1,12 @@
+{
+ "count": 24,
+ "memcfg": "sram",
+ "delay": 0,
+ "jobs": 3,
+ "inner_jobs": 2,
+ "profile": "--isa imac --priv msu --smc --irq",
+ "extra": ["--irq-mode", "2", "--irq-density", "1", "--irq-late"],
+ "mutants": [
+  {"from": "p5d_unit_commit.json"}
+ ]
+}

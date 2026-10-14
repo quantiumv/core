@@ -22,11 +22,11 @@
  * late (QV_MUTANT==5) takes it a retirement earlier, so the retirement
  * streams differ. Without late_i both kinds take it at the same boundary.
  */
-module lockstep_irq #(
-    parameter int DENSITY  = 32'd4   // ~DENSITY/256 chance of a new assert per retirement, per line
-) (
+module lockstep_irq (
     input  logic clk,
     input  logic rst,
+
+    input  logic [31:0]  density_i,        // runtime: ~density_i/256 chance of a new assert per retirement, per line
 
     input  logic [31:0]  irq_mode_i,       // runtime: 0=disabled, 1=MTIP only, 2=MTIP+MEIP+SEIP
     input  logic [31:0]  seed_i,           // runtime: re-seeds the LFSR at reset
@@ -61,13 +61,13 @@ module lockstep_irq #(
             if (irq_mode_i != 32'b0 && rvfi_valid) begin
                 lfsr_q <= lfsr_next;
                 if (!do_clear) begin
-                    if (lfsr_next[7:0] < DENSITY[7:0]) begin
+                    if (lfsr_next[7:0] < density_i[7:0]) begin
                         pending_mtip_q <= 1'b1;
                     end
-                    if (irq_mode_i >= 32'd2 && lfsr_next[15:8] < DENSITY[7:0]) begin
+                    if (irq_mode_i >= 32'd2 && lfsr_next[15:8] < density_i[7:0]) begin
                         pending_meip_q <= 1'b1;
                     end
-                    if (irq_mode_i >= 32'd2 && lfsr_next[23:16] < DENSITY[7:0]) begin
+                    if (irq_mode_i >= 32'd2 && lfsr_next[23:16] < density_i[7:0]) begin
                         pending_seip_q <= 1'b1;
                     end
                 end

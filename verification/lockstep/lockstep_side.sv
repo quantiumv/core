@@ -43,6 +43,7 @@ module lockstep_side #(
     input  logic [31:0] delay_seed_mem_i,    // runtime
     input  logic [31:0] irq_mode_i,          // runtime
     input  logic [31:0] irq_seed_i,          // runtime
+    input  logic [31:0] irq_density_i,       // runtime, see lockstep_irq.sv
     input  logic        irq_late_i,          // runtime, see lockstep_irq.sv
 
     // RVFI passthrough (core/ref_core always built with -DRISCV_FORMAL
@@ -184,11 +185,21 @@ module lockstep_side #(
         .o_rd_valid(o_mmio_rd_valid), .o_rd_addr(o_mmio_rd_addr), .o_rd_data(o_mmio_rd_data)
     );
 
+    // The levels drop on this side's own RETIRED store to MAGIC_CLR, seen through RVFI, never on the
+    // bus write: core_pipe writes the bus a cycle before the store retires and ref_core in the same
+    // cycle, so a bus-keyed drop lands on different sides of a sample point on the two sides. Keyed
+    // on retirement the stimulus is a pure function of the retirement stream, as lockstep_irq.sv
+    // promises. (The MMIO device's own strobe, magic_clr_we, is no longer used.)
+    localparam logic [31:0] MAGIC_DWORD = `QV_LOCKSTEP_MAGIC_SET & ~32'h7;
+    wire        ret_clr_we    = rvfi_valid && !rvfi_trap && (rvfi_mem_wmask[7:4] != 4'b0)
+                                && (rvfi_mem_addr[31:3] == MAGIC_DWORD[31:3]);
+    wire [31:0] ret_clr_wdata = rvfi_mem_wdata[63:32];
+
     lockstep_irq irq0 (
         .clk(clk), .rst(rst),
-        .irq_mode_i(irq_mode_i), .seed_i(irq_seed_i), .late_i(irq_late_i),
+        .irq_mode_i(irq_mode_i), .seed_i(irq_seed_i), .density_i(irq_density_i), .late_i(irq_late_i),
         .rvfi_valid(rvfi_valid),
-        .magic_clr_we(magic_clr_we), .magic_clr_wdata(magic_clr_wdata),
+        .magic_clr_we(ret_clr_we), .magic_clr_wdata(ret_clr_wdata),
         .o_mtip(i_mtip), .o_meip(i_meip), .o_seip(i_seip)
     );
 
@@ -198,7 +209,7 @@ module lockstep_side #(
     // MAGIC_IRQ_CLR-only convention). Silence the unused-signal warning
     // rather than pretend a consumer exists.
     /* verilator lint_off UNUSEDSIGNAL */
-    wire _unused_magic_set = magic_set_we & (|magic_set_wdata);
+    wire _unused_magic_set = magic_set_we & (|magic_set_wdata) & magic_clr_we & (|magic_clr_wdata);
     /* verilator lint_on UNUSEDSIGNAL */
 
     // Derived cause/tval -- identical technique to testbench/rvfi_tracer.sv.

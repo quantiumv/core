@@ -60,6 +60,7 @@ DELAY_MAX=0
 # provably caught at all.
 IRQ_MODE=0
 IRQ_SEED=1
+IRQ_DENSITY=4
 IRQ_LATE=0
 CORPUS=all
 ONLY=""
@@ -91,10 +92,13 @@ Usage: run_lockstep.sh --mode selfproof|mutant|corrupt [options]
                         under --mode mutant, e.g. --mutant 9 needs cache)
   --delay-max N        max bus-delay wait states (default 0 = disabled)
   --irq-mode N          0=disabled (default), 1=MTIP only, 2=MTIP+MEIP+SEIP
-                        (see lockstep_irq.sv) -- qvgen.py's own corpus never
-                        enables mstatus.MIE, so this only matters against a
-                        program that does (e.g. repro_irq_stall.s)
+                        (see lockstep_irq.sv) -- only matters against a
+                        program that enables interrupts: repro_irq_stall.s,
+                        or qvgen.py programs generated with --irq (set
+                        QV_RANDOM_PROFILE='... --irq' for --corpus random)
   --irq-seed N          seed for the injection LFSR (default 1)
+  --irq-density N       ~N/256 chance of a new assert per retirement, per line (default 4;
+                        qvgen --irq programs want 1: their handlers are long)
   --irq-late            make each injected level visible one cycle later
                         (separates a core that samples a cycle late, e.g.
                         QV_MUTANT 5, from one that samples on time)
@@ -125,6 +129,7 @@ while [ $# -gt 0 ]; do
         --delay-max) DELAY_MAX="$2"; shift 2 ;;
         --irq-mode) IRQ_MODE="$2"; shift 2 ;;
         --irq-seed) IRQ_SEED="$2"; shift 2 ;;
+        --irq-density) IRQ_DENSITY="$2"; shift 2 ;;
         --irq-late) IRQ_LATE=1; shift ;;
         --corpus) CORPUS="$2"; shift 2 ;;
         --only) ONLY="$2"; shift 2 ;;
@@ -192,7 +197,7 @@ RUN_DELAY_MAX=$DELAY_MAX
 SRC_HASH=$(cat $PIPE_FILES $REF_FILES $SUPPORT_FILES $LOCKSTEP_FILES \
                design/defaults/*.sv verification/reference/*.svh verification/lockstep/*.svh \
                2>/dev/null | sha1sum | cut -c1-8)
-RUN_KEY="${MODE}_${DUT}_m${QV_MUTANT_B}_${MEMCFG_B}_d${RUN_DELAY_MAX}_i${IRQ_MODE}_l${IRQ_LATE}_q${IRQ_SEED}_s${RUN_SEED}_${SRC_HASH}"
+RUN_KEY="${MODE}_${DUT}_m${QV_MUTANT_B}_${MEMCFG_B}_d${RUN_DELAY_MAX}_i${IRQ_MODE}_l${IRQ_LATE}_q${IRQ_SEED}_y${IRQ_DENSITY}_s${RUN_SEED}_${SRC_HASH}"
 VVP_BIN="$OUTDIR/lockstep_${MODE}_${DUT}_m${QV_MUTANT_B}_${MEMCFG_B}_d${RUN_DELAY_MAX}_${SRC_HASH}.vvp"
 BUILD_LOG="$OUTDIR/build_${MODE}_${DUT}_m${QV_MUTANT_B}.log"
 if [ ! -e "$VVP_BIN" ] || [ "$FORCE" == "1" ]; then
@@ -378,7 +383,7 @@ run_one() {
     fi
     local seed_a=$((RUN_SEED * 2 + 1))
     local seed_b=$((RUN_SEED * 2 + 2))
-    local args=(+HEXFILE="$hex" +TIMEOUT=$MAX_CYCLES +DLY_SEED_A=$seed_a +DLY_SEED_B=$seed_b +IRQ_MODE=$IRQ_MODE +IRQ_SEED=$IRQ_SEED +IRQ_LATE=$IRQ_LATE)
+    local args=(+HEXFILE="$hex" +TIMEOUT=$MAX_CYCLES +DLY_SEED_A=$seed_a +DLY_SEED_B=$seed_b +IRQ_MODE=$IRQ_MODE +IRQ_SEED=$IRQ_SEED +IRQ_DENSITY=$IRQ_DENSITY +IRQ_LATE=$IRQ_LATE)
     [ -n "$tohost" ] && args+=(+TOHOST_ADDR=$tohost)
     [ -n "$max_retire" ] && args+=(+MAX_RETIRE=$max_retire)
     local out

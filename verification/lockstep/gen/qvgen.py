@@ -90,6 +90,9 @@ BAD_ADDR_BASE = 0x00090000      # inside the RAM region but never mapped
                                 # fault, since this harness's own flat
                                 # SRAM has no protection to violate.
 EPILOGUE_MAGIC = 0x51757645      # "QuVE", arbitrary/recognizable
+MAGIC_BASE = 0x0400F000          # the lockstep harness's MAGIC dword (tohost-style set/clear registers)
+POCKET_X = BAD_ADDR_BASE + 0xC00 # --pmp: a `jr x25` lives here; a jump to it is a fetch from a PMP pocket
+                                 # (past x26 + 2047, so the random bad-address stores can't overwrite it)
 
 # Free pool for random-body content (see module docstring).
 FREE_POOL = list(range(13, 24))  # x13..x23
@@ -126,6 +129,7 @@ class Program:
         self.handlers: list[str] = []
         self.misc_data: list[str] = []
         self.pagetable_data: list[str] = []
+        self.pocket_code: list[str] = []      # --pmp: what sits at POCKET_X
         self.subroutines: list[str] = []  # appended to .text.entry at the end
         self.call_depth = 0
         self.open_labels: list[Label] = []  # forward branches waiting to land
@@ -137,6 +141,14 @@ class Program:
         # assume an S-mode body).
         self.priv_ext = args.priv == "msu" and not args.sail_safe and not args.sv39
         self.body_u = False       # the body starts in U mode
+        # --irq: the body runs with interrupts on, so an interrupt can strike between any two
+        # instructions -- inside an idiom that keeps a value in x5-x8, or between a sepc write and the
+        # sret that uses it. Hence transparent trap handlers (mscratch/sscratch are their save-area
+        # pointers, off limits to the random CSR pool), a PMP region so the S handler can write the
+        # MAGIC clear, and idioms that keep the S-level interrupts out of their windows. Not with
+        # --sail-safe (no MMIO), nor with --sv39 (its own handlers and page tables).
+        self.irq = bool(args.irq) and not args.sail_safe and not args.sv39
+        self.body_sie = False     # S-mode body: sstatus.SIE is set, so delegated interrupts are taken
         self.tsr = False          # mstatus.TSR is set: SRET always traps
 
     # -- tiny emission helpers -----------------------------------------
@@ -421,16 +433,21 @@ _U_RO = ["cycle", "instret", "time"]
 
 
 def emit_priv_csr(p: Program, recent: list[int]):
+    # under --irq the scratch CSRs hold the handlers' save-area pointers, and sip / mip show the
+    # injected pins, whose visibility cycle differs between cores
+    s_rw = [c for c in _S_RW if not (p.irq and c == "sscratch")]
+    s_ro = [c for c in _S_RO if not (p.irq and c == "sip")]
+    m_any = [c for c in _M_ANY if not (p.irq and c in ("mscratch", "mip"))]
     r = p.rng.random()
     rd = p.reg_biased(recent)
     if r < 0.30:
-        csr = p.rng.choice(_S_RW)
+        csr = p.rng.choice(s_rw)
         form = p.rng.choice(["csrrw", "csrrs", "csrrc", "csrrwi", "csrrsi", "csrrci"])
     elif r < 0.55:
-        csr = p.rng.choice(_S_RO)
+        csr = p.rng.choice(s_ro)
         form = "read"
     elif r < 0.85:
-        csr = p.rng.choice(_M_ANY)
+        csr = p.rng.choice(m_any)
         form = p.rng.choice(["csrrw", "csrrs", "csrrc", "csrrwi", "csrrsi", "csrrci", "read"])
     else:
         csr = p.rng.choice(_U_RO)
@@ -454,12 +471,23 @@ def emit_priv_op(p: Program, recent: list[int]):
     r = p.rng.random()
     if r < 0.30:
         nxt = Label("sret")
+        if p.irq:
+            # an S-level interrupt between the sepc write and the sret would overwrite sepc, and the
+            # sret would then return to the interrupted pc for ever: keep SIE clear across the window
+            # (M-level ones don't touch sepc), set SPIE so the sret turns SIE back on, and set it
+            # again after the label in case the sret trapped (TSR) instead
+            p.e("    csrci   sstatus, 2")
         p.e(f"    la      x6, {nxt}")
         p.e("    csrw    sepc, x6")
+        if p.irq:
+            p.e("    li      x6, 0x20")                           # sstatus.SPIE
+            p.e("    csrs    sstatus, x6")
         p.e("    li      x6, 0x100")                              # sstatus.SPP
         p.e(f"    {'csrs' if p.rng.random() < 0.7 else 'csrc'}    sstatus, x6")
         p.e("    sret")
         p.e(f"{nxt}:")
+        if p.irq and p.body_sie:
+            p.e("    csrsi   sstatus, 2")
     elif r < 0.40:
         p.e("    mret")
     elif r < 0.55:
@@ -487,6 +515,8 @@ def emit_csr(p: Program, recent: list[int]):
         emit_priv_csr(p, recent)
         return
     csr = "sscratch" if p.args.priv == "msu" else "mscratch"
+    if p.irq:
+        csr = "stval" if p.args.priv == "msu" else "mtval"     # the scratch CSRs are the handlers' pointers
     op = p.rng.choice(["csrrw", "csrrs", "csrrc"])
     rd = p.reg_biased(recent)
     rs1 = p.reg_biased(recent)
@@ -669,8 +699,22 @@ def emit_handlers(p: Program):
     m_not_ecall = Label("mnotecall")
     m_not_epi = Label("mnotepi")
 
+    m_pro, m_epi, s_pro, s_epi = [], [], [], []
+    if p.irq:
+        # save x5-x8 on entry and restore them on every return: the scratch CSR holds the save-area
+        # pointer, swapped with x5 to get a register to address it with
+        for csr, pro, epi in (("mscratch", m_pro, m_epi), ("sscratch", s_pro, s_epi)):
+            pro += [f"    csrrw   x5, {csr}, x5",
+                    "    sd      x6, 0(x5)", "    sd      x7, 8(x5)", "    sd      x8, 16(x5)",
+                    f"    csrr    x6, {csr}", "    sd      x6, 24(x5)",
+                    f"    csrw    {csr}, x5"]
+            epi += [f"    csrr    x5, {csr}",
+                    "    ld      x6, 0(x5)", "    ld      x7, 8(x5)", "    ld      x8, 16(x5)",
+                    "    ld      x5, 24(x5)"]
+
     p.handlers += [
         f"{m_trap}:",
+        *m_pro,
         "    csrr    x5, mcause",
         f"    bge     x5, x0, {m_sync}",
         f"{m_intr}:",
@@ -769,6 +813,7 @@ def emit_handlers(p: Program):
         "    addi    x6, x6, 4",
         "    csrw    mepc, x6",
         f"{m_ret}:",
+        *m_epi,
         "    mret",
     ]
 
@@ -785,6 +830,7 @@ def emit_handlers(p: Program):
         s_lenmem = Label("slenmem")
         p.handlers += [
             f"{s_trap}:",
+            *s_pro,
             "    csrr    x5, scause",
             f"    bge     x5, x0, {s_sync}",
             f"{s_intr}:",
@@ -860,6 +906,7 @@ def emit_handlers(p: Program):
             "    addi    x6, x6, 4",
             "    csrw    sepc, x6",
             f"{s_ret}:",
+            *s_epi,
             "    sret",
         ]
 
@@ -870,24 +917,85 @@ def emit_handlers(p: Program):
 # Preambles
 # =======================================================================
 
+_PMP_A_OFF, _PMP_A_TOR, _PMP_A_NA4, _PMP_A_NAPOT = 0, 1, 2, 3
+
+
+def napot_pmpaddr(base: int, size: int) -> int:
+    """pmpaddr for a NAPOT region of `size` bytes (a power of two, at least 8) at `base`."""
+    assert size >= 8 and size & (size - 1) == 0 and base % size == 0
+    return (base >> 2) | ((size >> 3) - 1)
+
+
 def emit_pmp(p: Program):
-    """TOR regions covering the whole 1 MiB image R+W+X (unlocked --
-    never denies M-mode regardless, per the real spec rule this
-    project's own PMP milestone already confirmed the hard way), plus
-    ONE genuinely denied region (bad_addr's own page) so PMP is real,
-    not a no-op rubber stamp."""
-    p.e("    # -- PMP: permit everything except BAD_ADDR_BASE's own page --")
-    p.li(6, 0x100 >> 2)  # region0 end (M-mode-only low code, permit)
-    p.e("    csrw    pmpaddr0, x6")
-    p.li(6, BAD_ADDR_BASE >> 2)
-    p.e("    csrw    pmpaddr1, x6")  # region1 [region0,BAD_ADDR_BASE) permit
-    p.li(6, (BAD_ADDR_BASE + 0x1000) >> 2)
-    p.e("    csrw    pmpaddr2, x6")  # region2 = the denied page
-    p.li(6, 0x100000 >> 2)
-    p.e("    csrw    pmpaddr3, x6")  # region3 rest of the image, permit
-    cfg = 0x0F | (0x0F << 8) | (0x00 << 16) | (0x0F << 24)
+    """Random PMP. The last entry is a NAPOT over the whole 1 MiB image, rwx and unlocked, so the code, the
+    handlers, the data and the epilogue stay reachable below M (and M is never denied by an unlocked region).
+    The entries ahead of it, which have priority, carve pockets with random permissions out of the sandbox and
+    the bad-address page -- NAPOT or NA4, or a TOR region on top of an OFF entry that only supplies its lower
+    bound -- and now and then lock one, so M mode obeys it too. Under --irq one entry is the MAGIC dword
+    (read+write), which the S handler writes to clear the injected levels.
+
+    Loads and stores into a pocket fault by what the pocket allows (5/7, LR and AMOs count as writes, a span
+    that only partly overlaps a region is no match at all); `jr x25` at POCKET_X is the target of the
+    fetch-fault idiom (emit_pmp_jump): execute permission there decides between a clean return and a fetch
+    access fault the handler resumes from x25."""
+    rng = p.rng
+    p.e("    # -- PMP: random pockets over a permissive whole-image region --")
+
+    def perms() -> int:
+        # R=1, W=2, X=4; W without R is reserved
+        return 0 if rng.random() < 0.35 else rng.choice([1, 1, 3, 3, 4, 5, 7])
+
+    def pocket_cfg(a: int, lockable: bool = True) -> int:
+        lock = 0x80 if lockable and rng.random() < 0.25 else 0
+        return lock | (a << 3) | perms()
+
+    def sandbox_pocket():
+        """An NA4 word or a NAPOT block (16 bytes .. 16 KiB) in the sandbox."""
+        if rng.random() < 0.3:
+            return pocket_cfg(_PMP_A_NA4), (SANDBOX_BASE + rng.randrange(0, SANDBOX_SIZE, 4)) >> 2
+        size = 1 << rng.randint(4, 14)
+        base = SANDBOX_BASE + rng.randrange(0, SANDBOX_SIZE, size) if size < SANDBOX_SIZE else SANDBOX_BASE
+        return pocket_cfg(_PMP_A_NAPOT), napot_pmpaddr(base, size)
+
+    def bad_page_pocket():
+        return (pocket_cfg(_PMP_A_NAPOT), napot_pmpaddr(BAD_ADDR_BASE, 0x1000))
+
+    entries = [None, None, None]
+    if rng.random() < 0.3:
+        # TOR layout: e0 only carries the lower bound, e1 is the TOR region on top of it
+        lower = SANDBOX_BASE + rng.randrange(0, 0x6000, 4)
+        top = lower + rng.randrange(8, 0x2000, 4)
+        entries[0] = (0, lower >> 2)
+        entries[1] = (pocket_cfg(_PMP_A_TOR), top >> 2)
+        entries[2] = bad_page_pocket()
+    else:
+        entries[0] = sandbox_pocket() if rng.random() < 0.85 else (0, 0)
+        entries[1] = bad_page_pocket()
+        entries[2] = sandbox_pocket() if rng.random() < 0.5 else (0, 0)
+    if p.irq:
+        entries[2] = (0x18 | 0x3, napot_pmpaddr(MAGIC_BASE, 8))          # NAPOT, read+write, unlocked
+    entries.append((0x18 | 0x7, napot_pmpaddr(0, 0x100000)))               # the base: NAPOT rwx over the image
+
+    cfg = 0
+    for i, (c, a) in enumerate(entries):
+        p.li(6, a)
+        p.e(f"    csrw    pmpaddr{i}, x6")
+        cfg |= c << (8 * i)
     p.li(6, cfg)
     p.e("    csrw    pmpcfg0, x6")
+
+
+def emit_pmp_jump(p: Program):
+    """A jump into the bad-address page: a fetch from a PMP pocket. x25 is pointed at the label after it first;
+    if the pocket forbids execute the fetch faults (cause 1) and the handler resumes at x25, otherwise the
+    `jr x25` placed at POCKET_X returns there -- either way the program carries on. Needs the page's PMP entry,
+    so only under --pmp."""
+    nxt = Label("pmpjmp")
+    p.e(f"    la      x25, {nxt}")
+    p.li(6, POCKET_X)
+    p.e("    jalr    x0, 0(x6)")
+    p.e(f"{nxt}:")
+    p.e("    la      x25, recovery_point")
 
 
 def emit_sv39(p: Program):
@@ -1052,7 +1160,16 @@ def emit_trap_delegation(p: Program):
         p.tsr = True
     p.li(6, bits)
     p.e("    csrw    medeleg, x6")
-    p.li(6, 0 if p.tsr else 0x222)  # STIP|SEIP|SSIP delegated -- harmless, no source yet
+    mideleg = 0 if p.tsr else 0x222   # STIP|SEIP|SSIP delegated
+    if p.irq and not p.tsr:
+        # the injected sources: SEI (bit 9) is in 0x222 already; MTI (7) and MEI (11) can go to S too
+        if p.rng.random() < 0.4:
+            mideleg |= 1 << 7
+        if p.rng.random() < 0.3:
+            mideleg |= 1 << 11
+        if p.rng.random() < 0.3:
+            mideleg &= ~(1 << 9)
+    p.li(6, mideleg)
     p.e("    csrw    mideleg, x6")
 
 
@@ -1087,8 +1204,32 @@ def emit_msu_minimal_pmp(p: Program):
     p.e("    # -- msu bootstrap: explicit permissive PMP (no --pmp) --")
     p.li(6, 0x100000 >> 2)
     p.e("    csrw    pmpaddr0, x6")
-    p.li(6, 0x0F)  # L=0,A=TOR,X=1,W=1,R=1
+    cfg = 0x0F  # L=0,A=TOR,X=1,W=1,R=1
+    if p.irq:
+        # entry 1: the 8-byte MAGIC dword (NAPOT), R+W, so a handler in S mode can write the clear
+        p.li(6, 0x0400F000 >> 2)
+        p.e("    csrw    pmpaddr1, x6")
+        cfg |= 0x1B << 8
+    p.li(6, cfg)
     p.e("    csrw    pmpcfg0, x6")
+
+
+def emit_irq_setup(p: Program):
+    """--irq: the handlers' save-area pointers and the enables for the injected sources. Interrupts stay
+    off until the body starts (MIE for an M body, below; SIE for an S body, after s_mode_entry; a U body
+    takes the non-delegated ones whatever MIE says, and the delegated ones always)."""
+    p.e("    # -- interrupts: handler save areas, source enables --")
+    p.e("    la      x6, msave")
+    p.e("    csrw    mscratch, x6")
+    if p.args.priv == "msu":
+        p.e("    la      x6, ssave")
+        p.e("    csrw    sscratch, x6")
+    bits = 0
+    for b in (7, 9, 11):
+        if p.rng.random() < 0.85:
+            bits |= 1 << b
+    p.li(6, bits or (1 << 7))
+    p.e("    csrw    mie, x6")
 
 
 def emit_entry_preamble(p: Program):
@@ -1105,6 +1246,8 @@ def emit_entry_preamble(p: Program):
     p.li(27, SANDBOX_BASE)
     if a.priv == "msu" and not a.pmp:
         emit_msu_minimal_pmp(p)
+    if p.irq:
+        emit_irq_setup(p)
     if a.pmp:
         emit_pmp(p)
     if a.sv39:
@@ -1129,6 +1272,12 @@ def emit_entry_preamble(p: Program):
         p.e("    csrw    mepc, x6")
         p.e("    mret")
         p.e("s_mode_entry:")
+        if p.irq and not p.body_u:
+            p.body_sie = p.rng.random() < 0.85
+            if p.body_sie:
+                p.e("    csrsi   sstatus, 2")      # SIE: delegated interrupts are taken in S
+    elif p.irq:
+        p.e("    csrsi   mstatus, 8")              # MIE: the body runs in M
     p.e("recovery_point:")
 
 
@@ -1157,6 +1306,8 @@ def emit_main_body(p: Program):
             emit_csr(p, recent)
         elif r < 0.83 and a.smc and not p.smc_done:
             emit_smc_fence_i(p, recent)
+        elif r < 0.835 and a.pmp and not a.sv39:
+            emit_pmp_jump(p)
         elif r < 0.85:
             p.e("    fence")
         elif r < 0.87:
@@ -1230,6 +1381,10 @@ def build_program(args) -> Program:
     emit_handlers(p)
     p.entry.extend(p.subroutines)
     p.misc_data += ["trap_count:", "    .zero   8", "tohost:", "    .zero   8"]
+    if p.args.pmp:
+        p.pocket_code = ["    jr      x25"]
+    if p.irq:
+        p.misc_data += ["    .balign 8", "msave:", "    .zero   32", "ssave:", "    .zero   32"]
     return p
 
 
@@ -1247,12 +1402,15 @@ def render(p: Program) -> str:
     if p.pagetable_data:
         lines += ["", "    .section .data.pagetables", "    .align  12"]
         lines += p.pagetable_data
+    if p.pocket_code:
+        lines += ["", "    .section .text.pocket"]
+        lines += p.pocket_code
     lines += ["", "    .section .data.misc"]
     lines += p.misc_data
     return "\n".join(lines) + "\n"
 
 
-def toolchain_build(asm_path: Path, out_base: Path, isa: str, has_pagetables: bool):
+def toolchain_build(asm_path: Path, out_base: Path, isa: str, has_pagetables: bool, has_pocket: bool = False):
     # -j (only-section) with a section name absent from the ELF is a
     # real objcopy error ("invalid operation"), not a silent no-op --
     # .data.pagetables only exists when --sv39 emitted it (render()
@@ -1270,6 +1428,8 @@ def toolchain_build(asm_path: Path, out_base: Path, isa: str, has_pagetables: bo
                 "-j", ".data.sandbox", "-j", ".data.misc"]
     if has_pagetables:
         sections += ["-j", ".data.pagetables"]
+    if has_pocket:
+        sections += ["-j", ".text.pocket"]
     subprocess.run(["riscv64-unknown-elf-objcopy", "-O", "verilog",
                      *sections, "--verilog-data-width=8",
                      str(elf), str(hexf)], check=True)
@@ -1284,12 +1444,12 @@ def main():
     ap.add_argument("--pmp", action="store_true")
     ap.add_argument("--sv39", action="store_true")
     ap.add_argument("--irq", action="store_true",
-                     help="reserved for the P3.4 lockstep harness's own "
-                          "interrupt injection -- affects nothing in "
-                          "THIS generator's own output today beyond the "
-                          "handler's best-effort MAGIC_IRQ_CLR write, "
-                          "which is always emitted regardless of this "
-                          "flag (see emit_handlers)")
+                     help="run the body with interrupts enabled, for the lockstep "
+                          "harness's own interrupt injection (--irq-mode): source "
+                          "enables, random mideleg, transparent trap handlers that "
+                          "save and restore x5-x8, a PMP region over the MAGIC "
+                          "register for S mode. Ignored under --sail-safe; "
+                          "not combinable with --sv39 yet")
     ap.add_argument("--smc", action="store_true")
     ap.add_argument("--no-div", action="store_true", dest="no_div",
                     help="keep M to the multiplies (for cores without a divider yet)")
@@ -1317,6 +1477,9 @@ def main():
     if args.sail_safe:
         args.pmp = False
         args.sv39 = False
+        args.irq = False
+    if args.irq and args.sv39:
+        ap.error("--irq cannot be combined with --sv39 yet")
 
     if args.output is None:
         args.output = GEN_DIR / f"gen_{args.seed}"
@@ -1329,7 +1492,7 @@ def main():
     print(f"wrote {asm_path}")
 
     if args.build:
-        elf, hexf = toolchain_build(asm_path, args.output, args.isa, bool(p.pagetable_data))
+        elf, hexf = toolchain_build(asm_path, args.output, args.isa, bool(p.pagetable_data), bool(p.pocket_code))
         print(f"built {elf}, {hexf}")
 
 

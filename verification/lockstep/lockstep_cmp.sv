@@ -22,6 +22,10 @@ module lockstep_cmp #(
     input logic clk,
     input logic rst,
 
+    // injected levels become visible a cycle late: mip's MTIP/SEIP/MEIP bits are then a live pin
+    // view that two sides retiring back to back or far apart legitimately read a cycle apart
+    input logic irq_late_i,
+
     // side A retirement pop interface
     input  logic         a_rec_avail,
     input  logic [31:0]  a_rec_total,
@@ -164,7 +168,7 @@ module lockstep_cmp #(
                 || (a_mcause != cb_mcause) || (a_scause != b_scause)
                 || (a_mtval != b_mtval) || (a_stval != b_stval)
                 || (a_satp != b_satp) || (a_medeleg != b_medeleg) || (a_mideleg != b_mideleg)
-                || (a_mie != b_mie) || (a_mip != b_mip)
+                || (a_mie != b_mie) || (((a_mip ^ b_mip) & ~(irq_late_i ? 64'h0000_0000_0000_0A80 : 64'b0)) != 64'b0)
                 || (a_mscratch != b_mscratch) || (a_sscratch != b_sscratch) || (a_minstret != b_minstret)
                 || (a_pmpcfg0 != b_pmpcfg0)
                 || (a_pmpaddr0 != b_pmpaddr0) || (a_pmpaddr1 != b_pmpaddr1)
