@@ -1,0 +1,12 @@
+{
+ "count": 30,
+ "memcfg": "sram",
+ "delay": 0,
+ "jobs": 3,
+ "inner_jobs": 2,
+ "profile": "--isa imac --priv msu --smc",
+ "mutants": [
+  {"from": "p5c_unit_decode.json", "only": [2, 5, 6, 8, 12, 13, 17]},
+  {"from": "p5c_unit_commit.json", "only": [0, 1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14]}
+ ]
+}

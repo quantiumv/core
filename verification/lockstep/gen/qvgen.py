@@ -131,6 +131,13 @@ class Program:
         self.open_labels: list[Label] = []  # forward branches waiting to land
         self.loop_nesting = 0
         self.smc_done = False
+        # privilege-switching content (see emit_priv_op): body in S or U, sret
+        # transitions, TSR/TVM, probes of the S/M CSRs. Off under --sail-safe
+        # (Sail diff stays as audited) and --sv39 (the page-table handlers
+        # assume an S-mode body).
+        self.priv_ext = args.priv == "msu" and not args.sail_safe and not args.sv39
+        self.body_u = False       # the body starts in U mode
+        self.tsr = False          # mstatus.TSR is set: SRET always traps
 
     # -- tiny emission helpers -----------------------------------------
     def e(self, line: str):
@@ -402,6 +409,66 @@ def emit_amo(p: Program, recent: list[int]):
     del recent[:-8]
 
 
+# CSRs the privilege-aware body touches. Which accesses are safe depends on
+# the privilege: an S-mode access to an M CSR, or a U-mode one to an M or S CSR,
+# is simply an illegal instruction (a trap the handlers skip), so those can be
+# written freely. The S CSRs that matter to control flow are only read.
+_S_RW = ["sscratch", "sepc", "scause", "stval"]    # rewritten by hardware at the next trap before anything reads them
+_S_RO = ["sstatus", "sie", "stvec", "scounteren", "sip", "satp"]    # a write could redirect traps, enable interrupts or translation
+_M_ANY = ["mstatus", "misa", "medeleg", "mideleg", "mie", "mtvec", "mscratch", "mepc", "mcause", "mtval",
+          "mip", "mhartid", "pmpcfg0", "pmpaddr0", "mcycle", "minstret"]
+_U_RO = ["cycle", "instret", "time"]
+
+
+def emit_priv_csr(p: Program, recent: list[int]):
+    r = p.rng.random()
+    rd = p.reg_biased(recent)
+    if r < 0.30:
+        csr = p.rng.choice(_S_RW)
+        form = p.rng.choice(["csrrw", "csrrs", "csrrc", "csrrwi", "csrrsi", "csrrci"])
+    elif r < 0.55:
+        csr = p.rng.choice(_S_RO)
+        form = "read"
+    elif r < 0.85:
+        csr = p.rng.choice(_M_ANY)
+        form = p.rng.choice(["csrrw", "csrrs", "csrrc", "csrrwi", "csrrsi", "csrrci", "read"])
+    else:
+        csr = p.rng.choice(_U_RO)
+        form = "read"
+    if form == "read":
+        p.e(f"    csrr    x{rd}, {csr}")
+    elif form.endswith("i"):
+        p.e(f"    {form:<7} x{rd}, {csr}, {p.rng.randint(0, 31)}")
+    else:
+        p.e(f"    {form:<7} x{rd}, {csr}, x{p.reg_biased(recent)}")
+    recent.append(rd)
+    del recent[:-8]
+
+
+def emit_priv_op(p: Program, recent: list[int]):
+    """A privilege-relevant instruction that is safe wherever the body runs:
+    SRET (set up so a legal one lands on the next instruction, in S or U by SPP;
+    from U, or under TSR, it traps and is skipped to the same place), MRET
+    (never legal below M: always a trap), SFENCE.VMA (legal in S and U, a trap
+    in S under TVM), or a CSR probe."""
+    r = p.rng.random()
+    if r < 0.30:
+        nxt = Label("sret")
+        p.e(f"    la      x6, {nxt}")
+        p.e("    csrw    sepc, x6")
+        p.e("    li      x6, 0x100")                              # sstatus.SPP
+        p.e(f"    {'csrs' if p.rng.random() < 0.7 else 'csrc'}    sstatus, x6")
+        p.e("    sret")
+        p.e(f"{nxt}:")
+    elif r < 0.40:
+        p.e("    mret")
+    elif r < 0.55:
+        form = p.rng.choice(["", "x0, x0", f"x{p.reg()}, x0", f"x0, x{p.reg()}", f"x{p.reg()}, x{p.reg()}"])
+        p.e(f"    sfence.vma {form}".rstrip())
+    else:
+        emit_priv_csr(p, recent)
+
+
 def emit_csr(p: Program, recent: list[int]):
     # mscratch/sscratch only -- see module docstring on why mstatus
     # deliberately isn't in this pool (it's load-bearing for the whole
@@ -416,6 +483,9 @@ def emit_csr(p: Program, recent: list[int]):
     # under msu fault, which by itself was enough to cascade into a much
     # longer, harder-to-diagnose chain of faults. The main body must use
     # ONLY the CSR its own current privilege can legally reach.
+    if p.priv_ext and p.rng.random() < 0.5:
+        emit_priv_csr(p, recent)
+        return
     csr = "sscratch" if p.args.priv == "msu" else "mscratch"
     op = p.rng.choice(["csrrw", "csrrs", "csrrc"])
     rd = p.reg_biased(recent)
@@ -723,6 +793,21 @@ def emit_handlers(p: Program):
             "    sw      x7, 0(x6)",
             f"    j       {s_ret}",
             f"{s_sync}:",
+        ]
+        if p.priv_ext:
+            # ECALL from U (cause 8) delegated to S: the epilogue's goes up to
+            # M as an ECALL from S (cause 9, never delegated); any other is
+            # an ordinary fault
+            s_not_u = Label("snotu")
+            p.handlers += [
+                "    li      x6, 8",
+                f"    bne     x5, x6, {s_not_u}",
+                f"    li      x6, {EPILOGUE_MAGIC}",
+                f"    bne     x24, x6, {s_ordinary}",
+                "    ecall",
+                f"{s_not_u}:",
+            ]
+        p.handlers += [
             "    li      x6, 1",
             f"    beq     x5, x6, {s_fetch}",
         ]
@@ -954,14 +1039,20 @@ def emit_trap_delegation(p: Program):
     from either U or S (bits 8/9), so the epilogue's own ECALL always
     reaches the M-handler directly regardless of what else is
     delegated -- see the module docstring's "Epilogue: ECALL to M"."""
-    causes = [0, 1, 3, 4, 5, 6, 7, 12, 13, 15]  # never 8, never 9
+    causes = [0, 1, 3, 4, 5, 6, 7, 12, 13, 15]  # never 9
+    if p.priv_ext:
+        causes.append(8)    # ECALL from U may go to S: its handler passes the epilogue's up to M
     bits = 0
     for c in causes:
         if p.rng.random() < 0.5:
             bits |= (1 << c)
+    # TSR makes every SRET trap, including the one that ends the S handler, so
+    # it needs a program that never enters it: nothing delegated.
+    if p.priv_ext and bits == 0 and p.rng.random() < 0.4:
+        p.tsr = True
     p.li(6, bits)
     p.e("    csrw    medeleg, x6")
-    p.li(6, 0x222)  # STIP|SEIP|SSIP delegated -- harmless, no source yet
+    p.li(6, 0 if p.tsr else 0x222)  # STIP|SEIP|SSIP delegated -- harmless, no source yet
     p.e("    csrw    mideleg, x6")
 
 
@@ -1024,9 +1115,16 @@ def emit_entry_preamble(p: Program):
         # to work whether or not Sv39 is active (the target is a real
         # label either way -- `la` + mepc works identically for a VA or
         # a PA, since under --sv39 the code region is identity-mapped).
-        p.li(6, 1)
-        p.e("    slli    x6, x6, 11")
-        p.e("    csrw    mstatus, x6")   # MPP = S
+        if p.priv_ext:
+            p.body_u = p.rng.random() < 0.4
+            tvm = p.rng.random() < 0.3
+            mst = (0 if p.body_u else 1 << 11) | ((1 << 22) if p.tsr else 0) | ((1 << 20) if tvm else 0)
+            p.li(6, mst)
+            p.e("    csrw    mstatus, x6")   # MPP = S or U, TSR, TVM
+        else:
+            p.li(6, 1)
+            p.e("    slli    x6, x6, 11")
+            p.e("    csrw    mstatus, x6")   # MPP = S
         p.e("    la      x6, s_mode_entry")
         p.e("    csrw    mepc, x6")
         p.e("    mret")
@@ -1067,6 +1165,8 @@ def emit_main_body(p: Program):
             emit_fault(p, "illegal")
         elif r < 0.87 + a.illegal_rate + a.ecall_rate:
             emit_fault(p, p.rng.choice(["ecall", "ebreak"]))
+        elif p.priv_ext and r < 0.87 + a.illegal_rate + a.ecall_rate + 0.07:
+            emit_priv_op(p, recent)
         else:
             emit_alu(p, recent)
 

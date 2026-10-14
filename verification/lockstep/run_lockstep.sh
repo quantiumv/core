@@ -30,9 +30,11 @@
 #
 # --dut pipe puts design/pipe/core_pipe.sv on side B (pipe-vs-ref; side
 # A stays ref_core). Selfproof and corrupt only, and the random corpus
-# switches to what core_pipe implements (--isa imac --priv m
-# --smc). --pipe-dir points the build at a modified copy of design/pipe/
-# (pipe mutants).
+# switches to what core_pipe implements (--isa imac --priv msu
+# --smc: the body runs in S or U and switches between them, with TSR/TVM and
+# privilege probes; no PMP or Sv39 yet). QV_RANDOM_PROFILE overrides the
+# profile for experiments (e.g. the M-mode body, --priv m). --pipe-dir points
+# the build at a modified copy of design/pipe/ (pipe mutants).
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -262,7 +264,8 @@ build_fw_entries() {
 
 # what each side-B core implements
 RANDOM_PROFILE="--isa imac --priv msu --sv39 --smc"
-[ "$DUT" == "pipe" ] && RANDOM_PROFILE="--isa imac --priv m --smc"
+[ "$DUT" == "pipe" ] && RANDOM_PROFILE="--isa imac --priv msu --smc"
+RANDOM_PROFILE="${QV_RANDOM_PROFILE:-$RANDOM_PROFILE}"   # experiments: override the profile
 
 build_random_entries() {
     # programs are regenerated whenever the generator or the profile changes

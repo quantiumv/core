@@ -26,6 +26,7 @@ VVP_BIN="/tmp/act_runner_tb_$$.vvp"
 CORE="${CORE:-fsm}"
 RESULTS_LOG="$REPO_ROOT/verification/riscv-arch-test/act_results.log"
 [ "$CORE" == "fsm" ] || RESULTS_LOG="$REPO_ROOT/verification/riscv-arch-test/act_results_${CORE}.log"
+RESULTS_LOG="${ACT_RESULTS:-$RESULTS_LOG}"   # experiments: keep the tracked log untouched
 ACT_ONLY="${ACT_ONLY:-}"
 
 if [ ! -d "$ELF_DIR" ]; then
