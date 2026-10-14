@@ -271,6 +271,8 @@ module core_pipe
     qv_decode decode0 (
         .clk(clk), .rst(rst), .i_flush(flush),
         .i_priv(priv), .i_tsr(mstatus_tsr_w), .i_tvm(mstatus_tvm_w),
+        .i_pmpcfg0(pmpcfg0_w), .i_pmpaddr0(pmpaddr0_w), .i_pmpaddr1(pmpaddr1_w),
+        .i_pmpaddr2(pmpaddr2_w), .i_pmpaddr3(pmpaddr3_w),
         .i_iq_valid(iq_valid), .i_iq_data(iq_head), .o_iq_pop(iq_pop),
         .o_valid(uop_valid), .o_uop(uop), .i_issue_ready(issue_fire)
     );
@@ -354,6 +356,10 @@ module core_pipe
     qv_exu_div exu_div0 (.clk(clk), .rst(rst), .i_flush(flush), .i_req(div_req), .o_free(div_free), .o_wb(div_wb));
 
     // ---------------- X: LSU -> slow writeback port ----------------
+    // read only by the interrupt check below
+    /* verilator lint_off UNUSEDSIGNAL */
+    logic lsu_head_started;
+    /* verilator lint_on UNUSEDSIGNAL */
     // No bypass from it: a dependent reads the ROB the next cycle, which
     // keeps wb_mem_dat_i out of issue's combinational paths.
     qv_lsu lsu0 (
@@ -361,14 +367,15 @@ module core_pipe
         .i_req(lsu_req), .o_free(lsu_free),
         .i_head_valid(head_valid), .i_head_tag(head_tag),
         .i_res_valid(res_valid), .i_res_addr(res_addr),
+        .i_priv(priv), .i_mprv(mstatus_mprv_w), .i_mpp(mstatus_mpp_w),
+        .i_pmpcfg0(pmpcfg0_w), .i_pmpaddr0(pmpaddr0_w), .i_pmpaddr1(pmpaddr1_w),
+        .i_pmpaddr2(pmpaddr2_w), .i_pmpaddr3(pmpaddr3_w),
         .wb_mem_addr_o(wb_mem_addr_o), .wb_mem_dat_o(wb_mem_dat_o), .wb_mem_sel_o(wb_mem_sel_o),
         .wb_mem_we_o(wb_mem_we_o), .wb_mem_cyc_o(wb_mem_cyc_o), .wb_mem_stb_o(wb_mem_stb_o),
         .wb_mem_lock_o(wb_mem_lock_o),
         .wb_mem_dat_i(wb_mem_dat_i), .wb_mem_ack_i(wb_mem_ack_i), .wb_mem_err_i(wb_mem_err_i),
         .o_wb(lsu_wb), .o_res(lsu_res),
-        /* verilator lint_off PINCONNECTEMPTY */
-        .o_head_started()          // interrupts/debug (P5) will wait on this
-        /* verilator lint_on PINCONNECTEMPTY */
+        .o_head_started(lsu_head_started)
     );
 
     // ---------------- C: commit ----------------
@@ -561,6 +568,12 @@ module core_pipe
     assign rvfi_csr_satp_rdata     = satp_w;
     assign rvfi_csr_satp_wdata     = satp_w;
     assign rvfi_any_trap_taken     = trap_taken || interrupt_taken;
+
+    // An interrupt is only ever taken with nothing started on the data bus: the cycle before retired
+    // something, so no memory op was in flight, and a head that would start in the interrupt's own
+    // cycle is held off by the flush the interrupt causes. (A started access cannot be abandoned, so
+    // this is what makes taking an interrupt without waiting for the LSU safe.)
+    always @* assert (!(interrupt_taken && lsu_head_started));
     assign rvfi_any_debug_entry    = debug_ebreak_entry || debug_halt_req_entry || trigger_debug_entry;
 `endif
 endmodule

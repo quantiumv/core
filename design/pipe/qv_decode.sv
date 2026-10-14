@@ -35,6 +35,14 @@
  * The privilege rules (CSR privilege, MRET/SRET, TSR, TVM) read the
  * current privilege and mstatus bits as inputs; see the port comment.
  *
+ * PMP is checked here, per instruction, as core.sv checks a fetch: the
+ * dword the instruction starts in, as the span [pc, pc+7], and -- for a
+ * 32-bit instruction at pc[2:1] == 2'b11, which crosses into the next
+ * dword -- [pc+8, pc+15] too, at the raw privilege (MPRV never applies to
+ * fetch). A denial is a fetch access fault (cause 1, mtval = pc), the same
+ * marker a bus error gets. Unlike core.sv the bus request has already been
+ * made by then; a denied fetch is just never used.
+ *
  * Output is registered (a real D/I split): one uop held until issue
  * takes it.
  */
@@ -50,6 +58,16 @@ module qv_decode (
     input  logic [1:0]        i_priv,
     input  logic              i_tsr,
     input  logic              i_tvm,
+
+    // PMP configuration (csr_file0's exports); the defaults are the reset
+    // state: region 0 NAPOT over everything, read/write/execute
+    /* verilator lint_off UNUSEDSIGNAL */
+    input  logic [63:0]       i_pmpcfg0   = 64'h0000_0000_0000_001F,
+    input  logic [63:0]       i_pmpaddr0  = 64'h003F_FFFF_FFFF_FFFF,
+    input  logic [63:0]       i_pmpaddr1  = 64'b0,
+    input  logic [63:0]       i_pmpaddr2  = 64'b0,
+    input  logic [63:0]       i_pmpaddr3  = 64'b0,
+    /* verilator lint_on UNUSEDSIGNAL */
 
     input  logic              i_iq_valid,
     // xcpt_hi matters only for page faults (Sv39)
@@ -81,7 +99,28 @@ module qv_decode (
         .o_illegal(c_expand_illegal)
     );
     wire c_illegal = i_iq_data.rvc && c_expand_illegal;
-    wire [31:0] instr = (i_iq_data.xcpt || c_illegal) ? 32'h0000_0013
+
+    // ---------------- PMP on the fetch ----------------
+    wire        fetch_hi_taken = !i_iq_data.rvc && (i_iq_data.pc[2:1] == 2'b11);
+    logic       exec_ok_lo, exec_ok_hi;
+    /* verilator lint_off PINCONNECTEMPTY */
+    qv_pmp pmp_lo (
+        .i_pmpcfg0(i_pmpcfg0), .i_pmpaddr0(i_pmpaddr0), .i_pmpaddr1(i_pmpaddr1),
+        .i_pmpaddr2(i_pmpaddr2), .i_pmpaddr3(i_pmpaddr3),
+        .i_addr(i_iq_data.pc), .i_end(i_iq_data.pc + 64'd7), .i_priv(i_priv),
+        .o_read_ok(), .o_write_ok(), .o_exec_ok(exec_ok_lo)
+    );
+    qv_pmp pmp_hi (
+        .i_pmpcfg0(i_pmpcfg0), .i_pmpaddr0(i_pmpaddr0), .i_pmpaddr1(i_pmpaddr1),
+        .i_pmpaddr2(i_pmpaddr2), .i_pmpaddr3(i_pmpaddr3),
+        .i_addr(i_iq_data.pc + 64'd8), .i_end(i_iq_data.pc + 64'd15), .i_priv(i_priv),
+        .o_read_ok(), .o_write_ok(), .o_exec_ok(exec_ok_hi)
+    );
+    /* verilator lint_on PINCONNECTEMPTY */
+    wire pmp_fault = !exec_ok_lo || (fetch_hi_taken && !exec_ok_hi);
+
+    // a denied fetch decodes as the inert placeholder too: nothing downstream may act on its bits
+    wire [31:0] instr = (i_iq_data.xcpt || pmp_fault || c_illegal) ? 32'h0000_0013
                       : i_iq_data.rvc ? expanded : i_iq_data.raw;
 
     decoder decoder0 (
@@ -371,6 +410,9 @@ module qv_decode (
         if (i_iq_data.xcpt) begin
             uop_d.xcpt       = 1'b1;
             uop_d.xcpt_cause = i_iq_data.xcpt_cause;
+        end else if (pmp_fault) begin
+            uop_d.xcpt       = 1'b1;
+            uop_d.xcpt_cause = 4'd1;
         end else if (c_illegal || !implemented || csr_illegal || priv_illegal) begin
             uop_d.xcpt       = 1'b1;
             uop_d.xcpt_cause = 4'd2;

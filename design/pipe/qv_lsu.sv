@@ -79,6 +79,19 @@ module qv_lsu (
     input  logic                             i_res_valid,
     input  logic [63:0]                      i_res_addr,
 
+    // PMP: the privilege commit keeps, mstatus.MPRV/MPP (data accesses only: an M-mode access runs
+    // at MPP when MPRV is set) and csr_file0's PMP exports; the defaults are the reset state
+    input  logic [1:0]                       i_priv = 2'b11,
+    input  logic                             i_mprv = 1'b0,
+    input  logic [1:0]                       i_mpp  = 2'b11,
+    /* verilator lint_off UNUSEDSIGNAL */
+    input  logic [63:0]                      i_pmpcfg0  = 64'h0000_0000_0000_001F,
+    input  logic [63:0]                      i_pmpaddr0 = 64'h003F_FFFF_FFFF_FFFF,
+    input  logic [63:0]                      i_pmpaddr1 = 64'b0,
+    input  logic [63:0]                      i_pmpaddr2 = 64'b0,
+    input  logic [63:0]                      i_pmpaddr3 = 64'b0,
+    /* verilator lint_on UNUSEDSIGNAL */
+
     output logic [31:0]                      wb_mem_addr_o,
     output logic [63:0]                      wb_mem_dat_o,
     output logic [7:0]                       wb_mem_sel_o,
@@ -131,10 +144,27 @@ module qv_lsu (
     wire kind_wr   = atomic_q ? !lr_q : store_q;                  // writes it: stores, SC, AMOs
     wire fault_st  = store_q || atomic_q;                         // faults like a store: cause 6/7
 
+    // ---------------- PMP ----------------
+    // checked against the access itself, [addr, addr + size - 1], once it is the head; loads need R,
+    // everything that writes (stores, SC, and LR and AMOs too, as core.sv has it) needs W; a misaligned
+    // access traps first, and a PMP fault comes before the SC's reservation compare
+    wire [1:0]  eff_priv = (i_mprv && i_priv == 2'b11) ? i_mpp : i_priv;
+    wire [63:0] end_addr = addr_q + (64'd1 << size_q) - 64'd1;
+    logic       pmp_r_ok, pmp_w_ok;
+    /* verilator lint_off PINCONNECTEMPTY */
+    qv_pmp pmp0 (
+        .i_pmpcfg0(i_pmpcfg0), .i_pmpaddr0(i_pmpaddr0), .i_pmpaddr1(i_pmpaddr1),
+        .i_pmpaddr2(i_pmpaddr2), .i_pmpaddr3(i_pmpaddr3),
+        .i_addr(addr_q), .i_end(end_addr), .i_priv(eff_priv),
+        .o_read_ok(pmp_r_ok), .o_write_ok(pmp_w_ok), .o_exec_ok()
+    );
+    /* verilator lint_on PINCONNECTEMPTY */
+    wire pmp_deny = !misaligned_q && !(fault_st ? pmp_w_ok : pmp_r_ok);
+
     // ---------------- at the head ----------------
     wire at_head  = (state_q == S_WAIT_HEAD) && i_head_valid && (i_head_tag == tag_q) && !i_flush;
     wire sc_fail  = sc_q && !(i_res_valid && i_res_addr == addr_q);
-    wire start    = at_head && !misaligned_q && !sc_fail;
+    wire start    = at_head && !misaligned_q && !pmp_deny && !sc_fail;
     wire resp     = wb_mem_ack_i || wb_mem_err_i;
     wire in_bus   = (state_q == S_BUS) || (state_q == S_DRAIN);
 
@@ -158,7 +188,7 @@ module qv_lsu (
     // An AMO's first (read) response doesn't complete it: the write follows.
     wire amo_read_ack = (state_q == S_BUS) && amo_q && !phase_wr_q && wb_mem_ack_i && !wb_mem_err_i && !i_flush;
     wire done_bus     = (state_q == S_BUS) && resp && !amo_read_ack;
-    wire done_nobus   = at_head && (misaligned_q || sc_fail);     // misaligned, or SC without its reservation
+    wire done_nobus   = at_head && (misaligned_q || pmp_deny || sc_fail);   // trapped before the bus, or SC without its reservation
 
     // load data: shift the addressed bytes down, then extend
     wire [63:0] shifted = wb_mem_dat_i >> {addr_q[2:0], 3'b000};
@@ -193,7 +223,7 @@ module qv_lsu (
         return word ? {{32{r[31]}}, r[31:0]} : r;
     endfunction
 
-    wire sc_fail_done = done_nobus && !misaligned_q;               // SC without its reservation: rd = 1
+    wire sc_fail_done = done_nobus && !misaligned_q && !pmp_deny; // SC without its reservation: rd = 1
     always_comb begin
         o_wb       = '0;
         o_wb.valid = done_bus || done_nobus;
@@ -249,7 +279,8 @@ module qv_lsu (
                 // an SC without its reservation did nothing: no fields at all
                 if (!sc_fail_done) begin
                     o_res.xcpt      <= done_nobus || wb_mem_err_i;
-                    o_res.cause     <= done_nobus ? (fault_st ? 4'd6 : 4'd4) : (fault_st ? 4'd7 : 4'd5);
+                    // misaligned: 4/6; a PMP denial or a bus error: 5/7 (stores, SC, LR, AMOs: the odd ones)
+                    o_res.cause     <= (done_nobus && misaligned_q) ? (fault_st ? 4'd6 : 4'd4) : (fault_st ? 4'd7 : 4'd5);
                     o_res.tval      <= addr_q;
                     o_res.vaddr     <= addr_q;
                     o_res.mem_addr  <= {addr_q[63:3], 3'b000};
