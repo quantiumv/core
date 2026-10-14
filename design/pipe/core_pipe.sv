@@ -41,7 +41,10 @@
  * delegation and the privilege rules (CSR access, TSR, TVM), and RVC:
  * compressed instructions on any 2-byte boundary, including 32-bit ones
  * that straddle two fetched dwords. Everything else decodes as an
- * illegal-instruction trap. Not yet: PMP, debug, Sv39.
+ * illegal-instruction trap. Interrupts (MEI, MTI, SEI) are taken as core.sv
+ * takes them, only in the cycle after a retirement, and the PMP is
+ * checked on the fetch (in decode) and on the data accesses (in the LSU).
+ * Not yet: debug, Sv39.
  * The debug/progbuf outputs are held inert. The
  * Debug Module's GPR/CSR access mux (core.sv wires it around regfile0
  * and csr_file0) comes back with debug support.

@@ -15,7 +15,9 @@
  *
  * When the uop becomes the head: a misaligned access (natural alignment
  * per size; bytes never are) completes at once with cause 4/6 and never
- * touches the bus; otherwise the request goes out that same cycle. On
+ * touches the bus; so does one the PMP denies (cause 5 for a load, 7 for
+ * everything that writes -- LR and the AMOs too -- see below); otherwise
+ * the request goes out that same cycle. On
  * ack/err the uop completes on the slow writeback port and the slot is
  * free from the next cycle -- freeing it any later would let it re-issue
  * the access while the uop sits completed at the head. err is checked
@@ -57,9 +59,15 @@
  *   - an AMO's RVFI memory fields: both masks set, rdata the extracted old
  *     value, wdata the new value in its lane. A failed SC reports none.
  *
- * o_head_started is for interrupts and debug halt (P5 on): once the head's
- * access has started they must wait for it to retire, because a store or
- * an MMIO read can't be undone.
+ * PMP (qv_pmp, a literal copy of core.sv's check): the access itself,
+ * [addr, addr + size - 1], is checked at the effective privilege -- M runs
+ * at MPP while mstatus.MPRV is set -- once it is the head. Loads need R;
+ * stores, SC, LR and AMOs need W. Priority: misaligned, then the PMP, then
+ * the SC's reservation compare.
+ *
+ * o_head_started says the head's access is under way. An interrupt never
+ * needs to wait for it: it is taken only in the cycle after a retirement,
+ * when nothing can be on the bus (core_pipe asserts this).
  */
 module qv_lsu (
     input  logic                             clk,
