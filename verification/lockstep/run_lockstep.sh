@@ -28,6 +28,12 @@
 # MAX_RETIRE-terminated -- needs --memcfg-b cache passed explicitly, NOT
 # part of "all"), or all (default: act + fw + random).
 #
+# --sim verilator builds the harness with Verilator instead of Icarus (about two
+# orders of magnitude faster per program; the retirement counts and verdicts are
+# the same -- compare a few before trusting a big run). Icarus stays the default
+# and the reference: re-run a Verilator FAIL under Icarus before believing it.
+# QV_LOCKSTEP_SIM=verilator makes it the default.
+#
 # --dut pipe puts design/pipe/core_pipe.sv on side B (pipe-vs-ref; side
 # A stays ref_core). Selfproof and corrupt only, and the random corpus
 # switches to what core_pipe implements (--isa imac --priv msu
@@ -44,6 +50,7 @@ cd "$REPO_ROOT" || exit 1
 MODE=selfproof
 DUT=ref
 PIPE_DIR=design/pipe
+SIM=${QV_LOCKSTEP_SIM:-iverilog}
 MUTANT=0
 MEMCFG_B=sram
 # 0: no delay injection. --delay-max N perturbs each side's bus timing;
@@ -85,6 +92,7 @@ usage() {
 Usage: run_lockstep.sh --mode selfproof|mutant|corrupt [options]
 
   --mode MODE          selfproof (default), mutant, or corrupt
+  --sim iverilog|verilator  the simulator the harness is built for (default iverilog)
   --dut ref|pipe       side B's core (default ref; pipe = core_pipe, not with --mode mutant)
   --pipe-dir DIR       design/pipe/ replacement for --dut pipe (default design/pipe)
   --mutant N           QV_MUTANT_B value, 1-10 (--mode mutant only)
@@ -124,6 +132,7 @@ while [ $# -gt 0 ]; do
         --mode) MODE="$2"; shift 2 ;;
         --dut) DUT="$2"; shift 2 ;;
         --pipe-dir) PIPE_DIR="$2"; shift 2 ;;
+        --sim) SIM="$2"; shift 2 ;;
         --mutant) MUTANT="$2"; shift 2 ;;
         --memcfg-b) MEMCFG_B="$2"; shift 2 ;;
         --delay-max) DELAY_MAX="$2"; shift 2 ;;
@@ -198,24 +207,53 @@ SRC_HASH=$(cat $PIPE_FILES $REF_FILES $SUPPORT_FILES $LOCKSTEP_FILES \
                design/defaults/*.sv verification/reference/*.svh verification/lockstep/*.svh \
                2>/dev/null | sha1sum | cut -c1-8)
 RUN_KEY="${MODE}_${DUT}_m${QV_MUTANT_B}_${MEMCFG_B}_d${RUN_DELAY_MAX}_i${IRQ_MODE}_l${IRQ_LATE}_q${IRQ_SEED}_y${IRQ_DENSITY}_s${RUN_SEED}_${SRC_HASH}"
+[ "$SIM" == "iverilog" ] || RUN_KEY="${RUN_KEY}_${SIM}"
 VVP_BIN="$OUTDIR/lockstep_${MODE}_${DUT}_m${QV_MUTANT_B}_${MEMCFG_B}_d${RUN_DELAY_MAX}_${SRC_HASH}.vvp"
 BUILD_LOG="$OUTDIR/build_${MODE}_${DUT}_m${QV_MUTANT_B}.log"
-if [ ! -e "$VVP_BIN" ] || [ "$FORCE" == "1" ]; then
-    echo "=== building $VVP_BIN ==="
-    iverilog -g2012 -DRISCV_FORMAL \
-        -I design -I design/defaults -I verification/reference -I verification/lockstep \
-        -Plockstep_tb.QV_MUTANT_B=$QV_MUTANT_B \
-        -Plockstep_tb.MEMCFG_B_CACHE=$MEMCFG_B_CACHE \
-        -Plockstep_tb.DELAY_MAX=$RUN_DELAY_MAX \
-        -Plockstep_tb.B_PIPE=$B_PIPE \
-        -o "$VVP_BIN" \
-        $PIPE_FILES $REF_FILES $SUPPORT_FILES $LOCKSTEP_FILES > "$BUILD_LOG" 2>&1
-    if [ $? -ne 0 ] || ! [ -e "$VVP_BIN" ]; then
-        echo "BUILD FAILED -- see $BUILD_LOG" >&2
-        tail -40 "$BUILD_LOG" >&2
-        exit 1
-    fi
-fi
+case "$SIM" in
+    iverilog)
+        if [ ! -e "$VVP_BIN" ] || [ "$FORCE" == "1" ]; then
+            echo "=== building $VVP_BIN ==="
+            iverilog -g2012 -DRISCV_FORMAL \
+                -I design -I design/defaults -I verification/reference -I verification/lockstep \
+                -Plockstep_tb.QV_MUTANT_B=$QV_MUTANT_B \
+                -Plockstep_tb.MEMCFG_B_CACHE=$MEMCFG_B_CACHE \
+                -Plockstep_tb.DELAY_MAX=$RUN_DELAY_MAX \
+                -Plockstep_tb.B_PIPE=$B_PIPE \
+                -o "$VVP_BIN" \
+                $PIPE_FILES $REF_FILES $SUPPORT_FILES $LOCKSTEP_FILES > "$BUILD_LOG" 2>&1
+            if [ $? -ne 0 ] || ! [ -e "$VVP_BIN" ]; then
+                echo "BUILD FAILED -- see $BUILD_LOG" >&2
+                tail -40 "$BUILD_LOG" >&2
+                exit 1
+            fi
+        fi
+        SIM_CMD=(vvp "$VVP_BIN")
+        ;;
+    verilator)
+        VL_DIR="$OUTDIR/vl_${MODE}_${DUT}_m${QV_MUTANT_B}_${MEMCFG_B}_d${RUN_DELAY_MAX}_${SRC_HASH}"
+        VL_BIN="$VL_DIR/lockstep_vl"
+        if [ ! -e "$VL_BIN" ] || [ "$FORCE" == "1" ]; then
+            echo "=== building $VL_BIN (verilator) ==="
+            rm -rf "$VL_DIR"
+            # The two cores' decoders define the same macro names; Verilator (unlike Icarus) warns about the
+            # redefinition, which is harmless here: each file expands its own uses while it is being read.
+            verilator --binary --timing -O2 -j ${VL_JOBS:-4} -Wno-fatal -Wno-lint -Wno-style -Wno-WIDTH \
+                -Wno-CASEINCOMPLETE -Wno-UNOPTFLAT -Wno-BLKANDNBLK -Wno-INITIALDLY -Wno-MULTIDRIVEN -Wno-REDEFMACRO \
+                -DRISCV_FORMAL -Idesign -Idesign/defaults -Iverification/reference -Iverification/lockstep \
+                -GQV_MUTANT_B=$QV_MUTANT_B -GMEMCFG_B_CACHE=$MEMCFG_B_CACHE -GDELAY_MAX=$RUN_DELAY_MAX -GB_PIPE=$B_PIPE \
+                --top-module lockstep_tb --Mdir "$VL_DIR" -o lockstep_vl \
+                $PIPE_FILES $REF_FILES $SUPPORT_FILES $LOCKSTEP_FILES > "$BUILD_LOG" 2>&1
+            if [ $? -ne 0 ] || ! [ -e "$VL_BIN" ]; then
+                echo "BUILD FAILED -- see $BUILD_LOG" >&2
+                grep -E "^%Error" "$BUILD_LOG" | head -20 >&2
+                exit 1
+            fi
+        fi
+        SIM_CMD=("$VL_BIN")
+        ;;
+    *) echo "Unknown --sim: $SIM (expected iverilog or verilator)" >&2; exit 1 ;;
+esac
 
 # ---------------- corpus enumeration ----------------
 # Each corpus entry becomes one line: tag|hexfile|tohost_addr_or_empty|max_retire_or_empty
@@ -387,7 +425,7 @@ run_one() {
     [ -n "$tohost" ] && args+=(+TOHOST_ADDR=$tohost)
     [ -n "$max_retire" ] && args+=(+MAX_RETIRE=$max_retire)
     local out
-    out=$(cd "$REPO_ROOT" && timeout $WALL_TIMEOUT vvp "$VVP_BIN" "${args[@]}" 2>&1 | grep -v "Unable to open")
+    out=$(cd "$REPO_ROOT" && timeout $WALL_TIMEOUT "${SIM_CMD[@]}" "${args[@]}" 2>&1 | grep -v "Unable to open")
     local verdict
     verdict=$(echo "$out" | grep "^LOCKSTEP_RESULT:" | head -1)
     [ -n "$verdict" ] || verdict="LOCKSTEP_RESULT: ERROR (no result line -- see log)"
@@ -420,7 +458,7 @@ if [ "$MODE" == "corrupt" ]; then
     fi
     echo "=== corruption self-test on $tag ($hex) ==="
     # First, an uncorrupted run to learn a real retirement order to target.
-    clean_out=$(cd "$REPO_ROOT" && timeout $WALL_TIMEOUT vvp "$VVP_BIN" +HEXFILE="$hex" +TIMEOUT=$MAX_CYCLES \
+    clean_out=$(cd "$REPO_ROOT" && timeout $WALL_TIMEOUT "${SIM_CMD[@]}" +HEXFILE="$hex" +TIMEOUT=$MAX_CYCLES \
         $([ -n "$tohost" ] && echo +TOHOST_ADDR=$tohost) $([ -n "$max_retire" ] && echo +MAX_RETIRE=$max_retire) 2>&1 | grep -v "Unable to open")
     clean_matched=$(echo "$clean_out" | grep "^LOCKSTEP_RESULT: PASS" | grep -oE '[0-9]+ retirements' | grep -oE '[0-9]+')
     if [ -z "$clean_matched" ] || [ "$clean_matched" -lt 10 ]; then
@@ -430,7 +468,7 @@ if [ "$MODE" == "corrupt" ]; then
     target_order=$((clean_matched / 2))
     all_ok=1
     for field in 1 2 3 4 5 6 7 8; do
-        out=$(cd "$REPO_ROOT" && timeout $WALL_TIMEOUT vvp "$VVP_BIN" +HEXFILE="$hex" +TIMEOUT=$MAX_CYCLES \
+        out=$(cd "$REPO_ROOT" && timeout $WALL_TIMEOUT "${SIM_CMD[@]}" +HEXFILE="$hex" +TIMEOUT=$MAX_CYCLES \
             $([ -n "$tohost" ] && echo +TOHOST_ADDR=$tohost) $([ -n "$max_retire" ] && echo +MAX_RETIRE=$max_retire) \
             +CORRUPT_AT=$target_order +CORRUPT_FIELD=$field 2>&1 | grep -v "Unable to open")
         fail_at=$(echo "$out" | grep "^LOCKSTEP_RESULT: FAIL" | grep -oE 'order=[0-9]+' | grep -oE '[0-9]+')

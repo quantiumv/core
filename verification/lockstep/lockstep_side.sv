@@ -156,6 +156,15 @@ module lockstep_side #(
     generate
         if (CORE_PIPE) begin : g_core
             core_pipe core0 (`LS_CORE_PORTS);
+            // core_pipe takes an interrupt without waiting for the LSU, which is only safe because nothing can
+            // be on the data bus at a sample point (it asserts that too, but an assertion only prints): make
+            // it fatal here.
+            always @(posedge clk) begin
+                if (!rst && core0.interrupt_taken && core0.lsu_head_started) begin
+                    $display("LOCKSTEP_RESULT: FAIL (core_pipe took an interrupt with a data access started)");
+                    $finish;
+                end
+            end
         end else begin : g_core
             ref_core #(.QV_MUTANT(QV_MUTANT)) core0 (`LS_CORE_PORTS);
         end
@@ -194,19 +203,6 @@ module lockstep_side #(
     wire        ret_clr_we    = rvfi_valid && !rvfi_trap && (rvfi_mem_wmask[7:4] != 4'b0)
                                 && (rvfi_mem_addr[31:3] == MAGIC_DWORD[31:3]);
     wire [31:0] ret_clr_wdata = rvfi_mem_wdata[63:32];
-
-    // core_pipe takes an interrupt without waiting for the LSU, which is only safe because nothing can be on
-    // the data bus at a sample point (core_pipe asserts it too, but an assertion only prints): make it fatal.
-    generate
-        if (CORE_PIPE) begin : g_pipe_irq_check
-            always @(posedge clk) begin
-                if (!rst && g_core.core0.interrupt_taken && g_core.core0.lsu_head_started) begin
-                    $display("LOCKSTEP_RESULT: FAIL (core_pipe took an interrupt with a data access started)");
-                    $finish;
-                end
-            end
-        end
-    endgenerate
 
     lockstep_irq irq0 (
         .clk(clk), .rst(rst),
