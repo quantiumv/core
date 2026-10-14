@@ -122,6 +122,15 @@ module core_priv_tb;
      * {S_FETCH, S_EXEC, S_MEM} = {0, 1, 2}, hence the literal 2'd1 below
      * (matching core_zicsr_tb.sv's own precedent).
      */
+`ifdef QV_PIPE_AS_CORE
+    // core_pipe has no state register: the monitors sample in the cycle the
+    // instruction retires, which is what "S_EXEC at this pc" means for the
+    // single-cycle instructions they watch
+    wire [1:0] exec_state = dut.core0.commit_now ? 2'd1 : 2'd0;
+`else
+    wire [1:0] exec_state = dut.core0.state;
+`endif
+
     localparam logic [63:0] PC_PHASE1_MARKER  = 64'h1C;  // idx7
     localparam logic [63:0] PC_PHASE3_MARKER  = 64'h40;  // idx16
     localparam logic [63:0] PC_PHASE5_TRIGGER = 64'h50;  // idx20
@@ -131,7 +140,7 @@ module core_priv_tb;
     logic [63:0] mcause_sampled;
     logic mcause_sample_captured;
     pc_trigger_sample_monitor #(.WIDTH(64)) mcause_monitor (
-        .clk(clk), .i_state(dut.core0.state), .i_state_target(2'd1),
+        .clk(clk), .i_state(exec_state), .i_state_target(2'd1),
         .i_pc(dut.core0.pc), .i_pc_target(PC_PHASE1_MARKER), .i_sample(dut.core0.csr_file0.mcause_q),
         .o_sampled(mcause_sampled), .o_captured(mcause_sample_captured)
     );
@@ -139,7 +148,7 @@ module core_priv_tb;
     logic [1:0] priv_sampled_phase3;
     logic priv_sample_phase3_captured;
     pc_trigger_sample_monitor #(.WIDTH(2)) priv_monitor_phase3 (
-        .clk(clk), .i_state(dut.core0.state), .i_state_target(2'd1),
+        .clk(clk), .i_state(exec_state), .i_state_target(2'd1),
         .i_pc(dut.core0.pc), .i_pc_target(PC_PHASE3_MARKER), .i_sample(dut.core0.current_priv),
         .o_sampled(priv_sampled_phase3), .o_captured(priv_sample_phase3_captured)
     );
@@ -147,7 +156,7 @@ module core_priv_tb;
     logic csr_we_sampled_phase5;
     logic csr_we_sample_phase5_captured;
     pc_trigger_sample_monitor csr_we_monitor_phase5 (
-        .clk(clk), .i_state(dut.core0.state), .i_state_target(2'd1),
+        .clk(clk), .i_state(exec_state), .i_state_target(2'd1),
         .i_pc(dut.core0.pc), .i_pc_target(PC_PHASE5_TRIGGER), .i_sample(dut.core0.csr_we),
         .o_sampled(csr_we_sampled_phase5), .o_captured(csr_we_sample_phase5_captured)
     );
@@ -155,12 +164,12 @@ module core_priv_tb;
     logic mret_taken_sampled_phase6a, trap_taken_sampled_phase6a;
     logic mret_taken_sample_phase6a_captured, trap_taken_sample_phase6a_captured;
     pc_trigger_sample_monitor mret_taken_monitor_phase6a (
-        .clk(clk), .i_state(dut.core0.state), .i_state_target(2'd1),
+        .clk(clk), .i_state(exec_state), .i_state_target(2'd1),
         .i_pc(dut.core0.pc), .i_pc_target(PC_PHASE6A_TRIGGER), .i_sample(dut.core0.mret_taken),
         .o_sampled(mret_taken_sampled_phase6a), .o_captured(mret_taken_sample_phase6a_captured)
     );
     pc_trigger_sample_monitor trap_taken_monitor_phase6a (
-        .clk(clk), .i_state(dut.core0.state), .i_state_target(2'd1),
+        .clk(clk), .i_state(exec_state), .i_state_target(2'd1),
         .i_pc(dut.core0.pc), .i_pc_target(PC_PHASE6A_TRIGGER), .i_sample(dut.core0.trap_taken),
         .o_sampled(trap_taken_sampled_phase6a), .o_captured(trap_taken_sample_phase6a_captured)
     );
@@ -168,12 +177,12 @@ module core_priv_tb;
     logic sret_taken_sampled_phase6b, trap_taken_sampled_phase6b;
     logic sret_taken_sample_phase6b_captured, trap_taken_sample_phase6b_captured;
     pc_trigger_sample_monitor sret_taken_monitor_phase6b (
-        .clk(clk), .i_state(dut.core0.state), .i_state_target(2'd1),
+        .clk(clk), .i_state(exec_state), .i_state_target(2'd1),
         .i_pc(dut.core0.pc), .i_pc_target(PC_PHASE6B_TRIGGER), .i_sample(dut.core0.sret_taken),
         .o_sampled(sret_taken_sampled_phase6b), .o_captured(sret_taken_sample_phase6b_captured)
     );
     pc_trigger_sample_monitor trap_taken_monitor_phase6b (
-        .clk(clk), .i_state(dut.core0.state), .i_state_target(2'd1),
+        .clk(clk), .i_state(exec_state), .i_state_target(2'd1),
         .i_pc(dut.core0.pc), .i_pc_target(PC_PHASE6B_TRIGGER), .i_sample(dut.core0.trap_taken),
         .o_sampled(trap_taken_sampled_phase6b), .o_captured(trap_taken_sample_phase6b_captured)
     );
@@ -288,7 +297,12 @@ module core_priv_tb;
         @(posedge clk); #1;
         rst = 0;
 
+`ifdef QV_PIPE_AS_CORE
+        // every CSR access serializes the pipeline, so this takes longer on core_pipe
+        wait_halted_or_timeout(`TIMEOUT_CYCLES_LARGE, "EBREAK trap never fired");
+`else
         wait_halted_or_timeout(`TIMEOUT_CYCLES_SMALL, "EBREAK trap never fired");
+`endif
 
         /* Marker registers -- structural proof control flow visited every phase, in order, and returned correctly each time. */
         check("x1 (phase 1 marker -- returned from M-mode ECALL)", dut.core0.regfile0.gp_registers[1], 64'd111);

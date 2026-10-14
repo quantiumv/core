@@ -9,6 +9,18 @@
  * redirect, the architectural pc and RVFI. Covers what the end-to-end
  * RVFI diff can't reach yet: fetch faults (mtval = pc), an exception on
  * an entry that would otherwise be a system op, and mtvec's MODE bits.
+ *
+ * The LR/SC reservation it keeps: set only by an LR that retires cleanly
+ * (to the address the LSU reports), cleared by retiring any store-class
+ * op -- a store, an SC either way, an AMO -- whether or not it faulted,
+ * and left alone by everything else, traps and returns included.
+ *
+ * Privilege: it starts in M and changes only as core.sv's current_priv does
+ * -- a trap goes to S when the instruction ran below M and medeleg has its
+ * cause's bit (to M otherwise, and always from M), MRET loads MPP raw (2'b10
+ * included, where ECALL gets cause 0), SRET loads SPP (S or U) -- with the
+ * ECALL cause following the privilege, the trap vector coming from stvec or
+ * mtvec, and SRET returning to sepc.
  */
 module qv_commit_tb;
     import qv_pkg::*;
@@ -42,11 +54,22 @@ module qv_commit_tb;
     logic [7:0]              r_mem_rmask, r_mem_wmask;
     logic                    fetch_idle = 1'b1;
     logic                    fetch_hold, icache_flush;
+    logic                    res_valid;
+    logic [63:0]             res_addr;
+    logic [63:0]             stvec = '0, sepc = '0, medeleg = '0;
+    logic [1:0]              mpp = 2'b11;
+    logic                    spp = 1'b0;
+    logic                    sret_taken, trap_to_s;
+    logic [1:0]              priv;
 
     qv_commit #(.RESET_PC(64'h1000)) dut (
         .clk(clk), .rst(rst),
         .i_head_valid(head_valid), .i_head_entry(e), .i_head_tag(tag),
         .i_head_shadow(sh), .i_head_ctrl(c), .i_lsu_res(lres), .o_commit_pop(pop),
+        .o_res_valid(res_valid), .o_res_addr(res_addr),
+        .o_sret_taken(sret_taken), .o_trap_to_s(trap_to_s), .o_priv(priv),
+        .i_stvec(stvec), .i_sepc(sepc), .i_medeleg(medeleg),
+        .i_mstatus_mpp(mpp), .i_mstatus_spp(spp),
         .o_regfile_we(rf_we), .o_regfile_sel(rf_sel), .o_regfile_data(rf_data),
         .o_commit_valid(c_valid), .o_commit_rd(c_rd), .o_commit_rd_wen(c_rd_wen), .o_commit_tag(c_tag),
         .o_csr_addr(csr_addr), .i_csr_rdata(csr_rdata), .o_csr_we(csr_we), .o_csr_wdata(csr_wdata),
@@ -106,6 +129,22 @@ module qv_commit_tb;
         check({name, ": still a commit (rvfi_valid)"}, b(commit_now), 64'd1);
     endtask
 
+    // a trap that is delegated to S: same checks as expect_trap, but to stvec's base
+    task automatic expect_plain_trap_to_s(input string name, input logic [63:0] cause, input logic [63:0] tval,
+                                          input logic [63:0] vec);
+        #1;
+        check({name, ": trap_taken"}, b(trap_taken), 64'd1);
+        check({name, ": rvfi_trap"}, b(r_trap), 64'd1);
+        check({name, ": cause"}, trap_cause, cause);
+        check({name, ": tval"}, trap_val, tval);
+        check({name, ": trap_to_s"}, b(trap_to_s), 64'd1);
+        check({name, ": not a retirement for minstret"}, b(instr_retired), 64'd0);
+        check({name, ": no rd write"}, b(rf_we), 64'd0);
+        check({name, ": redirect"}, b(redirect), 64'd1);
+        check({name, ": redirect to stvec's base"}, redirect_pc, vec);
+        check({name, ": rvfi pc_wdata = vector"}, r_pc_wdata, vec);
+    endtask
+
     task automatic expect_plain(input string name, input logic exp_redirect);
         #1;
         check({name, ": no trap"}, b(trap_taken), 64'd0);
@@ -121,8 +160,11 @@ module qv_commit_tb;
         #1 rst = 1'b0;
         mtvec = 64'h0000_0000_0000_8001;            // MODE bits must be masked off
         mepc  = 64'h0000_0000_0000_4444;
+        stvec = 64'h0000_0000_0000_9003;
+        sepc  = 64'h0000_0000_0000_5554;
         #1;
         check("reset: arch pc", arch_pc, 64'h1000);
+        check("reset: privilege M", {62'b0, priv}, 64'd3);
         check("idle: no commit", b(commit_now), 64'd0);
         check("idle: no redirect", b(redirect), 64'd0);
 
@@ -327,6 +369,270 @@ module qv_commit_tb;
         check("alu with a stale LSU result: rmask 0", {56'b0, r_mem_rmask}, 64'd0);
         retire();
         lres = '0;
+
+        // ---- the LR/SC reservation ----
+        lres = '0;
+        check("reservation: none after reset", b(res_valid), 64'd0);
+        // a clean LR sets it, to the LSU's exact address
+        lres.vaddr = 64'h0000_0001_0000_4008;                  // bits above the bus width count
+        set_entry(64'h6000, 32'h1002_B2AF, 5, 1'b1, 64'h77);   // lr.d x5, (x5)
+        c.cls = QV_FU_LSU; c.is_lr = 1'b1;
+        expect_plain("lr", 1'b0);
+        check("lr: not yet set before it retires", b(res_valid), 64'd0);
+        retire();
+        check("lr: reservation set", b(res_valid), 64'd1);
+        check("lr: at its address", res_addr, 64'h0000_0001_0000_4008);
+        // an incomplete head changes nothing
+        lres = '0; lres.vaddr = 64'h111;
+        set_entry(64'h6004, 32'h1002_B2AF, 5, 1'b1, 64'h77);
+        c.cls = QV_FU_LSU; c.is_lr = 1'b1; e.complete = 1'b0;
+        retire();
+        check("incomplete lr: reservation unchanged", res_addr, 64'h0000_0001_0000_4008);
+        // a later LR supersedes it
+        lres = '0; lres.vaddr = 64'h2468;
+        set_entry(64'h6004, 32'h1002_B2AF, 5, 1'b1, 64'h77);
+        c.cls = QV_FU_LSU; c.is_lr = 1'b1;
+        retire();
+        check("second lr: still valid", b(res_valid), 64'd1);
+        check("second lr: new address", res_addr, 64'h2468);
+        // things that must leave it alone
+        lres = '0;
+        set_entry(64'h6008, 32'h13, 5, 1'b1, 64'd1);                       // ALU
+        retire();
+        set_entry(64'h600C, 32'h0108_3283, 5, 1'b1, 64'd1);                // load
+        c.cls = QV_FU_LSU;
+        retire();
+        set_entry(64'h6010, 32'h0000_0073, 0, 1'b0, 64'd0);                // ecall: a trap
+        c.cls = QV_FU_SYS; c.sys_op = QV_SYS_ECALL;
+        retire();
+        set_entry(64'h8000, 32'h3020_0073, 0, 1'b0, 64'd0);                // mret
+        c.cls = QV_FU_SYS; c.sys_op = QV_SYS_MRET;
+        retire();
+        set_entry(64'h6014, 32'h3400_92F3, 5, 1'b1, 64'd0);                // a CSR write
+        c.cls = QV_FU_CSR; c.csr_op = QV_CSR_RW; c.csr_addr = 12'h340; c.serialize = 1'b1;
+        retire();
+        set_entry(64'h6018, 32'h0000_100F, 0, 1'b0, 64'd0);                // fence.i
+        c.cls = QV_FU_SYS; c.sys_op = QV_SYS_FENCE_I; c.serialize = 1'b1;
+        retire();
+        set_entry(64'h601C, 32'h0080_006F, 1, 1'b1, 64'h6020);             // a mispredicted jump
+        e.next_pc = 64'h7000; e.mispredict = 1'b1;
+        retire();
+        check("alu/load/trap/mret/csr/fence.i/jump leave it", b(res_valid), 64'd1);
+        check("... and its address", res_addr, 64'h2468);
+        // an LR that faults never sets it, and does not disturb a standing one
+        lres = '0; lres.xcpt = 1'b1; lres.cause = 4'd6; lres.tval = 64'h3001; lres.vaddr = 64'h3001;
+        set_entry(64'h7000, 32'h1002_B2AF, 5, 1'b1, 64'd0);
+        c.cls = QV_FU_LSU; c.is_lr = 1'b1;
+        expect_trap("faulting lr", 64'd6, 64'h3001);
+        retire();
+        check("faulting lr: standing reservation untouched", res_addr, 64'h2468);
+        check("faulting lr: still valid", b(res_valid), 64'd1);
+        // store-class ops clear it, at any address, faulting or not
+        for (int k = 0; k < 6; k++) begin
+            lres = '0; lres.vaddr = 64'h5000 + 64'(k);
+            set_entry(64'h7004, 32'h1002_B2AF, 5, 1'b1, 64'd0);
+            c.cls = QV_FU_LSU; c.is_lr = 1'b1;
+            retire();
+            check($sformatf("setup %0d: reservation held", k), b(res_valid), 64'd1);
+            lres = '0;
+            set_entry(64'h7008, 32'h0062_3423, 0, 1'b0, 64'd0);
+            c.cls = QV_FU_LSU; c.is_store_class = 1'b1;
+            case (k)
+                0: ;                                                      // a plain store
+                1: begin lres.xcpt = 1'b1; lres.cause = 4'd7; end        // a store that faults
+                2: begin lres.xcpt = 1'b1; lres.cause = 4'd6; end        // a misaligned store
+                3: begin e.rd_wen = 1'b1; e.rd = 5; e.value = 64'd1; end // an SC that failed: rd = 1, no access
+                4: begin e.rd_wen = 1'b1; e.rd = 5; end                  // an SC that succeeded
+                5: begin e.rd_wen = 1'b1; e.rd = 5; e.value = 64'h99; end// an AMO
+            endcase
+            retire();
+            check($sformatf("store-class variant %0d: reservation cleared", k), b(res_valid), 64'd0);
+        end
+        // a uop faulted at decode carries no flags, so it leaves the reservation alone
+        lres = '0; lres.vaddr = 64'h7777;
+        set_entry(64'h7004, 32'h1002_B2AF, 5, 1'b1, 64'd0);
+        c.cls = QV_FU_LSU; c.is_lr = 1'b1;
+        retire();
+        check("setup: held again", b(res_valid), 64'd1);
+        lres = '0;
+        set_entry(64'h7008, 32'h0000_0000, 0, 1'b0, 64'd0);
+        c.xcpt = 1'b1; c.cause = 4'd2;
+        retire();
+        check("a decode fault leaves it", b(res_valid), 64'd1);
+        // the store-class flag on an incomplete head does nothing yet
+        set_entry(64'h700C, 32'h0062_3423, 0, 1'b0, 64'd0);
+        c.cls = QV_FU_LSU; c.is_store_class = 1'b1; e.complete = 1'b0;
+        retire();
+        check("incomplete store: reservation unchanged", b(res_valid), 64'd1);
+        lres = '0;
+
+        // ---- privilege ----
+        check("priv: M after reset", {62'b0, priv}, 64'd3);
+        // MRET with MPP = S drops to S, to mepc
+        mpp = 2'b01;
+        set_entry(64'h8000, 32'h3020_0073, 0, 1'b0, 64'd0);
+        c.cls = QV_FU_SYS; c.sys_op = QV_SYS_MRET;
+        #1;
+        check("mret to S: redirect to mepc", redirect_pc, 64'h4444);
+        check("mret to S: still M while it retires", {62'b0, priv}, 64'd3);
+        retire();
+        check("mret to S: now S", {62'b0, priv}, 64'd1);
+
+        // an ECALL in S: cause 9, not delegated -> mtvec, back to M
+        medeleg = '0;
+        set_entry(64'h4444, 32'h0000_0073, 0, 1'b0, 64'd0);
+        c.cls = QV_FU_SYS; c.sys_op = QV_SYS_ECALL;
+        expect_trap("ecall from S", 64'd9, 64'd0);
+        check("ecall from S: to M", b(trap_to_s), 64'd0);
+        retire();
+        check("ecall from S: priv M", {62'b0, priv}, 64'd3);
+
+        // an ECALL in S with medeleg[9]: delegated to S -> stvec, stays S
+        mpp = 2'b01;
+        set_entry(64'h8000, 32'h3020_0073, 0, 1'b0, 64'd0);
+        c.cls = QV_FU_SYS; c.sys_op = QV_SYS_MRET;
+        retire();
+        medeleg = 64'h200;
+        set_entry(64'h4444, 32'h0000_0073, 0, 1'b0, 64'd0);
+        c.cls = QV_FU_SYS; c.sys_op = QV_SYS_ECALL;
+        #1;
+        check("delegated ecall from S: cause 9", trap_cause, 64'd9);
+        check("delegated ecall from S: trap_to_s", b(trap_to_s), 64'd1);
+        check("delegated ecall from S: to stvec's base", redirect_pc, 64'h9000);
+        check("delegated ecall from S: rvfi pc_wdata", r_pc_wdata, 64'h9000);
+        check("delegated ecall from S: still a trap", b(trap_taken), 64'd1);
+        retire();
+        check("delegated ecall from S: priv S", {62'b0, priv}, 64'd1);
+        check("delegated ecall from S: arch pc", arch_pc, 64'h9000);
+
+        // SRET with SPP = 0 -> U, to sepc; with SPP = 1 -> S
+        spp = 1'b0;
+        set_entry(64'h9000, 32'h1020_0073, 0, 1'b0, 64'd0);
+        c.cls = QV_FU_SYS; c.sys_op = QV_SYS_SRET;
+        #1;
+        check("sret: sret_taken", b(sret_taken), 64'd1);
+        check("sret: no mret", b(mret_taken), 64'd0);
+        check("sret: no trap", b(trap_taken), 64'd0);
+        check("sret: counted", b(instr_retired), 64'd1);
+        check("sret: redirect", b(redirect), 64'd1);
+        check("sret: to sepc", redirect_pc, 64'h5554);
+        check("sret: rvfi pc_wdata", r_pc_wdata, 64'h5554);
+        check("sret: no rd", b(rf_we), 64'd0);
+        retire();
+        check("sret: SPP=0 -> U", {62'b0, priv}, 64'd0);
+        check("sret: arch pc = sepc", arch_pc, 64'h5554);
+
+        // an ECALL in U: cause 8; medeleg[8] set -> S
+        medeleg = 64'h100;
+        set_entry(64'h5554, 32'h0000_0073, 0, 1'b0, 64'd0);
+        c.cls = QV_FU_SYS; c.sys_op = QV_SYS_ECALL;
+        expect_plain_trap_to_s("ecall from U (delegated)", 64'd8, 64'd0, 64'h9000);
+        retire();
+        check("ecall from U delegated: priv S", {62'b0, priv}, 64'd1);
+        spp = 1'b1;
+        set_entry(64'h9000, 32'h1020_0073, 0, 1'b0, 64'd0);
+        c.cls = QV_FU_SYS; c.sys_op = QV_SYS_SRET;
+        retire();
+        check("sret: SPP=1 -> S", {62'b0, priv}, 64'd1);
+
+        // a fault marked at fetch from S, delegated or not
+        medeleg = 64'h2;
+        set_entry(64'h6000, 32'h13, 0, 1'b0, 64'd0);
+        c.xcpt = 1'b1; c.cause = 4'd1;
+        expect_plain_trap_to_s("fetch fault from S (delegated)", 64'd1, 64'h6000, 64'h9000);
+        retire();
+        check("fetch fault delegated: priv S", {62'b0, priv}, 64'd1);
+        medeleg = 64'h4;                                  // illegal-instruction delegated, access fault not
+        set_entry(64'h6000, 32'h13, 0, 1'b0, 64'd0);
+        c.xcpt = 1'b1; c.cause = 4'd1;
+        expect_trap("fetch fault from S (not delegated)", 64'd1, 64'h6000);
+        check("fetch fault not delegated: to M", b(trap_to_s), 64'd0);
+        retire();
+        check("fetch fault not delegated: priv M", {62'b0, priv}, 64'd3);
+
+        // from M a trap is never delegated, whatever medeleg says
+        medeleg = '1;
+        set_entry(64'h6000, 32'h0000_0073, 0, 1'b0, 64'd0);
+        c.cls = QV_FU_SYS; c.sys_op = QV_SYS_ECALL;
+        expect_trap("ecall from M, medeleg all ones", 64'd11, 64'd0);
+        check("ecall from M: to M", b(trap_to_s), 64'd0);
+        retire();
+        check("ecall from M: stays M", {62'b0, priv}, 64'd3);
+
+        // memory faults delegate by their cause bit too
+        mpp = 2'b01;
+        set_entry(64'h8000, 32'h3020_0073, 0, 1'b0, 64'd0);
+        c.cls = QV_FU_SYS; c.sys_op = QV_SYS_MRET;
+        retire();
+        medeleg = 64'h20;                                 // load access fault (5)
+        lres = '0; lres.xcpt = 1'b1; lres.cause = 4'd5; lres.tval = 64'h20_0000;
+        set_entry(64'h4444, 32'h0002_3283, 5, 1'b1, 64'd1);
+        c.cls = QV_FU_LSU;
+        expect_plain_trap_to_s("load access fault from S (delegated)", 64'd5, 64'h20_0000, 64'h9000);
+        retire();
+        check("load access fault delegated: S", {62'b0, priv}, 64'd1);
+        lres = '0;
+        medeleg = '0;
+
+        // MPP is loaded raw: 2'b10 is a privilege of its own
+        mpp = 2'b10;
+        set_entry(64'h9000, 32'h3020_0073, 0, 1'b0, 64'd0);
+        c.cls = QV_FU_SYS; c.sys_op = QV_SYS_MRET;
+        retire();
+        check("mret with MPP = 2'b10 loads 2'b10", {62'b0, priv}, 64'd2);
+        set_entry(64'h4444, 32'h0000_0073, 0, 1'b0, 64'd0);
+        c.cls = QV_FU_SYS; c.sys_op = QV_SYS_ECALL;
+        expect_trap("ecall at privilege 2: cause 0", 64'd0, 64'd0);
+        check("ecall at privilege 2, no medeleg[0]: to M", b(trap_to_s), 64'd0);
+        medeleg = 64'h1;
+        #1;
+        check("ecall at privilege 2, medeleg[0]: delegated (it is below M)", b(trap_to_s), 64'd1);
+        check("ecall at privilege 2, delegated: stvec", redirect_pc, 64'h9000);
+        retire();
+        check("ecall at privilege 2, delegated: S", {62'b0, priv}, 64'd1);
+        medeleg = '0;
+        // back to M for the rest
+        mpp = 2'b11;
+        set_entry(64'h9000, 32'h3020_0073, 0, 1'b0, 64'd0);
+        c.cls = QV_FU_SYS; c.sys_op = QV_SYS_MRET;
+        #1;
+        check("mret from S is just executed (decode guards legality)", b(mret_taken), 64'd1);
+        retire();
+        check("mret with MPP = M", {62'b0, priv}, 64'd3);
+
+        // a trap wins over an xRET on the same entry: privilege follows the trap
+        mpp = 2'b00; spp = 1'b0;
+        set_entry(64'h4444, 32'h3020_0073, 0, 1'b0, 64'd0);
+        c.cls = QV_FU_SYS; c.sys_op = QV_SYS_MRET; c.xcpt = 1'b1; c.cause = 4'd1;
+        expect_trap("faulted mret", 64'd1, 64'h4444);
+        check("faulted mret: no mret", b(mret_taken), 64'd0);
+        retire();
+        check("faulted mret: priv from the trap (M), not MPP", {62'b0, priv}, 64'd3);
+        set_entry(64'h4444, 32'h1020_0073, 0, 1'b0, 64'd0);
+        c.cls = QV_FU_SYS; c.sys_op = QV_SYS_SRET; c.xcpt = 1'b1; c.cause = 4'd1;
+        expect_trap("faulted sret", 64'd1, 64'h4444);
+        check("faulted sret: no sret", b(sret_taken), 64'd0);
+        retire();
+        check("faulted sret: priv M", {62'b0, priv}, 64'd3);
+
+        // an incomplete head changes nothing, and neither do ordinary retirements
+        mpp = 2'b00;
+        set_entry(64'h4444, 32'h3020_0073, 0, 1'b0, 64'd0);
+        c.cls = QV_FU_SYS; c.sys_op = QV_SYS_MRET; e.complete = 1'b0;
+        retire();
+        check("incomplete mret: priv unchanged", {62'b0, priv}, 64'd3);
+        set_entry(64'h4444, 32'h13, 5, 1'b1, 64'd1);
+        retire();
+        set_entry(64'h4448, 32'h1050_0073, 0, 1'b0, 64'd0);      // wfi
+        c.cls = QV_FU_SYS; c.sys_op = QV_SYS_WFI;
+        retire();
+        set_entry(64'h444C, 32'h1200_0073, 0, 1'b0, 64'd0);      // sfence.vma: a serializing no-op
+        c.cls = QV_FU_SYS; c.sys_op = QV_SYS_SFENCE_VMA; c.serialize = 1'b1;
+        expect_plain("sfence.vma", 1'b1);
+        check("sfence.vma: no trap, no xRET", b(trap_taken | mret_taken | sret_taken), 64'd0);
+        retire();
+        check("wfi/alu/sfence.vma: priv unchanged", {62'b0, priv}, 64'd3);
+        mpp = 2'b11; spp = 1'b0; medeleg = '0;
 
         // ---- FENCE.I: fetch held until idle, then flush + serializing refetch ----
         check("no fence.i head: no hold", b(fetch_hold), 64'd0);

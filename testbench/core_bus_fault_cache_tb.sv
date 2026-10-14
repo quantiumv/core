@@ -58,10 +58,17 @@ module core_bus_fault_cache_tb;
      * ever legitimately reaches S_AMO_WRITE either.
      */
     logic amo_write_entered;
+`ifdef QV_PIPE_AS_CORE
+    // core_pipe has no S_AMO_WRITE: an AMO's write is a locked bus write
+    initial amo_write_entered = 1'b0;
+    always @(posedge clk)
+        if (dut.core0.wb_mem_cyc_o && dut.core0.wb_mem_we_o && dut.core0.wb_mem_lock_o) amo_write_entered <= 1'b1;
+`else
     state_reached_monitor amo_write_monitor (
         .clk(clk), .i_state(dut.core0.state),
         .i_state_target(dut.core0.S_AMO_WRITE), .o_reached(amo_write_entered)
     );
+`endif
 
     localparam int unsigned HANDLER_I = 32'h40;
     /*

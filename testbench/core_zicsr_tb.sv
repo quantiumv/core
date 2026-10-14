@@ -113,6 +113,15 @@ module core_zicsr_tb;
      * declared order in core.sv is {S_FETCH, S_EXEC, S_MEM} = {0, 1, 2}
      * for its 2-bit enum, hence the literal 2'd1 below.
      */
+`ifdef QV_PIPE_AS_CORE
+    // core_pipe has no state register: the monitors sample in the cycle the
+    // instruction retires, which is what "S_EXEC at this pc" means for the
+    // single-cycle instructions they watch
+    wire [1:0] exec_state = dut.core0.commit_now ? 2'd1 : 2'd0;
+`else
+    wire [1:0] exec_state = dut.core0.state;
+`endif
+
     localparam logic [63:0] PC_RS1_X0_CHECK       = 64'h2C;
     localparam logic [63:0] PC_CSRRSI_UIMM0_CHECK = 64'h30;
     localparam logic [63:0] PC_CSRRCI_UIMM0_CHECK = 64'h34;
@@ -120,7 +129,7 @@ module core_zicsr_tb;
     logic csr_we_sampled;
     logic csr_we_sample_captured;
     pc_trigger_sample_monitor rs1_x0_monitor (
-        .clk(clk), .i_state(dut.core0.state), .i_state_target(2'd1),
+        .clk(clk), .i_state(exec_state), .i_state_target(2'd1),
         .i_pc(dut.core0.pc), .i_pc_target(PC_RS1_X0_CHECK), .i_sample(dut.core0.csr_we),
         .o_sampled(csr_we_sampled), .o_captured(csr_we_sample_captured)
     );
@@ -128,7 +137,7 @@ module core_zicsr_tb;
     logic csrrsi_we_sampled;
     logic csrrsi_we_sample_captured;
     pc_trigger_sample_monitor csrrsi_uimm0_monitor (
-        .clk(clk), .i_state(dut.core0.state), .i_state_target(2'd1),
+        .clk(clk), .i_state(exec_state), .i_state_target(2'd1),
         .i_pc(dut.core0.pc), .i_pc_target(PC_CSRRSI_UIMM0_CHECK), .i_sample(dut.core0.csr_we),
         .o_sampled(csrrsi_we_sampled), .o_captured(csrrsi_we_sample_captured)
     );
@@ -136,7 +145,7 @@ module core_zicsr_tb;
     logic csrrci_we_sampled;
     logic csrrci_we_sample_captured;
     pc_trigger_sample_monitor csrrci_uimm0_monitor (
-        .clk(clk), .i_state(dut.core0.state), .i_state_target(2'd1),
+        .clk(clk), .i_state(exec_state), .i_state_target(2'd1),
         .i_pc(dut.core0.pc), .i_pc_target(PC_CSRRCI_UIMM0_CHECK), .i_sample(dut.core0.csr_we),
         .o_sampled(csrrci_we_sampled), .o_captured(csrrci_we_sample_captured)
     );

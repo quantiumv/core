@@ -1,0 +1,216 @@
+{
+ "dut": "design/pipe/qv_lsu.sv",
+ "tb": "design/pipe/qv_lsu_tb.sv",
+ "files": [
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_lsu.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench"
+ ],
+ "cwd": "design",
+ "timeout": 900,
+ "mutants": [
+  {
+   "name": "SC ignores the reservation",
+   "old": "wire sc_fail  = sc_q && !(i_res_valid && i_res_addr == addr_q);",
+   "new": "wire sc_fail  = 1'b0;"
+  },
+  {
+   "name": "SC ignores res_valid",
+   "old": "!(i_res_valid && i_res_addr == addr_q)",
+   "new": "!(i_res_addr == addr_q)"
+  },
+  {
+   "name": "SC compares only the low 32 bits",
+   "old": "i_res_addr == addr_q)",
+   "new": "i_res_addr[31:0] == addr_q[31:0])"
+  },
+  {
+   "name": "SC compares the dword, not the address",
+   "old": "i_res_addr == addr_q)",
+   "new": "i_res_addr[63:3] == addr_q[63:3])"
+  },
+  {
+   "name": "SC always fails",
+   "old": "wire sc_fail  = sc_q && !(i_res_valid && i_res_addr == addr_q);",
+   "new": "wire sc_fail  = sc_q;"
+  },
+  {
+   "name": "lock gap between the AMO's read and write",
+   "old": "assign wb_mem_lock_o = amo_q && (start || in_bus);",
+   "new": "assign wb_mem_lock_o = amo_q && (start || in_bus) && !(state_q == S_BUS && wb_mem_ack_i);"
+  },
+  {
+   "name": "lock starts a cycle late",
+   "old": "assign wb_mem_lock_o = amo_q && (start || in_bus);",
+   "new": "assign wb_mem_lock_o = amo_q && in_bus;"
+  },
+  {
+   "name": "lock drops before the write's response cycle",
+   "old": "assign wb_mem_lock_o = amo_q && (start || in_bus);",
+   "new": "assign wb_mem_lock_o = amo_q && (start || in_bus) && !(phase_wr_q && resp);"
+  },
+  {
+   "name": "lock held for LR and SC too",
+   "old": "assign wb_mem_lock_o = amo_q && (start || in_bus);",
+   "new": "assign wb_mem_lock_o = atomic_q && (start || in_bus);"
+  },
+  {
+   "name": "lock never",
+   "old": "assign wb_mem_lock_o = amo_q && (start || in_bus);",
+   "new": "assign wb_mem_lock_o = 1'b0;"
+  },
+  {
+   "name": "lock held for every access",
+   "old": "assign wb_mem_lock_o = amo_q && (start || in_bus);",
+   "new": "assign wb_mem_lock_o = (start || in_bus);"
+  },
+  {
+   "name": "LR misaligned is cause 4",
+   "old": "wire fault_st  = store_q || atomic_q;",
+   "new": "wire fault_st  = store_q || (atomic_q && !lr_q);"
+  },
+  {
+   "name": "AMO bus error is cause 5",
+   "old": "wire fault_st  = store_q || atomic_q;",
+   "new": "wire fault_st  = store_q;"
+  },
+  {
+   "name": "MIN and MAX swapped",
+   "old": "QV_AMO_MIN:  r = ($signed(old) < $signed(b)) ? old : b;",
+   "new": "QV_AMO_MIN:  r = ($signed(old) < $signed(b)) ? b : old;"
+  },
+  {
+   "name": "MINU compares signed",
+   "old": "QV_AMO_MINU: r = (old < b) ? old : b;",
+   "new": "QV_AMO_MINU: r = ($signed(old) < $signed(b)) ? old : b;"
+  },
+  {
+   "name": "MAXU compares signed",
+   "old": "QV_AMO_MAXU: r = (old < b) ? b : old;",
+   "new": "QV_AMO_MAXU: r = ($signed(old) < $signed(b)) ? b : old;"
+  },
+  {
+   "name": "AMOADD subtracts",
+   "old": "QV_AMO_ADD:  r = old + b;",
+   "new": "QV_AMO_ADD:  r = old - b;"
+  },
+  {
+   "name": "AMOXOR is OR",
+   "old": "QV_AMO_XOR:  r = old ^ b;",
+   "new": "QV_AMO_XOR:  r = old | b;"
+  },
+  {
+   "name": "AMOAND is OR",
+   "old": "QV_AMO_AND:  r = old & b;",
+   "new": "QV_AMO_AND:  r = old | b;"
+  },
+  {
+   "name": "AMOSWAP keeps the old value",
+   "old": "QV_AMO_SWAP: r = b;",
+   "new": "QV_AMO_SWAP: r = old;"
+  },
+  {
+   "name": "W operand not sign-extended",
+   "old": "b = word ? {{32{rs2[31]}}, rs2[31:0]} : rs2;",
+   "new": "b = word ? {32'b0, rs2[31:0]} : rs2;"
+  },
+  {
+   "name": "W result not sign-extended",
+   "old": "return word ? {{32{r[31]}}, r[31:0]} : r;",
+   "new": "return word ? {32'b0, r[31:0]} : r;"
+  },
+  {
+   "name": "AMO skips its write",
+   "old": "wire amo_read_ack = (state_q == S_BUS) && amo_q && !phase_wr_q && wb_mem_ack_i && !wb_mem_err_i && !i_flush;",
+   "new": "wire amo_read_ack = 1'b0;"
+  },
+  {
+   "name": "rd gets the new value",
+   "old": "else if (done_bus && !wb_mem_err_i && amo_q)  o_wb.value = old_q;",
+   "new": "else if (done_bus && !wb_mem_err_i && amo_q)  o_wb.value = amo_wdata >> {addr_q[2:0], 3'b000};"
+  },
+  {
+   "name": "RVFI rdata is the raw word for an AMO",
+   "old": "o_res.mem_rdata <= (done_bus && amo_q && phase_wr_q) ? old_q",
+   "new": "o_res.mem_rdata <= (1'b0) ? old_q"
+  },
+  {
+   "name": "SC failure returns 0",
+   "old": "if (sc_fail_done)                             o_wb.value = 64'd1;",
+   "new": "if (sc_fail_done)                             o_wb.value = 64'd0;"
+  },
+  {
+   "name": "SC failure still writes",
+   "old": "wire start    = at_head && !misaligned_q && !sc_fail;",
+   "new": "wire start    = at_head && !misaligned_q;"
+  },
+  {
+   "name": "AMO write phase is a read",
+   "old": "assign wb_mem_we_o   = store_q || phase_wr_q;",
+   "new": "assign wb_mem_we_o   = store_q;"
+  },
+  {
+   "name": "AMO write data not in its lane",
+   "old": "wire [63:0] amo_wdata = amo_result(aop_q, word_q, old_q, b_amo) << {addr_q[2:0], 3'b000};",
+   "new": "wire [63:0] amo_wdata = amo_result(aop_q, word_q, old_q, b_amo);"
+  },
+  {
+   "name": "read error still proceeds to the write",
+   "old": "wb_mem_ack_i && !wb_mem_err_i && !i_flush;",
+   "new": "wb_mem_ack_i && !i_flush;"
+  },
+  {
+   "name": "a flush mid-read still writes",
+   "old": "wb_mem_ack_i && !wb_mem_err_i && !i_flush;",
+   "new": "wb_mem_ack_i && !wb_mem_err_i;"
+  },
+  {
+   "name": "old value taken from the raw bus word",
+   "old": "                        old_q      <= load_value;",
+   "new": "                        old_q      <= wb_mem_dat_i;"
+  },
+  {
+   "name": "vaddr is the aligned address",
+   "old": "o_res.vaddr     <= addr_q;",
+   "new": "o_res.vaddr     <= {addr_q[63:3], 3'b000};"
+  },
+  {
+   "name": "atomic width from op[1:0]",
+   "old": "wire [1:0]  req_size    = req_atomic ? (i_req.is_word ? 2'd2 : 2'd3) : i_req.op[1:0];",
+   "new": "wire [1:0]  req_size    = req_atomic ? i_req.op[1:0] : i_req.op[1:0];"
+  },
+  {
+   "name": "atomic address adds imm",
+   "old": "wire [63:0] req_addr    = req_atomic ? i_req.a : i_req.a + (req_plain_store ? i_req.imm : i_req.b);",
+   "new": "wire [63:0] req_addr    = req_atomic ? i_req.a + i_req.imm : i_req.a + (req_plain_store ? i_req.imm : i_req.b);"
+  },
+  {
+   "name": "atomic address adds rs2",
+   "old": "wire [63:0] req_addr    = req_atomic ? i_req.a : i_req.a + (req_plain_store ? i_req.imm : i_req.b);",
+   "new": "wire [63:0] req_addr    = req_atomic ? i_req.a + i_req.b : i_req.a + (req_plain_store ? i_req.imm : i_req.b);"
+  },
+  {
+   "name": "SC success leaves the reservation check to a stale cycle",
+   "old": "wire at_head  = (state_q == S_WAIT_HEAD) && i_head_valid && (i_head_tag == tag_q) && !i_flush;",
+   "new": "wire at_head  = (state_q == S_WAIT_HEAD) && i_head_valid && !i_flush;"
+  },
+  {
+   "name": "misaligned atomic reaches the bus",
+   "old": "wire start    = at_head && !misaligned_q && !sc_fail;",
+   "new": "wire start    = at_head && (!misaligned_q || atomic_q) && !sc_fail;"
+  },
+  {
+   "name": "LR value not sign-extended",
+   "old": "wire        req_signed  = req_atomic || i_req.op[2];",
+   "new": "wire        req_signed  = i_req.op[2];"
+  }
+ ]
+}

@@ -74,8 +74,13 @@ module core_bus_fault_trap_tb;
      * the one real AMOADD here is the one under test) -- a true positive
      * anywhere in the whole run is equally damning.
      */
-`ifndef QV_PIPE_AS_CORE
     logic amo_write_entered;
+`ifdef QV_PIPE_AS_CORE
+    // core_pipe has no S_AMO_WRITE: an AMO's write is a locked bus write
+    initial amo_write_entered = 1'b0;
+    always @(posedge clk)
+        if (dut.core0.wb_mem_cyc_o && dut.core0.wb_mem_we_o && dut.core0.wb_mem_lock_o) amo_write_entered <= 1'b1;
+`else
     state_reached_monitor amo_write_monitor (
         .clk(clk), .i_state(dut.core0.state),
         .i_state_target(dut.core0.S_AMO_WRITE), .o_reached(amo_write_entered)
@@ -208,12 +213,6 @@ module core_bus_fault_trap_tb;
         main_prog[31] = encode_amo(`FUNCT5_AMOADD, 1'b0, 1'b0, 5'd24, 5'd29, `FUNCT3_AMO_W, 5'd23, `OPC_AMO);
         main_prog[32] = encode_i(32'sd666, 5'd0, 3'b000, 5'd7, `OPC_OP_IMM);
         main_prog[33] = encode_i(32'sd1, 5'd0, 3'b000, 5'd0, `OPC_SYSTEM); // ebreak
-`ifdef QV_PIPE_AS_CORE
-        // core_pipe has no A extension yet (P5): E and F fault a narrower
-        // store and load instead, at an offset so mtval is exact
-        main_prog[24] = encode_s(32'sd4, 5'd30, 5'd29, 3'b010, `OPC_STORE);  // sw x30, 4(x29)
-        main_prog[31] = encode_i(32'sd2, 5'd29, 3'b101, 5'd23, `OPC_LOAD);   // lhu x23, 2(x29)
-`endif
 
         for (i = 0; i < 17; i = i + 1)
             dut.sram0.memory[i] = {main_prog[2*i+1], main_prog[2*i]};
@@ -316,18 +315,6 @@ module core_bus_fault_trap_tb;
         check("D: resumed cleanly", dut.core0.regfile0.gp_registers[5], 64'd444);
         check("D: nearby valid sentinel dword unchanged", dut.sram0.memory[40], 64'hCAFE_F00D_CAFE_F00D);
 
-`ifdef QV_PIPE_AS_CORE
-        // ---- Test E: SW fault at an offset ----
-        check("E: mcause == 7 (store access fault)", dut.core0.regfile0.gp_registers[16], 64'd7);
-        check("E: mtval == the exact faulting store address", dut.core0.regfile0.gp_registers[17], 64'h1004);
-        check("E: resumed cleanly", dut.core0.regfile0.gp_registers[6], 64'd555);
-
-        // ---- Test F: LHU fault at an offset ----
-        check("F: mcause == 5 (load access fault)", dut.core0.regfile0.gp_registers[18], 64'd5);
-        check("F: mtval == the exact faulting load address", dut.core0.regfile0.gp_registers[19], 64'h1002);
-        check("F: dest register untouched (load never happened)", dut.core0.regfile0.gp_registers[23], 64'd903);
-        check("F: resumed cleanly", dut.core0.regfile0.gp_registers[7], 64'd666);
-`else
         // ---- Test E: LR.W fault -- must classify as cause 7, not 5 ----
         check("E: mcause == 7 (store/AMO access fault, NOT 5 -- LR is spec-classified as store/AMO)",
             dut.core0.regfile0.gp_registers[16], 64'd7);
@@ -342,7 +329,6 @@ module core_bus_fault_trap_tb;
         check("F: resumed cleanly", dut.core0.regfile0.gp_registers[7], 64'd666);
         check("F: S_AMO_WRITE never entered (read-phase fault must not chase a bogus write)",
             {63'b0, amo_write_entered}, 64'd0);
-`endif
 
         check("EBREAK trap fired", {63'b0, halted}, 64'd1);
 

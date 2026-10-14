@@ -36,9 +36,12 @@ module qv_decode_tb;
     uop_t      uop;
     logic      issue_ready = 1'b1;
     logic      flush = 1'b0;
+    logic [1:0] priv = 2'b11;         // the privilege state the illegal-instruction rules read
+    logic       tsr = 1'b0, tvm = 1'b0;
 
     qv_decode dut (
         .clk(clk), .rst(rst), .i_flush(flush),
+        .i_priv(priv), .i_tsr(tsr), .i_tvm(tvm),
         .i_iq_valid(iq_valid), .i_iq_data(iq_data), .o_iq_pop(iq_pop),
         .o_valid(valid), .o_uop(uop), .i_issue_ready(issue_ready)
     );
@@ -195,6 +198,28 @@ module qv_decode_tb;
         check({name, ": no fault"}, {63'b0, uop.xcpt}, 64'd0);
     endtask
 
+    // LR/SC/AMO: routed to the LSU, address rs1 alone, width from the encoding,
+    // sign-extending; rd written; rs2 a register for SC and the AMOs (LR has
+    // rs2 = x0). is_word marks the .W forms.
+    task automatic expect_atomic(input string name, input logic [4:0] funct5, input logic word,
+                                 input qv_amo_op_e exp_op, input logic exp_rs2_used);
+        feed(encode_amo(funct5, 1'b0, 1'b0, exp_rs2_used ? 5'd8 : 5'd0, 5'd7, word ? `FUNCT3_AMO_W : `FUNCT3_AMO_D, 5'd5, `OPC_AMO));
+        check({name, ": valid"}, {63'b0, valid}, 64'd1);
+        check({name, ": fu"}, {61'b0, uop.fu}, {61'b0, QV_FU_LSU});
+        check({name, ": is_atomic"}, {63'b0, uop.is_atomic}, 64'd1);
+        check({name, ": amo_op"}, {60'b0, uop.amo_op}, {60'b0, exp_op});
+        check({name, ": size"}, {62'b0, uop.mem_size}, word ? 64'd2 : 64'd3);
+        check({name, ": is_word"}, {63'b0, uop.is_word}, {63'b0, word});
+        check({name, ": not a plain load or store"}, {62'b0, uop.is_load, uop.is_store}, 64'd0);
+        check({name, ": rd"}, {59'b0, uop.rd}, 64'd5);
+        check({name, ": rd_wen"}, {63'b0, uop.rd_wen}, 64'd1);
+        check({name, ": rs1"}, {59'b0, uop.rs1}, 64'd7);
+        check({name, ": rs1_used"}, {63'b0, uop.rs1_used}, 64'd1);
+        check({name, ": rs2_used"}, {63'b0, uop.rs2_used}, {63'b0, exp_rs2_used});
+        check({name, ": no serialize"}, {63'b0, uop.serialize}, 64'd0);
+        check({name, ": no fault"}, {63'b0, uop.xcpt}, 64'd0);
+    endtask
+
     task automatic expect_fault(input string name, input logic [31:0] instr,
                                 input logic xcpt_in, input logic [3:0] cause_in, input logic [3:0] exp_cause);
         feed(instr, xcpt_in, cause_in);
@@ -207,6 +232,7 @@ module qv_decode_tb;
     localparam logic [6:0] OP = `OPC_OP, OPI = `OPC_OP_IMM, OP32 = `OPC_OP_32, OPI32 = `OPC_OP_IMM_32;
     localparam logic [6:0] F7_0 = 7'b0000000, F7_1 = 7'b0100000, F7_M = 7'b0000001;
 
+    logic [11:0] csr_probe [0:9] = '{12'h340, 12'h300, 12'h305, 12'h100, 12'h140, 12'h180, 12'hC00, 12'hC02, 12'h240, 12'hF14};
     logic [63:0]  a, b;
     logic [127:0] prod;
     int imm;
@@ -349,6 +375,38 @@ module qv_decode_tb;
         feed(encode_r(F7_M, 8, 7, 3'b100, 5, OP), 1'b1, 4'd1);
         check("faulted DIV: routed to the ALU", {61'b0, uop.fu}, {61'b0, QV_FU_ALU});
         check("faulted DIV: no rd write", {63'b0, uop.rd_wen}, 64'd0);
+
+        // ---------------- LR / SC / AMO -> LSU ----------------
+        for (int w = 0; w < 2; w++) begin
+            expect_atomic($sformatf("LR.%s", w ? "W" : "D"),      `FUNCT5_LR,      w[0], QV_AMO_LR,   1'b0);
+            expect_atomic($sformatf("SC.%s", w ? "W" : "D"),      `FUNCT5_SC,      w[0], QV_AMO_SC,   1'b1);
+            expect_atomic($sformatf("AMOSWAP.%s", w ? "W" : "D"), `FUNCT5_AMOSWAP, w[0], QV_AMO_SWAP, 1'b1);
+            expect_atomic($sformatf("AMOADD.%s", w ? "W" : "D"),  `FUNCT5_AMOADD,  w[0], QV_AMO_ADD,  1'b1);
+            expect_atomic($sformatf("AMOXOR.%s", w ? "W" : "D"),  `FUNCT5_AMOXOR,  w[0], QV_AMO_XOR,  1'b1);
+            expect_atomic($sformatf("AMOAND.%s", w ? "W" : "D"),  `FUNCT5_AMOAND,  w[0], QV_AMO_AND,  1'b1);
+            expect_atomic($sformatf("AMOOR.%s", w ? "W" : "D"),   `FUNCT5_AMOOR,   w[0], QV_AMO_OR,   1'b1);
+            expect_atomic($sformatf("AMOMIN.%s", w ? "W" : "D"),  `FUNCT5_AMOMIN,  w[0], QV_AMO_MIN,  1'b1);
+            expect_atomic($sformatf("AMOMAX.%s", w ? "W" : "D"),  `FUNCT5_AMOMAX,  w[0], QV_AMO_MAX,  1'b1);
+            expect_atomic($sformatf("AMOMINU.%s", w ? "W" : "D"), `FUNCT5_AMOMINU, w[0], QV_AMO_MINU, 1'b1);
+            expect_atomic($sformatf("AMOMAXU.%s", w ? "W" : "D"), `FUNCT5_AMOMAXU, w[0], QV_AMO_MAXU, 1'b1);
+        end
+        // aq/rl don't change the decode
+        feed(encode_amo(`FUNCT5_AMOADD, 1'b1, 1'b1, 5'd8, 5'd7, `FUNCT3_AMO_D, 5'd5, `OPC_AMO));
+        check("AMOADD.aqrl: still AMOADD", {60'b0, uop.amo_op}, {60'b0, QV_AMO_ADD});
+        check("AMOADD.aqrl: still an atomic on the LSU", {61'b0, uop.fu}, {61'b0, QV_FU_LSU});
+        // rd = x0 still goes to the LSU (the access happens), it just writes nothing
+        feed(encode_amo(`FUNCT5_AMOSWAP, 1'b0, 1'b0, 5'd8, 5'd7, `FUNCT3_AMO_W, 5'd0, `OPC_AMO));
+        check("AMOSWAP rd=x0: LSU", {61'b0, uop.fu}, {61'b0, QV_FU_LSU});
+        check("AMOSWAP rd=x0: rd 0", {59'b0, uop.rd}, 64'd0);
+        // plain loads and stores are not atomics
+        feed(encode_i(8, 7, 3'b011, 5, `OPC_LOAD));
+        check("LD: not atomic", {63'b0, uop.is_atomic}, 64'd0);
+        feed(encode_s(8, 6, 7, 3'b011, `OPC_STORE));
+        check("SD: not atomic", {63'b0, uop.is_atomic}, 64'd0);
+        // a fetch fault on an atomic encoding faults, and is not an atomic
+        feed(encode_amo(`FUNCT5_AMOADD, 1'b0, 1'b0, 5'd8, 5'd7, `FUNCT3_AMO_D, 5'd5, `OPC_AMO), 1'b1, 4'd1);
+        check("faulted AMO: routed to the ALU", {61'b0, uop.fu}, {61'b0, QV_FU_ALU});
+        check("faulted AMO: not an atomic", {63'b0, uop.is_atomic}, 64'd0);
 
         // ---------------- branches, JAL, JALR -> BRU ----------------
         // B offsets at both ends of their range; branches never write rd
@@ -555,8 +613,65 @@ module qv_decode_tb;
         feed(encode_b(8, 1, 2, 3'b000, `OPC_BRANCH));
         check("unpredicted BEQ: pred_taken", {63'b0, uop.pred_taken}, 64'd0);
 
+        // ---------------- privilege: what is illegal where ----------------
+        // CSR access above the current privilege (addr[9:8] > priv), through
+        // csrrs rd, csr, x0 so the write-suppress rules stay out of it
+        for (int pv = 0; pv < 4; pv++) begin
+            priv = 2'(pv);
+            foreach (csr_probe[i]) begin
+                feed(encode_csr(csr_probe[i], 5'd0, `FUNCT3_CSRRS, 5'd5, `OPC_SYSTEM));
+                check($sformatf("csr %h at priv %0d: illegal iff addr[9:8] > priv", csr_probe[i], pv),
+                      {63'b0, uop.xcpt}, {63'b0, csr_probe[i][9:8] > 2'(pv)});
+                if (uop.xcpt) check($sformatf("csr %h at priv %0d: cause 2", csr_probe[i], pv), {60'b0, uop.xcpt_cause}, 64'd2);
+            end
+        end
+        // MRET only in M; SRET not in U, nor in S under TSR; WFI and SFENCE.VMA (bar TVM) anywhere
+        for (int pv = 0; pv < 4; pv++)
+            for (int ts = 0; ts < 2; ts++)
+                for (int tv = 0; tv < 2; tv++) begin
+                    priv = 2'(pv); tsr = ts[0]; tvm = tv[0];
+                    feed(`INSTR_HEX_MRET);
+                    check($sformatf("mret at priv %0d: illegal iff not M", pv), {63'b0, uop.xcpt}, {63'b0, pv != 3});
+                    feed(`INSTR_HEX_SRET);
+                    check($sformatf("sret at priv %0d tsr %0d: illegal iff U, or S with TSR", pv, ts), {63'b0, uop.xcpt},
+                          {63'b0, pv == 0 || (pv == 1 && ts == 1)});
+                    feed(`INSTR_HEX_WFI);
+                    check($sformatf("wfi at priv %0d: never illegal", pv), {63'b0, uop.xcpt}, 64'd0);
+                    feed(encode_r(`FUNCT7_SFENCE_VMA, 5'd8, 5'd7, 3'b000, 5'd0, `OPC_SYSTEM));
+                    check($sformatf("sfence.vma at priv %0d tvm %0d: illegal iff S with TVM", pv, tv), {63'b0, uop.xcpt},
+                          {63'b0, pv == 1 && tv == 1});
+                    feed(encode_csr(12'h180, 5'd0, `FUNCT3_CSRRS, 5'd5, `OPC_SYSTEM));      // satp
+                    check($sformatf("satp at priv %0d tvm %0d", pv, tv), {63'b0, uop.xcpt},
+                          {63'b0, pv == 0 || (pv == 1 && tv == 1)});
+                    feed(encode_csr(12'h100, 5'd0, `FUNCT3_CSRRS, 5'd5, `OPC_SYSTEM));      // sstatus: TVM doesn't touch it
+                    check($sformatf("sstatus at priv %0d tvm %0d", pv, tv), {63'b0, uop.xcpt}, {63'b0, pv == 0});
+                end
+        // a legal SRET / SFENCE.VMA decodes to the system unit
+        priv = 2'b01; tsr = 1'b0; tvm = 1'b0;
+        feed(`INSTR_HEX_SRET);
+        check("sret: fu", {61'b0, uop.fu}, {61'b0, QV_FU_SYS});
+        check("sret: op", {61'b0, uop.sys_op}, {61'b0, QV_SYS_SRET});
+        check("sret: no rd", {63'b0, uop.rd_wen}, 64'd0);
+        check("sret: no serialize needed (it redirects)", {63'b0, uop.serialize}, 64'd0);
+        priv = 2'b00;
+        feed(encode_r(`FUNCT7_SFENCE_VMA, 5'd8, 5'd7, 3'b000, 5'd0, `OPC_SYSTEM));
+        check("sfence.vma (legal from U): fu", {61'b0, uop.fu}, {61'b0, QV_FU_SYS});
+        check("sfence.vma: op", {61'b0, uop.sys_op}, {61'b0, QV_SYS_SFENCE_VMA});
+        check("sfence.vma: no rd", {63'b0, uop.rd_wen}, 64'd0);
+        check("sfence.vma: serializes", {63'b0, uop.serialize}, 64'd1);
+        check("sfence.vma: rs1 used", {63'b0, uop.rs1_used}, 64'd1);
+        check("sfence.vma: rs2 used", {63'b0, uop.rs2_used}, 64'd1);
+        // a non-privileged instruction is unaffected at any privilege
+        for (int pv = 0; pv < 4; pv++) begin
+            priv = 2'(pv);
+            feed(encode_r(F7_0, 8, 7, 3'b000, 5, OP));
+            check($sformatf("add at priv %0d", pv), {63'b0, uop.xcpt}, 64'd0);
+            feed(encode_i(8, 7, 3'b011, 5, `OPC_LOAD));
+            check($sformatf("ld at priv %0d", pv), {63'b0, uop.xcpt}, 64'd0);
+        end
+        priv = 2'b11; tsr = 1'b0; tvm = 1'b0;
+
         // ---------------- not implemented / faults ----------------
-        expect_fault("SRET (not built yet)",  `INSTR_HEX_SRET, 1'b0, 4'd0, 4'd2);
         expect_fault("all-zero (illegal)",    32'h0000_0000, 1'b0, 4'd0, 4'd2);
         expect_fault("fetch fault on a valid instr", encode_r(F7_0, 8, 7, 3'b000, 5, OP), 1'b1, 4'd1, 4'd1);
         expect_fault("fetch fault beats illegal", 32'h0000_0000, 1'b1, 4'd1, 4'd1);

@@ -1,0 +1,28 @@
+{
+ "dut": "design/pipe/qv_decode.sv",
+ "tb": "design/pipe/qv_decode_tb.sv",
+ "files": ["design/decoder.sv", "design/c_expand.sv", "design/alu.sv", "design/pipe/qv_pkg.sv", "design/pipe/qv_decode.sv"],
+ "flags": ["-g2012", "-I", ".", "-I", "defaults", "-I", "../testbench"],
+ "cwd": "design",
+ "timeout": 600,
+ "mutants": [
+  {"name": "CSR privilege check is >= instead of >", "old": "wire csr_priv_violation  = is_csr && (csr_addr[9:8] > i_priv);", "new": "wire csr_priv_violation  = is_csr && (csr_addr[9:8] >= i_priv);"},
+  {"name": "CSR privilege looks at addr[8] only", "old": "(csr_addr[9:8] > i_priv)", "new": "({1'b0, csr_addr[8]} > i_priv)"},
+  {"name": "CSR privilege check missing", "old": "wire csr_priv_violation  = is_csr && (csr_addr[9:8] > i_priv);", "new": "wire csr_priv_violation  = 1'b0;"},
+  {"name": "MRET legal from S", "old": "wire mret_priv_violation = is_mret_op && (i_priv != QV_PRIV_M);", "new": "wire mret_priv_violation = is_mret_op && (i_priv == QV_PRIV_U);"},
+  {"name": "MRET always legal", "old": "wire mret_priv_violation = is_mret_op && (i_priv != QV_PRIV_M);", "new": "wire mret_priv_violation = 1'b0;"},
+  {"name": "SRET ignores TSR", "old": "((i_priv == QV_PRIV_U) || (i_priv == QV_PRIV_S && i_tsr))", "new": "((i_priv == QV_PRIV_U))"},
+  {"name": "SRET legal from U", "old": "((i_priv == QV_PRIV_U) || (i_priv == QV_PRIV_S && i_tsr))", "new": "((i_priv == QV_PRIV_S && i_tsr))"},
+  {"name": "SRET illegal from M", "old": "((i_priv == QV_PRIV_U) || (i_priv == QV_PRIV_S && i_tsr))", "new": "((i_priv != QV_PRIV_S) || (i_priv == QV_PRIV_S && i_tsr))"},
+  {"name": "TVM applies from every privilege below M", "old": "wire tvm_violation       = i_tvm && (i_priv == QV_PRIV_S) &&", "new": "wire tvm_violation       = i_tvm && (i_priv != QV_PRIV_M) &&"},
+  {"name": "TVM does not cover SFENCE.VMA", "old": "((is_csr && csr_addr == 12'h180) || is_sfence);", "new": "((is_csr && csr_addr == 12'h180));"},
+  {"name": "TVM does not cover satp", "old": "((is_csr && csr_addr == 12'h180) || is_sfence);", "new": "(is_sfence);"},
+  {"name": "TVM checks the wrong CSR address", "old": "csr_addr == 12'h180) || is_sfence);", "new": "csr_addr == 12'h181) || is_sfence);"},
+  {"name": "TVM ignored", "old": "wire tvm_violation       = i_tvm && (i_priv == QV_PRIV_S) &&", "new": "wire tvm_violation       = 1'b0 && (i_priv == QV_PRIV_S) &&"},
+  {"name": "SFENCE.VMA illegal from U", "old": "wire priv_illegal = csr_priv_violation || mret_priv_violation || sret_priv_violation || tvm_violation;", "new": "wire priv_illegal = csr_priv_violation || mret_priv_violation || sret_priv_violation || tvm_violation || (is_sfence && i_priv == QV_PRIV_U);"},
+  {"name": "WFI illegal from U", "old": "wire priv_illegal = csr_priv_violation || mret_priv_violation || sret_priv_violation || tvm_violation;", "new": "wire priv_illegal = csr_priv_violation || mret_priv_violation || sret_priv_violation || tvm_violation || ((sys_op == QV_SYS_WFI) && i_priv == QV_PRIV_U);"},
+  {"name": "SFENCE.VMA does not serialize", "old": "uop_d.serialize = is_csr || (sys_op == QV_SYS_FENCE_I) || is_sfence;", "new": "uop_d.serialize = is_csr || (sys_op == QV_SYS_FENCE_I);"},
+  {"name": "SRET decoded as MRET", "old": "`INSTR_CODE(SRET):   sys_op = QV_SYS_SRET;", "new": "`INSTR_CODE(SRET):   sys_op = QV_SYS_MRET;"},
+  {"name": "privilege rules left out of the fault", "old": "csr_illegal || priv_illegal) begin", "new": "csr_illegal) begin"}
+ ]
+}

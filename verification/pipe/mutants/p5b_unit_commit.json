@@ -1,0 +1,22 @@
+{
+ "dut": "design/pipe/qv_commit.sv",
+ "tb": "design/pipe/qv_commit_tb.sv",
+ "files": ["design/pipe/qv_pkg.sv", "design/pipe/qv_commit.sv"],
+ "flags": ["-g2012", "-I", ".", "-I", "defaults", "-I", "../testbench"],
+ "cwd": "design",
+ "timeout": 600,
+ "mutants": [
+  {"name": "a faulting LR still sets the reservation", "old": "end else if (commit && i_head_ctrl.is_lr && !is_trap) begin", "new": "end else if (commit && i_head_ctrl.is_lr) begin"},
+  {"name": "store-class ops never clear it", "old": "end else if (commit && i_head_ctrl.is_store_class) begin", "new": "end else if (1'b0) begin"},
+  {"name": "a faulting store-class op does not clear it", "old": "end else if (commit && i_head_ctrl.is_store_class) begin", "new": "end else if (commit && i_head_ctrl.is_store_class && !is_trap) begin"},
+  {"name": "the address is the aligned RVFI address", "old": "res_addr_q  <= i_lsu_res.vaddr;", "new": "res_addr_q  <= i_lsu_res.mem_addr;"},
+  {"name": "any trap clears it", "old": "end else if (commit && i_head_ctrl.is_store_class) begin", "new": "end else if (commit && (i_head_ctrl.is_store_class || is_trap)) begin"},
+  {"name": "mret clears it", "old": "end else if (commit && i_head_ctrl.is_store_class) begin", "new": "end else if (commit && (i_head_ctrl.is_store_class || is_mret)) begin"},
+  {"name": "an incomplete store-class head clears it", "old": "end else if (commit && i_head_ctrl.is_store_class) begin", "new": "end else if (i_head_valid && i_head_ctrl.is_store_class) begin"},
+  {"name": "an incomplete LR sets it", "old": "end else if (commit && i_head_ctrl.is_lr && !is_trap) begin", "new": "end else if (i_head_valid && i_head_ctrl.is_lr && !is_trap) begin"},
+  {"name": "a load clears it", "old": "end else if (commit && i_head_ctrl.is_store_class) begin", "new": "end else if (commit && (i_head_ctrl.is_store_class || is_lsu)) begin"},
+  {"name": "reservation address not updated by a second LR", "old": "res_valid_q <= 1'b1;\n            res_addr_q  <= i_lsu_res.vaddr;", "new": "res_valid_q <= 1'b1;\n            if (!res_valid_q) res_addr_q  <= i_lsu_res.vaddr;"},
+  {"name": "valid output stuck high", "old": "assign o_res_valid = res_valid_q;", "new": "assign o_res_valid = 1'b1;"},
+  {"name": "reservation not reset", "old": "        if (rst) begin\n            res_valid_q <= 1'b0;\n        end else if (commit && i_head_ctrl.is_lr", "new": "        if (1'b0) begin\n            res_valid_q <= 1'b0;\n        end else if (commit && i_head_ctrl.is_lr"}
+ ]
+}

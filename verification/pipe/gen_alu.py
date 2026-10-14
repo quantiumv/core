@@ -61,10 +61,11 @@ branch whose operand is a load, so the divide is well under way when the
 branch resolves and has to be killed.
 
 Atomics: the nine AMOs (.W and .D, with random .aq/.rl), LR/SC pairs that
-succeed, that a store or a different address breaks, SCs with no LR, and
-the faulting forms -- misaligned and out-of-range (bus error) addresses,
-including an LR that faults followed by an SC to the same address. Each is
-a short group entered only at its first slot (an addi sets the address).
+succeed, that a store, an AMO, an SC or a different address breaks (and a
+second SC after a successful one), SCs with no LR, and the faulting forms --
+misaligned and out-of-range (bus error) addresses, including an LR that
+faults followed by an SC to the same address. Each is a short group entered
+only at its first slot (an addi sets the address).
 
 Usage: gen_alu.py --seed N --len L [--no-div] [--no-amo] -o prog.s
 Prints "<static instruction count> <upper bound on dynamic count> <upper
@@ -294,8 +295,9 @@ class Gen:
 
         self.recent += [ta]
         kind = rng.choices(
-            ["amo", "pair_ok", "pair_store", "pair_other", "sc_alone", "lr_only", "misaligned", "bus_error", "lr_fault_sc"],
-            [38, 16, 8, 6, 6, 5, 9, 7, 5])[0]
+            ["amo", "pair_ok", "pair_store", "pair_other", "sc_alone", "lr_only", "misaligned", "bus_error", "lr_fault_sc",
+             "pair_twice", "pair_amo", "pair_sc_other"],
+            [30, 14, 7, 5, 5, 4, 8, 6, 4, 6, 6, 5])[0]
         if kind == "amo":
             return [setaddr(ta, off), amo(ta)], 0
         if kind == "pair_ok":
@@ -304,6 +306,13 @@ class Gen:
         if kind == "pair_store":
             st = f"{'sw' if w else 'sd'} x{self.src()}, 0(x{ta})"
             return [setaddr(ta, off), lr(ta), st, sc(ta)], 0
+        if kind == "pair_twice":                      # the first SC uses the reservation up
+            return [setaddr(ta, off), lr(ta), sc(ta), sc(ta)], 0
+        if kind == "pair_amo":                        # an AMO to the same address breaks it
+            return [setaddr(ta, off), lr(ta), amo(ta), sc(ta)], 0
+        if kind == "pair_sc_other":                   # an SC elsewhere fails, but still clears it
+            off2 = off + 8 if off + 8 <= 2040 else off - 8
+            return [setaddr(ta, off), setaddr(tb, off2), lr(ta), sc(tb), sc(ta)], 0
         if kind == "pair_other":
             off2 = off + 8 if off + 8 <= 2040 else off - 8
             return [setaddr(ta, off), setaddr(tb, off2), lr(ta), sc(tb)], 0
@@ -406,16 +415,16 @@ class Gen:
                 items.append(("jalr", self.dst(), base, odd, auipc, None))
                 i += 2 + odd
                 self.recent.append(base)
-            elif self.amo and r < 0.46 and i + 6 < n:
+            elif self.amo and r < 0.48 and i + 6 < n:
                 slots, traps = self.atomic()
                 forbidden.update(range(i + 1, i + len(slots)))
                 items += slots; i += len(slots)
                 self.seg_traps += traps
-            elif self.div and r < 0.48 and i + 4 < n:
+            elif self.div and r < 0.50 and i + 4 < n:
                 slots = self.edge_div()
                 forbidden.update(range(i + 1, i + len(slots)))
                 items += slots; i += len(slots)
-            elif self.div and r < 0.51 and i + 5 < n:
+            elif self.div and r < 0.53 and i + 5 < n:
                 slots, used = self.div_shadow(i)
                 forbidden.update(range(i + 1, i + used))
                 items += slots; i += used

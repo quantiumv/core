@@ -155,7 +155,12 @@ module core_debug_csr_violation_tb;
         @(posedge clk); #1;
         rst = 0;
 
+`ifdef QV_PIPE_AS_CORE
+        // every CSR access serializes the pipeline, so this takes longer on core_pipe
+        wait_halted_or_timeout(`TIMEOUT_CYCLES_LARGE, "EBREAK trap never fired");
+`else
         wait_halted_or_timeout(`TIMEOUT_CYCLES_SMALL, "EBREAK trap never fired");
+`endif
 
         check("x1 never written -- dcsr M-mode read trapped", dut.core0.regfile0.gp_registers[1], 64'd0);
         check("x2 never written -- dpc M-mode read trapped", dut.core0.regfile0.gp_registers[2], 64'd0);

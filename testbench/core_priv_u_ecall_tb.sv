@@ -147,13 +147,22 @@ module core_priv_u_ecall_tb;
      * {S_FETCH, S_EXEC, S_MEM} = {0, 1, 2}, hence the literal 2'd1 below
      * (matching core_priv_tb.sv/core_zicsr_tb.sv's own precedent).
      */
+`ifdef QV_PIPE_AS_CORE
+    // core_pipe has no state register: the monitors sample in the cycle the
+    // instruction retires, which is what "S_EXEC at this pc" means for the
+    // single-cycle instructions they watch
+    wire [1:0] exec_state = dut.core0.commit_now ? 2'd1 : 2'd0;
+`else
+    wire [1:0] exec_state = dut.core0.state;
+`endif
+
     localparam logic [63:0] PC_ECALL_U_MARKER  = 64'h24; // idx9
     localparam logic [63:0] PC_SFENCE_TRIGGER  = 64'h34; // idx13
 
     logic [1:0] priv_sampled_ecall_u;
     logic priv_sample_ecall_u_captured;
     pc_trigger_sample_monitor #(.WIDTH(2)) priv_monitor_ecall_u (
-        .clk(clk), .i_state(dut.core0.state), .i_state_target(2'd1),
+        .clk(clk), .i_state(exec_state), .i_state_target(2'd1),
         .i_pc(dut.core0.pc), .i_pc_target(PC_ECALL_U_MARKER), .i_sample(dut.core0.current_priv),
         .o_sampled(priv_sampled_ecall_u), .o_captured(priv_sample_ecall_u_captured)
     );
@@ -161,12 +170,12 @@ module core_priv_u_ecall_tb;
     logic [4:0] rs1_sel_sampled_sfence, rs2_sel_sampled_sfence;
     logic rs1_sel_sample_sfence_captured, rs2_sel_sample_sfence_captured;
     pc_trigger_sample_monitor #(.WIDTH(5)) rs1_sel_monitor_sfence (
-        .clk(clk), .i_state(dut.core0.state), .i_state_target(2'd1),
+        .clk(clk), .i_state(exec_state), .i_state_target(2'd1),
         .i_pc(dut.core0.pc), .i_pc_target(PC_SFENCE_TRIGGER), .i_sample(dut.core0.read_gpr_A_sel),
         .o_sampled(rs1_sel_sampled_sfence), .o_captured(rs1_sel_sample_sfence_captured)
     );
     pc_trigger_sample_monitor #(.WIDTH(5)) rs2_sel_monitor_sfence (
-        .clk(clk), .i_state(dut.core0.state), .i_state_target(2'd1),
+        .clk(clk), .i_state(exec_state), .i_state_target(2'd1),
         .i_pc(dut.core0.pc), .i_pc_target(PC_SFENCE_TRIGGER), .i_sample(dut.core0.read_gpr_B_sel),
         .o_sampled(rs2_sel_sampled_sfence), .o_captured(rs2_sel_sample_sfence_captured)
     );

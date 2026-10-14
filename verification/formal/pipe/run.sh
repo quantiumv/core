@@ -6,7 +6,10 @@
 #   PASS (cover: every non-vacuity cover point reached).
 #   --mutants: each property set must also catch known-bad versions, each
 #   FAILing a BMC: the pre-fix qv_fetch whose 1-bit epoch let a stale
-#   response through (ade0d1c^), and hand-made mutants of both units.
+#   response through (ade0d1c^), and hand-made mutants of both units
+#   (for the LSU also the A extension's: an SC that ignores its
+#   reservation, a gap or a stray lock, a write after a faulting or
+#   flushed read, an AMO that never writes).
 set -u
 cd "$(dirname "$0")" || exit 1
 HERE=$(pwd)
@@ -67,10 +70,16 @@ EOF
     mutant fetch_no_stale      fetch 's/wire resp_ok  = resp \&\& !req_stale_q \&\& !i_redirect_valid;/wire resp_ok  = resp \&\& !i_redirect_valid;/'
     mutant fetch_ignores_hold  fetch 's/ \&\& !i_hold;/;/'
     mutant fetch_abandons      fetch 's/assign wb_fetch_cyc_o  = req_valid_q \&\& !(wb_fetch_ack_i || wb_fetch_err_i);/assign wb_fetch_cyc_o  = req_valid_q \&\& !(wb_fetch_ack_i || wb_fetch_err_i) \&\& !i_redirect_valid;/'
-    mutant lsu_ignores_head    lsu 's/wire at_head = (state_q == S_WAIT_HEAD) \&\& i_head_valid \&\& (i_head_tag == tag_q) \&\& !i_flush;/wire at_head = (state_q == S_WAIT_HEAD) \&\& !i_flush;/'
-    mutant lsu_misaligned_bus  lsu 's/wire start   = at_head \&\& !misaligned_q;/wire start   = at_head;/'
-    mutant lsu_reissues        lsu 's/S_BUS:   if (resp) state_q <= S_IDLE;/S_BUS:   if (resp) state_q <= S_WAIT_HEAD;/'
+    mutant lsu_ignores_head    lsu 's/wire at_head  = (state_q == S_WAIT_HEAD) \&\& i_head_valid \&\& (i_head_tag == tag_q) \&\& !i_flush;/wire at_head  = (state_q == S_WAIT_HEAD) \&\& !i_flush;/'
+    mutant lsu_misaligned_bus  lsu 's/wire start    = at_head \&\& !misaligned_q \&\& !sc_fail;/wire start    = at_head \&\& !sc_fail;/'
+    mutant lsu_reissues        lsu 's/^                        state_q <= S_IDLE;/                        state_q <= S_WAIT_HEAD;/'
     mutant lsu_abandons        lsu 's/assign wb_mem_cyc_o  = (start || in_bus) \&\& !resp;/assign wb_mem_cyc_o  = (start || in_bus) \&\& !resp \&\& !i_flush;/'
+    mutant lsu_sc_no_reservation lsu 's/wire sc_fail  = sc_q \&\& !(i_res_valid \&\& i_res_addr == addr_q);/wire sc_fail  = 1'"'"'b0;/'
+    mutant lsu_lock_gap        lsu 's/assign wb_mem_lock_o = amo_q \&\& (start || in_bus);/assign wb_mem_lock_o = amo_q \&\& (start || in_bus) \&\& !(state_q == S_BUS \&\& wb_mem_ack_i);/'
+    mutant lsu_lock_for_all    lsu 's/assign wb_mem_lock_o = amo_q \&\& (start || in_bus);/assign wb_mem_lock_o = (start || in_bus);/'
+    mutant lsu_write_after_err lsu 's/wb_mem_ack_i \&\& !wb_mem_err_i \&\& !i_flush;/wb_mem_ack_i \&\& !i_flush;/'
+    mutant lsu_write_after_flush lsu 's/wb_mem_ack_i \&\& !wb_mem_err_i \&\& !i_flush;/wb_mem_ack_i \&\& !wb_mem_err_i;/'
+    mutant lsu_amo_never_writes lsu 's/wire amo_read_ack = (state_q == S_BUS) \&\& amo_q \&\& !phase_wr_q \&\& wb_mem_ack_i \&\& !wb_mem_err_i \&\& !i_flush;/wire amo_read_ack = 1'"'"'b0;/'
     rm -rf "$T"
 fi
 
