@@ -27,7 +27,9 @@
     20
    ],
    "unit_only": {
-    "19": "a PMP denial and a bus error look the same to the retirement stream (cause 5/7, tval, no rd write); only the bus transaction differs"
+    "19": "a PMP denial and a bus error look the same to the retirement stream (cause 5/7, tval, no rd write); only the bus transaction differs",
+    "7": "a naturally aligned data access cannot straddle the edge of a NAPOT block (16 bytes or more, aligned to its size); the unit testbench checks the spans",
+    "8": "a naturally aligned data access cannot straddle the edge of a NAPOT block (16 bytes or more, aligned to its size); the unit testbench checks the spans"
    }
   },
   {

@@ -323,6 +323,8 @@ def _sandbox_addr(p: Program, reg: int, misaligned=False, width=8):
         addr = p.rng.choice([lo, hi]) + p.rng.randrange(-12, 13)
         addr = min(max(addr, SANDBOX_BASE), SANDBOX_BASE + SANDBOX_SIZE - 64)
         addr &= ~(width - 1)
+        if p.rng.random() < 0.4:
+            addr |= 4               # half a dword in: an NA4 word there is hit by a word access, not a dword one
         if misaligned and width > 1:
             addr += 1
         p.li(reg, addr)
