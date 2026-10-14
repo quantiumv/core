@@ -8,7 +8,10 @@
 # (that needs memory and CSRs). Run from WSL, any cwd.
 #
 #   run_rvfi_diff.sh [--seeds N] [--first S] [--len L]
-#                    [--serialize 0|1] [--bypass 0|1]
+#                    [--serialize 0|1] [--bypass 0|1] [--no-div] [--pipe-dir DIR]
+#
+# --pipe-dir builds core_pipe from a copy of design/pipe/ (for mutants);
+# --outdir keeps concurrent runs apart.
 #
 # Prints one PASS/FAIL line per seed, then RVFI_DIFF_SUMMARY. Logs for
 # failing seeds stay in verification/pipe/.results/.
@@ -16,9 +19,13 @@ set -u
 cd "$(dirname "$0")/../.."
 REPO=$(pwd)
 
-SEEDS=20; FIRST=1; LEN=400; SER=0; BYP=1
+SEEDS=20; FIRST=1; LEN=400; SER=0; BYP=1; GEN_ARGS=""; PIPE_DIR="$REPO/design/pipe"
+OUT="$REPO/verification/pipe/.results"
 while [ $# -gt 0 ]; do
     case "$1" in
+        --no-div)    GEN_ARGS="$GEN_ARGS --no-div"; shift ;;
+        --pipe-dir)  PIPE_DIR=$(cd "$2" && pwd); shift 2 ;;
+        --outdir)    OUT=$2; shift 2 ;;
         --seeds)     SEEDS=$2; shift 2 ;;
         --first)     FIRST=$2; shift 2 ;;
         --len)       LEN=$2; shift 2 ;;
@@ -32,7 +39,6 @@ case "$SER$BYP" in
     *) echo "--serialize and --bypass take 0 or 1" >&2; exit 2 ;;
 esac
 
-OUT="$REPO/verification/pipe/.results"
 mkdir -p "$OUT"
 TAG="s${SER}b${BYP}"
 REF_VVP="$OUT/ref.vvp"
@@ -40,9 +46,11 @@ DUT_VVP="$OUT/pipe_$TAG.vvp"
 
 REF_FILES="decoder.sv alu.sv c_expand.sv core.sv csr_file.sv divider.sv register_file.sv wb4_sram.sv wb_arbiter2.sv"
 # core_pipe's own files come from the shared list (so a new module is added
-# in one place); paths there are repo-relative, the build runs from design/
+# in one place); absolute paths, since the build runs from design/
 PIPE_FILES="$(grep -E '^design/(pipe/|decoder\.sv|alu\.sv|c_expand\.sv|csr_file\.sv|register_file\.sv|divider\.sv)' \
-                  verification/regress/pipe_design_files.list | sed 's#^design/##' | tr '\n' ' ') wb4_sram.sv wb_arbiter2.sv"
+                  verification/regress/pipe_design_files.list \
+                  | sed -e "s#^design/pipe/#$PIPE_DIR/#" -e "s#^design/#$REPO/design/#" | tr '\n' ' ') \
+            $REPO/design/wb4_sram.sv $REPO/design/wb_arbiter2.sv"
 
 build() {
     local out=$1; shift
@@ -59,7 +67,7 @@ build "$DUT_VVP" -DQV_PIPE_AS_CORE -DQV_PIPE_SERIALIZE=$SER -DQV_PIPE_BYPASS_EN=
 pass=0; fail=0
 for ((s = FIRST; s < FIRST + SEEDS; s++)); do
     base="$OUT/alu_$s"
-    read -r n dyn < <(python3 verification/pipe/gen_alu.py --seed "$s" --len "$LEN" -o "$base.s") || exit 1
+    read -r n dyn divs < <(python3 verification/pipe/gen_alu.py --seed "$s" --len "$LEN" $GEN_ARGS -o "$base.s") || exit 1
     riscv64-unknown-elf-as -march=rv64imc_zicsr_zifencei -mabi=lp64 -mno-relax "$base.s" -o "$base.o" &&
     riscv64-unknown-elf-ld -T verification/lockstep/gen/link.ld -o "$base.elf" "$base.o" &&
     riscv64-unknown-elf-objcopy -O verilog -j .text.entry -j .text.handlers -j .data.sandbox \
@@ -67,9 +75,9 @@ for ((s = FIRST; s < FIRST + SEEDS; s++)); do
 
     # 0x80000 is never written, so the tracer runs to its cycle limit.
     # Both cores average a few cycles per instruction (core_pipe more on
-    # taken branches); a limit that turns out too tight shows up as an
-    # "unfinished" FAIL, never a silent pass.
-    timeout=$((dyn * 12 + 1000))
+    # taken branches) plus ~70 per divide; a limit that turns out too tight
+    # shows up as an "unfinished" FAIL, never a silent pass.
+    timeout=$((dyn * 12 + divs * 90 + 1000))
     vvp -n "$REF_VVP" +HEXFILE="$base.hex" +TOHOST_ADDR=80000 +TIMEOUT=$timeout > "$base.ref.log" 2>&1
     vvp -n "$DUT_VVP" +HEXFILE="$base.hex" +TOHOST_ADDR=80000 +TIMEOUT=$timeout > "$base.$TAG.log" 2>&1
     end=$(riscv64-unknown-elf-nm "$base.elf" | awk '$3 == "end_of_test" {print $1}')

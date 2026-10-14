@@ -15,7 +15,7 @@
 # leaves (P3.3), or design/pipe/core_pipe.sv -- same env-var convention as
 # CONFIG_FILES/WORKDIR above. ACT_ONLY=<regex> runs only the ELFs whose
 # path matches; for CORE=pipe it defaults to the tests core_pipe can run
-# today (RV64I, the multiplies, Zca, Zicsr, M-mode exceptions). Results go
+# today (RV64I, M, Zca, Zicsr, M-mode exceptions). Results go
 # to act_results.log for fsm, act_results_<core>.log otherwise.
 set -u
 
@@ -52,10 +52,10 @@ case "$CORE" in
         ;;
     pipe)
         # core_pipe and the design/ leaves it reuses, in pipe_design_files.list order
-        mapfile -t CORE_FILES < <(grep -E '^design/(pipe/|decoder\.sv|alu\.sv|c_expand\.sv|csr_file\.sv|register_file\.sv)' \
+        mapfile -t CORE_FILES < <(grep -E '^design/(pipe/|decoder\.sv|alu\.sv|c_expand\.sv|csr_file\.sv|register_file\.sv|divider\.sv)' \
             "$REPO_ROOT/verification/regress/pipe_design_files.list" | sed "s#^#$REPO_ROOT/#")
         CORE_DEFINE=(-DQV_PIPE_AS_CORE)
-        [ -n "$ACT_ONLY" ] || ACT_ONLY='/I/|/Zca/|/Zicsr/|/M-mul|/ExceptionsZc/'
+        [ -n "$ACT_ONLY" ] || ACT_ONLY='/I/|/Zca/|/Zicsr/|/M/|/ExceptionsZc/'
         ;;
     *)
         echo "Unknown CORE: $CORE (expected fsm, ref or pipe)" >&2

@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """gen_alu.py -- seeded random RV64IM + Zicsr programs with control flow, memory and traps.
 
-Bring-up corpus for design/pipe/core_pipe.sv while it implements the
-single-cycle integer class (RV64I register/immediate ops including the
-*W forms, LUI, AUIPC, MUL/MULH/MULHSU/MULHU/MULW), conditional
+Bring-up corpus for design/pipe/core_pipe.sv: the integer class (RV64I
+register/immediate ops including the *W forms, LUI, AUIPC, MUL/MULH/
+MULHSU/MULHU/MULW, DIV/DIVU/REM/REMU and the W forms), conditional
 branches, JAL, JALR, loads, stores, FENCE, FENCE.I, Zicsr, M-mode traps and RVC.
-Assemble with -march=rv64imc_zicsr_zifencei.
+Assemble with -march=rv64imc_zicsr_zifencei. --no-div leaves the
+divides out (for a core without them).
 
 Everything runs in M-mode. A prologue points mtvec at a fixed handler
 (.text.handlers, 0x8000) that reads mcause/mtval and returns to
@@ -53,8 +54,15 @@ The program ends at the end_of_test symbol; core_pipe has no way to
 stop, so run_rvfi_diff.sh compares retirements up to the first one at
 that pc.
 
-Usage: gen_alu.py --seed N --len L -o prog.s
-Prints "<static instruction count> <upper bound on dynamic count>".
+Divides: random ones, plus two constructs aimed at what is hard about
+them -- operands at the spec's special cases (zero divisor, INT_MIN / -1 at
+64 and at 32 bits, 1), and a divide on the wrong path of an always-taken
+branch whose operand is a load, so the divide is well under way when the
+branch resolves and has to be killed.
+
+Usage: gen_alu.py --seed N --len L [--no-div] -o prog.s
+Prints "<static instruction count> <upper bound on dynamic count> <upper
+bound on dynamic divides>" (a divide takes ~70 cycles, the rest a few).
 """
 import argparse
 import random
@@ -62,6 +70,7 @@ import random
 R_OPS = ["add", "sub", "slt", "sltu", "xor", "or", "and", "sll", "srl", "sra",
          "addw", "subw", "sllw", "srlw", "sraw",
          "mul", "mulh", "mulhsu", "mulhu", "mulw"]
+DIV_OPS = ["div", "divu", "rem", "remu", "divw", "divuw", "remw", "remuw"]
 I_OPS = ["addi", "slti", "sltiu", "xori", "ori", "andi", "addiw"]
 SH_OPS = ["slli", "srli", "srai"]
 SHW_OPS = ["slliw", "srliw", "sraiw"]
@@ -138,9 +147,11 @@ def seed_reg(rng, r):
 
 
 class Gen:
-    def __init__(self, rng, dep_bias):
+    def __init__(self, rng, dep_bias, div=True):
         self.rng = rng
         self.dep_bias = dep_bias
+        self.div = div
+        self.seg_divs = 0
         self.recent = []
         self.nlabel = 0
 
@@ -202,6 +213,9 @@ class Gen:
         rng = self.rng
         cls = rng.random()
         if cls < 0.5:
+            if self.div and rng.random() < 0.12:
+                self.seg_divs += 1
+                return f"{rng.choice(DIV_OPS)} x{self.dst()}, x{self.src()}, x{self.src()}"
             return f"{rng.choice(R_OPS)} x{self.dst()}, x{self.src()}, x{self.src()}"
         if cls < 0.75:
             return f"{rng.choice(I_OPS)} x{self.dst()}, x{self.src()}, {imm12(rng)}"
@@ -244,6 +258,46 @@ class Gen:
             ("wfi", False),
         ])
 
+    def edge_div(self):
+        """A divide on operands at one of the spec's special cases. Entered
+        only at the first slot. Returns the slots."""
+        rng = self.rng
+        ta, tb = rng.sample(FREE_REGS, 2)
+        op = rng.choice(DIV_OPS)
+        rd = self.dst()
+        kind = rng.choice(["min_m1", "min32_m1", "by_zero", "by_one", "m1_by_m1", "small_neg"])
+        if kind == "min_m1":                 # INT64_MIN / -1
+            pre = [f"addi x{ta}, x0, 1", f"slli x{ta}, x{ta}, 63", f"addi x{tb}, x0, -1"]
+        elif kind == "min32_m1":             # INT32_MIN (as a W operand) / -1
+            pre = [f"lui x{ta}, 0x80000", f"addi x{tb}, x0, -1"]
+        elif kind == "by_zero":
+            pre = [f"addi x{ta}, x0, {imm12(rng)}", f"addi x{tb}, x0, 0"]
+        elif kind == "by_one":
+            pre = [f"addi x{ta}, x0, {imm12(rng)}", f"addi x{tb}, x0, 1"]
+        elif kind == "m1_by_m1":
+            pre = [f"addi x{ta}, x0, -1", f"addi x{tb}, x0, -1"]
+        else:                                # a small negative over a small positive: rounding toward zero
+            pre = [f"addi x{ta}, x0, {-rng.randint(1, 2047)}", f"addi x{tb}, x0, {rng.randint(1, 9)}"]
+        self.recent += [ta, tb]
+        self.seg_divs += 1
+        return pre + [f"{op} x{rd}, x{ta}, x{tb}"]
+
+    def div_shadow(self, i):
+        """A load, then an always-taken branch on it, then 1-2 divides it
+        skips. Items for slots i.., with the branch aimed past the divides;
+        returns (items, slots used)."""
+        rng = self.rng
+        t = rng.choice(FREE_REGS)
+        nd = rng.randint(1, 2)
+        off = rng.randint(-2048 // 8, 2047 // 8) * 8
+        items = [f"ld x{t}, {off}(x27)",
+                 ("br", "beq", t, t, i + 2 + nd)]
+        for _ in range(nd):
+            items.append(f"{rng.choice(DIV_OPS)} x{self.dst()}, x{self.src()}, x{self.src()}")
+        self.recent.append(t)
+        self.seg_divs += nd
+        return items, 2 + nd
+
     def branch_srcs(self):
         a = self.src()
         b = a if self.rng.random() < 0.2 else self.src()   # equal operands: BEQ/BGE/BGEU taken
@@ -256,6 +310,7 @@ class Gen:
         rng = self.rng
         items, forbidden = [], set()
         self.seg_traps = 0
+        self.seg_divs = 0
         i = 0
         while i < n:
             r = rng.random()
@@ -288,12 +343,22 @@ class Gen:
                 items.append(("jalr", self.dst(), base, odd, auipc, None))
                 i += 2 + odd
                 self.recent.append(base)
+            elif self.div and r < 0.48 and i + 4 < n:
+                slots = self.edge_div()
+                forbidden.update(range(i + 1, i + len(slots)))
+                items += slots; i += len(slots)
+            elif self.div and r < 0.51 and i + 5 < n:
+                slots, used = self.div_shadow(i)
+                forbidden.update(range(i + 1, i + used))
+                items += slots; i += used
             else:
                 items.append(self.alu()); i += 1
         # resolve targets now that every slot exists
         out = []
         for slot, it in enumerate(items):
-            if isinstance(it, tuple) and it[0] in ("br", "jal", "jalr"):
+            if isinstance(it, tuple) and it[0] in ("br", "jal", "jalr") and it[-1] is not None:
+                pass                          # target fixed by the construct that emitted it
+            elif isinstance(it, tuple) and it[0] in ("br", "jal", "jalr"):
                 cands = [t for t in range(slot + 1, min(slot + 8, n) + 1) if t not in forbidden]
                 t = rng.choice(cands) if cands else n
                 it = it[:-1] + (t,)
@@ -333,10 +398,11 @@ def main():
     ap.add_argument("--seed", type=int, required=True)
     ap.add_argument("--len", type=int, default=400, help="approximate body length")
     ap.add_argument("--dep-bias", type=float, default=0.6)
+    ap.add_argument("--no-div", action="store_true", help="no DIV/DIVU/REM/REMU (or W forms)")
     ap.add_argument("-o", "--out", required=True)
     a = ap.parse_args()
     rng = random.Random(a.seed)
-    g = Gen(rng, a.dep_bias)
+    g = Gen(rng, a.dep_bias, div=not a.no_div)
 
     lines = [(0, "lui x30, 8"), (1, "csrw mtvec, x30")]     # (slot, text); handler at 0x8000
     for r in range(1, 32):
@@ -348,6 +414,7 @@ def main():
             lines.append((len(lines), f"addi x{r}, x{r}, {(v & 0xFFF) - ((v & 0x800) << 1)}"))
     labels = {}
     dyn = len(lines)
+    ndiv = 0
     body_start = len(lines)
 
     while len(lines) - body_start < a.len:
@@ -363,11 +430,13 @@ def main():
             lines.append((base + 1 + body_n, f"addi x{LOOP_REG}, x{LOOP_REG}, -1"))
             lines.append((base + 2 + body_n, f"bne x{LOOP_REG}, x0, L{base + 1}"))
             dyn += 1 + k * (body_n + 2 + g.seg_traps * len(HANDLER))
+            ndiv += k * g.seg_divs
         else:
             n = rng.randint(4, 16)
             seg = g.segment(n)
             lines += render(seg, base, labels)
             dyn += n + g.seg_traps * len(HANDLER)
+            ndiv += g.seg_divs
 
     count = len(lines)
     if 4 * count > 0x8000:
@@ -389,7 +458,7 @@ def main():
         f.write(".section .data.sandbox\n")
         for _ in range(512):
             f.write(f"    .dword {rng.getrandbits(64):#018x}\n")
-    print(count, dyn)
+    print(count, dyn, ndiv)
 
 
 if __name__ == "__main__":
