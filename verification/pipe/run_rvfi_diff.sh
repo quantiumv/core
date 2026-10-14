@@ -39,9 +39,10 @@ REF_VVP="$OUT/ref.vvp"
 DUT_VVP="$OUT/pipe_$TAG.vvp"
 
 REF_FILES="decoder.sv alu.sv c_expand.sv core.sv csr_file.sv divider.sv register_file.sv wb4_sram.sv wb_arbiter2.sv"
-PIPE_FILES="decoder.sv c_expand.sv pipe/qv_pkg.sv pipe/qv_fetch.sv pipe/qv_align.sv pipe/qv_fifo.sv pipe/qv_decode.sv
-            pipe/qv_issue.sv pipe/qv_rob.sv pipe/qv_exu_alu.sv pipe/qv_exu_bru.sv pipe/qv_lsu.sv pipe/qv_commit.sv pipe/core_pipe.sv
-            alu.sv register_file.sv csr_file.sv wb4_sram.sv wb_arbiter2.sv"
+# core_pipe's own files come from the shared list (so a new module is added
+# in one place); paths there are repo-relative, the build runs from design/
+PIPE_FILES="$(grep -E '^design/(pipe/|decoder\.sv|alu\.sv|c_expand\.sv|csr_file\.sv|register_file\.sv|divider\.sv)' \
+                  verification/regress/pipe_design_files.list | sed 's#^design/##' | tr '\n' ' ') wb4_sram.sv wb_arbiter2.sv"
 
 build() {
     local out=$1; shift

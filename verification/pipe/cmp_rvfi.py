@@ -12,8 +12,10 @@ mem_rdata is ignored when mem_rmask is 0 and mem_wdata when mem_wmask is
 access they carry whatever the bus last held. mem_rdata is ignored on
 trapping records too: a misaligned access never reaches the bus, and a
 bus error's data is whatever the slave last drove, which depends on
-each core's own fetch/load interleaving. Addresses and masks stay
-strict on every record. Last line is
+each core's own fetch/load interleaving. insn is ignored on a
+fetch-fault trap (cause 1): core.sv reports whatever its line register
+last held there. Addresses and masks stay strict on every record. Last
+line is
 "RVFI_DIFF: PASS ..." or "RVFI_DIFF: FAIL ...".
 """
 import sys
@@ -35,6 +37,8 @@ def load(path, end_pc):
                 return recs, True
             if int(rec["mem_rmask"], 16) == 0 or rec["trap"] == "1":
                 rec["mem_rdata"] = "-"
+            if rec["trap"] == "1" and int(rec["cause"], 16) == 1:
+                rec["insn"] = "-"
             if int(rec["mem_wmask"], 16) == 0:
                 rec["mem_wdata"] = "-"
             recs.append(rec)
