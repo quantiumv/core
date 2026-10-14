@@ -36,11 +36,12 @@
  * loads and stores (performed one at a time, at the ROB head), FENCE,
  * FENCE.I, LR/SC and the nine AMOs (.W and .D, also at the head, with the
  * bus locked across an AMO's read and write), the six Zicsr instructions,
- * ECALL, EBREAK, MRET and WFI (a no-op),
- * with M-mode synchronous traps, and RVC: compressed instructions on any
- * 2-byte boundary, including 32-bit ones that straddle two fetched
- * dwords. Everything else decodes as an illegal-instruction trap. Not
- * yet: SFENCE.VMA, U/S modes, SRET, interrupts, debug.
+ * ECALL, EBREAK, MRET, SRET, WFI (a no-op) and SFENCE.VMA (a serializing
+ * no-op, until there are TLBs), with the three privilege levels, trap
+ * delegation and the privilege rules (CSR access, TSR, TVM), and RVC:
+ * compressed instructions on any 2-byte boundary, including 32-bit ones
+ * that straddle two fetched dwords. Everything else decodes as an
+ * illegal-instruction trap. Not yet: interrupts, PMP, debug, Sv39.
  * The debug/progbuf outputs are held inert. The
  * Debug Module's GPR/CSR access mux (core.sv wires it around regfile0
  * and csr_file0) comes back with debug support.
@@ -198,6 +199,20 @@ module core_pipe
 
     localparam logic [63:0] RESET_PC = 64'h0;   // core.sv's own reset pc
 
+    // ---------------- csr_file0's exports ----------------
+    // declared up here: decode, commit and the fetch path all read some of them
+    /* verilator lint_off UNUSEDSIGNAL */
+    logic [63:0] stvec_w, sepc_w, medeleg_w, mip_w, mie_w, mideleg_w;
+    logic [63:0] dcsr_o, dpc_o, tdata1_0_w, tdata1_1_w, tdata2_0_w, tdata2_1_w;
+    logic [63:0] pmpcfg0_w, pmpaddr0_w, pmpaddr1_w, pmpaddr2_w, pmpaddr3_w, satp_w;
+    logic [1:0]  mstatus_mpp_w;
+    logic        mstatus_spp_w, mstatus_tsr_w, mstatus_mie_w, mstatus_sie_w;
+    logic        mstatus_mprv_w, mstatus_sum_w, mstatus_mxr_w, mstatus_tvm_w;
+    /* verilator lint_on UNUSEDSIGNAL */
+
+    logic [1:0]  priv;                       // the privilege commit keeps
+    logic        c_trap_to_s, c_sret_taken;
+
     // ---------------- redirects ----------------
     logic        redirect_valid, fe_redirect_valid;
     logic [63:0] redirect_pc, fe_redirect_pc;
@@ -255,6 +270,7 @@ module core_pipe
 
     qv_decode decode0 (
         .clk(clk), .rst(rst), .i_flush(flush),
+        .i_priv(priv), .i_tsr(mstatus_tsr_w), .i_tvm(mstatus_tvm_w),
         .i_iq_valid(iq_valid), .i_iq_data(iq_head), .o_iq_pop(iq_pop),
         .o_valid(uop_valid), .o_uop(uop), .i_issue_ready(issue_fire)
     );
@@ -389,6 +405,9 @@ module core_pipe
         .o_csr_addr(c_csr_addr), .i_csr_rdata(csr_rdata), .o_csr_we(c_csr_we), .o_csr_wdata(c_csr_wdata),
         .o_instr_retired(c_instr_retired), .o_trap_taken(c_trap_taken), .o_trap_cause(c_trap_cause),
         .o_trap_val(c_trap_val), .o_mret_taken(c_mret_taken), .i_mtvec(mtvec_w), .i_mepc(mepc_w),
+        .o_sret_taken(c_sret_taken), .o_trap_to_s(c_trap_to_s), .o_priv(priv),
+        .i_stvec(stvec_w), .i_sepc(sepc_w), .i_medeleg(medeleg_w),
+        .i_mstatus_mpp(mstatus_mpp_w), .i_mstatus_spp(mstatus_spp_w),
         .o_fetch_hold(fetch_hold), .i_fetch_idle(fetch_idle), .o_icache_flush(icache_flush_o),
         .o_commit_now(commit_now_w), .o_pc(arch_pc), .o_next_pc(retire_next_pc),
         .o_redirect_valid(redirect_valid), .o_redirect_pc(redirect_pc),
@@ -409,14 +428,6 @@ module core_pipe
         .i_load_gpr(rf_we), .i_load_gpr_sel(rf_sel), .i_load_gpr_data(rf_data)
     );
 
-    /* verilator lint_off UNUSEDSIGNAL */
-    logic [63:0] stvec_w, sepc_w, medeleg_w, mip_w, mie_w, mideleg_w;
-    logic [63:0] dcsr_o, dpc_o, tdata1_0_w, tdata1_1_w, tdata2_0_w, tdata2_1_w;
-    logic [63:0] pmpcfg0_w, pmpaddr0_w, pmpaddr1_w, pmpaddr2_w, pmpaddr3_w, satp_w;
-    logic [1:0]  mstatus_mpp_w;
-    logic        mstatus_spp_w, mstatus_tsr_w, mstatus_mie_w, mstatus_sie_w;
-    logic        mstatus_mprv_w, mstatus_sum_w, mstatus_mxr_w, mstatus_tvm_w;
-    /* verilator lint_on UNUSEDSIGNAL */
 `ifdef RISCV_FORMAL
     logic [63:0] mcause_w, scause_w, mepc_next_w, sepc_next_w, mcause_next_w, scause_next_w;
 `endif
@@ -425,11 +436,11 @@ module core_pipe
         .i_clk(clk), .i_rst(rst),
         .i_csr_addr(c_csr_addr), .o_csr_rdata(csr_rdata), .i_csr_we(c_csr_we), .i_csr_wdata(c_csr_wdata),
         .i_instr_retired(c_instr_retired),
-        .i_current_priv(2'b11),
+        .i_current_priv(priv),
         .i_mtip(i_mtip), .i_meip(i_meip), .i_seip(i_seip),
         .i_trap_taken(c_trap_taken), .i_trap_cause(c_trap_cause), .i_trap_val(c_trap_val),
         .i_trap_pc(arch_pc),
-        .i_trap_to_s(1'b0), .i_mret_taken(c_mret_taken), .i_sret_taken(1'b0),
+        .i_trap_to_s(c_trap_to_s), .i_mret_taken(c_mret_taken), .i_sret_taken(c_sret_taken),
         .i_debug_entry(1'b0), .i_debug_cause(3'b0),
         .o_mtvec(mtvec_w), .o_stvec(stvec_w), .o_mepc(mepc_w), .o_sepc(sepc_w),
         .o_medeleg(medeleg_w),
@@ -460,7 +471,7 @@ module core_pipe
     wire [63:0] next_pc        = retire_next_pc;
     wire [4:0]  read_gpr_A_sel = c_rs1_addr;
     wire [4:0]  read_gpr_B_sel = c_rs2_addr;
-    wire [1:0]  current_priv   = 2'b11;
+    wire [1:0]  current_priv   = priv;
     wire [63:0] dpc_w          = dpc_o;
     wire [63:0] dcsr_w         = dcsr_o;
     wire        trap_taken     = c_trap_taken;
@@ -474,8 +485,8 @@ module core_pipe
     wire        div_stall      = is_div_family && !head_entry.complete;
 
     wire        interrupt_taken      = 1'b0;
-    wire        route_to_s           = 1'b0;
-    wire        sret_taken           = 1'b0;
+    wire        route_to_s           = c_trap_to_s;
+    wire        sret_taken           = c_sret_taken;
     wire        debug_halt_req_entry = 1'b0;
     wire        debug_ebreak_entry   = 1'b0;
     wire        trigger_debug_entry  = 1'b0;

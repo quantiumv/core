@@ -44,8 +44,17 @@ package qv_pkg;
         QV_SYS_EBREAK,
         QV_SYS_MRET,
         QV_SYS_WFI,
-        QV_SYS_FENCE_I
+        QV_SYS_FENCE_I,
+        QV_SYS_SRET,
+        QV_SYS_SFENCE_VMA
     } qv_sys_op_e;
+
+    // Privilege levels (mstatus.MPP, current_priv). Plain bits rather than an
+    // enum: like core.sv, MRET loads MPP raw, so 2'b10 can occur and every
+    // privilege compare has to behave as written for it too.
+    localparam logic [1:0] QV_PRIV_U = 2'b00;
+    localparam logic [1:0] QV_PRIV_S = 2'b01;
+    localparam logic [1:0] QV_PRIV_M = 2'b11;
 
     // A-extension operations (the LSU runs them, at the ROB head). LR and SC
     // are single accesses; the nine AMOs read, modify and write under one lock.

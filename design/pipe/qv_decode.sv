@@ -32,6 +32,9 @@
  * decoder.sv must come before this file in the compile order: the
  * INSTR_CODE macro is defined there, the same requirement core.sv has.
  *
+ * The privilege rules (CSR privilege, MRET/SRET, TSR, TVM) read the
+ * current privilege and mstatus bits as inputs; see the port comment.
+ *
  * Output is registered (a real D/I split): one uop held until issue
  * takes it.
  */
@@ -39,6 +42,14 @@ module qv_decode (
     input  logic              clk,
     input  logic              rst,
     input  logic              i_flush,
+
+    // privilege state the illegal-instruction rules depend on. Live values
+    // are exact: every change to them is a trap, an xRET (both redirect) or
+    // a CSR write (serializes), each of which flushes decode before a
+    // younger instruction can be decoded against a stale value.
+    input  logic [1:0]        i_priv,
+    input  logic              i_tsr,
+    input  logic              i_tvm,
 
     input  logic              i_iq_valid,
     // xcpt_hi matters only for page faults (Sv39)
@@ -168,6 +179,8 @@ module qv_decode (
             `INSTR_CODE(ECALL):  sys_op = QV_SYS_ECALL;
             `INSTR_CODE(EBREAK): sys_op = QV_SYS_EBREAK;
             `INSTR_CODE(MRET):   sys_op = QV_SYS_MRET;
+            `INSTR_CODE(SRET):   sys_op = QV_SYS_SRET;
+            `INSTR_CODE(SFENCE_VMA): sys_op = QV_SYS_SFENCE_VMA;
             `INSTR_CODE(WFI):    sys_op = QV_SYS_WFI;
             `INSTR_CODE(FENCE_I): sys_op = QV_SYS_FENCE_I;
             default: begin
@@ -267,13 +280,27 @@ module qv_decode (
     // RS/RC suppress on the rs1 FIELD being x0, the I forms on uimm == 0;
     // a non-suppressed write to a read-only CSR (addr[11:10] == 11) and
     // any access to the debug (0x7B0-0x7B3) or trigger (0x7A0-0x7A4)
-    // CSRs outside debug mode are illegal. Privilege checks arrive with
-    // U/S modes.
+    // CSRs outside debug mode are illegal. The privilege-dependent rules
+    // follow below.
     wire [11:0] csr_addr = imm_2[11:0];
     wire csr_wsup = (csr_op != QV_CSR_RW) && (csr_imm ? (imm_1 == '0) : (sel_a == '0));
     wire csr_illegal = is_csr && ((!csr_wsup && csr_addr[11:10] == 2'b11)
                                   || csr_addr[11:2] == 10'h1EC
                                   || csr_addr[11:2] == 10'h1E8 || csr_addr == 12'h7A4);
+
+    // Privilege rules, literally core.sv's (its comments say why each is so):
+    // a CSR above the current privilege (addr[9:8] is the lowest privilege
+    // that may touch it); MRET outside M; SRET in U, or in S with TSR; an S-mode
+    // satp access or SFENCE.VMA under TVM. WFI traps nowhere (no TW) and
+    // SFENCE.VMA is legal from U.
+    wire is_mret_op = (sys_op == QV_SYS_MRET);
+    wire is_sret_op = (sys_op == QV_SYS_SRET);
+    wire is_sfence  = (sys_op == QV_SYS_SFENCE_VMA);
+    wire csr_priv_violation  = is_csr && (csr_addr[9:8] > i_priv);
+    wire mret_priv_violation = is_mret_op && (i_priv != QV_PRIV_M);
+    wire sret_priv_violation = is_sret_op && ((i_priv == QV_PRIV_U) || (i_priv == QV_PRIV_S && i_tsr));
+    wire tvm_violation       = i_tvm && (i_priv == QV_PRIV_S) && ((is_csr && csr_addr == 12'h180) || is_sfence);
+    wire priv_illegal = csr_priv_violation || mret_priv_violation || sret_priv_violation || tvm_violation;
 
     logic reg_write_ctrl;
     always_comb begin: reg_write_control
@@ -330,11 +357,11 @@ module qv_decode (
         // a CSR's rd value exists only at commit, so nothing younger may
         // run ahead on it -- flushing after every CSR op covers that too.
         // FENCE.I refetches everything after it.
-        uop_d.serialize = is_csr || (sys_op == QV_SYS_FENCE_I);
+        uop_d.serialize = is_csr || (sys_op == QV_SYS_FENCE_I) || is_sfence;
         uop_d.pred_taken = i_iq_data.pred_taken;
         uop_d.pred_tgt   = i_iq_data.pred_tgt;
         uop_d.mem_size   = is_atomic ? (atomic_word ? 2'd2 : 2'd3) : mem_size;
-        uop_d.mem_signed = is_atomic || mem_signed;      // LR.W / AMO.W results sign-extend
+        uop_d.mem_signed = mem_signed;                   // (atomics: the LSU always sign-extends them)
         uop_d.is_atomic  = is_atomic;
         uop_d.amo_op     = amo_op;
         uop_d.is_load    = is_load;
@@ -344,7 +371,7 @@ module qv_decode (
         if (i_iq_data.xcpt) begin
             uop_d.xcpt       = 1'b1;
             uop_d.xcpt_cause = i_iq_data.xcpt_cause;
-        end else if (c_illegal || !implemented || csr_illegal) begin
+        end else if (c_illegal || !implemented || csr_illegal || priv_illegal) begin
             uop_d.xcpt       = 1'b1;
             uop_d.xcpt_cause = 4'd2;
         end

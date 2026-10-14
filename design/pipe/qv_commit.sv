@@ -9,11 +9,14 @@
  *
  * What the head does when it retires, in priority order:
  *   trap    a fault marked at fetch/decode (cause 1 or 2), one a memory op
- *           hit while executing (4-7, from the LSU's result), ECALL (11,
- *           M mode only so far) or EBREAK (3): nothing is written,
- *           csr_file0 takes the trap, fetch restarts at mtvec's base
- *           (direct mode)
- *   MRET    csr_file0 restores mstatus, fetch restarts at mepc
+ *           hit while executing (4-7, from the LSU's result), ECALL (8, 9 or
+ *           11 by privilege) or EBREAK (3): nothing is written, csr_file0
+ *           takes the trap, fetch restarts at the vector base of mtvec or,
+ *           when the trap is delegated (medeleg, from below M), stvec (direct
+ *           mode only)
+ *   MRET    csr_file0 restores mstatus, privilege becomes MPP, fetch restarts
+ *           at mepc
+ *   SRET    likewise: privilege becomes SPP (S or U), fetch restarts at sepc
  *   CSR     the old value goes to rd, the new one (RW: src, RS: old | src,
  *           RC: old & ~src, src being the ALU pass value) to the CSR
  *           unless write-suppressed; then a serializing refetch
@@ -32,15 +35,18 @@
  * unless the instruction writes rd, rd_wdata is 0 unless it writes a
  * nonzero rd, pc_wdata is the real next pc (trap vector, mepc, or the
  * entry's own), intr flags a retirement whose pc doesn't follow the
- * previous one's pc_wdata, mode and ixl are fixed (M, 64-bit). Source
+ * previous one's pc_wdata, mode is the privilege the instruction ran at
+ * and ixl is fixed (64-bit). Source
  * operands come from the values issue captured (rvfi_shadow_t), since
  * regfile0's read ports aren't free to re-read them here; memory fields
  * come from the LSU's result for a memory op and are 0 otherwise.
  *
- * Not yet: interrupts, U/S modes.
+ * Not yet: interrupts.
  *
- * It also keeps the LR/SC reservation (see below), since only a retirement
- * may change it.
+ * It also keeps the privilege level (updated exactly as core.sv's
+ * current_priv is: trap, MRET, SRET; MPP is loaded raw, so privilege 2'b10
+ * can occur and then behaves as written) and the LR/SC reservation (see
+ * below), since only a retirement may change either.
  */
 module qv_commit #(
     parameter logic [63:0] RESET_PC = 64'h0
@@ -87,6 +93,17 @@ module qv_commit #(
     input  logic [63:0]                      i_mtvec,
     /* verilator lint_on UNUSEDSIGNAL */
     input  logic [63:0]                      i_mepc,
+    output logic                             o_sret_taken,
+    output logic                             o_trap_to_s,
+    output logic [1:0]                       o_priv,
+    // exported by csr_file0; stvec's MODE bits are ignored like mtvec's
+    /* verilator lint_off UNUSEDSIGNAL */
+    input  logic [63:0]                      i_stvec,
+    /* verilator lint_on UNUSEDSIGNAL */
+    input  logic [63:0]                      i_sepc,
+    input  logic [63:0]                      i_medeleg,
+    input  logic [1:0]                       i_mstatus_mpp,
+    input  logic                             i_mstatus_spp,
 
     // FENCE.I: fetch is held while it is the head; it retires only once
     // fetch has nothing outstanding, flushing the icache in that cycle
@@ -139,6 +156,11 @@ module qv_commit #(
     wire is_trap = i_head_ctrl.xcpt || mem_xcpt
                 || (is_sys && (i_head_ctrl.sys_op == QV_SYS_ECALL || i_head_ctrl.sys_op == QV_SYS_EBREAK));
     wire is_mret = is_sys && (i_head_ctrl.sys_op == QV_SYS_MRET);
+    wire is_sret = is_sys && (i_head_ctrl.sys_op == QV_SYS_SRET);
+
+    // current privilege: the one the head instruction runs at
+    logic [1:0] priv_q;
+    assign o_priv = priv_q;
     wire is_csr  = (i_head_ctrl.cls == QV_FU_CSR) && !i_head_ctrl.xcpt;
 
     logic [3:0] cause;
@@ -146,7 +168,10 @@ module qv_commit #(
         if (i_head_ctrl.xcpt)                          cause = i_head_ctrl.cause;
         else if (mem_xcpt)                             cause = i_lsu_res.cause;
         else if (i_head_ctrl.sys_op == QV_SYS_EBREAK)  cause = 4'd3;
-        else                                           cause = 4'd11;
+        else if (priv_q == QV_PRIV_U)                  cause = 4'd8;        // ECALL from U
+        else if (priv_q == QV_PRIV_S)                  cause = 4'd9;        // ... S
+        else if (priv_q == QV_PRIV_M)                  cause = 4'd11;       // ... M
+        else                                           cause = 4'd0;        // privilege 2'b10: core.sv falls through to 0
     end
 
     logic [63:0] tval;
@@ -173,7 +198,12 @@ module qv_commit #(
     assign o_csr_addr = i_head_ctrl.csr_addr;
     assign o_csr_we   = commit && is_csr && !i_head_ctrl.csr_wsup;
 
+    // a trap from below M goes to S when medeleg says so; never from M
+    wire trap_to_s = is_trap && (priv_q != QV_PRIV_M) && i_medeleg[{2'b00, cause}];
+
     assign o_trap_taken    = commit && is_trap;
+    assign o_trap_to_s     = trap_to_s;
+    assign o_sret_taken    = commit && is_sret;
     assign o_trap_cause    = {60'b0, cause};
     assign o_trap_val      = tval;
     assign o_mret_taken    = commit && is_mret;
@@ -220,12 +250,24 @@ module qv_commit #(
     // ---------------- next pc / redirect ----------------
     logic [63:0] actual_next_pc;
     always_comb begin
-        if (is_trap)      actual_next_pc = {i_mtvec[63:2], 2'b00};
+        if (is_trap)      actual_next_pc = trap_to_s ? {i_stvec[63:2], 2'b00} : {i_mtvec[63:2], 2'b00};
         else if (is_mret) actual_next_pc = i_mepc;
+        else if (is_sret) actual_next_pc = i_sepc;
         else              actual_next_pc = i_head_entry.next_pc;
     end
 
-    assign o_redirect_valid = commit && (is_trap || is_mret || i_head_entry.mispredict
+    // privilege after this retirement; trap wins over xRET, as in core.sv
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            priv_q <= QV_PRIV_M;
+        end else if (commit) begin
+            if (is_trap)      priv_q <= trap_to_s ? QV_PRIV_S : QV_PRIV_M;
+            else if (is_mret) priv_q <= i_mstatus_mpp;
+            else if (is_sret) priv_q <= i_mstatus_spp ? QV_PRIV_S : QV_PRIV_U;
+        end
+    end
+
+    assign o_redirect_valid = commit && (is_trap || is_mret || is_sret || i_head_entry.mispredict
                                          || i_head_ctrl.serialize);
     assign o_redirect_pc    = actual_next_pc;
 
