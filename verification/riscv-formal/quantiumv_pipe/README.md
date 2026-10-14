@@ -26,9 +26,9 @@ log already says `DONE (PASS)`, so an interrupted sweep resumes. The RTL file li
 
 - **Small configuration.** `-D QV_FORMAL_SMALL` gives the ROB 4 entries and the instruction queue 2
   (8 and 4 otherwise). `pipe-full` drops it for the spot checks.
-- **`unique 1 10 15`.** riscv-formal's unique check assumes a retirement at its trigger cycle
+- **`unique 1 10 20`.** riscv-formal's unique check assumes a retirement at its trigger cycle
   (`rvfi_unique_check.sv`). The first retirement of core_pipe is 8 to 10 cycles after reset, so the
-  FSM's trigger of 5 is unsatisfiable (`PREUNSAT`); 10 is not.
+  FSM's trigger of 5 is unsatisfiable (`PREUNSAT`); 10 is not, and the check then looks 10 cycles on.
 - **`liveness 1 10 40` and `hang 1 40` run with no divide in the stream** (`QV_FORMAL_NO_DIV` in the
   wrapper). A divide takes about 66 cycles, longer than either window, so with one the properties fail
   by design. The FSM's hang check gets the same assumption, so the two are read against each other.
