@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """mutate_lockstep.py SPEC.json [idx,idx,...] -- pipe mutants against the pipe-vs-ref lockstep gate.
 
-SPEC: {"counts": [8, 24, 64], "memcfg": "sram", "delay": 0, "jobs": 3, "inner_jobs": 2,
+SPEC: {"counts": [8, 24, 64], "memcfg": "sram", "delay": 0, "jobs": 3, "inner_jobs": 2, "sim": "verilator",
        "profile": "--isa imac --priv msu --smc", "extra": ["--irq-mode", "2"],
        "mutants": [{"name": "...", "file": "qv_commit.sv", "old": "text", "new": "text"},
                    {"from": "p5c_unit_decode.json", "only": [2, 5]}]}
@@ -65,7 +65,7 @@ def run_one(args):
                "--mode", "selfproof", "--dut", "pipe", "--pipe-dir", os.path.join(d, "pipe"),
                "--corpus", spec.get("corpus", "random"), "--random-count", str(n),
                "--memcfg-b", spec.get("memcfg", "sram"), "--delay-max", str(spec.get("delay", 0)),
-               "-j", str(spec.get("inner_jobs", 2)), "--outdir", out] + (m or {}).get("extra", spec.get("extra", []))
+               "--sim", spec.get("sim", "iverilog"), "-j", str(spec.get("inner_jobs", 2)), "--outdir", out] + (m or {}).get("extra", spec.get("extra", []))
         try:
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=spec.get("timeout", 7200),
                                cwd=REPO, env=env)

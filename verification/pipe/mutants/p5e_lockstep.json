@@ -1,15 +1,83 @@
 {
- "counts": [8, 24, 64],
+ "counts": [
+  8,
+  24,
+  64
+ ],
+ "sim": "verilator",
  "memcfg": "sram",
  "delay": 0,
  "jobs": 3,
  "inner_jobs": 2,
  "profile": "--isa imac --priv msu --pmp --smc",
  "mutants": [
-  {"from": "p5e_unit_pmp.json", "only": [0, 4, 5, 7, 8, 9, 13, 14, 15, 16, 19, 20]},
-  {"from": "p5e_unit_pmp.json", "only": [17, 18, 21], "profile": "--isa imac --priv m --pmp --smc"},
-  {"from": "p5e_unit_decode.json", "only": [8, 11, 12, 14, 16]},
-  {"from": "p5e_unit_lsu.json", "only": [0, 1, 2, 3, 4, 5, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]},
-  {"from": "p5e_unit_lsu.json", "only": [6, 7, 8], "profile": "--isa imac --priv m --pmp --smc"}
+  {
+   "from": "p5e_unit_pmp.json",
+   "only": [
+    0,
+    4,
+    5,
+    7,
+    8,
+    9,
+    13,
+    14,
+    15,
+    16,
+    19,
+    20
+   ]
+  },
+  {
+   "from": "p5e_unit_pmp.json",
+   "only": [
+    17,
+    18,
+    21
+   ],
+   "profile": "--isa imac --priv m --pmp --smc"
+  },
+  {
+   "from": "p5e_unit_decode.json",
+   "only": [
+    8,
+    11,
+    12,
+    14,
+    16
+   ]
+  },
+  {
+   "from": "p5e_unit_lsu.json",
+   "only": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20
+   ]
+  },
+  {
+   "from": "p5e_unit_lsu.json",
+   "only": [
+    6,
+    7,
+    8
+   ],
+   "profile": "--isa imac --priv m --pmp --smc"
+  }
  ]
 }
