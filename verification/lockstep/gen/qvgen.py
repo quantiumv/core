@@ -489,6 +489,8 @@ def emit_priv_op(p: Program, recent: list[int]):
     (never legal below M: always a trap), SFENCE.VMA (legal in S and U, a trap
     in S under TVM), or a CSR probe."""
     r = p.rng.random()
+    if p.body_priv2 and r < 0.30:
+        r += 0.30           # a legal sret at privilege 2 would drop to S or U for good: keep the body there
     if r < 0.30:
         nxt = Label("sret")
         if p.irq:
