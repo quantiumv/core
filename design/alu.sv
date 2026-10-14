@@ -105,11 +105,24 @@ module alu (
     logic signed [`WORD_SIZE:0] mulhsu_a_ext, mulhsu_b_ext;
     logic signed [(2*`WORD_SIZE + 1):0] product_su;
     /* verilator lint_on UNUSEDSIGNAL */
-    assign product_uu = i_operand_A * i_operand_B;
-    assign product_ss = $signed(i_operand_A) * $signed(i_operand_B);
     assign mulhsu_a_ext = {i_operand_A[(`WORD_SIZE - 1)], i_operand_A};
     assign mulhsu_b_ext = {1'b0, i_operand_B};
+`ifdef QV_FORMAL_NO_MUL
+    /*
+     * riscv-formal builds only: the three products are plain wiring, not
+     * multipliers. No rv64ic check depends on a product's value (a product
+     * is data, like any other result), and the multipliers alone double the
+     * solver time of every check. Never defined for simulation, synthesis
+     * or lint.
+     */
+    assign product_uu = {i_operand_A, i_operand_B};
+    assign product_ss = {i_operand_A, ~i_operand_B};
+    assign product_su = {mulhsu_a_ext, mulhsu_b_ext};
+`else
+    assign product_uu = i_operand_A * i_operand_B;
+    assign product_ss = $signed(i_operand_A) * $signed(i_operand_B);
     assign product_su = mulhsu_a_ext * mulhsu_b_ext;
+`endif
 
     /*
      * Low/high WORD_SIZE-bit halves, precomputed via plain assign rather
