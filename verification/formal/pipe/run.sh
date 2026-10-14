@@ -9,7 +9,8 @@
 #   response through (ade0d1c^), and hand-made mutants of both units
 #   (for the LSU also the A extension's: an SC that ignores its
 #   reservation, a gap or a stray lock, a write after a faulting or
-#   flushed read, an AMO that never writes).
+#   flushed read, an AMO that never writes, and a PMP-denied access that
+#   still goes to the bus).
 set -u
 cd "$(dirname "$0")" || exit 1
 HERE=$(pwd)
@@ -72,7 +73,8 @@ EOF
     mutant fetch_ignores_hold  fetch 's/ \&\& !i_hold;/;/'
     mutant fetch_abandons      fetch 's/assign wb_fetch_cyc_o  = req_valid_q \&\& !(wb_fetch_ack_i || wb_fetch_err_i);/assign wb_fetch_cyc_o  = req_valid_q \&\& !(wb_fetch_ack_i || wb_fetch_err_i) \&\& !i_redirect_valid;/'
     mutant lsu_ignores_head    lsu 's/wire at_head  = (state_q == S_WAIT_HEAD) \&\& i_head_valid \&\& (i_head_tag == tag_q) \&\& !i_flush;/wire at_head  = (state_q == S_WAIT_HEAD) \&\& !i_flush;/'
-    mutant lsu_misaligned_bus  lsu 's/wire start    = at_head \&\& !misaligned_q \&\& !sc_fail;/wire start    = at_head \&\& !sc_fail;/'
+    mutant lsu_misaligned_bus  lsu 's/wire start    = at_head \&\& !misaligned_q \&\& !pmp_deny \&\& !sc_fail;/wire start    = at_head \&\& !pmp_deny \&\& !sc_fail;/'
+    mutant lsu_pmp_bus         lsu 's/wire start    = at_head \&\& !misaligned_q \&\& !pmp_deny \&\& !sc_fail;/wire start    = at_head \&\& !misaligned_q \&\& !sc_fail;/'
     mutant lsu_reissues        lsu 's/^                        state_q <= S_IDLE;/                        state_q <= S_WAIT_HEAD;/'
     mutant lsu_abandons        lsu 's/assign wb_mem_cyc_o  = (start || in_bus) \&\& !resp;/assign wb_mem_cyc_o  = (start || in_bus) \&\& !resp \&\& !i_flush;/'
     mutant lsu_sc_no_reservation lsu 's/wire sc_fail  = sc_q \&\& !(i_res_valid \&\& i_res_addr == addr_q);/wire sc_fail  = 1'"'"'b0;/'
