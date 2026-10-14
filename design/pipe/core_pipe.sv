@@ -41,7 +41,7 @@
  * delegation and the privilege rules (CSR access, TSR, TVM), and RVC:
  * compressed instructions on any 2-byte boundary, including 32-bit ones
  * that straddle two fetched dwords. Everything else decodes as an
- * illegal-instruction trap. Not yet: interrupts, PMP, debug, Sv39.
+ * illegal-instruction trap. Not yet: PMP, debug, Sv39.
  * The debug/progbuf outputs are held inert. The
  * Debug Module's GPR/CSR access mux (core.sv wires it around regfile0
  * and csr_file0) comes back with debug support.
@@ -380,7 +380,7 @@ module core_pipe
     logic [4:0]  c_rs1_addr, c_rs2_addr;
     logic [11:0] c_csr_addr;
     logic [63:0] c_csr_wdata, c_trap_cause, c_trap_val;
-    logic        c_csr_we, c_instr_retired, c_trap_taken, c_mret_taken;
+    logic        c_csr_we, c_instr_retired, c_trap_taken, c_mret_taken, c_irq_taken;
     // read only by the RISCV_FORMAL port block
     /* verilator lint_off UNUSEDSIGNAL */
     logic        c_rvfi_trap;
@@ -408,6 +408,8 @@ module core_pipe
         .o_sret_taken(c_sret_taken), .o_trap_to_s(c_trap_to_s), .o_priv(priv),
         .i_stvec(stvec_w), .i_sepc(sepc_w), .i_medeleg(medeleg_w),
         .i_mstatus_mpp(mstatus_mpp_w), .i_mstatus_spp(mstatus_spp_w),
+        .i_mip(mip_w), .i_mie(mie_w), .i_mideleg(mideleg_w),
+        .i_mstatus_mie(mstatus_mie_w), .i_mstatus_sie(mstatus_sie_w), .o_irq_taken(c_irq_taken),
         .o_fetch_hold(fetch_hold), .i_fetch_idle(fetch_idle), .o_icache_flush(icache_flush_o),
         .o_commit_now(commit_now_w), .o_pc(arch_pc), .o_next_pc(retire_next_pc),
         .o_redirect_valid(redirect_valid), .o_redirect_pc(redirect_pc),
@@ -474,7 +476,7 @@ module core_pipe
     wire [1:0]  current_priv   = priv;
     wire [63:0] dpc_w          = dpc_o;
     wire [63:0] dcsr_w         = dcsr_o;
-    wire        trap_taken     = c_trap_taken;
+    wire        trap_taken     = c_trap_taken && !c_irq_taken;    // a synchronous exception only
     wire [63:0] trap_val       = c_trap_val;
     wire        csr_we         = c_csr_we;
     wire        mret_taken     = c_mret_taken;
@@ -484,7 +486,7 @@ module core_pipe
     wire        is_div_family  = head_valid && head_ctrl.cls == QV_FU_DIV;
     wire        div_stall      = is_div_family && !head_entry.complete;
 
-    wire        interrupt_taken      = 1'b0;
+    wire        interrupt_taken      = c_irq_taken;
     wire        route_to_s           = c_trap_to_s;
     wire        sret_taken           = c_sret_taken;
     wire        debug_halt_req_entry = 1'b0;

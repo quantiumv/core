@@ -41,7 +41,14 @@
  * regfile0's read ports aren't free to re-read them here; memory fields
  * come from the LSU's result for a memory op and are 0 otherwise.
  *
- * Not yet: interrupts.
+ * Interrupts are sampled exactly as core.sv does: only in the cycle after
+ * a retirement (commit_q), from the live mip/mie/mideleg/mstatus/privilege
+ * values of that cycle, and one that is sampled takes the place of whatever
+ * would retire in the same cycle (nothing commits, everything younger is
+ * flushed). mepc is then the architectural pc, the next instruction to
+ * retire; the order counter and the previous-pc register are untouched, so
+ * the handler's first retirement shows up with rvfi_intr set. There is no
+ * halt or step term yet (debug comes later).
  *
  * It also keeps the privilege level (updated exactly as core.sv's
  * current_priv is: trap, MRET, SRET; MPP is loaded raw, so privilege 2'b10
@@ -105,6 +112,16 @@ module qv_commit #(
     input  logic [1:0]                       i_mstatus_mpp,
     input  logic                             i_mstatus_spp,
 
+    // interrupt sampling; only MEI/MTI/SEI (bits 11, 7, 9) are looked at
+    /* verilator lint_off UNUSEDSIGNAL */
+    input  logic [63:0]                      i_mip = 64'b0,
+    input  logic [63:0]                      i_mie = 64'b0,
+    input  logic [63:0]                      i_mideleg = 64'b0,
+    /* verilator lint_on UNUSEDSIGNAL */
+    input  logic                             i_mstatus_mie = 1'b0,
+    input  logic                             i_mstatus_sie = 1'b0,
+    output logic                             o_irq_taken,
+
     // FENCE.I: fetch is held while it is the head; it retires only once
     // fetch has nothing outstanding, flushing the icache in that cycle
     output logic                             o_fetch_hold,
@@ -138,6 +155,41 @@ module qv_commit #(
 );
     import qv_pkg::*;
 
+    // ---------------- interrupts ----------------
+    // current privilege: the one the head instruction runs at
+    logic [1:0] priv_q;
+    assign o_priv = priv_q;
+
+    // core.sv's enables, expression for expression: a delegated interrupt
+    // is enabled in U, in S when SIE is set and never in M; an M one is
+    // enabled below M and in M when MIE is set
+    wire mei_pending = i_mie[11] & i_mip[11];
+    wire mei_to_s    = i_mideleg[11];
+    wire mei_enabled = mei_to_s
+        ? ((priv_q == QV_PRIV_U) ? 1'b1 : (priv_q == QV_PRIV_S) ? i_mstatus_sie : 1'b0)
+        : ((priv_q != QV_PRIV_M) ? 1'b1 : i_mstatus_mie);
+    wire mti_pending = i_mie[7] & i_mip[7];
+    wire mti_to_s    = i_mideleg[7];
+    wire mti_enabled = mti_to_s
+        ? ((priv_q == QV_PRIV_U) ? 1'b1 : (priv_q == QV_PRIV_S) ? i_mstatus_sie : 1'b0)
+        : ((priv_q != QV_PRIV_M) ? 1'b1 : i_mstatus_mie);
+    wire sei_pending = i_mie[9] & i_mip[9];
+    wire sei_to_s    = i_mideleg[9];
+    wire sei_enabled = sei_to_s
+        ? ((priv_q == QV_PRIV_U) ? 1'b1 : (priv_q == QV_PRIV_S) ? i_mstatus_sie : 1'b0)
+        : ((priv_q != QV_PRIV_M) ? 1'b1 : i_mstatus_mie);
+
+    // priority MEI > MTI > SEI
+    wire        mei_take = mei_pending && mei_enabled;
+    wire        mti_take = mti_pending && mti_enabled;
+    wire        sei_take = sei_pending && sei_enabled;
+    wire [3:0]  int_cause = mei_take ? 4'd11 : mti_take ? 4'd7 : sei_take ? 4'd9 : 4'd0;
+    wire        int_to_s  = mei_take ? mei_to_s : mti_take ? mti_to_s : sei_take ? sei_to_s : 1'b0;
+
+    logic commit_q;                       // a retirement happened last cycle: the sample point
+    wire  irq = commit_q && (mei_take || mti_take || sei_take);
+    assign o_irq_taken = irq;
+
     // ---------------- classify the head ----------------
     // a marked fault overrides whatever the entry would otherwise do, as
     // core.sv's instr_faulted gating does
@@ -147,7 +199,11 @@ module qv_commit #(
     // FENCE.I waits for fetch to drain: an icache fill finishing in the
     // flush cycle would revalidate its line (icache.sv), and anything
     // fetched before the flush is refetched by the serializing redirect
-    wire commit = i_head_valid && i_head_entry.complete && (!is_fence_i || i_fetch_idle);
+    wire commit = i_head_valid && i_head_entry.complete && (!is_fence_i || i_fetch_idle) && !irq;
+    always_ff @(posedge clk) begin
+        if (rst) commit_q <= 1'b0;
+        else     commit_q <= commit;
+    end
 
     assign o_fetch_hold   = i_head_valid && is_fence_i;
     assign o_icache_flush = commit && is_fence_i;
@@ -158,9 +214,6 @@ module qv_commit #(
     wire is_mret = is_sys && (i_head_ctrl.sys_op == QV_SYS_MRET);
     wire is_sret = is_sys && (i_head_ctrl.sys_op == QV_SYS_SRET);
 
-    // current privilege: the one the head instruction runs at
-    logic [1:0] priv_q;
-    assign o_priv = priv_q;
     wire is_csr  = (i_head_ctrl.cls == QV_FU_CSR) && !i_head_ctrl.xcpt;
 
     logic [3:0] cause;
@@ -201,11 +254,13 @@ module qv_commit #(
     // a trap from below M goes to S when medeleg says so; never from M
     wire trap_to_s = is_trap && (priv_q != QV_PRIV_M) && i_medeleg[{2'b00, cause}];
 
-    assign o_trap_taken    = commit && is_trap;
-    assign o_trap_to_s     = trap_to_s;
+    // an interrupt goes through the same csr_file0 trap channel: cause with
+    // the interrupt bit, no tval, and its own delegation
+    assign o_trap_taken    = (commit && is_trap) || irq;
+    assign o_trap_to_s     = irq ? int_to_s : trap_to_s;
     assign o_sret_taken    = commit && is_sret;
-    assign o_trap_cause    = {60'b0, cause};
-    assign o_trap_val      = tval;
+    assign o_trap_cause    = irq ? {1'b1, 59'b0, int_cause} : {60'b0, cause};
+    assign o_trap_val      = irq ? 64'b0 : tval;
     assign o_mret_taken    = commit && is_mret;
     assign o_instr_retired = commit && !is_trap;
 
@@ -260,6 +315,8 @@ module qv_commit #(
     always_ff @(posedge clk) begin
         if (rst) begin
             priv_q <= QV_PRIV_M;
+        end else if (irq) begin
+            priv_q <= int_to_s ? QV_PRIV_S : QV_PRIV_M;
         end else if (commit) begin
             if (is_trap)      priv_q <= trap_to_s ? QV_PRIV_S : QV_PRIV_M;
             else if (is_mret) priv_q <= i_mstatus_mpp;
@@ -267,14 +324,17 @@ module qv_commit #(
         end
     end
 
-    assign o_redirect_valid = commit && (is_trap || is_mret || is_sret || i_head_entry.mispredict
-                                         || i_head_ctrl.serialize);
-    assign o_redirect_pc    = actual_next_pc;
+    // an interrupt redirects to the vector of the mode it is taken in (direct mode only)
+    wire [63:0] irq_vector = int_to_s ? {i_stvec[63:2], 2'b00} : {i_mtvec[63:2], 2'b00};
+    assign o_redirect_valid = irq || (commit && (is_trap || is_mret || is_sret || i_head_entry.mispredict
+                                                 || i_head_ctrl.serialize));
+    assign o_redirect_pc    = irq ? irq_vector : actual_next_pc;
 
     // architectural PC: the next instruction to retire
     logic [63:0] arch_pc_q;
     always_ff @(posedge clk) begin
         if (rst)         arch_pc_q <= RESET_PC;
+        else if (irq)    arch_pc_q <= irq_vector;
         else if (commit) arch_pc_q <= actual_next_pc;
     end
     assign o_pc      = arch_pc_q;
