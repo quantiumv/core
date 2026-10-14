@@ -132,6 +132,7 @@ class Program:
         self.misc_data: list[str] = []
         self.pagetable_data: list[str] = []
         self.pocket_code: list[str] = []      # --pmp: what sits at POCKET_X
+        self.pockets: list[tuple[int, int]] = []   # --pmp: the byte ranges [lo, hi) of the sandbox pockets
         self.subroutines: list[str] = []  # appended to .text.entry at the end
         self.call_depth = 0
         self.open_labels: list[Label] = []  # forward branches waiting to land
@@ -315,6 +316,17 @@ def _sandbox_addr(p: Program, reg: int, misaligned=False, width=8):
     """Load a real, in-sandbox address into `reg`, either via
     base+imm (x27 + a small offset) or and/add-masked from a computed
     value -- both forms the plan calls for."""
+    if p.pockets and p.rng.random() < 0.25:
+        # right at a pocket's edge: a span that only partly overlaps a region is no match for it, and a
+        # byte, a word and a dword at the same place can each come out differently
+        lo, hi = p.rng.choice(p.pockets)
+        addr = p.rng.choice([lo, hi]) + p.rng.randrange(-12, 13)
+        addr = min(max(addr, SANDBOX_BASE), SANDBOX_BASE + SANDBOX_SIZE - 64)
+        addr &= ~(width - 1)
+        if misaligned and width > 1:
+            addr += 1
+        p.li(reg, addr)
+        return
     hot = p.args.pmp and p.rng.random() < 0.3        # small PMP pockets live in the hot zone: hit them often
     if p.rng.random() < 0.5:
         off = p.rng.randrange(0, HOT_SIZE if hot else SANDBOX_SIZE - 64, width)
@@ -963,12 +975,15 @@ def emit_pmp(p: Program):
         """An NA4 word or a NAPOT block (16 bytes .. 16 KiB) in the sandbox."""
         if rng.random() < 0.3:
             area = HOT_SIZE if rng.random() < 0.7 else SANDBOX_SIZE
-            return pocket_cfg(_PMP_A_NA4), (SANDBOX_BASE + rng.randrange(0, area, 4)) >> 2
+            a = SANDBOX_BASE + rng.randrange(0, area, 4)
+            p.pockets.append((a, a + 4))
+            return pocket_cfg(_PMP_A_NA4), a >> 2
         size = 1 << rng.randint(4, 14)
         if size <= HOT_SIZE and rng.random() < 0.7:
             base = SANDBOX_BASE + rng.randrange(0, HOT_SIZE, size)
         else:
             base = SANDBOX_BASE + rng.randrange(0, SANDBOX_SIZE, size) if size < SANDBOX_SIZE else SANDBOX_BASE
+        p.pockets.append((base, base + size))
         return pocket_cfg(_PMP_A_NAPOT), napot_pmpaddr(base, size)
 
     def bad_page_pocket():
@@ -981,6 +996,7 @@ def emit_pmp(p: Program):
         top = lower + rng.randrange(8, 0x2000, 4)
         entries[0] = (0, lower >> 2)
         entries[1] = (pocket_cfg(_PMP_A_TOR), top >> 2)
+        p.pockets.append((lower, top))
         entries[2] = bad_page_pocket()
     else:
         entries[0] = sandbox_pocket() if rng.random() < 0.85 else (0, 0)

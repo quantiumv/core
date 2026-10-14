@@ -21,16 +21,19 @@
     8,
     9,
     13,
-    14,
     15,
     16,
     19,
     20
-   ]
+   ],
+   "unit_only": {
+    "19": "a PMP denial and a bus error look the same to the retirement stream (cause 5/7, tval, no rd write); only the bus transaction differs"
+   }
   },
   {
    "from": "p5e_unit_pmp.json",
    "only": [
+    14,
     17,
     18,
     21
@@ -45,7 +48,10 @@
     12,
     14,
     16
-   ]
+   ],
+   "unit_only": {
+    "16": "the only instruction a generated program ever fetches from a denied pocket is a `jr x25`, which writes no register"
+   }
   },
   {
    "from": "p5e_unit_lsu.json",
@@ -56,9 +62,9 @@
     3,
     4,
     5,
+    7,
     9,
     10,
-    11,
     12,
     13,
     14,
@@ -68,14 +74,17 @@
     18,
     19,
     20
-   ]
+   ],
+   "unit_only": {
+    "7": "MPRV can only be set while MPP = M, and nothing runs below M with MPRV set and MPP = M (MRET loads MPP = U on the way down)"
+   }
   },
   {
    "from": "p5e_unit_lsu.json",
    "only": [
     6,
-    7,
-    8
+    8,
+    11
    ],
    "profile": "--isa imac --priv m --pmp --smc"
   }
