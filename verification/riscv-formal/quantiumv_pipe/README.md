@@ -12,7 +12,8 @@ as in `../quantiumv/README.md`):
 
 ```sh
 verification/riscv-formal/sync_core.sh pipe          # copy the RTL list, wrapper and checks.cfg in, regenerate the checks
-verification/riscv-formal/run_sweep.sh pipe -j 5     # resumable; prints a PASS/FAIL/TIMEOUT table at the end
+verification/riscv-formal/run_sweep.sh pipe -j 8 --timeout 86400   # resumable; prints a PASS/FAIL/TIMEOUT table at the end
+verification/riscv-formal/sweep_status.sh pipe --summary             # the same table without running anything
 verification/riscv-formal/run_sweep.sh pipe --only '^(reg_ch0|causal_ch0)\.sby$'   # a subset
 verification/riscv-formal/sync_core.sh pipe-full     # the same without QV_FORMAL_SMALL, for spot checks
 ```
