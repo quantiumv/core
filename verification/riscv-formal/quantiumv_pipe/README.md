@@ -26,6 +26,16 @@ log already says `DONE (PASS)`, so an interrupted sweep resumes. The RTL file li
 
 - **Small configuration.** `-D QV_FORMAL_SMALL` gives the ROB 4 entries and the instruction queue 2
   (8 and 4 otherwise). `pipe-full` drops it for the spot checks.
+- **Multipliers are wiring.** `-D QV_FORMAL_NO_MUL` turns the ALU's three 64x64 products into plain
+  wiring (`design/alu.sv`; the define exists nowhere else). No rv64ic check depends on a product's value,
+  and with the multipliers in the model every check took about twice as long (`insn_and` on boolector: 73 min
+  of CPU time against 39). It is an abstraction, not a restriction of the instruction stream: a multiply still
+  flows through issue, the ROB, bypass and commit with an arbitrary value.
+- **Bitwuzla, not boolector.** About twice as fast on this core (`insn_and`, same model: 35 min of CPU against 73
+  on boolector). It needs the patched `smtio.py` that `run_sweep.sh` puts on `PYTHONPATH`; without it
+  yosys-smtbmc dies with `BrokenPipeError`, the failure the FSM sweep hit and answered by using boolector.
+  Both are in `checks.cfg`; `sweep_status.sh pipe --detail` prints the solver and model each check actually
+  ran with.
 - **`unique 1 10 20`.** riscv-formal's unique check assumes a retirement at its trigger cycle
   (`rvfi_unique_check.sv`). The first retirement of core_pipe is 8 to 10 cycles after reset, so the
   FSM's trigger of 5 is unsatisfiable (`PREUNSAT`); 10 is not, and the check then looks 10 cycles on.
