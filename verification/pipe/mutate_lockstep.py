@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """mutate_lockstep.py SPEC.json [idx,idx,...] -- pipe mutants against the pipe-vs-ref lockstep gate.
 
-SPEC: {"count": 30, "memcfg": "sram", "delay": 0, "jobs": 3, "inner_jobs": 2,
+SPEC: {"counts": [8, 24, 64], "memcfg": "sram", "delay": 0, "jobs": 3, "inner_jobs": 2,
        "profile": "--isa imac --priv msu --smc", "extra": ["--irq-mode", "2"],
        "mutants": [{"name": "...", "file": "qv_commit.sv", "old": "text", "new": "text"},
                    {"from": "p5c_unit_decode.json", "only": [2, 5]}]}
 A "from" entry pulls mutants (name/old/new) out of a unit-mutation spec in this directory; the
-target file is the basename of that spec's "dut". Each mutant gets a private copy of design/pipe/
+target file is the basename of that spec's "dut". Both kinds of entry may carry their own "profile"
+and "extra", which replace the spec's for that mutant (the lock bit, say, needs an M-mode body). Each mutant gets a private copy of design/pipe/
 and its own outdir, and runs verification/lockstep/run_lockstep.sh --mode selfproof --dut pipe
 --pipe-dir on it over the random corpus with the spec's profile. KILLED = any corpus entry failed
-or the build failed; SURVIVED = every entry passed. A mutant marked "equivalent": true is known to
+or the build failed; SURVIVED = every entry passed. "counts" escalates: a mutant is first run
+over the first count programs, and only a survivor goes on to the next count (the results of the
+programs already run are cached in its outdir), so a mutant that is easy to kill costs little.
+("count": N is a single count.) A mutant marked "equivalent": true is known to
 change nothing observable and is expected to survive. With no mutants selected the baseline
 (unmutated) is run, which must PASS: use "baseline" as the selector.
 """
@@ -28,8 +32,12 @@ def expand(spec):
             fname = os.path.basename(src["dut"])
             for i in m.get("only", range(len(src["mutants"]))):
                 u = src["mutants"][i]
-                out.append({"name": u["name"], "file": fname, "old": u["old"], "new": u["new"],
-                            "equivalent": u.get("equivalent", False)})
+                e = {"name": u["name"], "file": fname, "old": u["old"], "new": u["new"],
+                     "equivalent": u.get("equivalent", False)}
+                for k in ("profile", "extra"):
+                    if k in m:
+                        e[k] = m[k]
+                out.append(e)
         else:
             out.append(m)
     return out
@@ -46,27 +54,32 @@ def run_one(args):
             return i, "PATTERN NOT FOUND", ""
         open(f, "w", newline="").write(src.replace(m["old"], m["new"], m.get("count", 1)))
     out = os.path.join(d, "out")
-    cmd = ["bash", os.path.join(REPO, "verification/lockstep/run_lockstep.sh"),
-           "--mode", "selfproof", "--dut", "pipe", "--pipe-dir", os.path.join(d, "pipe"),
-           "--corpus", spec.get("corpus", "random"), "--random-count", str(spec.get("count", 30)),
-           "--memcfg-b", spec.get("memcfg", "sram"), "--delay-max", str(spec.get("delay", 0)),
-           "-j", str(spec.get("inner_jobs", 2)), "--outdir", out] + spec.get("extra", [])
     env = dict(os.environ)
-    if "profile" in spec:
-        env["QV_RANDOM_PROFILE"] = spec["profile"]
-    try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=spec.get("timeout", 7200),
-                           cwd=REPO, env=env)
-    except subprocess.TimeoutExpired:
-        return i, "killed", "(timeout)"
-    text = r.stdout + r.stderr
-    res = [l for l in text.splitlines() if "LOCKSTEP_RESULT:" in l]
-    bad = [l for l in res if "LOCKSTEP_RESULT: PASS" not in l]
-    if "BUILD FAILED" in text:
-        return i, "killed", "(build failed)"
-    if r.returncode == 0 and res and not bad:
-        return i, "SURVIVED", f"{len(res)} entries passed"
-    return i, "killed", (bad[0].strip() if bad else text[-150:].strip())
+    prof = (m or {}).get("profile", spec.get("profile"))
+    if prof:
+        env["QV_RANDOM_PROFILE"] = prof
+    counts = spec.get("counts") or [spec.get("count", 30)]
+    last = ""
+    for n in counts:
+        cmd = ["bash", os.path.join(REPO, "verification/lockstep/run_lockstep.sh"),
+               "--mode", "selfproof", "--dut", "pipe", "--pipe-dir", os.path.join(d, "pipe"),
+               "--corpus", spec.get("corpus", "random"), "--random-count", str(n),
+               "--memcfg-b", spec.get("memcfg", "sram"), "--delay-max", str(spec.get("delay", 0)),
+               "-j", str(spec.get("inner_jobs", 2)), "--outdir", out] + (m or {}).get("extra", spec.get("extra", []))
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=spec.get("timeout", 7200),
+                               cwd=REPO, env=env)
+        except subprocess.TimeoutExpired:
+            return i, "killed", "(timeout)"
+        text = r.stdout + r.stderr
+        res = [l for l in text.splitlines() if "LOCKSTEP_RESULT:" in l]
+        bad = [l for l in res if "LOCKSTEP_RESULT: PASS" not in l]
+        if "BUILD FAILED" in text:
+            return i, "killed", "(build failed)"
+        if not (r.returncode == 0 and res and not bad):
+            return i, "killed", f"[{n}] " + (bad[0].strip() if bad else text[-150:].strip())
+        last = f"{len(res)} entries passed"
+    return i, "SURVIVED", last
 
 
 def main():

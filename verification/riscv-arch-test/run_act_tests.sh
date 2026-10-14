@@ -14,9 +14,10 @@
 # modules, the frozen verification/reference/ref_core.sv + its ref_*
 # leaves (P3.3), or design/pipe/core_pipe.sv -- same env-var convention as
 # CONFIG_FILES/WORKDIR above. ACT_ONLY=<regex> runs only the ELFs whose
-# path matches; for CORE=pipe it defaults to the tests core_pipe can run
-# today (RV64I, M, Zca, Zicsr, M-mode exceptions). Results go
-# to act_results.log for fsm, act_results_<core>.log otherwise.
+# path matches. Results go to act_results.log for fsm,
+# act_results_<core>.log otherwise (ACT_RESULTS=<path> overrides, to keep the
+# tracked log untouched). core_pipe runs every ELF the FSM does today: it has
+# no Sv39 or debug yet, and the generated tests don't need either.
 set -u
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -56,7 +57,6 @@ case "$CORE" in
         mapfile -t CORE_FILES < <(grep -E '^design/(pipe/|decoder\.sv|alu\.sv|c_expand\.sv|csr_file\.sv|register_file\.sv|divider\.sv)' \
             "$REPO_ROOT/verification/regress/pipe_design_files.list" | sed "s#^#$REPO_ROOT/#")
         CORE_DEFINE=(-DQV_PIPE_AS_CORE)
-        [ -n "$ACT_ONLY" ] || ACT_ONLY='/I/|/Zca/|/Zicsr/|/M/|/ExceptionsZc/'
         ;;
     *)
         echo "Unknown CORE: $CORE (expected fsm, ref or pipe)" >&2

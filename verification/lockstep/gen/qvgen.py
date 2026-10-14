@@ -1276,8 +1276,14 @@ def emit_entry_preamble(p: Program):
             p.body_sie = p.rng.random() < 0.85
             if p.body_sie:
                 p.e("    csrsi   sstatus, 2")      # SIE: delegated interrupts are taken in S
-    elif p.irq:
-        p.e("    csrsi   mstatus, 8")              # MIE: the body runs in M
+    else:
+        if a.pmp and p.rng.random() < 0.5:
+            # M-mode data accesses run at MPP while MPRV is set: the PMP pockets then bind them too
+            mpp = p.rng.choice([0, 1])
+            p.li(6, (1 << 17) | (mpp << 11))
+            p.e("    csrs    mstatus, x6")        # MPRV, MPP = U or S
+        if p.irq:
+            p.e("    csrsi   mstatus, 8")          # MIE: the body runs in M
     p.e("recovery_point:")
 
 

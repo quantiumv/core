@@ -1,5 +1,5 @@
 {
- "count": 24,
+ "counts": [8, 24, 64],
  "memcfg": "sram",
  "delay": 0,
  "jobs": 3,
