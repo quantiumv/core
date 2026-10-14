@@ -21,6 +21,13 @@
  * included, where ECALL gets cause 0), SRET loads SPP (S or U) -- with the
  * ECALL cause following the privilege, the trap vector coming from stvec or
  * mtvec, and SRET returning to sepc.
+ *
+ * Interrupts: sampled only in the cycle after a retirement, from that
+ * cycle's live mip/mie/mideleg/MIE/SIE/privilege; one that is taken replaces
+ * the head's commit (nothing retires, the pipe is flushed), goes out on the
+ * trap channel with the interrupt bit, no tval and its own delegation,
+ * updates privilege and the architectural pc, and leaves the order counter
+ * alone so the handler's first retirement reports rvfi_intr.
  */
 module qv_commit_tb;
     import qv_pkg::*;
@@ -57,6 +64,8 @@ module qv_commit_tb;
     logic                    res_valid;
     logic [63:0]             res_addr;
     logic [63:0]             stvec = '0, sepc = '0, medeleg = '0;
+    logic [63:0]             mip = '0, mie = '0, mideleg = '0;
+    logic                    mstatus_mie = 1'b0, mstatus_sie = 1'b0, irq_taken;
     logic [1:0]              mpp = 2'b11;
     logic                    spp = 1'b0;
     logic                    sret_taken, trap_to_s;
@@ -70,6 +79,8 @@ module qv_commit_tb;
         .o_sret_taken(sret_taken), .o_trap_to_s(trap_to_s), .o_priv(priv),
         .i_stvec(stvec), .i_sepc(sepc), .i_medeleg(medeleg),
         .i_mstatus_mpp(mpp), .i_mstatus_spp(spp),
+        .i_mip(mip), .i_mie(mie), .i_mideleg(mideleg),
+        .i_mstatus_mie(mstatus_mie), .i_mstatus_sie(mstatus_sie), .o_irq_taken(irq_taken),
         .o_regfile_we(rf_we), .o_regfile_sel(rf_sel), .o_regfile_data(rf_data),
         .o_commit_valid(c_valid), .o_commit_rd(c_rd), .o_commit_rd_wen(c_rd_wen), .o_commit_tag(c_tag),
         .o_csr_addr(csr_addr), .i_csr_rdata(csr_rdata), .o_csr_we(csr_we), .o_csr_wdata(csr_wdata),
@@ -153,6 +164,64 @@ module qv_commit_tb;
         check({name, ": redirect"}, b(redirect), b(exp_redirect));
         check({name, ": next pc"}, next_pc, e.next_pc);
         if (exp_redirect) check({name, ": redirect pc"}, redirect_pc, e.next_pc);
+    endtask
+
+    // retire one plain ALU entry at the architectural pc, with no interrupt pending while it
+    // commits: the next cycle is a sample cycle, with mip as the caller had it
+    task automatic plain_retire();
+        logic [63:0] save;
+        save = mip; mip = '0;
+        set_entry(arch_pc, 32'h13, 1, 1'b1, 64'd7);
+        retire();
+        mip = save;
+    endtask
+
+    // move to privilege p by retiring an MRET with MPP = p, with no interrupt pending
+    // while it commits; the cycle after it is a sample cycle with mip as the caller had it
+    task automatic go_priv(input logic [1:0] p);
+        logic [63:0] save;
+        save = mip; mip = '0;
+        mpp = p;
+        set_entry(arch_pc, 32'h3020_0073, 0, 1'b0, 64'd0);
+        c.cls = QV_FU_SYS; c.sys_op = QV_SYS_MRET;
+        retire();
+        mip = save;
+    endtask
+
+    // a sample cycle with a complete ALU head presented: the interrupt replaces its commit
+    task automatic expect_irq(input string name, input logic [3:0] icause, input logic to_s, input logic [63:0] vec);
+        logic [63:0] pc0, ord0;
+        pc0 = arch_pc; ord0 = r_order;
+        set_entry(arch_pc, 32'h13, 2, 1'b1, 64'd9);
+        #1;
+        check({name, ": interrupt taken"}, b(irq_taken), 64'd1);
+        check({name, ": trap channel"}, b(trap_taken), 64'd1);
+        check({name, ": cause = interrupt bit + code"}, trap_cause, {1'b1, 59'b0, icause});
+        check({name, ": tval 0"}, trap_val, 64'd0);
+        check({name, ": trap_to_s"}, b(trap_to_s), b(to_s));
+        check({name, ": head does not commit"}, b(commit_now), 64'd0);
+        check({name, ": head not popped"}, b(pop), 64'd0);
+        check({name, ": no rd write"}, b(rf_we), 64'd0);
+        check({name, ": no retirement counted"}, b(instr_retired), 64'd0);
+        check({name, ": no rvfi trap flag"}, b(r_trap), 64'd0);
+        check({name, ": redirect"}, b(redirect), 64'd1);
+        check({name, ": redirect to the vector"}, redirect_pc, vec);
+        check({name, ": arch pc is still the next instruction (becomes mepc)"}, arch_pc, pc0);
+        retire();
+        check({name, ": arch pc is the vector"}, arch_pc, vec);
+        check({name, ": privilege"}, {62'b0, priv}, to_s ? 64'd1 : 64'd3);
+        check({name, ": order not advanced"}, r_order, ord0);
+    endtask
+
+    // a sample cycle (or not) in which nothing is taken: the head just commits
+    task automatic expect_no_irq(input string name);
+        set_entry(arch_pc, 32'h13, 2, 1'b1, 64'd9);
+        #1;
+        check({name, ": no interrupt"}, b(irq_taken), 64'd0);
+        check({name, ": head commits"}, b(commit_now), 64'd1);
+        check({name, ": no trap"}, b(trap_taken), 64'd0);
+        check({name, ": retirement counted"}, b(instr_retired), 64'd1);
+        retire();
     endtask
 
     initial begin
@@ -679,6 +748,171 @@ module qv_commit_tb;
         check("alu, fetch busy: no hold", b(fetch_hold), 64'd0);
         retire();
         fetch_idle = 1'b1;
+
+        // ---- interrupts ----
+        mip = '0; mie = '0; mideleg = '0; medeleg = '0; mstatus_mie = 1'b0; mstatus_sie = 1'b0;
+        mpp = 2'b11; spp = 1'b0;
+        go_priv(2'b11);
+        check("interrupts: start in M", {62'b0, priv}, 64'd3);
+        plain_retire();
+        expect_no_irq("nothing pending");
+
+        // MTI in M with MIE set: taken to M through mtvec
+        mie = 64'h80; mip = 64'h80; mstatus_mie = 1'b1;
+        plain_retire();
+        expect_irq("MTI in M", 4'd7, 1'b0, {mtvec[63:2], 2'b00});
+        // the cycle after the entry is not a sample point: the handler's first
+        // instruction retires, flagged as an interrupt entry
+        set_entry(arch_pc, 32'h13, 3, 1'b1, 64'd5);
+        #1;
+        check("after entry: no second interrupt", b(irq_taken), 64'd0);
+        check("after entry: handler instruction commits", b(commit_now), 64'd1);
+        check("after entry: rvfi_intr on it", b(r_intr), 64'd1);
+        retire();
+        // still pending and enabled: taken again at the next sample point
+        expect_irq("MTI again after one handler retirement", 4'd7, 1'b0, {mtvec[63:2], 2'b00});
+        mip = '0;
+
+        // not enabled: MIE clear in M, the source's own enable clear, other mip bits
+        mstatus_mie = 1'b0; mie = 64'h80; mip = 64'h80;
+        plain_retire();
+        expect_no_irq("MTI pending, MIE=0 in M");
+        mstatus_mie = 1'b1; mie = '0;
+        plain_retire();
+        expect_no_irq("MTI pending, MTIE clear");
+        mie = 64'hFFFF; mip = 64'h002A;               // SSIP, MSIP, STIP: no source here
+        plain_retire();
+        expect_no_irq("SSIP/MSIP/STIP pending are not sources");
+
+        // sampled only in the cycle after a retirement: enabling it in a later cycle
+        // does not take it until the next retirement has happened
+        mie = '0; mip = 64'h80;
+        plain_retire();                                // sample cycle follows, nothing enabled
+        @(posedge clk); #1;                            // an idle cycle: no retirement, not a sample cycle
+        mie = 64'h80;
+        expect_no_irq("MTI enabled outside a sample cycle");
+        expect_irq("MTI at the next sample point", 4'd7, 1'b0, {mtvec[63:2], 2'b00});
+        mip = '0;
+
+        // an empty ROB does not matter: the interrupt comes with no head at all
+        mie = 64'h80; mip = '0;
+        plain_retire();
+        mip = 64'h80;
+        #1;
+        check("empty ROB: interrupt taken", b(irq_taken), 64'd1);
+        check("empty ROB: redirect", b(redirect), 64'd1);
+        retire();
+        mip = '0;
+        go_priv(2'b11);
+
+        // below M a non-delegated interrupt is enabled whatever MIE says
+        mstatus_mie = 1'b0; mie = 64'h80; mideleg = '0;
+        mip = 64'h80; go_priv(2'b01);
+        expect_irq("MTI in S, MIE=0", 4'd7, 1'b0, {mtvec[63:2], 2'b00});
+        mip = 64'h80; go_priv(2'b00);
+        expect_irq("MTI in U, MIE=0", 4'd7, 1'b0, {mtvec[63:2], 2'b00});
+        // privilege 2'b10 is not M either (MPP is loaded raw)
+        mip = 64'h80; go_priv(2'b10);
+        check("MPP = 2'b10 reached", {62'b0, priv}, 64'd2);
+        expect_irq("MTI at privilege 2", 4'd7, 1'b0, {mtvec[63:2], 2'b00});
+        mip = '0;
+
+        // delegated: enabled in U, in S with SIE, never in M
+        mideleg = 64'h80; mie = 64'h80; mstatus_mie = 1'b1; mstatus_sie = 1'b0;
+        mip = 64'h80; go_priv(2'b01);
+        expect_no_irq("delegated MTI in S, SIE=0");
+        mstatus_sie = 1'b1;
+        plain_retire();
+        expect_irq("delegated MTI in S, SIE=1", 4'd7, 1'b1, {stvec[63:2], 2'b00});
+        mstatus_sie = 1'b0;
+        mip = 64'h80; go_priv(2'b00);
+        expect_irq("delegated MTI in U, SIE=0", 4'd7, 1'b1, {stvec[63:2], 2'b00});
+        mip = 64'h80; go_priv(2'b11);
+        expect_no_irq("delegated MTI in M, MIE=1");
+        mip = 64'h80; go_priv(2'b10);
+        expect_no_irq("delegated MTI at privilege 2");
+        mip = '0; mideleg = '0;
+
+        // priority MEI > MTI > SEI, and the route follows the one taken
+        mstatus_mie = 1'b1; mstatus_sie = 1'b1; go_priv(2'b11);
+        mie = 64'hA80; mip = 64'hA80;
+        plain_retire();
+        expect_irq("MEI beats MTI and SEI", 4'd11, 1'b0, {mtvec[63:2], 2'b00});
+        mie = 64'hA80; mip = 64'hA80; go_priv(2'b11);
+        mie = 64'h280;
+        plain_retire();
+        expect_irq("MTI beats SEI", 4'd7, 1'b0, {mtvec[63:2], 2'b00});
+        mie = 64'h280; mip = 64'hA80; go_priv(2'b11);
+        mie = 64'h200;
+        plain_retire();
+        expect_irq("SEI alone", 4'd9, 1'b0, {mtvec[63:2], 2'b00});
+        mideleg = 64'h200; mie = 64'h200; mip = 64'h200; go_priv(2'b00);
+        expect_irq("delegated SEI in U", 4'd9, 1'b1, {stvec[63:2], 2'b00});
+        // MEI undelegated outranks a delegated MTI: M route
+        mideleg = 64'h080; mie = 64'hA80; mip = 64'hA80; go_priv(2'b00);
+        expect_irq("MEI (M) beats delegated MTI", 4'd11, 1'b0, {mtvec[63:2], 2'b00});
+        // MEI delegated outranks MTI: S route
+        mideleg = 64'h800; mie = 64'hA80; mip = 64'hA80; go_priv(2'b00);
+        expect_irq("delegated MEI beats MTI", 4'd11, 1'b1, {stvec[63:2], 2'b00});
+        // MEI masked: the route belongs to the MTI that is taken instead
+        mideleg = 64'h800; mie = 64'h280; mip = 64'hA80; go_priv(2'b00);
+        expect_irq("MTI taken while MEI is masked: its own (M) route", 4'd7, 1'b0, {mtvec[63:2], 2'b00});
+        mip = '0; mideleg = '0;
+
+        // every source has its own enables below M and when delegated
+        mideleg = '0; mie = 64'hA80; mstatus_mie = 1'b0; mstatus_sie = 1'b0;
+        mie = 64'h800; mip = 64'h800; go_priv(2'b01);
+        expect_irq("MEI in S, MIE=0", 4'd11, 1'b0, {mtvec[63:2], 2'b00});
+        mie = 64'h200; mip = 64'h200; go_priv(2'b00);
+        expect_irq("SEI in U, MIE=0", 4'd9, 1'b0, {mtvec[63:2], 2'b00});
+        mideleg = 64'h200; mie = 64'h200; mip = 64'h200; mstatus_sie = 1'b0; go_priv(2'b01);
+        expect_no_irq("delegated SEI in S, SIE=0");
+        mstatus_sie = 1'b1;
+        plain_retire();
+        expect_irq("delegated SEI in S, SIE=1", 4'd9, 1'b1, {stvec[63:2], 2'b00});
+        mideleg = 64'h800; mie = 64'h800; mip = 64'h800; mstatus_sie = 1'b0; go_priv(2'b01);
+        expect_no_irq("delegated MEI in S, SIE=0");
+        mstatus_sie = 1'b1;
+        plain_retire();
+        expect_irq("delegated MEI in S, SIE=1", 4'd11, 1'b1, {stvec[63:2], 2'b00});
+        mip = '0; mideleg = '0; mstatus_sie = 1'b0;
+
+        // a faulted head in the sample cycle: the interrupt carries no tval of its own
+        mie = 64'h80; mip = '0; mstatus_mie = 1'b1; go_priv(2'b11);
+        plain_retire();
+        mip = 64'h80;
+        set_entry(arch_pc, 32'h0000_0000, 0, 1'b0, 64'd0);
+        c.xcpt = 1'b1; c.cause = 4'd1;                          // a fetch fault: its tval would be the pc
+        #1;
+        check("faulted head vs interrupt: interrupt", b(irq_taken), 64'd1);
+        check("faulted head vs interrupt: cause", trap_cause, {1'b1, 59'b0, 4'd7});
+        check("faulted head vs interrupt: tval 0", trap_val, 64'd0);
+        retire();
+        mip = '0;
+
+        // right after a trap: the architectural pc is the handler's vector
+        mie = 64'h80; mstatus_mie = 1'b1; go_priv(2'b11);
+        set_entry(arch_pc, 32'h0000_0073, 0, 1'b0, 64'd0);       // ecall, no interrupt yet
+        c.cls = QV_FU_SYS; c.sys_op = QV_SYS_ECALL;
+        retire();
+        check("after a trap: arch pc is the vector", arch_pc, {mtvec[63:2], 2'b00});
+        mip = 64'h80;
+        expect_irq("interrupt right after a trap", 4'd7, 1'b0, {mtvec[63:2], 2'b00});
+        mip = '0;
+
+        // FENCE.I at the head of a sample cycle: the interrupt wins, no flush
+        go_priv(2'b11);
+        plain_retire();
+        mip = 64'h80;
+        set_entry(arch_pc, 32'h0000_100F, 0, 1'b0, 64'd0);
+        c.cls = QV_FU_SYS; c.sys_op = QV_SYS_FENCE_I; c.serialize = 1'b1;
+        #1;
+        check("fence.i vs interrupt: interrupt", b(irq_taken), 64'd1);
+        check("fence.i vs interrupt: no flush", b(icache_flush), 64'd0);
+        check("fence.i vs interrupt: no commit", b(commit_now), 64'd0);
+        retire();
+        mip = '0; mie = '0; mstatus_mie = 1'b0; mideleg = '0;
+        go_priv(2'b11);
 
         $display("");
         $display("qv_commit_tb: %0d passed, %0d failed", pass_count, fail_count);
