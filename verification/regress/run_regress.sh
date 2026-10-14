@@ -23,7 +23,7 @@ JOBS="$(nproc 2>/dev/null || echo 4)"
 FORCE=0
 LIST_ONLY=0
 OUTDIR=""
-DEFAULT_TIMEOUT=180
+DEFAULT_TIMEOUT=${QV_REGRESS_TIMEOUT:-180}   # seconds per test; raise it on a loaded machine
 
 usage() {
     cat <<'EOF'
