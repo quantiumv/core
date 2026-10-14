@@ -30,7 +30,7 @@
 #
 # --dut pipe puts design/pipe/core_pipe.sv on side B (pipe-vs-ref; side
 # A stays ref_core). Selfproof and corrupt only, and the random corpus
-# switches to what core_pipe implements (--isa imc --priv m
+# switches to what core_pipe implements (--isa imac --priv m
 # --smc). --pipe-dir points the build at a modified copy of design/pipe/
 # (pipe mutants).
 set -u
@@ -262,7 +262,7 @@ build_fw_entries() {
 
 # what each side-B core implements
 RANDOM_PROFILE="--isa imac --priv msu --sv39 --smc"
-[ "$DUT" == "pipe" ] && RANDOM_PROFILE="--isa imc --priv m --smc"
+[ "$DUT" == "pipe" ] && RANDOM_PROFILE="--isa imac --priv m --smc"
 
 build_random_entries() {
     # programs are regenerated whenever the generator or the profile changes

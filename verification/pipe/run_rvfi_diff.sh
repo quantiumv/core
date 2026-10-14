@@ -8,7 +8,7 @@
 # (that needs memory and CSRs). Run from WSL, any cwd.
 #
 #   run_rvfi_diff.sh [--seeds N] [--first S] [--len L]
-#                    [--serialize 0|1] [--bypass 0|1] [--no-div] [--pipe-dir DIR]
+#                    [--serialize 0|1] [--bypass 0|1] [--no-div] [--no-amo] [--pipe-dir DIR]
 #
 # --pipe-dir builds core_pipe from a copy of design/pipe/ (for mutants);
 # --outdir keeps concurrent runs apart.
@@ -24,6 +24,7 @@ OUT="$REPO/verification/pipe/.results"
 while [ $# -gt 0 ]; do
     case "$1" in
         --no-div)    GEN_ARGS="$GEN_ARGS --no-div"; shift ;;
+        --no-amo)    GEN_ARGS="$GEN_ARGS --no-amo"; shift ;;
         --pipe-dir)  PIPE_DIR=$(cd "$2" && pwd); shift 2 ;;
         --outdir)    OUT=$2; shift 2 ;;
         --seeds)     SEEDS=$2; shift 2 ;;
@@ -68,7 +69,7 @@ pass=0; fail=0
 for ((s = FIRST; s < FIRST + SEEDS; s++)); do
     base="$OUT/alu_$s"
     read -r n dyn divs < <(python3 verification/pipe/gen_alu.py --seed "$s" --len "$LEN" $GEN_ARGS -o "$base.s") || exit 1
-    riscv64-unknown-elf-as -march=rv64imc_zicsr_zifencei -mabi=lp64 -mno-relax "$base.s" -o "$base.o" &&
+    riscv64-unknown-elf-as -march=rv64imac_zicsr_zifencei -mabi=lp64 -mno-relax "$base.s" -o "$base.o" &&
     riscv64-unknown-elf-ld -T verification/lockstep/gen/link.ld -o "$base.elf" "$base.o" &&
     riscv64-unknown-elf-objcopy -O verilog -j .text.entry -j .text.handlers -j .data.sandbox \
         --verilog-data-width=8 "$base.elf" "$base.hex" || exit 1

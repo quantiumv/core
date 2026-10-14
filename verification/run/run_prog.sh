@@ -8,9 +8,7 @@
 # SRC: one or more .c/.s/.S files, linked after firmware/crt0.s (sets sp,
 # zeroes .bss, calls main, then EBREAK ends the run) with
 # verification/run/link.ld. No libc; verification/run/qv_io.h prints
-# through the UART. libgcc is linked, so * / % work on every core: for
-# core_pipe (no divider yet) the program is built for rv64ic and libgcc
-# does the arithmetic.
+# through the UART. libgcc is linked for the builtins the compiler calls.
 #
 # --core   fsm: design/core.sv (default); ref: the frozen reference;
 #          pipe: design/pipe/core_pipe.sv
@@ -37,7 +35,7 @@ done
 case "$CORE" in
     fsm)  LIST=design_files.list;      DEF="";                 MARCH=rv64imac_zicsr_zifencei ;;
     ref)  LIST=ref_design_files.list;  DEF="-DQV_REF_AS_CORE";  MARCH=rv64imac_zicsr_zifencei ;;
-    pipe) LIST=pipe_design_files.list; DEF="-DQV_PIPE_AS_CORE"; MARCH=rv64ic_zicsr_zifencei ;;
+    pipe) LIST=pipe_design_files.list; DEF="-DQV_PIPE_AS_CORE"; MARCH=rv64imac_zicsr_zifencei ;;
     *) echo "unknown core: $CORE (expected fsm, ref or pipe)" >&2; exit 2 ;;
 esac
 [ -n "$OUT" ] || OUT="/tmp/qv_run_${CORE}"
@@ -57,10 +55,6 @@ $CC "${CFLAGS[@]}" -T "$REPO/verification/run/link.ld" -Wl,--no-warn-rwx-segment
 riscv64-unknown-elf-objdump -d "$OUT/prog.elf" > "$OUT/prog.lst"
 riscv64-unknown-elf-objcopy -O verilog -j .text -j .rodata -j .data --verilog-data-width=8 \
     "$OUT/prog.elf" "$OUT/prog.hex" || exit 1
-if [ "$CORE" == "pipe" ] && grep -qE $'\t(div|rem)[uw]*\t' "$OUT/prog.lst"; then
-    echo "error: the build contains div/rem, which core_pipe can't execute yet (see $OUT/prog.lst)" >&2
-    exit 1
-fi
 echo "built $OUT/prog.elf ($(riscv64-unknown-elf-size "$OUT/prog.elf" | awk 'NR==2 {print $4}') bytes; listing in prog.lst)"
 
 # ---------------- simulate ----------------

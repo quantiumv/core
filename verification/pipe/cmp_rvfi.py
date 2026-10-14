@@ -14,8 +14,9 @@ trapping records too: a misaligned access never reaches the bus, and a
 bus error's data is whatever the slave last drove, which depends on
 each core's own fetch/load interleaving. insn is ignored on a
 fetch-fault trap (cause 1): core.sv reports whatever its line register
-last held there. Addresses and masks stay strict on every record. Last
-line is
+last held there. A trapping atomic's address, masks and write data are
+ignored too: core.sv reports those of the last AMO that completed.
+Otherwise addresses and masks stay strict on every record. Last line is
 "RVFI_DIFF: PASS ..." or "RVFI_DIFF: FAIL ...".
 """
 import sys
@@ -23,6 +24,11 @@ import sys
 FIELDS = ["order", "pc_rdata", "pc_wdata", "insn", "mode", "trap", "intr", "cause",
           "tval", "rd_addr", "rd_wdata", "rs1_addr", "rs1_rdata", "rs2_addr",
           "rs2_rdata", "mem_addr", "mem_rmask", "mem_wmask", "mem_rdata", "mem_wdata"]
+
+
+def unused(mask):
+    """A mask field that is ignored or zero: no access of that kind."""
+    return mask == "-" or int(mask, 16) == 0
 
 
 def load(path, end_pc):
@@ -35,11 +41,18 @@ def load(path, end_pc):
             rec = dict(kv.split("=", 1) for kv in line.split()[1:])
             if int(rec["pc_rdata"], 16) == end_pc:
                 return recs, True
-            if int(rec["mem_rmask"], 16) == 0 or rec["trap"] == "1":
-                rec["mem_rdata"] = "-"
-            if rec["trap"] == "1" and int(rec["cause"], 16) == 1:
+            trap = rec["trap"] == "1"
+            insn = int(rec["insn"], 16)
+            if trap and insn & 0x7F == 0x2F:
+                # a trapping atomic: core.sv reports the fields of the last AMO that
+                # ran (X if none has yet)
+                for k in ("mem_addr", "mem_rmask", "mem_wmask", "mem_rdata", "mem_wdata"):
+                    rec[k] = "-"
+            if trap and int(rec["cause"], 16) == 1:
                 rec["insn"] = "-"
-            if int(rec["mem_wmask"], 16) == 0:
+            if trap or unused(rec["mem_rmask"]):
+                rec["mem_rdata"] = "-"
+            if unused(rec["mem_wmask"]):
                 rec["mem_wdata"] = "-"
             recs.append(rec)
     return recs, False

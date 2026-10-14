@@ -5,8 +5,8 @@ Bring-up corpus for design/pipe/core_pipe.sv: the integer class (RV64I
 register/immediate ops including the *W forms, LUI, AUIPC, MUL/MULH/
 MULHSU/MULHU/MULW, DIV/DIVU/REM/REMU and the W forms), conditional
 branches, JAL, JALR, loads, stores, FENCE, FENCE.I, Zicsr, M-mode traps and RVC.
-Assemble with -march=rv64imc_zicsr_zifencei. --no-div leaves the
-divides out (for a core without them).
+Assemble with -march=rv64imac_zicsr_zifencei. --no-div and --no-amo leave
+the divides / the A extension out (for a core without them).
 
 Everything runs in M-mode. A prologue points mtvec at a fixed handler
 (.text.handlers, 0x8000) that reads mcause/mtval and returns to
@@ -60,7 +60,13 @@ them -- operands at the spec's special cases (zero divisor, INT_MIN / -1 at
 branch whose operand is a load, so the divide is well under way when the
 branch resolves and has to be killed.
 
-Usage: gen_alu.py --seed N --len L [--no-div] -o prog.s
+Atomics: the nine AMOs (.W and .D, with random .aq/.rl), LR/SC pairs that
+succeed, that a store or a different address breaks, SCs with no LR, and
+the faulting forms -- misaligned and out-of-range (bus error) addresses,
+including an LR that faults followed by an SC to the same address. Each is
+a short group entered only at its first slot (an addi sets the address).
+
+Usage: gen_alu.py --seed N --len L [--no-div] [--no-amo] -o prog.s
 Prints "<static instruction count> <upper bound on dynamic count> <upper
 bound on dynamic divides>" (a divide takes ~70 cycles, the rest a few).
 """
@@ -71,6 +77,7 @@ R_OPS = ["add", "sub", "slt", "sltu", "xor", "or", "and", "sll", "srl", "sra",
          "addw", "subw", "sllw", "srlw", "sraw",
          "mul", "mulh", "mulhsu", "mulhu", "mulw"]
 DIV_OPS = ["div", "divu", "rem", "remu", "divw", "divuw", "remw", "remuw"]
+AMO_OPS = ["amoswap", "amoadd", "amoxor", "amoand", "amoor", "amomin", "amomax", "amominu", "amomaxu"]
 I_OPS = ["addi", "slti", "sltiu", "xori", "ori", "andi", "addiw"]
 SH_OPS = ["slli", "srli", "srai"]
 SHW_OPS = ["slliw", "srliw", "sraiw"]
@@ -147,10 +154,11 @@ def seed_reg(rng, r):
 
 
 class Gen:
-    def __init__(self, rng, dep_bias, div=True):
+    def __init__(self, rng, dep_bias, div=True, amo=True):
         self.rng = rng
         self.dep_bias = dep_bias
         self.div = div
+        self.amo = amo
         self.seg_divs = 0
         self.recent = []
         self.nlabel = 0
@@ -258,6 +266,61 @@ class Gen:
             ("wfi", False),
         ])
 
+    def atomic(self):
+        """An atomic: one AMO, or an LR/SC sequence, or a faulting form.
+        Entered only at the first slot. Returns (slots, traps); traps counts
+        the faults the group can take (each is a 4-byte instruction)."""
+        rng = self.rng
+        w = rng.random() < 0.5
+        sfx = "w" if w else "d"
+        size = 4 if w else 8
+        aq = rng.choice(["", "", "", ".aq", ".rl", ".aqrl"])
+        ta, tb = rng.sample(FREE_REGS, 2)
+        off = rng.randint(-2048 // size, 2047 // size) * size
+        rs2 = lambda: "x0" if rng.random() < 0.1 else f"x{self.src()}"
+        rd = lambda: f"x{self.dst()}"
+
+        def amo(t):
+            return f"{rng.choice(AMO_OPS)}.{sfx}{aq} {rd()}, {rs2()}, (x{t})"
+
+        def lr(t):
+            return f"lr.{sfx}{aq} {rd()}, (x{t})"
+
+        def sc(t):
+            return f"sc.{sfx}{aq} {rd()}, {rs2()}, (x{t})"
+
+        def setaddr(t, o, base=27):
+            return f"addi x{t}, x{base}, {o}"
+
+        self.recent += [ta]
+        kind = rng.choices(
+            ["amo", "pair_ok", "pair_store", "pair_other", "sc_alone", "lr_only", "misaligned", "bus_error", "lr_fault_sc"],
+            [38, 16, 8, 6, 6, 5, 9, 7, 5])[0]
+        if kind == "amo":
+            return [setaddr(ta, off), amo(ta)], 0
+        if kind == "pair_ok":
+            mid = [self.alu()] if rng.random() < 0.5 else []
+            return [setaddr(ta, off), lr(ta)] + mid + [sc(ta)], 0
+        if kind == "pair_store":
+            st = f"{'sw' if w else 'sd'} x{self.src()}, 0(x{ta})"
+            return [setaddr(ta, off), lr(ta), st, sc(ta)], 0
+        if kind == "pair_other":
+            off2 = off + 8 if off + 8 <= 2040 else off - 8
+            return [setaddr(ta, off), setaddr(tb, off2), lr(ta), sc(tb)], 0
+        if kind == "sc_alone":
+            return [setaddr(ta, off), sc(ta)], 0
+        if kind == "lr_only":
+            return [setaddr(ta, off), lr(ta)], 0
+        if kind == "misaligned":
+            mis = off + rng.randint(1, size - 1) if off + size - 1 <= 2047 else off - rng.randint(1, size - 1)
+            return [setaddr(ta, mis), rng.choice([amo, lr, sc])(ta)], 1
+        if kind == "bus_error":
+            bad = rng.choice([amo, lr, sc])
+            line = bad(ta)
+            return [setaddr(ta, off, 26), line], 0 if line.startswith("sc") else 1
+        # an LR that faults leaves no reservation: the SC after it must fail
+        return [setaddr(ta, off, 26), lr(ta), sc(ta)], 1
+
     def edge_div(self):
         """A divide on operands at one of the spec's special cases. Entered
         only at the first slot. Returns the slots."""
@@ -343,6 +406,11 @@ class Gen:
                 items.append(("jalr", self.dst(), base, odd, auipc, None))
                 i += 2 + odd
                 self.recent.append(base)
+            elif self.amo and r < 0.46 and i + 6 < n:
+                slots, traps = self.atomic()
+                forbidden.update(range(i + 1, i + len(slots)))
+                items += slots; i += len(slots)
+                self.seg_traps += traps
             elif self.div and r < 0.48 and i + 4 < n:
                 slots = self.edge_div()
                 forbidden.update(range(i + 1, i + len(slots)))
@@ -399,10 +467,11 @@ def main():
     ap.add_argument("--len", type=int, default=400, help="approximate body length")
     ap.add_argument("--dep-bias", type=float, default=0.6)
     ap.add_argument("--no-div", action="store_true", help="no DIV/DIVU/REM/REMU (or W forms)")
+    ap.add_argument("--no-amo", action="store_true", help="no A extension")
     ap.add_argument("-o", "--out", required=True)
     a = ap.parse_args()
     rng = random.Random(a.seed)
-    g = Gen(rng, a.dep_bias, div=not a.no_div)
+    g = Gen(rng, a.dep_bias, div=not a.no_div, amo=not a.no_amo)
 
     lines = [(0, "lui x30, 8"), (1, "csrw mtvec, x30")]     # (slot, text); handler at 0x8000
     for r in range(1, 32):
