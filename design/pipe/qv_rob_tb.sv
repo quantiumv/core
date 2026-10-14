@@ -6,7 +6,8 @@
  * Drives what the end-to-end pipeline can't reach yet (every ALU uop has
  * the same one-cycle latency and commits immediately, so a completed-
  * but-uncommitted entry is always the head): filling the ROB, completing
- * entries out of order, looking up non-head entries by tag, tag
+ * entries out of order (on any of the three writeback ports), looking up
+ * non-head entries by tag, tag
  * wraparound -- including reusing an index whose previous occupant
  * completed -- the mispredict next-pc override, and flush. Run at
  * ROB_DEPTH=8, 4 and 2.
@@ -35,7 +36,7 @@ module qv_rob_tb #(
     rob_ctrl_t               alloc_ctrl, head_ctrl;
     logic [QV_ROB_TAG_W-1:0] alloc_tag, head_tag;
     logic                    alloc_ready, empty;
-    wb_t                     wb = '0, wb2 = '0;
+    wb_t                     wb = '0, wb2 = '0, wb3 = '0;
     logic [QV_ROB_TAG_W-1:0] l1_tag = '0, l2_tag = '0;
     logic                    l1_complete, l2_complete;
     logic [63:0]             l1_value, l2_value;
@@ -49,7 +50,7 @@ module qv_rob_tb #(
         .i_alloc_rd(alloc_rd), .i_alloc_rd_wen(alloc_rd_wen), .i_alloc_next_pc(alloc_next_pc),
         .i_alloc_shadow(alloc_shadow), .i_alloc_ctrl(alloc_ctrl),
         .o_alloc_tag(alloc_tag), .o_alloc_ready(alloc_ready),
-        .o_empty(empty), .i_wb(wb), .i_wb2(wb2),
+        .o_empty(empty), .i_wb(wb), .i_wb2(wb2), .i_wb3(wb3),
         .i_lookup1_tag(l1_tag), .o_lookup1_complete(l1_complete), .o_lookup1_value(l1_value),
         .i_lookup2_tag(l2_tag), .o_lookup2_complete(l2_complete), .o_lookup2_value(l2_value),
         .o_head_valid(head_valid), .o_head_entry(head), .o_head_tag(head_tag),
@@ -132,7 +133,7 @@ module qv_rob_tb #(
         pop = 1'b0;
     endtask
 
-    int i, base;
+    int i, base, n3;
 
     initial begin
         repeat (2) @(posedge clk);
@@ -265,6 +266,43 @@ module qv_rob_tb #(
         do_alloc();                                      // reuses the flushed index
         #1;
         check("port 2 during flush: reused entry not complete", {63'b0, head.complete}, 64'd0);
+        @(negedge clk);
+        wb = '0; wb.valid = 1'b1; wb.tag = tag_of[seq - 1]; wb.value = val_of(seq - 1);
+        @(posedge clk); #1;
+        wb = '0;
+        @(negedge clk); pop = 1'b1; @(posedge clk); #1; pop = 1'b0;
+
+        // ---- the third (slow) writeback port: every port at once ----
+        // (a 2-entry ROB can only hold two, so it drives ports 3 and 1)
+        base = seq;
+        n3   = (ROB_DEPTH >= 4) ? 3 : 2;
+        for (i = 0; i < n3; i++) do_alloc();
+        @(negedge clk);
+        wb  = '0; wb.valid  = 1'b1; wb.tag  = tag_of[base + n3 - 1]; wb.value  = val_of(base + n3 - 1);
+        wb3 = '0; wb3.valid = 1'b1; wb3.tag = tag_of[base];          wb3.value = val_of(base);
+        wb3.mispredict = 1'b1; wb3.next_pc = 64'hBAD0;   // port 3 never redirects: ignored
+        if (n3 == 3) begin
+            wb2 = '0; wb2.valid = 1'b1; wb2.tag = tag_of[base + 1]; wb2.value = val_of(base + 1);
+        end
+        @(posedge clk); #1;
+        wb = '0; wb2 = '0; wb3 = '0;
+        for (i = 0; i < n3; i++) check_lookup("every port, one cycle", base + i, 1'b1);
+        #1;
+        check("port 3: head complete", {63'b0, head.complete}, 64'd1);
+        check("port 3: never a mispredict", {63'b0, head.mispredict}, 64'd0);
+        check("port 3: predicted next_pc kept", head.next_pc, 64'h1004 + 64'(4 * base));
+        for (i = 0; i < n3; i++) begin @(negedge clk); pop = 1'b1; @(posedge clk); #1; pop = 1'b0; end
+        // port 3 is ignored during a flush, like the others
+        base = seq;
+        do_alloc();
+        @(negedge clk);
+        wb3 = '0; wb3.valid = 1'b1; wb3.tag = tag_of[base]; wb3.value = 64'hDEAD;
+        flush = 1'b1;
+        @(posedge clk); #1;
+        wb3 = '0; flush = 1'b0;
+        do_alloc();                                      // reuses the flushed index
+        #1;
+        check("port 3 during flush: reused entry not complete", {63'b0, head.complete}, 64'd0);
         @(negedge clk);
         wb = '0; wb.valid = 1'b1; wb.tag = tag_of[seq - 1]; wb.value = val_of(seq - 1);
         @(posedge clk); #1;

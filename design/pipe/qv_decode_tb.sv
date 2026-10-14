@@ -174,6 +174,27 @@ module qv_decode_tb;
         check({name, ": no fault"}, {63'b0, uop.xcpt}, 64'd0);
     endtask
 
+    // DIV/DIVU/REM/REMU and the W forms: routed to the divider, rs1/rs2 both
+    // registers, writes rd, op bits {quot, signed} and is_word as given
+    task automatic expect_div(input string name, input logic [31:0] instr, input logic [6:0] exp_code,
+                              input logic exp_signed, input logic exp_quot, input logic exp_word);
+        feed(instr);
+        check({name, ": valid"}, {63'b0, valid}, 64'd1);
+        check({name, ": code"}, {57'b0, uop.code}, {57'b0, exp_code});
+        check({name, ": fu"}, {61'b0, uop.fu}, {61'b0, QV_FU_DIV});
+        check({name, ": div_signed"}, {63'b0, uop.div_signed}, {63'b0, exp_signed});
+        check({name, ": div_quot"}, {63'b0, uop.div_quot}, {63'b0, exp_quot});
+        check({name, ": is_word"}, {63'b0, uop.is_word}, {63'b0, exp_word});
+        check({name, ": rd"}, {59'b0, uop.rd}, 64'd5);
+        check({name, ": rs1"}, {59'b0, uop.rs1}, 64'd7);
+        check({name, ": rs1_used"}, {63'b0, uop.rs1_used}, 64'd1);
+        check({name, ": rs2"}, {59'b0, uop.rs2}, 64'd8);
+        check({name, ": rs2_used"}, {63'b0, uop.rs2_used}, 64'd1);
+        check({name, ": rd_wen"}, {63'b0, uop.rd_wen}, 64'd1);
+        check({name, ": no serialize"}, {63'b0, uop.serialize}, 64'd0);
+        check({name, ": no fault"}, {63'b0, uop.xcpt}, 64'd0);
+    endtask
+
     task automatic expect_fault(input string name, input logic [31:0] instr,
                                 input logic xcpt_in, input logic [3:0] cause_in, input logic [3:0] exp_cause);
         feed(instr, xcpt_in, cause_in);
@@ -306,6 +327,28 @@ module qv_decode_tb;
         expect_alu("MULHU",  encode_r(F7_M, 8, 6, 3'b011, 24, OP), `INSTR_CODE(MULHU),  24, 6, 1, 8, 1, prod[127:64]);
         a = R[9];  b = R[10];
         expect_alu("MULW",   encode_r(F7_M, 10, 9, 3'b000, 25, OP32), `INSTR_CODE(MULW), 25, 9, 1, 10, 1, sx32(a * b));
+
+        // ---------------- divide / remainder -> DIV ----------------
+        expect_div("DIV",   encode_r(F7_M, 8, 7, 3'b100, 5, OP),   `INSTR_CODE(DIV),   1'b1, 1'b1, 1'b0);
+        expect_div("DIVU",  encode_r(F7_M, 8, 7, 3'b101, 5, OP),   `INSTR_CODE(DIVU),  1'b0, 1'b1, 1'b0);
+        expect_div("REM",   encode_r(F7_M, 8, 7, 3'b110, 5, OP),   `INSTR_CODE(REM),   1'b1, 1'b0, 1'b0);
+        expect_div("REMU",  encode_r(F7_M, 8, 7, 3'b111, 5, OP),   `INSTR_CODE(REMU),  1'b0, 1'b0, 1'b0);
+        expect_div("DIVW",  encode_r(F7_M, 8, 7, 3'b100, 5, OP32), `INSTR_CODE(DIVW),  1'b1, 1'b1, 1'b1);
+        expect_div("DIVUW", encode_r(F7_M, 8, 7, 3'b101, 5, OP32), `INSTR_CODE(DIVUW), 1'b0, 1'b1, 1'b1);
+        expect_div("REMW",  encode_r(F7_M, 8, 7, 3'b110, 5, OP32), `INSTR_CODE(REMW),  1'b1, 1'b0, 1'b1);
+        expect_div("REMUW", encode_r(F7_M, 8, 7, 3'b111, 5, OP32), `INSTR_CODE(REMUW), 1'b0, 1'b0, 1'b1);
+        // a divide is not a multiply: MUL keeps going to the ALU, unflagged
+        feed(encode_r(F7_M, 8, 7, 3'b000, 5, OP));
+        check("MUL: still the ALU", {61'b0, uop.fu}, {61'b0, QV_FU_ALU});
+        check("MUL: not a divide", {62'b0, uop.div_signed, uop.div_quot}, 64'd0);
+        // x0 as a destination: a divide that writes nothing still runs
+        feed(encode_r(F7_M, 8, 7, 3'b100, 0, OP));
+        check("DIV x0: still the divider", {61'b0, uop.fu}, {61'b0, QV_FU_DIV});
+        check("DIV x0: rd 0", {59'b0, uop.rd}, 64'd0);
+        // a fetch fault on a divide encoding is a fault, not a divide
+        feed(encode_r(F7_M, 8, 7, 3'b100, 5, OP), 1'b1, 4'd1);
+        check("faulted DIV: routed to the ALU", {61'b0, uop.fu}, {61'b0, QV_FU_ALU});
+        check("faulted DIV: no rd write", {63'b0, uop.rd_wen}, 64'd0);
 
         // ---------------- branches, JAL, JALR -> BRU ----------------
         // B offsets at both ends of their range; branches never write rd
@@ -514,7 +557,6 @@ module qv_decode_tb;
 
         // ---------------- not implemented / faults ----------------
         expect_fault("SRET (not built yet)",  `INSTR_HEX_SRET, 1'b0, 4'd0, 4'd2);
-        expect_fault("DIV (not built yet)",   encode_r(F7_M, 8, 7, 3'b100, 5, OP), 1'b0, 4'd0, 4'd2);
         expect_fault("all-zero (illegal)",    32'h0000_0000, 1'b0, 4'd0, 4'd2);
         expect_fault("fetch fault on a valid instr", encode_r(F7_0, 8, 7, 3'b000, 5, OP), 1'b1, 4'd1, 4'd1);
         expect_fault("fetch fault beats illegal", 32'h0000_0000, 1'b1, 4'd1, 4'd1);
