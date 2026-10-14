@@ -156,6 +156,11 @@ module qv_issue #(
         o_alloc_ctrl.csr_addr  = i_uop.csr_addr;
         o_alloc_ctrl.csr_wsup  = i_uop.csr_wsup;
         o_alloc_ctrl.serialize = i_uop.serialize;
+        // the reservation (LR sets it, any store-class op clears it) is kept
+        // by commit; a decode fault never reaches the LSU, so it never counts
+        o_alloc_ctrl.is_lr     = i_uop.is_atomic && i_uop.amo_op == QV_AMO_LR && !i_uop.xcpt;
+        o_alloc_ctrl.is_store_class = (i_uop.is_store || (i_uop.is_atomic && i_uop.amo_op != QV_AMO_LR))
+                                      && !i_uop.xcpt;
         o_alloc_ctrl.xcpt      = i_uop.xcpt;
         o_alloc_ctrl.cause     = i_uop.xcpt_cause;
     end
@@ -163,9 +168,10 @@ module qv_issue #(
     // ---------------- dispatch: one request port per unit ----------------
     // CSR and SYS uops go through the ALU only to resolve their source
     // operand; commit carries out the operation itself at the ROB head.
-    // Memory uops go to the LSU (op = {store, signed, size}; a = rs1,
-    // b = rs2 or the I-immediate, imm = the S-immediate), which takes one
-    // at a time -- the next waits here until it is free. Divides likewise
+    // Memory uops go to the LSU (op = {0, store, signed, size}; a = rs1,
+    // b = rs2 or the I-immediate, imm = the S-immediate -- or, for an atomic,
+    // op = {1, qv_amo_op_e}, a = rs1 (the address), b = rs2, is_word for .W),
+    // which takes one at a time -- the next waits here until it is free. Divides likewise
     // go to the divider (op = {quotient, signed}, is_word for the W forms).
     // The ALU is the default for everything else, so every other unit must
     // be excluded from it by name.
@@ -174,7 +180,8 @@ module qv_issue #(
         req         = '0;
         req.tag     = i_alloc_tag;
         if (to_bru)      req.op = 5'(i_uop.bru_op);
-        else if (to_lsu) req.op = {1'b0, i_uop.is_store, i_uop.mem_signed, i_uop.mem_size};
+        else if (to_lsu) req.op = i_uop.is_atomic ? {1'b1, 4'(i_uop.amo_op)}
+                                                  : {1'b0, i_uop.is_store, i_uop.mem_signed, i_uop.mem_size};
         else if (to_div) req.op = {3'b0, i_uop.div_quot, i_uop.div_signed};
         else             req.op = i_uop.alu_op;
         req.is_word = i_uop.is_word;

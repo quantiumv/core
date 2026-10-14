@@ -38,6 +38,9 @@
  * come from the LSU's result for a memory op and are 0 otherwise.
  *
  * Not yet: interrupts, U/S modes.
+ *
+ * It also keeps the LR/SC reservation (see below), since only a retirement
+ * may change it.
  */
 module qv_commit #(
     parameter logic [63:0] RESET_PC = 64'h0
@@ -55,6 +58,10 @@ module qv_commit #(
     input  qv_pkg::rob_ctrl_t                i_head_ctrl,
     input  qv_pkg::lsu_res_t                 i_lsu_res,     // the head's, when it's a memory op
     output logic                             o_commit_pop,
+
+    // LR/SC reservation, read by the LSU when an SC becomes the head
+    output logic                             o_res_valid,
+    output logic [63:0]                      o_res_addr,
 
     output logic                             o_regfile_we,
     output logic [4:0]                       o_regfile_sel,
@@ -177,6 +184,27 @@ module qv_commit #(
 
     assign o_commit_pop = commit;
     assign o_commit_now = commit;
+
+    // ---------------- LR/SC reservation ----------------
+    // Set by a clean LR, to the address it loaded. Cleared by retiring any
+    // store-class op -- a store, an SC (whether or not it succeeded) or an
+    // AMO -- faulting or not, at any address; core.sv's rule exactly. Traps
+    // and interrupts leave it alone. The LSU reads it when an SC reaches the
+    // head: everything older has retired by then, so it can't change under it.
+    logic        res_valid_q;
+    logic [63:0] res_addr_q;
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            res_valid_q <= 1'b0;
+        end else if (commit && i_head_ctrl.is_lr && !is_trap) begin
+            res_valid_q <= 1'b1;
+            res_addr_q  <= i_lsu_res.vaddr;
+        end else if (commit && i_head_ctrl.is_store_class) begin
+            res_valid_q <= 1'b0;
+        end
+    end
+    assign o_res_valid = res_valid_q;
+    assign o_res_addr  = res_addr_q;
 
     // a memory op that faults while executing still has rd_wen set
     wire writes_rd = i_head_entry.rd_wen && !is_trap;

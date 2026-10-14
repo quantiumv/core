@@ -201,7 +201,42 @@ module qv_decode (
             default: ;
         endcase
     end: mem_control
-    wire is_mem   = is_load || is_store;
+    // A extension (core.sv's mem_control): LR/SC and the nine AMOs, .W and .D.
+    // The address is rs1 alone; the LSU runs them at the ROB head.
+    logic       is_atomic, atomic_word;
+    qv_amo_op_e amo_op;
+    always_comb begin: atomic_control
+        is_atomic   = 1'b1;
+        atomic_word = 1'b0;
+        amo_op      = QV_AMO_LR;
+        case (code)
+            `INSTR_CODE(LR_W):      begin amo_op = QV_AMO_LR;   atomic_word = 1'b1; end
+            `INSTR_CODE(LR_D):      begin amo_op = QV_AMO_LR; end
+            `INSTR_CODE(SC_W):      begin amo_op = QV_AMO_SC;   atomic_word = 1'b1; end
+            `INSTR_CODE(SC_D):      begin amo_op = QV_AMO_SC; end
+            `INSTR_CODE(AMOSWAP_W): begin amo_op = QV_AMO_SWAP; atomic_word = 1'b1; end
+            `INSTR_CODE(AMOSWAP_D): begin amo_op = QV_AMO_SWAP; end
+            `INSTR_CODE(AMOADD_W):  begin amo_op = QV_AMO_ADD;  atomic_word = 1'b1; end
+            `INSTR_CODE(AMOADD_D):  begin amo_op = QV_AMO_ADD; end
+            `INSTR_CODE(AMOXOR_W):  begin amo_op = QV_AMO_XOR;  atomic_word = 1'b1; end
+            `INSTR_CODE(AMOXOR_D):  begin amo_op = QV_AMO_XOR; end
+            `INSTR_CODE(AMOAND_W):  begin amo_op = QV_AMO_AND;  atomic_word = 1'b1; end
+            `INSTR_CODE(AMOAND_D):  begin amo_op = QV_AMO_AND; end
+            `INSTR_CODE(AMOOR_W):   begin amo_op = QV_AMO_OR;   atomic_word = 1'b1; end
+            `INSTR_CODE(AMOOR_D):   begin amo_op = QV_AMO_OR; end
+            `INSTR_CODE(AMOMIN_W):  begin amo_op = QV_AMO_MIN;  atomic_word = 1'b1; end
+            `INSTR_CODE(AMOMIN_D):  begin amo_op = QV_AMO_MIN; end
+            `INSTR_CODE(AMOMAX_W):  begin amo_op = QV_AMO_MAX;  atomic_word = 1'b1; end
+            `INSTR_CODE(AMOMAX_D):  begin amo_op = QV_AMO_MAX; end
+            `INSTR_CODE(AMOMINU_W): begin amo_op = QV_AMO_MINU; atomic_word = 1'b1; end
+            `INSTR_CODE(AMOMINU_D): begin amo_op = QV_AMO_MINU; end
+            `INSTR_CODE(AMOMAXU_W): begin amo_op = QV_AMO_MAXU; atomic_word = 1'b1; end
+            `INSTR_CODE(AMOMAXU_D): begin amo_op = QV_AMO_MAXU; end
+            default:                is_atomic = 1'b0;
+        endcase
+    end: atomic_control
+
+    wire is_mem   = is_load || is_store || is_atomic;
     wire is_fence = (code == `INSTR_CODE(FENCE));
 
     // DIV/DIVU/REM/REMU and the W forms (core.sv's is_div_family): a
@@ -257,10 +292,11 @@ module qv_decode (
 
     // ADDW/SUBW/ADDIW/MULW reuse the 64-bit op and get truncated after;
     // the *W shifts have their own 32-bit ALU ops (core.sv's is_word_arith).
-    // The W divides also work on 32-bit operands and a sign-extended result.
+    // The W divides also work on 32-bit operands and a sign-extended result,
+    // and the LSU takes .W atomics' width from this flag.
     wire is_word = (code == `INSTR_CODE(ADDW)) || (code == `INSTR_CODE(SUBW))
                 || (code == `INSTR_CODE(ADDIW)) || (code == `INSTR_CODE(MULW))
-                || div_word;
+                || div_word || (is_atomic && atomic_word);
     wire is_auipc = (code == `INSTR_CODE(AUIPC));
     wire is_jal   = (code == `INSTR_CODE(JAL));
 
@@ -297,8 +333,10 @@ module qv_decode (
         uop_d.serialize = is_csr || (sys_op == QV_SYS_FENCE_I);
         uop_d.pred_taken = i_iq_data.pred_taken;
         uop_d.pred_tgt   = i_iq_data.pred_tgt;
-        uop_d.mem_size   = mem_size;
-        uop_d.mem_signed = mem_signed;
+        uop_d.mem_size   = is_atomic ? (atomic_word ? 2'd2 : 2'd3) : mem_size;
+        uop_d.mem_signed = is_atomic || mem_signed;      // LR.W / AMO.W results sign-extend
+        uop_d.is_atomic  = is_atomic;
+        uop_d.amo_op     = amo_op;
         uop_d.is_load    = is_load;
         uop_d.is_store   = is_store;
         uop_d.div_signed = div_signed;

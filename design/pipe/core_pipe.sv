@@ -34,13 +34,14 @@
  * MUL/MULH/MULHSU/MULHU/MULW -- DIV/DIVU/REM/REMU and the W forms (one at
  * a time, on the divider), conditional branches, JAL, JALR,
  * loads and stores (performed one at a time, at the ROB head), FENCE,
- * FENCE.I, the six Zicsr instructions, ECALL, EBREAK, MRET and WFI (a
- * no-op),
+ * FENCE.I, LR/SC and the nine AMOs (.W and .D, also at the head, with the
+ * bus locked across an AMO's read and write), the six Zicsr instructions,
+ * ECALL, EBREAK, MRET and WFI (a no-op),
  * with M-mode synchronous traps, and RVC: compressed instructions on any
  * 2-byte boundary, including 32-bit ones that straddle two fetched
  * dwords. Everything else decodes as an illegal-instruction trap. Not
- * yet: SFENCE.VMA, U/S modes, SRET, interrupts, debug, A.
- * wb_mem_lock_o and the debug/progbuf outputs are held inert. The
+ * yet: SFENCE.VMA, U/S modes, SRET, interrupts, debug.
+ * The debug/progbuf outputs are held inert. The
  * Debug Module's GPR/CSR access mux (core.sv wires it around regfile0
  * and csr_file0) comes back with debug support.
  *
@@ -273,6 +274,8 @@ module core_pipe
     wb_t                     wb_bus;
     fu_req_t                 alu_req, bru_req, lsu_req, div_req;
     logic                    lsu_free, div_free;
+    logic                    res_valid;      // the LR/SC reservation, kept by commit
+    logic [63:0]             res_addr;
     logic                    c_valid, c_rd_wen;
     logic [4:0]              c_rd;
     logic [QV_ROB_TAG_W-1:0] c_tag;
@@ -341,8 +344,10 @@ module core_pipe
         .clk(clk), .rst(rst), .i_flush(flush),
         .i_req(lsu_req), .o_free(lsu_free),
         .i_head_valid(head_valid), .i_head_tag(head_tag),
+        .i_res_valid(res_valid), .i_res_addr(res_addr),
         .wb_mem_addr_o(wb_mem_addr_o), .wb_mem_dat_o(wb_mem_dat_o), .wb_mem_sel_o(wb_mem_sel_o),
         .wb_mem_we_o(wb_mem_we_o), .wb_mem_cyc_o(wb_mem_cyc_o), .wb_mem_stb_o(wb_mem_stb_o),
+        .wb_mem_lock_o(wb_mem_lock_o),
         .wb_mem_dat_i(wb_mem_dat_i), .wb_mem_ack_i(wb_mem_ack_i), .wb_mem_err_i(wb_mem_err_i),
         .o_wb(lsu_wb), .o_res(lsu_res),
         /* verilator lint_off PINCONNECTEMPTY */
@@ -378,6 +383,7 @@ module core_pipe
         .clk(clk), .rst(rst),
         .i_head_valid(head_valid), .i_head_entry(head_entry), .i_head_tag(head_tag),
         .i_head_shadow(head_shadow), .i_head_ctrl(head_ctrl), .i_lsu_res(lsu_res), .o_commit_pop(commit_pop),
+        .o_res_valid(res_valid), .o_res_addr(res_addr),
         .o_regfile_we(rf_we), .o_regfile_sel(rf_sel), .o_regfile_data(rf_data),
         .o_commit_valid(c_valid), .o_commit_rd(c_rd), .o_commit_rd_wen(c_rd_wen), .o_commit_tag(c_tag),
         .o_csr_addr(c_csr_addr), .i_csr_rdata(csr_rdata), .o_csr_we(c_csr_we), .o_csr_wdata(c_csr_wdata),
@@ -478,7 +484,6 @@ module core_pipe
     /* verilator lint_on UNUSEDSIGNAL */
 
     // ---------------- inert ports ----------------
-    assign wb_mem_lock_o   = 1'b0;
     assign o_debug_mode    = in_debug_mode;
     assign o_dm_csr_rdata  = csr_rdata;
     assign o_dm_gpr_rdata  = rs2_data;

@@ -47,6 +47,22 @@ package qv_pkg;
         QV_SYS_FENCE_I
     } qv_sys_op_e;
 
+    // A-extension operations (the LSU runs them, at the ROB head). LR and SC
+    // are single accesses; the nine AMOs read, modify and write under one lock.
+    typedef enum logic [3:0] {
+        QV_AMO_LR,
+        QV_AMO_SC,
+        QV_AMO_SWAP,
+        QV_AMO_ADD,
+        QV_AMO_XOR,
+        QV_AMO_AND,
+        QV_AMO_OR,
+        QV_AMO_MIN,
+        QV_AMO_MAX,
+        QV_AMO_MINU,
+        QV_AMO_MAXU
+    } qv_amo_op_e;
+
     // CSR read-modify-write kind (the I forms differ only in operand source).
     typedef enum logic [1:0] {
         QV_CSR_RW,
@@ -96,6 +112,8 @@ package qv_pkg;
         logic        mem_signed;
         logic        is_load;
         logic        is_store;
+        logic        is_atomic;    // LR/SC/AMO: mem_size is 2 (.W) or 3 (.D), always signed
+        qv_amo_op_e  amo_op;
         logic        div_signed;   // DIV/REM(W): signed operands
         logic        div_quot;     // DIV(U)(W): the quotient; REM(U)(W): the remainder
         qv_sys_op_e  sys_op;
@@ -143,6 +161,7 @@ package qv_pkg;
         logic        xcpt;
         logic [3:0]  cause;
         logic [63:0] tval;
+        logic [63:0] vaddr;        // the exact access address (LR's reservation address)
         logic [63:0] mem_addr;
         logic [7:0]  mem_rmask;
         logic [7:0]  mem_wmask;
@@ -159,6 +178,8 @@ package qv_pkg;
         logic [11:0] csr_addr;
         logic        csr_wsup;
         logic        serialize;
+        logic        is_lr;        // a clean retirement sets the reservation
+        logic        is_store_class; // store, SC or AMO: retiring clears it, faulting or not
         logic        xcpt;
         logic [3:0]  cause;
     } rob_ctrl_t;
@@ -167,7 +188,7 @@ package qv_pkg;
     typedef struct packed {
         logic                    valid;
         logic [QV_ROB_TAG_W-1:0] tag;
-        logic [4:0]              op;       // alu_op; a qv_bru_op_e (BRU); {quot, signed} (DIV); see qv_lsu (LSU)
+        logic [4:0]              op;       // alu_op; a qv_bru_op_e (BRU); {quot, signed} (DIV); {store, signed, size} or {1, qv_amo_op_e} (LSU)
         logic                    is_word;
         logic [63:0]             a;
         logic [63:0]             b;
