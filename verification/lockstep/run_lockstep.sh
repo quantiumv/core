@@ -214,7 +214,7 @@ case "$SIM" in
     iverilog)
         if [ ! -e "$VVP_BIN" ] || [ "$FORCE" == "1" ]; then
             echo "=== building $VVP_BIN ==="
-            iverilog -g2012 -DRISCV_FORMAL \
+            iverilog -g2012 -DRISCV_FORMAL $([ "$B_PIPE" == "1" ] && echo -DLS_HAVE_PIPE) \
                 -I design -I design/defaults -I verification/reference -I verification/lockstep \
                 -Plockstep_tb.QV_MUTANT_B=$QV_MUTANT_B \
                 -Plockstep_tb.MEMCFG_B_CACHE=$MEMCFG_B_CACHE \
@@ -240,7 +240,7 @@ case "$SIM" in
             # redefinition, which is harmless here: each file expands its own uses while it is being read.
             verilator --binary --timing -O2 -j ${VL_JOBS:-4} -Wno-fatal -Wno-lint -Wno-style -Wno-WIDTH \
                 -Wno-CASEINCOMPLETE -Wno-UNOPTFLAT -Wno-BLKANDNBLK -Wno-INITIALDLY -Wno-MULTIDRIVEN -Wno-REDEFMACRO \
-                -DRISCV_FORMAL -Idesign -Idesign/defaults -Iverification/reference -Iverification/lockstep \
+                -DRISCV_FORMAL $([ "$B_PIPE" == "1" ] && echo -DLS_HAVE_PIPE) -Idesign -Idesign/defaults -Iverification/reference -Iverification/lockstep \
                 -GQV_MUTANT_B=$QV_MUTANT_B -GMEMCFG_B_CACHE=$MEMCFG_B_CACHE -GDELAY_MAX=$RUN_DELAY_MAX -GB_PIPE=$B_PIPE \
                 --top-module lockstep_tb --Mdir "$VL_DIR" -o lockstep_vl \
                 $PIPE_FILES $REF_FILES $SUPPORT_FILES $LOCKSTEP_FILES > "$BUILD_LOG" 2>&1

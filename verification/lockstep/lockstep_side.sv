@@ -156,15 +156,18 @@ module lockstep_side #(
     generate
         if (CORE_PIPE) begin : g_core
             core_pipe core0 (`LS_CORE_PORTS);
+`ifdef LS_HAVE_PIPE
             // core_pipe takes an interrupt without waiting for the LSU, which is only safe because nothing can
             // be on the data bus at a sample point (it asserts that too, but an assertion only prints): make
-            // it fatal here.
+            // it fatal here. (Only when core_pipe is in the build: Verilator checks the names even in a branch
+            // that is not taken.)
             always @(posedge clk) begin
                 if (!rst && core0.interrupt_taken && core0.lsu_head_started) begin
                     $display("LOCKSTEP_RESULT: FAIL (core_pipe took an interrupt with a data access started)");
                     $finish;
                 end
             end
+`endif
         end else begin : g_core
             ref_core #(.QV_MUTANT(QV_MUTANT)) core0 (`LS_CORE_PORTS);
         end

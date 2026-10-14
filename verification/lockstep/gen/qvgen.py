@@ -141,6 +141,7 @@ class Program:
         # assume an S-mode body).
         self.priv_ext = args.priv == "msu" and not args.sail_safe and not args.sv39
         self.body_u = False       # the body starts in U mode
+        self.body_priv2 = False   # ... or in the reserved privilege 2'b10 (MPP is loaded raw)
         # --irq: the body runs with interrupts on, so an interrupt can strike between any two
         # instructions -- inside an idiom that keeps a value in x5-x8, or between a sepc write and the
         # sret that uses it. Hence transparent trap handlers (mscratch/sscratch are their save-area
@@ -739,7 +740,7 @@ def emit_handlers(p: Program):
     # fault" path instead, got skipped over as if it were a random
     # fault, and the program ran off into whatever garbage follows.
     m_is_ecall = Label("misecall")
-    for cause in (8, 9, 11):
+    for cause in (8, 9, 11) + ((0,) if p.priv_ext else ()):
         p.handlers += [f"    li      x6, {cause}", f"    beq     x5, x6, {m_is_ecall}"]
     p.handlers += [
         f"    j       {m_not_ecall}",
@@ -1150,14 +1151,20 @@ def emit_trap_delegation(p: Program):
     causes = [0, 1, 3, 4, 5, 6, 7, 12, 13, 15]  # never 9
     if p.priv_ext:
         causes.append(8)    # ECALL from U may go to S: its handler passes the epilogue's up to M
-    bits = 0
-    for c in causes:
-        if p.rng.random() < 0.5:
-            bits |= (1 << c)
     # TSR makes every SRET trap, including the one that ends the S handler, so
     # it needs a program that never enters it: nothing delegated.
-    if p.priv_ext and bits == 0 and p.rng.random() < 0.4:
+    if p.priv_ext and p.rng.random() < 0.15:
         p.tsr = True
+    # a body at the reserved privilege 2 (MPP = 2'b10 is legal to load): its ECALL has cause 0, which the M
+    # handler recognizes as the epilogue's, so cause 0 must not be delegated away from it
+    p.body_priv2 = p.priv_ext and p.rng.random() < 0.07
+    bits = 0
+    if not p.tsr:
+        for c in causes:
+            if p.rng.random() < 0.5:
+                bits |= (1 << c)
+    if p.body_priv2:
+        bits &= ~1
     p.li(6, bits)
     p.e("    csrw    medeleg, x6")
     mideleg = 0 if p.tsr else 0x222   # STIP|SEIP|SSIP delegated
@@ -1236,9 +1243,13 @@ def emit_entry_preamble(p: Program):
     a = p.args
     p.e("_start:")
     p.e("    la      x6, m_trap_handler")
+    if not a.sail_safe and p.rng.random() < 0.3:
+        p.e(f"    addi    x6, x6, {p.rng.choice([1, 2, 3])}")     # MODE bits: both cores take direct mode only
     p.e("    csrw    mtvec, x6")
     if a.priv == "msu":
         p.e("    la      x6, s_trap_handler")
+        if not a.sail_safe and p.rng.random() < 0.3:
+            p.e(f"    addi    x6, x6, {p.rng.choice([1, 2, 3])}")
         p.e("    csrw    stvec, x6")
         emit_trap_delegation(p)
     p.e("    la      x25, recovery_point")
@@ -1259,9 +1270,10 @@ def emit_entry_preamble(p: Program):
         # label either way -- `la` + mepc works identically for a VA or
         # a PA, since under --sv39 the code region is identity-mapped).
         if p.priv_ext:
-            p.body_u = p.rng.random() < 0.4
+            p.body_u = not p.body_priv2 and p.rng.random() < 0.4
             tvm = p.rng.random() < 0.3
-            mst = (0 if p.body_u else 1 << 11) | ((1 << 22) if p.tsr else 0) | ((1 << 20) if tvm else 0)
+            mpp = 2 if p.body_priv2 else (0 if p.body_u else 1)
+            mst = (mpp << 11) | ((1 << 22) if p.tsr else 0) | ((1 << 20) if tvm else 0)
             p.li(6, mst)
             p.e("    csrw    mstatus, x6")   # MPP = S or U, TSR, TVM
         else:

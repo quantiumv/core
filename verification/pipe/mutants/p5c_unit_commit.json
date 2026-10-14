@@ -64,8 +64,8 @@
   },
   {
    "name": "SRET does not redirect",
-   "old": "assign o_redirect_valid = commit && (is_trap || is_mret || is_sret || i_head_entry.mispredict",
-   "new": "assign o_redirect_valid = commit && (is_trap || is_mret || i_head_entry.mispredict"
+   "old": "assign o_redirect_valid = irq || (commit && (is_trap || is_mret || is_sret || i_head_entry.mispredict",
+   "new": "assign o_redirect_valid = irq || (commit && (is_trap || is_mret || i_head_entry.mispredict"
   },
   {
    "name": "MRET legalizes MPP = 2",
