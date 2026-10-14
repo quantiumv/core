@@ -1,0 +1,81 @@
+{
+ "seeds": 30,
+ "first": 1,
+ "jobs": 5,
+ "mutants": [
+  {
+   "name": "divider never killed",
+   "file": "qv_exu_div.sv",
+   "old": ".i_kill(i_flush),",
+   "new": ".i_kill(1'b0),"
+  },
+  {
+   "name": "unit busy not cleared by flush",
+   "file": "qv_exu_div.sv",
+   "old": "if (rst || i_flush) begin\n            busy_q <= 1'b0;",
+   "new": "if (rst) begin\n            busy_q <= 1'b0;"
+  },
+  {
+   "name": "DIV also runs on the ALU (not excluded)",
+   "file": "qv_issue.sv",
+   "old": "o_alu_req.valid = o_issue && !to_bru && !to_lsu && !to_div;",
+   "new": "o_alu_req.valid = o_issue && !to_bru && !to_lsu;"
+  },
+  {
+   "name": "issue ignores div_free",
+   "file": "qv_issue.sv",
+   "old": "&& (!to_div || i_div_free)",
+   "new": ""
+  },
+  {
+   "name": "DIV op bits swapped",
+   "file": "qv_issue.sv",
+   "old": "req.op = {3'b0, i_uop.div_quot, i_uop.div_signed};",
+   "new": "req.op = {3'b0, i_uop.div_signed, i_uop.div_quot};"
+  },
+  {
+   "name": "DIVU decoded signed",
+   "file": "qv_decode.sv",
+   "old": "`INSTR_CODE(DIVU):  begin div_quot = 1'b1; end",
+   "new": "`INSTR_CODE(DIVU):  begin div_signed = 1'b1; div_quot = 1'b1; end"
+  },
+  {
+   "name": "REMW not a word op",
+   "file": "qv_decode.sv",
+   "old": "`INSTR_CODE(REMW):  begin div_signed = 1'b1; div_word = 1'b1; end",
+   "new": "`INSTR_CODE(REMW):  begin div_signed = 1'b1; end"
+  },
+  {
+   "name": "DIVUW not a word op",
+   "file": "qv_decode.sv",
+   "old": "`INSTR_CODE(DIVUW): begin div_quot = 1'b1; div_word = 1'b1; end",
+   "new": "`INSTR_CODE(DIVUW): begin div_quot = 1'b1; end"
+  },
+  {
+   "name": "divider result never reaches the ROB",
+   "file": "core_pipe.sv",
+   "old": ".i_wb3(div_wb)",
+   "new": ".i_wb3('0)"
+  },
+  {
+   "name": "ROB takes port 3 during a flush",
+   "file": "qv_rob.sv",
+   "old": "if (i_wb3.valid && !i_flush) begin",
+   "new": "if (i_wb3.valid) begin",
+   "equivalent": true,
+   "why": "allocation clears complete_q and every flush empties the ROB, so a completion arriving in a flush cycle is never observed; qv_exu_div masks it too"
+  },
+  {
+   "name": "W result not sign-extended",
+   "file": "qv_exu_div.sv",
+   "old": "o_wb.value = word_q ? {{32{raw[31]}}, raw[31:0]} : raw;",
+   "new": "o_wb.value = word_q ? {32'b0, raw[31:0]} : raw;"
+  },
+  {
+   "name": "W unsigned operands sign-extended",
+   "file": "qv_exu_div.sv",
+   "old": "wire [63:0] divisor  = !word_q ? b_q : signed_q ? {{32{b_q[31]}}, b_q[31:0]} : {32'b0, b_q[31:0]};",
+   "new": "wire [63:0] divisor  = !word_q ? b_q : {{32{b_q[31]}}, b_q[31:0]};"
+  }
+ ]
+}

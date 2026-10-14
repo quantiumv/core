@@ -1,0 +1,42 @@
+{
+ "dut": "design/pipe/qv_rob.sv",
+ "tb": "design/pipe/qv_rob_tb.sv",
+ "files": [
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_rob.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench"
+ ],
+ "cwd": "design",
+ "mutants": [
+  {
+   "name": "ROB takes port 3 during a flush",
+   "old": "if (i_wb3.valid && !i_flush) begin",
+   "new": "if (i_wb3.valid) begin",
+   "equivalent": true,
+   "why": "allocation clears complete_q and every flush empties the ROB, so a completion arriving in a flush cycle is never observed; qv_exu_div masks it too"
+  },
+  {
+   "name": "port 3 does not complete",
+   "old": "complete_q[wb3_idx] <= 1'b1;",
+   "new": "complete_q[wb3_idx] <= complete_q[wb3_idx];"
+  },
+  {
+   "name": "port 3 writes no value",
+   "old": "value_q[wb3_idx]    <= i_wb3.value;",
+   "new": ""
+  },
+  {
+   "name": "port 3 writes the wrong entry",
+   "old": "wire [IDX_W-1:0] wb3_idx   = i_wb3.tag[IDX_W-1:0];",
+   "new": "wire [IDX_W-1:0] wb3_idx   = i_wb2.tag[IDX_W-1:0];"
+  }
+ ]
+}
