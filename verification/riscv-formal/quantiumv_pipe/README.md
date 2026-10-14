@@ -31,6 +31,11 @@ log already says `DONE (PASS)`, so an interrupted sweep resumes. The RTL file li
   and with the multipliers in the model every check took about twice as long (`insn_and` on boolector: 73 min
   of CPU time against 39). It is an abstraction, not a restriction of the instruction stream: a multiply still
   flows through issue, the ROB, bypass and commit with an arbitrary value.
+- **Memories are mapped (`memory_map`).** `[script-link]` in `checks.cfg` turns every memory (register
+  file, ROB, producer table, CSR state) into flops and muxes before the SMT2 is written, so the solver never
+  does array reasoning. The semantics are unchanged (a bug injected into the ALU's ADD is still caught, in
+  under a minute). On this core array reasoning was the bottleneck: `hang` went from more than 5 hours of CPU
+  time without finishing even its satisfiability pre-check to 8 minutes, `insn_c_beqz` from 28 minutes to 8.
 - **Bitwuzla, not boolector.** About twice as fast on this core (`insn_and`, same model: 35 min of CPU against 73
   on boolector). It needs the patched `smtio.py` that `run_sweep.sh` puts on `PYTHONPATH`; without it
   yosys-smtbmc dies with `BrokenPipeError`, the failure the FSM sweep hit and answered by using boolector.
