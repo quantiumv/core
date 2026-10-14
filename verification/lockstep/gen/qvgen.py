@@ -721,6 +721,7 @@ def emit_handlers(p: Program):
                     "    ld      x5, 24(x5)"]
 
     p.handlers += [
+        "    .balign 4",             # mtvec's low bits may carry MODE bits, so its base has to be 4-aligned
         f"{m_trap}:",
         *m_pro,
         "    csrr    x5, mcause",
@@ -837,6 +838,7 @@ def emit_handlers(p: Program):
         s_len2 = Label("slen2")
         s_lenmem = Label("slenmem")
         p.handlers += [
+            "    .balign 4",         # stvec's low bits may carry MODE bits, so its base has to be 4-aligned
             f"{s_trap}:",
             *s_pro,
             "    csrr    x5, scause",
