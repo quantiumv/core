@@ -1,6 +1,6 @@
 #!/bin/bash
 # verification/lockstep/run_kill_matrix.sh -- the lockstep harness against its mutants (P3.4's kill matrix).
-# Run under WSL bash:  wsl bash -lc "verification/lockstep/run_kill_matrix.sh [--random-count N] [-j N] [--outdir DIR] [--only 1,5,9]"
+# Run under WSL bash:  wsl bash -lc "verification/lockstep/run_kill_matrix.sh [--random-count N] [-j N] [--outdir DIR] [--only 1,5,9] [--sim verilator]"
 #
 # Each ref_core mutant (QV_MUTANT_B = 1..10, see ref_core.sv) runs against the reference through run_lockstep.sh
 # --mode mutant, and at least one corpus entry must FAIL: that is the proof the comparator can see that kind of
@@ -18,6 +18,7 @@ cd "$SCRIPT_DIR/../.." || exit 1
 COUNT=10
 JOBS=3
 OUT=/tmp/qv_kill_matrix
+SIM=iverilog
 ONLY="1,2,3,4,5,6,7,8,9,10"
 ENTRIES='fw_|random_|act_(I-add-00|I-sb-00|I-bltu-00|I-fence-00|ExceptionsZc-00|U-00|S-00)' 
 while [ $# -gt 0 ]; do
@@ -27,6 +28,7 @@ while [ $# -gt 0 ]; do
         --outdir) OUT="$2"; shift 2 ;;
         --only) ONLY="$2"; shift 2 ;;
         --entries) ENTRIES="$2"; shift 2 ;;
+        --sim) SIM="$2"; shift 2 ;;
         *) echo "Unknown option: $1" >&2; exit 1 ;;
     esac
 done
@@ -40,7 +42,7 @@ for m in ${ONLY//,/ }; do
     esac
     log="$OUT/mutant_$m.log"
     mkdir -p "$OUT"
-    bash verification/lockstep/run_lockstep.sh --mode mutant --mutant "$m" "${args[@]}" -j "$JOBS" \
+    bash verification/lockstep/run_lockstep.sh --mode mutant --mutant "$m" "${args[@]}" --sim "$SIM" -j "$JOBS" \
         --outdir "$OUT/m$m" > "$log" 2>&1
     rc=$?
     first=$(grep 'LOCKSTEP_RESULT: FAIL' "$log" | head -1)
