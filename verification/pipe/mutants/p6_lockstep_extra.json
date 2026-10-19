@@ -28,19 +28,14 @@
     2,
     3,
     4
-   ]
+   ],
+   "profile": "--isa imac --priv m --pmp --irq --smc"
   },
   {
    "from": "p6b_unit_decode.json",
    "only": [
     5,
     6
-   ]
-  },
-  {
-   "from": "p6c_unit_commit.json",
-   "only": [
-    20
    ]
   },
   {

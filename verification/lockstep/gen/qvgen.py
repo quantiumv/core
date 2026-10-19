@@ -551,6 +551,21 @@ def emit_csr(p: Program, recent: list[int]):
     if p.priv_ext and p.rng.random() < 0.5:
         emit_priv_csr(p, recent)
         return
+    if p.rng.random() < 0.12:
+        # a debug or trigger CSR outside Debug Mode: an illegal instruction at every privilege. In an M-mode body
+        # this is the only way to reach the decoder's Debug Mode check (below M the privilege check traps first).
+        rd = p.reg_biased(recent)
+        csr = p.rng.choice(_D_ANY)
+        form = p.rng.choice(["csrrw", "csrrs", "csrrc", "csrrwi", "csrrsi", "csrrci", "read"])
+        if form == "read":
+            p.e(f"    csrr    x{rd}, {csr}")
+        elif form.endswith("i"):
+            p.e(f"    {form:<7} x{rd}, {csr}, {p.rng.randint(0, 31)}")
+        else:
+            p.e(f"    {form:<7} x{rd}, {csr}, x{p.reg_biased(recent)}")
+        recent.append(rd)
+        del recent[:-8]
+        return
     csr = "sscratch" if p.args.priv == "msu" else "mscratch"
     if p.irq:
         csr = "stval" if p.args.priv == "msu" else "mtval"     # the scratch CSRs are the handlers' pointers

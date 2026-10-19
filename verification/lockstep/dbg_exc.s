@@ -56,6 +56,9 @@ _start:
     lr.d    x30, (x27)
     sd      x30, 40(x27)            # a store between LR and SC clears the reservation
     sc.d    x31, x18, (x27)
+    lr.d    x30, (x27)
+    sw      x30, 48(x27)            # a second store between an LR and its SC: a trigger exception on it still clears the reservation
+    sc.d    x31, x18, (x27)
     amoadd.d x28, x19, (x27)
     csrrw   x30, mscratch, x14
     csrrs   x31, mscratch, x0
