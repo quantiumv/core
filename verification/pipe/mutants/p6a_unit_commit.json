@@ -34,8 +34,8 @@
   },
   {
    "name": "a halt does not beat the head's commit",
-   "old": "(!is_fence_i || i_fetch_idle) && !irq && !halt_take;",
-   "new": "(!is_fence_i || i_fetch_idle) && !irq;"
+   "old": "(!is_fence_i || i_fetch_idle) && !irq && !halt_take && !head_dbg_entry;",
+   "new": "(!is_fence_i || i_fetch_idle) && !irq && !head_dbg_entry;"
   },
   {
    "name": "an interrupt beats a halt request and a step",
@@ -59,33 +59,33 @@
   },
   {
    "name": "the cause ignores the step",
-   "old": "assign o_dbg_cause      = i_dbg_stepping ? 3'd4 : 3'd3;",
-   "new": "assign o_dbg_cause      = 3'd3;"
+   "old": "trigger_entry ? 3'd2 : i_dbg_stepping ? 3'd4 : 3'd3;",
+   "new": "trigger_entry ? 3'd2 : 3'd3;"
   },
   {
    "name": "the halt request outranks the step in the cause",
-   "old": "assign o_dbg_cause      = i_dbg_stepping ? 3'd4 : 3'd3;",
-   "new": "assign o_dbg_cause      = i_dbg_halt_req ? 3'd3 : 3'd4;"
+   "old": "trigger_entry ? 3'd2 : i_dbg_stepping ? 3'd4 : 3'd3;",
+   "new": "trigger_entry ? 3'd2 : i_dbg_halt_req ? 3'd3 : 3'd4;"
   },
   {
    "name": "the entry redirects to the next pc, not the architectural one",
-   "old": "o_redirect_pc    = irq ? irq_vector : halt_take ? arch_pc_q :",
-   "new": "o_redirect_pc    = irq ? irq_vector : halt_take ? actual_next_pc :"
+   "old": "o_redirect_pc    = irq ? irq_vector : (halt_take || head_dbg_entry) ? arch_pc_q :",
+   "new": "o_redirect_pc    = irq ? irq_vector : halt_take ? actual_next_pc : head_dbg_entry ? arch_pc_q :"
   },
   {
    "name": "no redirect (flush) on a halt entry",
-   "old": "assign o_redirect_valid = irq || halt_take || i_dbg_resume",
-   "new": "assign o_redirect_valid = irq || i_dbg_resume"
+   "old": "assign o_redirect_valid = irq || halt_take || head_dbg_entry || i_dbg_resume",
+   "new": "assign o_redirect_valid = irq || head_dbg_entry || i_dbg_resume"
   },
   {
    "name": "no redirect on a resume",
-   "old": "assign o_redirect_valid = irq || halt_take || i_dbg_resume",
-   "new": "assign o_redirect_valid = irq || halt_take"
+   "old": "assign o_redirect_valid = irq || halt_take || head_dbg_entry || i_dbg_resume",
+   "new": "assign o_redirect_valid = irq || halt_take || head_dbg_entry"
   },
   {
    "name": "a resume ignores the (rewritten) dpc in the redirect",
-   "old": "halt_take ? arch_pc_q : i_dbg_resume ? i_dpc : actual_next_pc;",
-   "new": "halt_take ? arch_pc_q : i_dbg_resume ? arch_pc_q : actual_next_pc;"
+   "old": "(halt_take || head_dbg_entry) ? arch_pc_q : i_dbg_resume ? i_dpc : actual_next_pc;",
+   "new": "(halt_take || head_dbg_entry) ? arch_pc_q : i_dbg_resume ? arch_pc_q : actual_next_pc;"
   },
   {
    "name": "a resume does not load the architectural pc from dpc",
@@ -94,13 +94,13 @@
   },
   {
    "name": "a halt entry counts as a retirement",
-   "old": "assign o_instr_retired = commit && !is_trap;",
-   "new": "assign o_instr_retired = (commit && !is_trap) || halt_take;"
+   "old": "assign o_instr_retired = commit && !faulted && !(i_dbg_in_debug && i_dcsr[10]);",
+   "new": "assign o_instr_retired = (commit && !faulted && !(i_dbg_in_debug && i_dcsr[10])) || halt_take;"
   },
   {
    "name": "a halt entry goes out on the trap channel",
-   "old": "assign o_trap_taken    = (commit && is_trap) || irq;",
-   "new": "assign o_trap_taken    = (commit && is_trap) || irq || halt_take;"
+   "old": "assign o_trap_taken    = (commit && trap_fx) || irq;",
+   "new": "assign o_trap_taken    = (commit && trap_fx) || irq || halt_take;"
   },
   {
    "name": "FENCE.I flushes the icache in the halt cycle",
@@ -114,8 +114,8 @@
   },
   {
    "name": "a halt entry is not reported as an entry",
-   "old": "assign o_dbg_entry      = halt_take;",
-   "new": "assign o_dbg_entry      = 1'b0;"
+   "old": "assign o_dbg_entry         = halt_take || head_dbg_entry;",
+   "new": "assign o_dbg_entry         = head_dbg_entry;"
   },
   {
    "name": "the order counter advances on an entry",

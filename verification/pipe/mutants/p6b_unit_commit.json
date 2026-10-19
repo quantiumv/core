@@ -114,8 +114,8 @@
   },
   {
    "name": "an entering head counts as a retirement",
-   "old": "assign o_instr_retired = commit && !is_trap;",
-   "new": "assign o_instr_retired = (commit && !is_trap) || head_dbg_entry;"
+   "old": "assign o_instr_retired = commit && !faulted && !(i_dbg_in_debug && i_dcsr[10]);",
+   "new": "assign o_instr_retired = (commit && !faulted && !(i_dbg_in_debug && i_dcsr[10])) || head_dbg_entry;"
   },
   {
    "name": "an EBREAK word under a fetch fault enters",

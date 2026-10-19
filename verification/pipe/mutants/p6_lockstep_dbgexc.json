@@ -1,0 +1,29 @@
+{
+ "counts": [
+  10,
+  40
+ ],
+ "sim": "verilator",
+ "memcfg": "sram",
+ "delay": 0,
+ "jobs": 3,
+ "inner_jobs": 2,
+ "profile": "--isa imac --priv msu --pmp --irq --smc",
+ "extra": [
+  "--irq-mode",
+  "0",
+  "--dbg-mode",
+  "1",
+  "--dbg-features",
+  "191"
+ ],
+ "corpus": "dbg",
+ "mutants": [
+  {
+   "from": "p6b_unit_commit.json"
+  },
+  {
+   "from": "p6b_unit_decode.json"
+  }
+ ]
+}

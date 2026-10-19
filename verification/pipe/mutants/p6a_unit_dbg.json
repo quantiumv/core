@@ -18,8 +18,8 @@
  "mutants": [
   {
    "name": "a resume is accepted while running",
-   "old": "assign o_resume = i_resume_req && in_debug_q;",
-   "new": "assign o_resume = i_resume_req;"
+   "old": "assign o_resume = i_resume_req && in_debug_q && !active_q;",
+   "new": "assign o_resume = i_resume_req && !active_q;"
   },
   {
    "name": "an entry does not set in_debug",
@@ -58,12 +58,12 @@
   },
   {
    "name": "the Debug Module owns the ports outside Debug Mode too",
-   "old": "assign o_dm_access_active = in_debug_q;",
+   "old": "assign o_dm_access_active = in_debug_q && !active_q;",
    "new": "assign o_dm_access_active = 1'b1;"
   },
   {
    "name": "the Debug Module never owns the ports",
-   "old": "assign o_dm_access_active = in_debug_q;",
+   "old": "assign o_dm_access_active = in_debug_q && !active_q;",
    "new": "assign o_dm_access_active = 1'b0;"
   },
   {
