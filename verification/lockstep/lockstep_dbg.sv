@@ -308,19 +308,22 @@ module lockstep_dbg (
     function automatic [31:0] enc_csr(input [11:0] csr, input [4:0] rs1, input [2:0] f3, input [4:0] rd);
         enc_csr = {csr, rs1, f3, rd, 7'b1110011};
     endfunction
+    function automatic [31:0] enc_amo(input [4:0] f5, input [4:0] rs2, input [4:0] rs1, input [2:0] f3, input [4:0] rd);
+        enc_amo = {f5, 1'b0, 1'b0, rs2, rs1, f3, rd, 7'b0101111};
+    endfunction
 
     // Fill pbw[0..pbn-1] with one snippet. ra/rb are x22/x23 when the
     // program leaves them alone, x0 otherwise (so the words are still
     // there to be executed and retired, with no architectural effect).
-    // The sandbox snippet needs the qvgen sandbox base in x27, so it only
-    // exists for reserved programs.
+    // The sandbox snippets (3, 9, 10) need the qvgen sandbox base in x27, so
+    // they only exist for reserved programs.
     task automatic make_snippet(input integer which_in, input logic reserved);
         logic [4:0] ra, rb;
         integer which, i, k;
         begin
             ra    = reserved ? 5'd22 : 5'd0;
             rb    = reserved ? 5'd23 : 5'd0;
-            which = (which_in == 3 && !reserved) ? 0 : which_in;
+            which = ((which_in == 3 || which_in == 9 || which_in == 10) && !reserved) ? 0 : which_in;
             pbn   = 0;
             case (which)
                 0: begin   // ALU chain
@@ -383,6 +386,31 @@ module lockstep_dbg (
                     for (i = 0; i < 15; i = i + 1)
                         pbw[i] = enc_i(12'd1, ra, 3'b000, ra, 7'b0010011);
                     pbw[15] = EBREAK; pbn = 16;
+                end
+                9: begin   // atomics through the sandbox base: LR, SC, AMOADD (the lock, the reservation)
+                    pbw[0] = enc_amo(5'b00010, 5'd0, 5'd27, 3'b011, ra);                  // lr.d ra, (x27)
+                    pbw[1] = enc_amo(5'b00011, rb, 5'd27, 3'b011, rb);                    // sc.d rb, rb, (x27)
+                    pbw[2] = enc_amo(5'b00000, rb, 5'd27, 3'b011, ra);                    // amoadd.d ra, rb, (x27)
+                    pbw[3] = EBREAK; pbn = 4;
+                end
+                10: begin  // abort: a misaligned store (cause 6)
+                    pbw[0] = enc_i(12'd1, ra, 3'b000, ra, 7'b0010011);
+                    pbw[1] = enc_s(12'd1, rb, 5'd27, 3'b010);                             // sw rb, 1(x27)
+                    pbw[2] = EBREAK; pbn = 3;
+                end
+                11: begin  // multiply and divide, including a divide by the other register
+                    pbw[0] = enc_r(7'b0000001, rb, ra, 3'b000, ra, 7'b0110011);           // mul ra, ra, rb
+                    pbw[1] = enc_r(7'b0000001, rb, ra, 3'b101, rb, 7'b0110011);           // divu rb, ra, rb
+                    pbw[2] = enc_r(7'b0000001, ra, rb, 3'b111, ra, 7'b0110011);           // remu ra, rb, ra
+                    pbw[3] = enc_r(7'b0000001, ra, rb, 3'b100, rb, 7'b0111011);           // divw rb, rb, ra
+                    pbw[4] = EBREAK; pbn = 5;
+                end
+                12: begin  // reads of counters and status: minstret (stopcount!), mstatus, mcause, mtvec
+                    pbw[0] = enc_csr(CSR_MINSTRET, 5'd0, 3'b010, ra);                     // csrrs ra, minstret, x0
+                    pbw[1] = enc_csr(12'h300, 5'd0, 3'b010, rb);                          // csrrs rb, mstatus, x0
+                    pbw[2] = enc_csr(12'h342, 5'd0, 3'b010, ra);                          // csrrs ra, mcause, x0
+                    pbw[3] = enc_csr(12'h305, 5'd0, 3'b010, rb);                          // csrrs rb, mtvec, x0
+                    pbw[4] = EBREAK; pbn = 5;
                 end
                 default: begin
                     pbw[0] = EBREAK; pbn = 1;
@@ -466,7 +494,7 @@ module lockstep_dbg (
                         ev(EV_WRITE, 64'(r), back);
                     end
                     6: if (feat_i[5]) begin                         // a Program Buffer run
-                        pb_run(rnd(9), reserved);
+                        pb_run(rnd(13), reserved);
                     end
                     default: if (feat_i[2]) begin
                         ar_read({4'b0, CSR_MINSTRET}, v);
