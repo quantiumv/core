@@ -35,7 +35,8 @@ module lockstep_rec #(
     parameter int REC_DEPTH = `QV_LOCKSTEP_REC_DEPTH,
     parameter int WR_DEPTH  = `QV_LOCKSTEP_WR_DEPTH,
     parameter int RD_DEPTH  = `QV_LOCKSTEP_RD_DEPTH,
-    parameter int DBG_DEPTH = `QV_LOCKSTEP_HIST_DEPTH
+    parameter int DBG_DEPTH = `QV_LOCKSTEP_HIST_DEPTH,
+    parameter int EV_DEPTH  = `QV_LOCKSTEP_EV_DEPTH
 ) (
     input logic clk_push,
     input logic clk_pop,
@@ -77,6 +78,13 @@ module lockstep_rec #(
     input logic [31:0]  rd_addr_i,
     input logic [63:0]  rd_data_i,
 
+    // debug-script event log (lockstep_dbg.sv), one push per event
+    input logic         ev_valid_i,
+    input logic [3:0]   ev_kind_i,
+    input logic [63:0]  ev_order_i,
+    input logic [63:0]  ev_a_i,
+    input logic [63:0]  ev_b_i,
+
     output logic [31:0] rec_count,
     output logic [31:0] rec_total,   // lifetime push count, for the final report
 
@@ -116,7 +124,15 @@ module lockstep_rec #(
     output logic         rd_avail,
     input  logic         rd_pop,
     output logic [31:0]  rdp_addr,
-    output logic [63:0]  rdp_data
+    output logic [63:0]  rdp_data,
+
+    output logic         ev_avail,
+    input  logic         ev_pop,
+    output logic [3:0]   evp_kind,
+    output logic [63:0]  evp_order,
+    output logic [63:0]  evp_a,
+    output logic [63:0]  evp_b,
+    output logic [31:0]  ev_count      // unconsumed events, for pacing
 );
     // Plain parallel arrays, one per field, all indexed identically --
     // NOT an array of a packed struct. iverilog's elaborator (confirmed
@@ -380,4 +396,45 @@ module lockstep_rec #(
     end
     assign rdp_addr = rdring_addr[rd_rp_q];
     assign rdp_data = rdring_data[rd_rp_q];
+
+    // -------------------- debug-event ring --------------------
+    // One more bit of pointer than the index needs, so a full ring is
+    // told apart from an empty one (the older rings above lap silently;
+    // an event burst from a debug phase must not).
+    localparam int EV_PTR_W = $clog2(EV_DEPTH) + 1;
+    logic [EV_PTR_W-1:0] ev_wp_q = '0, ev_rp_q = '0;
+    logic [3:0]  evring_kind  [0:EV_DEPTH-1];
+    logic [63:0] evring_order [0:EV_DEPTH-1];
+    logic [63:0] evring_a     [0:EV_DEPTH-1];
+    logic [63:0] evring_b     [0:EV_DEPTH-1];
+
+    assign ev_avail = (ev_wp_q != ev_rp_q);
+    assign ev_count = 32'(ev_wp_q - ev_rp_q);
+
+    always_ff @(posedge clk_push) begin
+        if (rst) begin
+            ev_wp_q <= '0;
+        end else if (ev_valid_i) begin
+            if ((ev_wp_q - ev_rp_q) >= EV_PTR_W'(EV_DEPTH)) begin
+                $display("LOCKSTEP_RESULT: FAIL (debug-event ring overflow: the other side is too far behind)");
+                $finish;
+            end
+            evring_kind[ev_wp_q[EV_PTR_W-2:0]]  <= ev_kind_i;
+            evring_order[ev_wp_q[EV_PTR_W-2:0]] <= ev_order_i;
+            evring_a[ev_wp_q[EV_PTR_W-2:0]]     <= ev_a_i;
+            evring_b[ev_wp_q[EV_PTR_W-2:0]]     <= ev_b_i;
+            ev_wp_q <= ev_wp_q + 1'b1;
+        end
+    end
+    always_ff @(posedge clk_pop) begin
+        if (rst) begin
+            ev_rp_q <= '0;
+        end else if (ev_pop && ev_avail) begin
+            ev_rp_q <= ev_rp_q + 1'b1;
+        end
+    end
+    assign evp_kind  = evring_kind[ev_rp_q[EV_PTR_W-2:0]];
+    assign evp_order = evring_order[ev_rp_q[EV_PTR_W-2:0]];
+    assign evp_a     = evring_a[ev_rp_q[EV_PTR_W-2:0]];
+    assign evp_b     = evring_b[ev_rp_q[EV_PTR_W-2:0]];
 endmodule

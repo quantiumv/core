@@ -44,7 +44,9 @@ wouldn't be for a real OS):
   x5-x12        handler scratch ONLY (t0,t1,t2,s0,s1,a0,a1,a2) -- never
                 touched by the random body, so a trap can freely clobber
                 them without needing to save/restore anything
-  x13-x23       FREE POOL for random-body content (a3-a7,s2-s7 -- 11 regs)
+  x13-x23       FREE POOL for random-body content (a3-a7,s2-s7 -- 11 regs);
+                under --dbg x22/x23 are left out of the pool (9 regs): the lockstep
+                harness's scripted debugger (lockstep_dbg.sv) uses them as scratch
   x24           epilogue marker (set immediately before the epilogue's
                 own ECALL; the M-handler's ecall path checks it to tell
                 the deliberate epilogue ecall apart from a random one)
@@ -1503,6 +1505,10 @@ def main():
                           "register for S mode. Ignored under --sail-safe; "
                           "not combinable with --sv39 yet")
     ap.add_argument("--smc", action="store_true")
+    ap.add_argument("--dbg", action="store_true",
+                    help="keep x22/x23 out of the random pool, for the lockstep harness's scripted "
+                         "debugger (--dbg-mode): it overwrites them from the Debug Module, and runs "
+                         "Program Buffer snippets that use them and the sandbox base x27")
     ap.add_argument("--no-div", action="store_true", dest="no_div",
                     help="keep M to the multiplies (for cores without a divider yet)")
     ap.add_argument("--len", type=int, default=200)
@@ -1532,6 +1538,9 @@ def main():
         args.irq = False
     if args.irq and args.sv39:
         ap.error("--irq cannot be combined with --sv39 yet")
+
+    if args.dbg:
+        del FREE_POOL[-2:]      # x22, x23 (in place: every user of the pool sees it)
 
     if args.output is None:
         args.output = GEN_DIR / f"gen_{args.seed}"

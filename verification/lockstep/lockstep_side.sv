@@ -45,6 +45,12 @@ module lockstep_side #(
     input  logic [31:0] irq_seed_i,          // runtime
     input  logic [31:0] irq_density_i,       // runtime, see lockstep_irq.sv
     input  logic        irq_late_i,          // runtime, see lockstep_irq.sv
+    input  logic [31:0] dbg_mode_i,          // runtime, see lockstep_dbg.sv (0 = no debug script)
+    input  logic [31:0] dbg_seed_i,          // runtime
+    input  logic [31:0] dbg_density_i,       // runtime
+    input  logic [31:0] dbg_feat_i,          // runtime, feature mask
+    input  logic        dbg_late_i,          // runtime, halt level visible one cycle later
+    input  logic [63:0] dbg_max_retire_i,    // runtime, the run's MAX_RETIRE (0 = tohost-terminated)
 
     // RVFI passthrough (core/ref_core always built with -DRISCV_FORMAL
     // by this harness -- see run_lockstep.sh)
@@ -101,7 +107,14 @@ module lockstep_side #(
     // ordered MMIO-read log
     output logic        o_mmio_rd_valid,
     output logic [31:0] o_mmio_rd_addr,
-    output logic [63:0] o_mmio_rd_data
+    output logic [63:0] o_mmio_rd_data,
+
+    // debug-script event log (lockstep_dbg.sv)
+    output logic        o_ev_valid,
+    output logic [3:0]  o_ev_kind,
+    output logic [63:0] o_ev_order,
+    output logic [63:0] o_ev_a,
+    output logic [63:0] o_ev_b
 );
     logic i_mtip, i_meip, i_seip;
     logic icache_flush;
@@ -112,6 +125,22 @@ module lockstep_side #(
     logic [63:0] wb_mem_dat_o, wb_mem_dat_i;
     logic [7:0]  wb_mem_sel;
     logic        wb_mem_we, wb_mem_cyc, wb_mem_stb, wb_mem_ack, wb_mem_err, wb_mem_lock;
+
+    // Debug Module wiring, as soc.sv does it: dm0's plain register interface is driven by lockstep_dbg.sv
+    // (a scripted debugger), everything between dm0 and the core is the real thing.
+    logic        dbg_halted;                        // core0.o_debug_mode
+    logic        dm_halt_req, dm_resume_req, script_halt_req, core_halt_req;
+    logic        dm_gpr_we, dm_csr_we;
+    logic [4:0]  dm_gpr_sel;
+    logic [11:0] dm_csr_addr;
+    logic [63:0] dm_gpr_wdata, dm_csr_wdata, dm_gpr_rdata, dm_csr_rdata;
+    logic        progbuf_start, progbuf_done, progbuf_abort;
+    logic [3:0]  progbuf_pc;
+    logic [31:0] progbuf_data;
+    logic [6:0]  dmi_addr;
+    logic [31:0] dmi_wdata, dmi_rdata;
+    logic        dmi_we;
+    assign core_halt_req = dm_halt_req | script_halt_req;
 
     // the port list both branches share
 `define LS_CORE_PORTS \
@@ -150,7 +179,12 @@ module lockstep_side #(
         .rvfi_csr_medeleg_rdata(rvfi_csr_medeleg_rdata), .rvfi_csr_medeleg_wdata(rvfi_csr_medeleg_wdata), \
         .rvfi_csr_satp_rmask(rvfi_csr_satp_rmask), .rvfi_csr_satp_wmask(rvfi_csr_satp_wmask), \
         .rvfi_csr_satp_rdata(rvfi_csr_satp_rdata), .rvfi_csr_satp_wdata(rvfi_csr_satp_wdata), \
-        .rvfi_any_trap_taken(rvfi_any_trap_taken), .rvfi_any_debug_entry(rvfi_any_debug_entry)
+        .rvfi_any_trap_taken(rvfi_any_trap_taken), .rvfi_any_debug_entry(rvfi_any_debug_entry), \
+        .o_debug_mode(dbg_halted), .i_debug_halt_req(core_halt_req), .i_debug_resume_req(dm_resume_req), \
+        .i_dm_gpr_we(dm_gpr_we), .i_dm_gpr_sel(dm_gpr_sel), .i_dm_gpr_wdata(dm_gpr_wdata), .o_dm_gpr_rdata(dm_gpr_rdata), \
+        .i_dm_csr_we(dm_csr_we), .i_dm_csr_addr(dm_csr_addr), .i_dm_csr_wdata(dm_csr_wdata), .o_dm_csr_rdata(dm_csr_rdata), \
+        .i_progbuf_start(progbuf_start), .o_progbuf_pc(progbuf_pc), .i_progbuf_data(progbuf_data), \
+        .o_progbuf_done(progbuf_done), .o_progbuf_abort(progbuf_abort)
 
     /* verilator lint_off PINCONNECTEMPTY */
     generate
@@ -213,6 +247,39 @@ module lockstep_side #(
         .rvfi_valid(rvfi_valid),
         .magic_clr_we(ret_clr_we), .magic_clr_wdata(ret_clr_wdata),
         .o_mtip(i_mtip), .o_meip(i_meip), .o_seip(i_seip)
+    );
+
+    // The Debug Module itself (its System Bus Access port is unused here) and the scripted debugger in
+    // front of it. With dbg_mode_i == 0 the script never acts and nothing on these wires moves.
+    /* verilator lint_off PINCONNECTEMPTY */
+    dm dm0 (
+        .clk(clk), .rst(rst),
+        .i_reg_addr(dmi_addr), .i_reg_wdata(dmi_wdata), .i_reg_we(dmi_we), .i_reg_re(1'b0),
+        .o_reg_rdata(dmi_rdata),
+        .i_hart_halted(dbg_halted),
+        .o_debug_halt_req(dm_halt_req), .o_debug_resume_req(dm_resume_req),
+        .o_dm_gpr_we(dm_gpr_we), .o_dm_gpr_sel(dm_gpr_sel),
+        .o_dm_gpr_wdata(dm_gpr_wdata), .i_dm_gpr_rdata(dm_gpr_rdata),
+        .o_dm_csr_we(dm_csr_we), .o_dm_csr_addr(dm_csr_addr),
+        .o_dm_csr_wdata(dm_csr_wdata), .i_dm_csr_rdata(dm_csr_rdata),
+        .o_progbuf_start(progbuf_start), .i_progbuf_pc(progbuf_pc),
+        .o_progbuf_data(progbuf_data), .i_progbuf_done(progbuf_done),
+        .i_progbuf_abort(progbuf_abort),
+        .o_sba_addr(), .o_sba_dat(), .i_sba_dat(64'b0),
+        .o_sba_sel(), .o_sba_we(), .o_sba_cyc(), .o_sba_stb(),
+        .i_sba_ack(1'b0), .i_sba_err(1'b0)
+    );
+    /* verilator lint_on PINCONNECTEMPTY */
+
+    lockstep_dbg dbg0 (
+        .clk(clk), .rst(rst),
+        .mode_i(dbg_mode_i), .seed_i(dbg_seed_i), .density_i(dbg_density_i), .feat_i(dbg_feat_i),
+        .late_i(dbg_late_i), .max_retire_i(dbg_max_retire_i),
+        .rvfi_valid(rvfi_valid), .debug_mode_i(dbg_halted),
+        .o_reg_addr(dmi_addr), .o_reg_wdata(dmi_wdata), .o_reg_we(dmi_we), .i_reg_rdata(dmi_rdata),
+        .o_halt_req(script_halt_req),
+        .o_ev_valid(o_ev_valid), .o_ev_kind(o_ev_kind), .o_ev_order(o_ev_order),
+        .o_ev_a(o_ev_a), .o_ev_b(o_ev_b)
     );
 
     // magic_set_we/wdata are captured for symmetry with the plan's "set"

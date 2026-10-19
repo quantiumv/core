@@ -95,6 +95,14 @@ module lockstep_cmp #(
     input  logic [31:0]  a_rdp_addr, b_rdp_addr,
     input  logic [63:0]  a_rdp_data, b_rdp_data,
 
+    // debug-script event logs
+    input  logic         a_ev_avail, b_ev_avail,
+    output logic         a_ev_pop, b_ev_pop,
+    input  logic [3:0]   a_evp_kind, b_evp_kind,
+    input  logic [63:0]  a_evp_order, b_evp_order,
+    input  logic [63:0]  a_evp_a, b_evp_a,
+    input  logic [63:0]  a_evp_b, b_evp_b,
+
     // a side frozen at the run's stop point isn't stalled
     input  logic         a_stopped, b_stopped,
 
@@ -104,7 +112,8 @@ module lockstep_cmp #(
 
     output logic         result_fail,
     output logic [63:0]  fail_order,
-    output logic [63:0]  match_count
+    output logic [63:0]  match_count,
+    output logic [63:0]  ev_match_count
 );
     // -------------------- optional corruption of side B --------------------
     // cb_mcause corrupts b_mcause, the registered CSR snapshot (lags one
@@ -307,6 +316,42 @@ module lockstep_cmp #(
         end
     end
 
+    // -------------------- debug-event comparison --------------------
+    // Each side's lockstep_dbg.sv logs what it observed (cause/dpc/prv at
+    // a halt, every Access Register read, how a Program Buffer run ended,
+    // minstret), tagged with that side's own retirement count. Compared in
+    // order, FIFO against FIFO, like the bus logs.
+    //
+    // The corruption self-test reaches the event log too: with
+    // corrupt_field 9..12, the corrupt_at-th event (1-based) of side B has
+    // its kind (9), retirement tag (10), first (11) or second (12) payload
+    // word flipped before the comparison.
+    logic ev_mismatch_q;
+    logic [63:0] ev_idx_q;
+    wire  do_ev_corrupt = (corrupt_at != 64'b0) && (ev_idx_q + 64'b1 == corrupt_at);
+    wire [3:0]  cb_evp_kind  = b_evp_kind  ^ ((do_ev_corrupt && corrupt_field == 9)  ? 4'h1  : 4'h0);
+    wire [63:0] cb_evp_order = b_evp_order ^ ((do_ev_corrupt && corrupt_field == 10) ? 64'h1 : 64'h0);
+    wire [63:0] cb_evp_a     = b_evp_a     ^ ((do_ev_corrupt && corrupt_field == 11) ? 64'h1 : 64'h0);
+    wire [63:0] cb_evp_b     = b_evp_b     ^ ((do_ev_corrupt && corrupt_field == 12) ? 64'h1 : 64'h0);
+    assign a_ev_pop = a_ev_avail && b_ev_avail && !ev_mismatch_q;
+    assign b_ev_pop = a_ev_avail && b_ev_avail && !ev_mismatch_q;
+    assign ev_match_count = ev_idx_q;
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            ev_mismatch_q <= 1'b0;
+            ev_idx_q      <= 64'b0;
+        end else if (a_ev_pop && b_ev_pop && !ev_mismatch_q) begin
+            if (a_evp_kind != cb_evp_kind || a_evp_order != cb_evp_order ||
+                a_evp_a != cb_evp_a || a_evp_b != cb_evp_b) begin
+                ev_mismatch_q <= 1'b1;
+                $display("LOCKSTEP_DIVERGENCE: debug event #%0d mismatch: a={kind=%0d order=%0d a=%016h b=%016h} b={kind=%0d order=%0d a=%016h b=%016h}",
+                         ev_idx_q + 64'b1, a_evp_kind, a_evp_order, a_evp_a, a_evp_b, cb_evp_kind, cb_evp_order, cb_evp_a, cb_evp_b);
+            end else begin
+                ev_idx_q <= ev_idx_q + 64'b1;
+            end
+        end
+    end
+
     // -------------------- stall divergence --------------------
     // Tracks each side's lifetime retirement count (monotonic, from
     // lockstep_rec.sv) rather than its ring occupancy -- occupancy alone
@@ -341,5 +386,5 @@ module lockstep_cmp #(
         end
     end
 
-    assign result_fail = val_mismatch_q || wr_mismatch_q || rd_mismatch_q || stall_fail_q;
+    assign result_fail = val_mismatch_q || wr_mismatch_q || rd_mismatch_q || ev_mismatch_q || stall_fail_q;
 endmodule

@@ -20,6 +20,8 @@
  * Everything else is genuine runtime data and comes in as a plusarg:
  * +HEXFILE=<path> +TOHOST_ADDR=<hex> +MAX_RETIRE=<n> +TIMEOUT=<cycles>
  * +IRQ_MODE=<0|1|2> +IRQ_SEED=<n> +IRQ_LATE=<0|1> +DLY_SEED_A=<n> +DLY_SEED_B=<n>
+ * +DBG_MODE=<0|1> +DBG_SEED=<n> +DBG_DENSITY=<n> +DBG_FEAT=<mask> +DBG_LATE=<0|1>
+ * (scripted debugger, see lockstep_dbg.sv; DBG_MODE 0 = off)
  * +CORRUPT_AT=<order> +CORRUPT_FIELD=<code> +DUMP_FROM=<cycles> (0 = no
  * VCD).
  *
@@ -65,6 +67,7 @@ module lockstep_tb #(
     longint      max_retire;
     longint      max_cycles;
     int          irq_mode, irq_seed, irq_late, irq_density;
+    int          dbg_mode, dbg_seed, dbg_late, dbg_density, dbg_feat;
     int          dly_seed_a, dly_seed_b;
     longint      corrupt_at;
     int          corrupt_field;
@@ -79,6 +82,11 @@ module lockstep_tb #(
         if (!$value$plusargs("IRQ_SEED=%d", irq_seed))      irq_seed       = 1;
         if (!$value$plusargs("IRQ_LATE=%d", irq_late))      irq_late       = 0;
         if (!$value$plusargs("IRQ_DENSITY=%d", irq_density)) irq_density   = 4;
+        if (!$value$plusargs("DBG_MODE=%d", dbg_mode))      dbg_mode       = 0;
+        if (!$value$plusargs("DBG_SEED=%d", dbg_seed))      dbg_seed       = 1;
+        if (!$value$plusargs("DBG_LATE=%d", dbg_late))      dbg_late       = 0;
+        if (!$value$plusargs("DBG_DENSITY=%d", dbg_density)) dbg_density   = 4;
+        if (!$value$plusargs("DBG_FEAT=%d", dbg_feat))      dbg_feat       = 255;
         if (!$value$plusargs("DLY_SEED_A=%d", dly_seed_a))  dly_seed_a     = 1;
         if (!$value$plusargs("DLY_SEED_B=%d", dly_seed_b))  dly_seed_b     = 2;
         if (!$value$plusargs("CORRUPT_AT=%d", corrupt_at))  corrupt_at     = 0;       // 0 = disabled
@@ -125,6 +133,9 @@ module lockstep_tb #(
     logic [31:0] a_wr_addr, a_mmio_rd_addr;
     logic [7:0]  a_wr_sel;
     logic [63:0] a_wr_data, a_mmio_rd_data;
+    logic        a_ev_valid;
+    logic [3:0]  a_ev_kind;
+    logic [63:0] a_ev_order, a_ev_a, a_ev_b;
 
     lockstep_side #(
         .QV_MUTANT(0), .MEMCFG_CACHE(1'b0),
@@ -133,6 +144,8 @@ module lockstep_tb #(
         .clk(clk_a), .rst(rst),
         .delay_seed_fetch_i(dly_seed_a[31:0]), .delay_seed_mem_i(dly_seed_a[31:0] + 32'h1000),
         .irq_mode_i(irq_mode[31:0]), .irq_seed_i(irq_seed[31:0]), .irq_density_i(irq_density[31:0]), .irq_late_i(irq_late != 0),
+        .dbg_mode_i(dbg_mode[31:0]), .dbg_seed_i(dbg_seed[31:0]), .dbg_density_i(dbg_density[31:0]),
+        .dbg_feat_i(dbg_feat[31:0]), .dbg_late_i(dbg_late != 0), .dbg_max_retire_i(max_retire[63:0]),
         .rvfi_valid(a_rvfi_valid), .rvfi_order(a_rvfi_order), .rvfi_insn(a_rvfi_insn),
         .rvfi_trap(a_rvfi_trap), .rvfi_halt(a_rvfi_halt), .rvfi_intr(a_rvfi_intr),
         .rvfi_mode(a_rvfi_mode), .rvfi_ixl(a_rvfi_ixl),
@@ -165,7 +178,9 @@ module lockstep_tb #(
         .o_mstatus_mprv(a_mstatus_mprv), .o_mstatus_sum(a_mstatus_sum),
         .o_mstatus_mxr(a_mstatus_mxr), .o_mstatus_tvm(a_mstatus_tvm), .o_mstatus_mpp(a_mstatus_mpp),
         .o_wr_valid(a_wr_valid), .o_wr_addr(a_wr_addr), .o_wr_sel(a_wr_sel), .o_wr_data(a_wr_data),
-        .o_mmio_rd_valid(a_mmio_rd_valid), .o_mmio_rd_addr(a_mmio_rd_addr), .o_mmio_rd_data(a_mmio_rd_data)
+        .o_mmio_rd_valid(a_mmio_rd_valid), .o_mmio_rd_addr(a_mmio_rd_addr), .o_mmio_rd_data(a_mmio_rd_data),
+        .o_ev_valid(a_ev_valid), .o_ev_kind(a_ev_kind), .o_ev_order(a_ev_order),
+        .o_ev_a(a_ev_a), .o_ev_b(a_ev_b)
     );
 
     // ---------------- side B: configurable ----------------
@@ -190,6 +205,9 @@ module lockstep_tb #(
     logic [31:0] b_wr_addr, b_mmio_rd_addr;
     logic [7:0]  b_wr_sel;
     logic [63:0] b_wr_data, b_mmio_rd_data;
+    logic        b_ev_valid;
+    logic [3:0]  b_ev_kind;
+    logic [63:0] b_ev_order, b_ev_a, b_ev_b;
 
     lockstep_side #(
         .QV_MUTANT(QV_MUTANT_B), .CORE_PIPE(B_PIPE), .MEMCFG_CACHE(MEMCFG_B_CACHE),
@@ -198,6 +216,8 @@ module lockstep_tb #(
         .clk(clk_b), .rst(rst),
         .delay_seed_fetch_i(dly_seed_b[31:0]), .delay_seed_mem_i(dly_seed_b[31:0] + 32'h1000),
         .irq_mode_i(irq_mode[31:0]), .irq_seed_i(irq_seed[31:0]), .irq_density_i(irq_density[31:0]), .irq_late_i(irq_late != 0),
+        .dbg_mode_i(dbg_mode[31:0]), .dbg_seed_i(dbg_seed[31:0]), .dbg_density_i(dbg_density[31:0]),
+        .dbg_feat_i(dbg_feat[31:0]), .dbg_late_i(dbg_late != 0), .dbg_max_retire_i(max_retire[63:0]),
         .rvfi_valid(b_rvfi_valid), .rvfi_order(b_rvfi_order), .rvfi_insn(b_rvfi_insn),
         .rvfi_trap(b_rvfi_trap), .rvfi_halt(b_rvfi_halt), .rvfi_intr(b_rvfi_intr),
         .rvfi_mode(b_rvfi_mode), .rvfi_ixl(b_rvfi_ixl),
@@ -230,7 +250,9 @@ module lockstep_tb #(
         .o_mstatus_mprv(b_mstatus_mprv), .o_mstatus_sum(b_mstatus_sum),
         .o_mstatus_mxr(b_mstatus_mxr), .o_mstatus_tvm(b_mstatus_tvm), .o_mstatus_mpp(b_mstatus_mpp),
         .o_wr_valid(b_wr_valid), .o_wr_addr(b_wr_addr), .o_wr_sel(b_wr_sel), .o_wr_data(b_wr_data),
-        .o_mmio_rd_valid(b_mmio_rd_valid), .o_mmio_rd_addr(b_mmio_rd_addr), .o_mmio_rd_data(b_mmio_rd_data)
+        .o_mmio_rd_valid(b_mmio_rd_valid), .o_mmio_rd_addr(b_mmio_rd_addr), .o_mmio_rd_data(b_mmio_rd_data),
+        .o_ev_valid(b_ev_valid), .o_ev_kind(b_ev_kind), .o_ev_order(b_ev_order),
+        .o_ev_a(b_ev_a), .o_ev_b(b_ev_b)
     );
 
     // ---------------- per-side record capture ----------------
@@ -263,6 +285,10 @@ module lockstep_tb #(
     logic [63:0] a_wrp_data;
     logic [31:0] a_rdap_addr;
     logic [63:0] a_rdap_data;
+    logic        a_ev_avail, a_ev_pop;
+    logic [3:0]  a_evp_kind;
+    logic [63:0] a_evp_order, a_evp_a, a_evp_b;
+    logic [31:0] a_ev_count;
 
     logic [63:0] b_rp_order, b_rp_pc_rdata, b_rp_pc_wdata, b_rp_rd_wdata, b_rp_rs1_rdata, b_rp_rs2_rdata;
     logic [31:0] b_rp_insn;
@@ -286,6 +312,10 @@ module lockstep_tb #(
     logic [63:0] b_wrp_data;
     logic [31:0] b_rdap_addr;
     logic [63:0] b_rdap_data;
+    logic        b_ev_avail, b_ev_pop;
+    logic [3:0]  b_evp_kind;
+    logic [63:0] b_evp_order, b_evp_a, b_evp_b;
+    logic [31:0] b_ev_count;
 
     lockstep_rec rec_a (
         .clk_push(clk_a), .clk_pop(clk_mon), .rst(rst),
@@ -309,6 +339,8 @@ module lockstep_tb #(
         .o_mstatus_sum(a_mstatus_sum), .o_mstatus_mxr(a_mstatus_mxr), .o_mstatus_tvm(a_mstatus_tvm),
         .wr_valid_i(a_wr_valid), .wr_addr_i(a_wr_addr), .wr_sel_i(a_wr_sel), .wr_data_i(a_wr_data),
         .rd_valid_i(a_mmio_rd_valid), .rd_addr_i(a_mmio_rd_addr), .rd_data_i(a_mmio_rd_data),
+        .ev_valid_i(a_ev_valid), .ev_kind_i(a_ev_kind), .ev_order_i(a_ev_order),
+        .ev_a_i(a_ev_a), .ev_b_i(a_ev_b),
         .rec_count(a_rec_count), .rec_total(a_rec_total),
         .rec_avail(a_rec_avail), .rec_pop(a_rec_pop),
         .rp_order(a_rp_order), .rp_pc_rdata(a_rp_pc_rdata), .rp_pc_wdata(a_rp_pc_wdata), .rp_insn(a_rp_insn),
@@ -330,7 +362,9 @@ module lockstep_tb #(
         .rp_mstatus_mie(a_rp_mstatus_mie), .rp_mstatus_sie(a_rp_mstatus_sie), .rp_mstatus_mprv(a_rp_mstatus_mprv),
         .rp_mstatus_sum(a_rp_mstatus_sum), .rp_mstatus_mxr(a_rp_mstatus_mxr), .rp_mstatus_tvm(a_rp_mstatus_tvm),
         .wr_avail(a_wr_avail), .wr_pop(a_wr_pop), .wrp_addr(a_wrp_addr), .wrp_sel(a_wrp_sel), .wrp_data(a_wrp_data),
-        .rd_avail(a_rda_avail), .rd_pop(a_rda_pop), .rdp_addr(a_rdap_addr), .rdp_data(a_rdap_data)
+        .rd_avail(a_rda_avail), .rd_pop(a_rda_pop), .rdp_addr(a_rdap_addr), .rdp_data(a_rdap_data),
+        .ev_avail(a_ev_avail), .ev_pop(a_ev_pop), .evp_kind(a_evp_kind), .evp_order(a_evp_order),
+        .evp_a(a_evp_a), .evp_b(a_evp_b), .ev_count(a_ev_count)
     );
 
     lockstep_rec rec_b (
@@ -355,6 +389,8 @@ module lockstep_tb #(
         .o_mstatus_sum(b_mstatus_sum), .o_mstatus_mxr(b_mstatus_mxr), .o_mstatus_tvm(b_mstatus_tvm),
         .wr_valid_i(b_wr_valid), .wr_addr_i(b_wr_addr), .wr_sel_i(b_wr_sel), .wr_data_i(b_wr_data),
         .rd_valid_i(b_mmio_rd_valid), .rd_addr_i(b_mmio_rd_addr), .rd_data_i(b_mmio_rd_data),
+        .ev_valid_i(b_ev_valid), .ev_kind_i(b_ev_kind), .ev_order_i(b_ev_order),
+        .ev_a_i(b_ev_a), .ev_b_i(b_ev_b),
         .rec_count(b_rec_count), .rec_total(b_rec_total),
         .rec_avail(b_rec_avail), .rec_pop(b_rec_pop),
         .rp_order(b_rp_order), .rp_pc_rdata(b_rp_pc_rdata), .rp_pc_wdata(b_rp_pc_wdata), .rp_insn(b_rp_insn),
@@ -376,7 +412,9 @@ module lockstep_tb #(
         .rp_mstatus_mie(b_rp_mstatus_mie), .rp_mstatus_sie(b_rp_mstatus_sie), .rp_mstatus_mprv(b_rp_mstatus_mprv),
         .rp_mstatus_sum(b_rp_mstatus_sum), .rp_mstatus_mxr(b_rp_mstatus_mxr), .rp_mstatus_tvm(b_rp_mstatus_tvm),
         .wr_avail(b_wr_avail), .wr_pop(b_wr_pop), .wrp_addr(b_wrp_addr), .wrp_sel(b_wrp_sel), .wrp_data(b_wrp_data),
-        .rd_avail(b_rda_avail), .rd_pop(b_rda_pop), .rdp_addr(b_rdap_addr), .rdp_data(b_rdap_data)
+        .rd_avail(b_rda_avail), .rd_pop(b_rda_pop), .rdp_addr(b_rdap_addr), .rdp_data(b_rdap_data),
+        .ev_avail(b_ev_avail), .ev_pop(b_ev_pop), .evp_kind(b_evp_kind), .evp_order(b_evp_order),
+        .evp_a(b_evp_a), .evp_b(b_evp_b), .ev_count(b_ev_count)
     );
 
     // ---------------- comparator ----------------
@@ -384,7 +422,7 @@ module lockstep_tb #(
     // comment for why gating it (or the ring pop-pointers it drains) on
     // clk_a/clk_b instead is a real deadlock.
     logic        result_fail;
-    logic [63:0] fail_order, match_count;
+    logic [63:0] fail_order, match_count, ev_match_count;
 
     lockstep_cmp cmp0 (
         .clk(clk_mon), .rst(rst), .irq_late_i(irq_late != 0),
@@ -435,9 +473,13 @@ module lockstep_tb #(
         .a_rd_avail(a_rda_avail), .b_rd_avail(b_rda_avail), .a_rd_pop(a_rda_pop), .b_rd_pop(b_rda_pop),
         .a_rdp_addr(a_rdap_addr), .b_rdp_addr(b_rdap_addr), .a_rdp_data(a_rdap_data), .b_rdp_data(b_rdap_data),
 
+        .a_ev_avail(a_ev_avail), .b_ev_avail(b_ev_avail), .a_ev_pop(a_ev_pop), .b_ev_pop(b_ev_pop),
+        .a_evp_kind(a_evp_kind), .b_evp_kind(b_evp_kind), .a_evp_order(a_evp_order), .b_evp_order(b_evp_order),
+        .a_evp_a(a_evp_a), .b_evp_a(b_evp_a), .a_evp_b(a_evp_b), .b_evp_b(b_evp_b),
+
         .a_stopped(a_stopped), .b_stopped(b_stopped),
         .corrupt_at(corrupt_at[63:0]), .corrupt_field(corrupt_field),
-        .result_fail(result_fail), .fail_order(fail_order), .match_count(match_count)
+        .result_fail(result_fail), .fail_order(fail_order), .match_count(match_count), .ev_match_count(ev_match_count)
     );
 
     // ---------------- exact stop ----------------
@@ -472,6 +514,16 @@ module lockstep_tb #(
     assign a_stopped = (stop_at != 0) && (longint'(a_rec_total) >= stop_at);
     assign b_stopped = (stop_at != 0) && (longint'(b_rec_total) >= stop_at);
 
+    // +RVFI_TRACE: one line per retirement of side A (debugging a hang or a divergence; the last field is
+    // 1 for a retirement made while the hart is in Debug Mode, i.e. a Program Buffer instruction)
+    logic rvfi_trace_on;
+    initial rvfi_trace_on = $test$plusargs("RVFI_TRACE");
+    always @(posedge clk_a)
+        if (rvfi_trace_on && !rst && a_rvfi_valid)
+            $display("RT %0d pc=%016h insn=%08h rd=%0d/%016h mode=%0d trap=%0d intr=%0d dbg=%0d",
+                     a_rvfi_order, a_rvfi_pc_rdata, a_rvfi_insn, a_rvfi_rd_addr, a_rvfi_rd_wdata,
+                     a_rvfi_mode, a_rvfi_trap, a_rvfi_intr, side_a.dbg_halted);
+
     // interrupt entries seen (retirements flagged rvfi_intr), side A: shown in the PASS line so a run
     // that was supposed to take interrupts can be told from one that never did
     longint intr_count_a;
@@ -479,8 +531,8 @@ module lockstep_tb #(
     always @(posedge clk_a) if (!rst && a_rvfi_valid && a_rvfi_intr) intr_count_a = intr_count_a + 1;
 
     // ---------------- pacing: hold a side's clock once it's too far ahead or done ----------------
-    assign pace_a_hold = (a_rec_count >= `QV_LOCKSTEP_AHEAD_MAX) || a_stopped;
-    assign pace_b_hold = (b_rec_count >= `QV_LOCKSTEP_AHEAD_MAX) || b_stopped;
+    assign pace_a_hold = (a_rec_count >= `QV_LOCKSTEP_AHEAD_MAX) || (a_ev_count >= `QV_LOCKSTEP_EV_AHEAD_MAX) || a_stopped;
+    assign pace_b_hold = (b_rec_count >= `QV_LOCKSTEP_AHEAD_MAX) || (b_ev_count >= `QV_LOCKSTEP_EV_AHEAD_MAX) || b_stopped;
 
     // ---------------- image load, run control, final report ----------------
     // Anchored to clk_mon throughout, deliberately -- never to clk_a/
@@ -524,6 +576,7 @@ module lockstep_tb #(
             // logs only pop in pairs, so anything left over on one side
             // (an extra or missing access) is a divergence of its own.
             if (a_stopped && b_stopped && !a_rec_avail && !b_rec_avail
+                    && !(a_ev_avail && b_ev_avail)
                     && longint'(match_count) >= stop_at) begin
                 repeat (4) @(posedge clk_mon);
                 if (result_fail) begin
@@ -536,16 +589,25 @@ module lockstep_tb #(
                     $display("LOCKSTEP_RESULT: FAIL (unmatched bus-write/MMIO-read log entries after %0d retirements)", match_count);
                     $finish;
                 end
+                if (a_ev_avail || b_ev_avail) begin
+                    $display("LOCKSTEP_DIVERGENCE: unmatched debug events at the stop (a=%0d b=%0d left)", a_ev_count, b_ev_count);
+                    $display("LOCKSTEP_RESULT: FAIL (unmatched debug-script events after %0d retirements)", match_count);
+                    $finish;
+                end
                 check_final_state();
                 if (tohost_addr != 32'b0 && max_retire == 0)
-                    $display("LOCKSTEP_RESULT: PASS (%0d retirements matched, %0d interrupt entries, tohost=%0h)",
-                             match_count, intr_count_a, side_a.mem0.sram0.memory[tohost_addr[31:3]]);
+                    $display("LOCKSTEP_RESULT: PASS (%0d retirements matched, %0d interrupt entries, %0d debug events, tohost=%0h)",
+                             match_count, intr_count_a, ev_match_count, side_a.mem0.sram0.memory[tohost_addr[31:3]]);
                 else
-                    $display("LOCKSTEP_RESULT: PASS (%0d retirements matched, %0d interrupt entries, MAX_RETIRE reached)",
-                             match_count, intr_count_a);
+                    $display("LOCKSTEP_RESULT: PASS (%0d retirements matched, %0d interrupt entries, %0d debug events, MAX_RETIRE reached)",
+                             match_count, intr_count_a, ev_match_count);
                 $finish;
             end
             if (cycle_q >= max_cycles) begin
+                $display("  at the timeout: A order=%0d pc=%016h dcsr=%016h dpc=%016h evq=%0d  B order=%0d pc=%016h dcsr=%016h dpc=%016h evq=%0d",
+                         a_rvfi_order, a_rvfi_pc_rdata, a_dcsr, a_dpc, a_ev_count, b_rvfi_order, b_rvfi_pc_rdata, b_dcsr, b_dpc, b_ev_count);
+                $display("  A priv=%0d mcause=%016h scause=%016h mepc=%016h sepc=%016h mtval=%016h stval=%016h satp=%016h medeleg=%016h",
+                         a_current_priv, a_mcause, a_scause, a_mepc, a_sepc, a_mtval, a_stval, a_satp, a_medeleg);
                 $display("LOCKSTEP_RESULT: TIMEOUT after %0d cycles (%0d retirements matched)", cycle_q, match_count);
                 $finish;
             end

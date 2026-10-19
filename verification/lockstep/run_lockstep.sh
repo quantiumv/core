@@ -34,6 +34,11 @@
 # and the reference: re-run a Verilator FAIL under Icarus before believing it.
 # QV_LOCKSTEP_SIM=verilator makes it the default.
 #
+# --dbg-mode 1 adds a scripted debugger on both sides (lockstep_dbg.sv driving a real design/dm.sv: halts,
+# Access Register reads and writes, Program Buffer runs, single steps, EBREAK-to-debug and triggers, with
+# every observation logged and compared), see --dbg-features for the phasing. The random corpus is then
+# generated with qvgen --dbg, which keeps x22/x23 for the script.
+#
 # --dut pipe puts design/pipe/core_pipe.sv on side B (pipe-vs-ref; side
 # A stays ref_core). Selfproof and corrupt only, and the random corpus
 # switches to what core_pipe implements (--isa imac --priv msu
@@ -69,6 +74,13 @@ IRQ_MODE=0
 IRQ_SEED=1
 IRQ_DENSITY=4
 IRQ_LATE=0
+# 0 (off) matches every run before the scripted debugger existed. DBG_FEAT is the lockstep_dbg.sv feature mask:
+# 1 halt, 2 step, 4 access (Access Register), 8 ebreak, 16 trigger, 32 progbuf, 64 (set per program: it is
+# qvgen --dbg output), 128 hold the halt request across a resume.
+DBG_MODE=0
+DBG_FEAT=191
+DBG_DENSITY=4
+DBG_LATE=0
 CORPUS=all
 ONLY=""
 JOBS="$(nproc 2>/dev/null || echo 4)"
@@ -110,6 +122,12 @@ Usage: run_lockstep.sh --mode selfproof|mutant|corrupt [options]
   --irq-late            make each injected level visible one cycle later
                         (separates a core that samples a cycle late, e.g.
                         QV_MUTANT 5, from one that samples on time)
+  --dbg-mode N          0=off (default), 1=scripted debugger on both sides (lockstep_dbg.sv)
+  --dbg-features MASK   which parts of the script run (default 191 = everything but the per-program bit 64):
+                        1 halt, 2 step, 4 Access Register, 8 ebreak, 16 trigger, 32 Program Buffer,
+                        128 hold the halt request across a resume
+  --dbg-density N       halts are about 8*N retirements apart (default 4)
+  --dbg-late            the script's halt level is visible one cycle later
   --corpus WHICH        act, fw, random, irq, smc, or all (default all --
                         irq/smc are NOT part of all, since each needs a
                         non-default flag passed explicitly -- --irq-mode 2
@@ -140,6 +158,10 @@ while [ $# -gt 0 ]; do
         --irq-seed) IRQ_SEED="$2"; shift 2 ;;
         --irq-density) IRQ_DENSITY="$2"; shift 2 ;;
         --irq-late) IRQ_LATE=1; shift ;;
+        --dbg-mode) DBG_MODE="$2"; shift 2 ;;
+        --dbg-features) DBG_FEAT="$2"; shift 2 ;;
+        --dbg-density) DBG_DENSITY="$2"; shift 2 ;;
+        --dbg-late) DBG_LATE=1; shift ;;
         --corpus) CORPUS="$2"; shift 2 ;;
         --only) ONLY="$2"; shift 2 ;;
         -j) JOBS="$2"; shift 2 ;;
@@ -175,10 +197,10 @@ verification/reference/ref_register_file.sv verification/reference/ref_csr_file.
 verification/reference/ref_divider.sv verification/reference/ref_c_expand.sv \
 verification/reference/ref_core.sv"
 SUPPORT_FILES="design/wb4_sram.sv design/wb_arbiter2.sv design/cache_complex.sv \
-design/icache.sv design/dcache.sv"
+design/icache.sv design/dcache.sv design/dm.sv"
 LOCKSTEP_FILES="verification/lockstep/lockstep_wb_delay.sv verification/lockstep/lockstep_mmio.sv \
 verification/lockstep/lockstep_mem.sv verification/lockstep/lockstep_irq.sv \
-verification/lockstep/lockstep_side.sv verification/lockstep/lockstep_rec.sv \
+verification/lockstep/lockstep_dbg.sv verification/lockstep/lockstep_side.sv verification/lockstep/lockstep_rec.sv \
 verification/lockstep/lockstep_cmp.sv verification/lockstep/lockstep_tb.sv"
 # core_pipe and the design/ leaf modules it reuses, in pipe_design_files.list
 # order (decoder.sv first: qv_decode.sv uses its INSTR_CODE macro)
@@ -206,7 +228,7 @@ RUN_DELAY_MAX=$DELAY_MAX
 SRC_HASH=$(cat $PIPE_FILES $REF_FILES $SUPPORT_FILES $LOCKSTEP_FILES \
                design/defaults/*.sv verification/reference/*.svh verification/lockstep/*.svh \
                2>/dev/null | sha1sum | cut -c1-8)
-RUN_KEY="${MODE}_${DUT}_m${QV_MUTANT_B}_${MEMCFG_B}_d${RUN_DELAY_MAX}_i${IRQ_MODE}_l${IRQ_LATE}_q${IRQ_SEED}_y${IRQ_DENSITY}_s${RUN_SEED}_${SRC_HASH}"
+RUN_KEY="${MODE}_${DUT}_m${QV_MUTANT_B}_${MEMCFG_B}_d${RUN_DELAY_MAX}_i${IRQ_MODE}_l${IRQ_LATE}_q${IRQ_SEED}_y${IRQ_DENSITY}_g${DBG_MODE}-${DBG_FEAT}-${DBG_DENSITY}-${DBG_LATE}_s${RUN_SEED}_${SRC_HASH}"
 [ "$SIM" == "iverilog" ] || RUN_KEY="${RUN_KEY}_${SIM}"
 VVP_BIN="$OUTDIR/lockstep_${MODE}_${DUT}_m${QV_MUTANT_B}_${MEMCFG_B}_d${RUN_DELAY_MAX}_${SRC_HASH}.vvp"
 BUILD_LOG="$OUTDIR/build_${MODE}_${DUT}_m${QV_MUTANT_B}.log"
@@ -309,6 +331,7 @@ build_fw_entries() {
 RANDOM_PROFILE="--isa imac --priv msu --sv39 --smc"
 [ "$DUT" == "pipe" ] && RANDOM_PROFILE="--isa imac --priv msu --smc"
 RANDOM_PROFILE="${QV_RANDOM_PROFILE:-$RANDOM_PROFILE}"   # experiments: override the profile
+[ "$DBG_MODE" != "0" ] && RANDOM_PROFILE="$RANDOM_PROFILE --dbg"   # x22/x23 are the debug script's
 
 build_random_entries() {
     # programs are regenerated whenever the generator or the profile changes
@@ -412,6 +435,16 @@ result_path() {
     echo "$OUTDIR/result_${RUN_KEY}_${1}_$(sha1sum "$2" | cut -c1-8)"
 }
 
+# the debug-script plusargs for one program (empty when the script is off). The script's seed follows the
+# program, and bit 64 of the feature mask (x22/x23/x27 are the script's) is only set for qvgen --dbg output.
+dbg_args() {
+    local tag="$1" feat="$DBG_FEAT" seed
+    [ "$DBG_MODE" == "0" ] && return
+    case "$tag" in random_*) feat=$((feat | 64)) ;; *) feat=$((feat & ~64)) ;; esac
+    seed=$(( (RUN_SEED * 7919 + $(printf '%s' "$tag" | cksum | cut -d' ' -f1)) % 2147483646 + 1 ))
+    echo "+DBG_MODE=$DBG_MODE +DBG_SEED=$seed +DBG_DENSITY=$DBG_DENSITY +DBG_FEAT=$feat +DBG_LATE=$DBG_LATE"
+}
+
 run_one() {
     local tag="$1" hex="$2" tohost="$3" max_retire="$4"
     local resfile
@@ -424,6 +457,8 @@ run_one() {
     local args=(+HEXFILE="$hex" +TIMEOUT=$MAX_CYCLES +DLY_SEED_A=$seed_a +DLY_SEED_B=$seed_b +IRQ_MODE=$IRQ_MODE +IRQ_SEED=$IRQ_SEED +IRQ_DENSITY=$IRQ_DENSITY +IRQ_LATE=$IRQ_LATE)
     [ -n "$tohost" ] && args+=(+TOHOST_ADDR=$tohost)
     [ -n "$max_retire" ] && args+=(+MAX_RETIRE=$max_retire)
+    # shellcheck disable=SC2207
+    args+=($(dbg_args "$tag") ${QV_LOCKSTEP_EXTRA:-})   # QV_LOCKSTEP_EXTRA: more plusargs for debugging, e.g. +DBG_TRACE
     local out
     out=$(cd "$REPO_ROOT" && timeout $WALL_TIMEOUT "${SIM_CMD[@]}" "${args[@]}" 2>&1 | grep -v "Unable to open")
     local verdict
@@ -458,8 +493,9 @@ if [ "$MODE" == "corrupt" ]; then
     fi
     echo "=== corruption self-test on $tag ($hex) ==="
     # First, an uncorrupted run to learn a real retirement order to target.
+    dargs=$(dbg_args "$tag")
     clean_out=$(cd "$REPO_ROOT" && timeout $WALL_TIMEOUT "${SIM_CMD[@]}" +HEXFILE="$hex" +TIMEOUT=$MAX_CYCLES \
-        $([ -n "$tohost" ] && echo +TOHOST_ADDR=$tohost) $([ -n "$max_retire" ] && echo +MAX_RETIRE=$max_retire) 2>&1 | grep -v "Unable to open")
+        $([ -n "$tohost" ] && echo +TOHOST_ADDR=$tohost) $([ -n "$max_retire" ] && echo +MAX_RETIRE=$max_retire) $dargs 2>&1 | grep -v "Unable to open")
     clean_matched=$(echo "$clean_out" | grep "^LOCKSTEP_RESULT: PASS" | grep -oE '[0-9]+ retirements' | grep -oE '[0-9]+')
     if [ -z "$clean_matched" ] || [ "$clean_matched" -lt 10 ]; then
         echo "ERROR: uncorrupted run didn't PASS with enough retirements to target -- can't run the corruption self-test" >&2
@@ -469,7 +505,7 @@ if [ "$MODE" == "corrupt" ]; then
     all_ok=1
     for field in 1 2 3 4 5 6 7 8; do
         out=$(cd "$REPO_ROOT" && timeout $WALL_TIMEOUT "${SIM_CMD[@]}" +HEXFILE="$hex" +TIMEOUT=$MAX_CYCLES \
-            $([ -n "$tohost" ] && echo +TOHOST_ADDR=$tohost) $([ -n "$max_retire" ] && echo +MAX_RETIRE=$max_retire) \
+            $([ -n "$tohost" ] && echo +TOHOST_ADDR=$tohost) $([ -n "$max_retire" ] && echo +MAX_RETIRE=$max_retire) $dargs \
             +CORRUPT_AT=$target_order +CORRUPT_FIELD=$field 2>&1 | grep -v "Unable to open")
         fail_at=$(echo "$out" | grep "^LOCKSTEP_RESULT: FAIL" | grep -oE 'order=[0-9]+' | grep -oE '[0-9]+')
         if [ "$fail_at" == "$target_order" ]; then
@@ -479,6 +515,27 @@ if [ "$MODE" == "corrupt" ]; then
             all_ok=0
         fi
     done
+    # the debug-event log, when the script ran: kind / tag / payload a / payload b of one event in the middle
+    clean_events=$(echo "$clean_out" | grep "^LOCKSTEP_RESULT: PASS" | grep -oE '[0-9]+ debug events' | grep -oE '[0-9]+')
+    if [ "$DBG_MODE" != "0" ]; then
+        if [ -z "$clean_events" ] || [ "$clean_events" -lt 4 ]; then
+            echo "ERROR: --dbg-mode ${DBG_MODE}: the uncorrupted run logged only '${clean_events:-0}' debug events, nothing to corrupt" >&2
+            all_ok=0
+        else
+            target_event=$((clean_events / 2))
+            for field in 9 10 11 12; do
+                out=$(cd "$REPO_ROOT" && timeout $WALL_TIMEOUT "${SIM_CMD[@]}" +HEXFILE="$hex" +TIMEOUT=$MAX_CYCLES \
+                    $([ -n "$tohost" ] && echo +TOHOST_ADDR=$tohost) $([ -n "$max_retire" ] && echo +MAX_RETIRE=$max_retire) $dargs \
+                    +CORRUPT_AT=$target_event +CORRUPT_FIELD=$field 2>&1 | grep -v "Unable to open")
+                if echo "$out" | grep -q "debug event #${target_event} mismatch" && echo "$out" | grep -q "^LOCKSTEP_RESULT: FAIL"; then
+                    echo "field $field: OK (debug event #$target_event caught)"
+                else
+                    echo "field $field: MISMATCH (expected a debug event #$target_event mismatch) -- $(echo "$out" | grep '^LOCKSTEP_RESULT:')"
+                    all_ok=0
+                fi
+            done
+        fi
+    fi
     [ "$all_ok" == "1" ] && echo "=== corruption self-test: ALL FIELD CLASSES CAUGHT AT THE TARGETED RETIREMENT ===" \
                           || { echo "=== corruption self-test: SOME FIELD CLASSES NOT CLEANLY CAUGHT ===" >&2; exit 1; }
     exit 0
