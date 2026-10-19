@@ -27,7 +27,10 @@
     23,
     24,
     25
-   ]
+   ],
+   "unit_only": {
+    "24": "decode never sets trig_exc together with a fault marker, so the ranking in commit cannot show"
+   }
   },
   {
    "from": "p6b_unit_decode.json",
@@ -42,7 +45,12 @@
     22,
     23,
     24
-   ]
+   ],
+   "unit_only": {
+    "14": "a trig_debug head enters Debug Mode first, so a trig_exc set beside it is never evaluated",
+    "15": "a fault marker outranks trig_exc in commit's cause and tval either way",
+    "18": "commit gates the register write again for a trap and an entry, so rd_wen is redundant here"
+   }
   }
  ]
 }

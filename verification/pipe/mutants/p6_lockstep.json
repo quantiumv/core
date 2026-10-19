@@ -22,31 +22,101 @@
  ],
  "mutants": [
   {
-   "from": "p6a_unit_commit.json"
+   "from": "p6a_unit_commit.json",
+   "unit_only": {
+    "10": "the redirect target of a halt entry is never used: fetch is held in Debug Mode and the resume redirects to dpc",
+    "17": "an extra or earlier icache flush changes timing only",
+    "18": "the halt-entry pulse only feeds the compatibility wires and stepping_q, which every accepted resume reloads"
+   }
   },
   {
-   "from": "p6a_unit_dbg.json"
+   "from": "p6a_unit_dbg.json",
+   "unit_only": {
+    "0": "the Debug Module never produces it (it accepts a command, a resume or a start only in the state that allows it): a resume only while halted",
+    "5": "the Debug Module never produces it (it accepts a command, a resume or a start only in the state that allows it): a resume only while halted",
+    "6": "stepping_q is reloaded from dcsr.step by every accepted resume and nothing samples it in Debug Mode",
+    "7": "stepping_q is reloaded from dcsr.step by every accepted resume and nothing samples it in Debug Mode"
+   }
   },
   {
-   "from": "p6a_unit_decode.json"
+   "from": "p6a_unit_decode.json",
+   "unit_only": {
+    "0": "killed by p6_lockstep_extra.json (an M-mode body: below M the privilege check traps the access first)",
+    "2": "killed by p6_lockstep_extra.json (an M-mode body: below M the privilege check traps the access first)",
+    "3": "killed by p6_lockstep_extra.json (an M-mode body: below M the privilege check traps the access first)",
+    "4": "killed by p6_lockstep_extra.json (an M-mode body: below M the privilege check traps the access first)"
+   }
   },
   {
-   "from": "p6b_unit_commit.json"
+   "from": "p6b_unit_commit.json",
+   "unit_only": {
+    "8": "decode never marks trig_debug in Debug Mode and an entry flushes what was marked before, so this commit-side gate is a second line",
+    "9": "timing only: the entry comes a cycle or two earlier, the architectural result is the same",
+    "10": "timing only: the entry comes a cycle or two earlier, the architectural result is the same",
+    "11": "killed by p6_lockstep_dense.json: it needs an EBREAK at the head in the very cycle a halt request or a step is sampled, which takes dense EBREAKs and halts",
+    "12": "needs an armed EBREAK or trigger complete at the head in the very cycle an interrupt is sampled: over 160 dense programs an armed EBREAK was complete at a sample point 4 times and an interrupt was taken in that cycle never; qv_commit_tb covers the priority",
+    "14": "needs an armed EBREAK or trigger complete at the head in the very cycle an interrupt is sampled: over 160 dense programs an armed EBREAK was complete at a sample point 4 times and an interrupt was taken in that cycle never; qv_commit_tb covers the priority",
+    "15": "reporting wire only (compatibility and formal tap)",
+    "18": "the redirect target of a head entry is never used: fetch is held in Debug Mode and the resume redirects to dpc",
+    "20": "a fetch-fault marker never travels with an EBREAK word in generated programs; qv_commit_tb covers it",
+    "22": "killed by p6_lockstep_dbgexc.json: it needs an action-0 trigger, which only the directed straight-line program can take (a skipped instruction ruins a random program)",
+    "23": "killed by p6_lockstep_dbgexc.json: it needs an action-0 trigger, which only the directed straight-line program can take (a skipped instruction ruins a random program)",
+    "24": "decode never sets trig_exc together with a fault marker, so the ranking in commit cannot show",
+    "25": "killed by p6_lockstep_dbgexc.json: it needs an action-0 trigger, which only the directed straight-line program can take (a skipped instruction ruins a random program)"
+   }
   },
   {
-   "from": "p6b_unit_decode.json"
+   "from": "p6b_unit_decode.json",
+   "unit_only": {
+    "5": "killed by p6_lockstep_extra.json: a trigger armed with the execute bit clear must never fire",
+    "6": "killed by p6_lockstep_extra.json: a trigger armed with the execute bit clear must never fire",
+    "7": "all generated code sits below 4 GiB",
+    "11": "killed by p6_lockstep_dbgexc.json: it needs an action-0 trigger, which only the directed straight-line program can take (a skipped instruction ruins a random program)",
+    "13": "killed by p6_lockstep_dbgexc.json: it needs an action-0 trigger, which only the directed straight-line program can take (a skipped instruction ruins a random program)",
+    "14": "a trig_debug head enters Debug Mode first, so a trig_exc set beside it is never evaluated",
+    "15": "a fault marker outranks trig_exc in commit's cause and tval either way",
+    "18": "commit gates the register write again for a trap and an entry, so rd_wen is redundant here",
+    "19": "killed by p6_lockstep_dbgexc.json: it needs an action-0 trigger, which only the directed straight-line program can take (a skipped instruction ruins a random program)",
+    "20": "killed by p6_lockstep_dbgexc.json: it needs an action-0 trigger, which only the directed straight-line program can take (a skipped instruction ruins a random program)",
+    "22": "killed by p6_lockstep_dbgexc.json: it needs an action-0 trigger, which only the directed straight-line program can take (a skipped instruction ruins a random program)",
+    "23": "killed by p6_lockstep_dbgexc.json: it needs an action-0 trigger, which only the directed straight-line program can take (a skipped instruction ruins a random program)",
+    "24": "killed by p6_lockstep_dbgexc.json: it needs an action-0 trigger, which only the directed straight-line program can take (a skipped instruction ruins a random program)"
+   }
   },
   {
-   "from": "p6c_unit_commit.json"
+   "from": "p6c_unit_commit.json",
+   "unit_only": {
+    "11": "dm.sv ignores a done pulse outside a run, and a run only ends with its EBREAK",
+    "14": "a Program Buffer commit outside a run only moves an index that every start resets",
+    "19": "nothing is in flight behind a Program Buffer word, so there is nothing for the flush to clear",
+    "20": "needs an aborting load (a CSR or system abort writes no register in either core), whose RVFI memory fields the FSM reports stale: the snippets avoid it, dm_tb Test E covers it",
+    "21": "needs an aborting LR, whose RVFI memory fields the FSM reports stale: the snippets avoid it, qv_commit_tb covers it"
+   }
   },
   {
-   "from": "p6c_unit_dbg.json"
+   "from": "p6c_unit_dbg.json",
+   "unit_only": {
+    "0": "the Debug Module never produces it (it accepts a command, a resume or a start only in the state that allows it): a start only while halted and idle",
+    "1": "the Debug Module never produces it (it accepts a command, a resume or a start only in the state that allows it): a start only while halted and idle",
+    "2": "the Debug Module never produces it (it accepts a command, a resume or a start only in the state that allows it): no start in the cycle of a resume",
+    "3": "the Debug Module never produces it (it accepts a command, a resume or a start only in the state that allows it): a resume only after the run's done or abort",
+    "6": "the index is reset by every start and not read after a run's last word",
+    "7": "one word is in flight at a time, so the index has the same value at the next injection",
+    "10": "the IQ is empty during a run: fetch is held and flushed"
+   }
   },
   {
-   "from": "p6c_unit_decode.json"
+   "from": "p6c_unit_decode.json",
+   "unit_only": {
+    "0": "needs the halted pc inside an execute-denied PMP region; qv_decode_tb covers it",
+    "2": "needs the halted pc inside an execute-denied PMP region; qv_decode_tb covers it"
+   }
   },
   {
-   "from": "p6c_unit_lsu.json"
+   "from": "p6c_unit_lsu.json",
+   "unit_only": {
+    "2": "killed by p6_lockstep_extra.json: a Program Buffer load into a read-denied pocket"
+   }
   }
  ]
 }

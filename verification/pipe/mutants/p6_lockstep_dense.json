@@ -29,7 +29,11 @@
     11,
     12,
     14
-   ]
+   ],
+   "unit_only": {
+    "12": "needs an armed EBREAK complete at the head in the very cycle an interrupt is sampled: over 160 dense programs an armed EBREAK was complete at a sample point 4 times and an interrupt was taken in that cycle never; qv_commit_tb covers the priority",
+    "14": "needs an action-1 trigger match complete at the head in the very cycle an interrupt is sampled (the same coincidence, never seen in 160 dense programs); qv_commit_tb covers the priority"
+   }
   }
  ]
 }
