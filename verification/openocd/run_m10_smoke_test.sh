@@ -7,13 +7,32 @@
 # REPO_ROOT, one summary line, exit code from the final boolean check).
 #
 # Usage (from WSL): verification/openocd/run_m10_smoke_test.sh
+#   CORE=fsm|ref|pipe verification/openocd/run_m10_smoke_test.sh
+# CORE (default fsm) picks the core under test: the file list and the rename
+# define come from the same verification/regress/*design_files.list as
+# run_regress.sh, so soc.sv's `core core0` is the FSM core, ref_core
+# (-DQV_REF_AS_CORE) or core_pipe (-DQV_PIPE_AS_CORE). Each core builds in
+# its own directory and listens on its own port, so they can run side by side.
 set -u
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 OOD_DIR="$REPO_ROOT/verification/openocd"
 FW_DIR="$REPO_ROOT/firmware"
-OUT_DIR="/tmp/m10_smoke_out"
-PORT=9824
+CORE="${CORE:-fsm}"
+case "$CORE" in
+    fsm)  DESIGN_LIST="$REPO_ROOT/verification/regress/design_files.list";      CORE_DEFINE="";                  PORT=9824; OUT_DIR="/tmp/m10_smoke_out" ;;
+    ref)  DESIGN_LIST="$REPO_ROOT/verification/regress/ref_design_files.list";   CORE_DEFINE="-DQV_REF_AS_CORE";   PORT=9825; OUT_DIR="/tmp/m10_smoke_out_ref" ;;
+    pipe) DESIGN_LIST="$REPO_ROOT/verification/regress/pipe_design_files.list";  CORE_DEFINE="-DQV_PIPE_AS_CORE";  PORT=9826; OUT_DIR="/tmp/m10_smoke_out_pipe" ;;
+    *) echo "Unknown CORE: $CORE (expected fsm, ref or pipe)" >&2; exit 1 ;;
+esac
+
+DESIGN_FILES=()
+while IFS= read -r line; do
+    line="${line%%#*}"
+    line="$(echo "$line" | xargs)"
+    [ -n "$line" ] || continue
+    DESIGN_FILES+=("$REPO_ROOT/$line")
+done < "$DESIGN_LIST"
 
 mkdir -p "$OUT_DIR"
 
@@ -33,20 +52,15 @@ if ! make -C "$FW_DIR" m10_debug_test > "$OUT_DIR/firmware_build.log" 2>&1; then
     exit 1
 fi
 
-echo "=== Building the Verilator remote_bitbang harness ==="
+echo "=== Building the Verilator remote_bitbang harness (core: $CORE) ==="
 SIM_MDIR="$OUT_DIR/sim_obj"
 rm -rf "$SIM_MDIR"
 mkdir -p "$SIM_MDIR"
-if ! verilator --cc --exe --build --timing -j 0 \
-        -I"$REPO_ROOT/design" -I"$REPO_ROOT/design/defaults" \
+# -Wno-fatal: the pipe and ref builds raise lint-style warnings the FSM build does not (this is not the lint gate)
+if ! verilator --cc --exe --build --timing -j 0 -Wno-fatal $CORE_DEFINE \
+        -I"$REPO_ROOT/design" -I"$REPO_ROOT/design/defaults" -I"$REPO_ROOT/verification/reference" \
         --top-module sim_soc_top -Mdir "$SIM_MDIR" -o sim_m10 \
-        "$REPO_ROOT"/design/decoder.sv "$REPO_ROOT"/design/alu.sv "$REPO_ROOT"/design/c_expand.sv \
-        "$REPO_ROOT"/design/cache_complex.sv "$REPO_ROOT"/design/clint.sv "$REPO_ROOT"/design/core.sv \
-        "$REPO_ROOT"/design/csr_file.sv "$REPO_ROOT"/design/dcache.sv "$REPO_ROOT"/design/divider.sv \
-        "$REPO_ROOT"/design/dm.sv "$REPO_ROOT"/design/dm_dmi.sv "$REPO_ROOT"/design/icache.sv \
-        "$REPO_ROOT"/design/jtag_tap.sv "$REPO_ROOT"/design/plic.sv "$REPO_ROOT"/design/register_file.sv \
-        "$REPO_ROOT"/design/soc.sv "$REPO_ROOT"/design/uart16550.sv "$REPO_ROOT"/design/wb4_sram.sv \
-        "$REPO_ROOT"/design/wb_addr_decoder.sv "$REPO_ROOT"/design/wb_arbiter2.sv \
+        "${DESIGN_FILES[@]}" \
         "$OOD_DIR/sim_soc_top.sv" "$OOD_DIR/sim_main.cpp" > "$OUT_DIR/verilator_build.log" 2>&1; then
     echo "FAIL: Verilator build failed -- see $OUT_DIR/verilator_build.log" >&2
     tail -40 "$OUT_DIR/verilator_build.log"

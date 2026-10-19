@@ -30,7 +30,7 @@ act:
 	verification/riscv-arch-test/run_act_tests.sh
 
 openocd-smoke:
-	verification/openocd/run_m10_smoke_test.sh
+	CORE=$(CORE) verification/openocd/run_m10_smoke_test.sh
 
 # P3.4: REF-vs-REF self-proof over the whole corpus, zero bus delay (the
 # safe default -- see lockstep_wb_delay.sv's own KNOWN GAP comment before
