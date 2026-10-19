@@ -399,6 +399,12 @@ def emit_amo(p: Program, recent: list[int]):
         # -- but the FAILURE path only under normal generation, never
         # --sail-safe (see the comment just above that branch for why).
         rd = p.reg_biased(recent)
+        while rd == addr_r:
+            # The LR's rd must not be the address register: the store and the SC below still use it, and
+            # the loaded word would become their address. That is a wild store, and when it lands in the
+            # code (the sandbox word held a code address) the two cores can legitimately fetch different
+            # bytes -- the pipe has prefetched them, the FSM has not -- since no FENCE.I follows.
+            rd = p.reg()
         p.e(f"    lr.{width_sfx}    x{rd}, (x{addr_r})")
         if p.args.sail_safe or p.rng.random() < 0.5:
             # success: SC to the SAME address, no intervening access.
