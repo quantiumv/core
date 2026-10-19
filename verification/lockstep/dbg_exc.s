@@ -12,7 +12,8 @@
  * (causes 5 and 7), an LR / store / SC sequence (a store that traps still clears the reservation), an AMO, CSR
  * accesses, FENCE and FENCE.I, an illegal word (a trigger exception ranks below it), forward branches and jumps,
  * ECALL and EBREAK. The handler skips whatever trapped.
- * At the end a run of `j .`: a skipped one lands on the next, which loops too.
+ * The body repeats 80 times (about 4500 retirements) so that most of the script's halts land in it rather than in the
+ * spin loop at the end: a run of `j .`, where a skipped one lands on the next, which loops too.
  *
  * Build (as the other directed programs; see run_lockstep.sh's build_dbg_entries):
  *   riscv64-unknown-elf-as -march=rv64imac_zicsr_zifencei -mabi=lp64 -mno-relax dbg_exc.s -o dbg_exc.o
@@ -33,7 +34,7 @@ _start:
     li      x11, -77
 
     .balign 64                      # the body starts at 0x40 (the assembler pads code with nops)
-    .rept 12
+    .rept 80
     addi    x12, x10, 5
     add     x13, x12, x11
     xor     x14, x13, x12
