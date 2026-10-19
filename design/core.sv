@@ -4603,7 +4603,11 @@ module core (
      * cycle, so state falls through to commit_now/trap_taken directly,
      * the same path a misaligned or PMP-denied access already takes.
      */
-    assign trigger_exception_match = !(trig0_debug_fire || trig1_debug_fire) && (trig0_exc_fire || trig1_exc_fire);
+    // errata E1: no trigger fires in Debug Mode. trap_taken is already off for a Program
+    // Buffer run, but this wire also sits in mem_phase_needed's exclusion list, where a
+    // match at the drifting pc used to cancel a Program Buffer load or store's bus access.
+    assign trigger_exception_match = !in_debug_mode
+                                  && !(trig0_debug_fire || trig1_debug_fire) && (trig0_exc_fire || trig1_exc_fire);
 
     /*
      * Branch comparator: NOT routed through alu0. alu_ops.sv has no
@@ -4965,6 +4969,10 @@ module core (
         : (fetch_lo_fault_q[cur_slot] || fetch_hi_fault_q[cur_slot]) ? ptw_vaddr_q[fetch_slot]
         : is_illegal_instr ? (is_compressed ? {48'b0, first_hw}
                                              : {{(`WORD_SIZE - `INSTR_SIZE){1'b0}}, instruction})
+        // errata E2: exc_code ranks a trigger exception (cause 3) above every
+        // memory fault, so its mtval has to be ranked there too -- the pc,
+        // not the address of an access that never happens
+        : trigger_exception_match ? pc
         : (mem_load_misaligned || mem_store_misaligned) ? mem_paddr
         // Sv39 M4: mem-side PTE-content page fault (cause 13/15) --
         // ptw_vaddr_q[cur_slot], same reasoning as the fetch-side arm above.
@@ -4975,7 +4983,6 @@ module core (
         // state==S_AMO_WRITE-vs-mem_paddr mux.
         : (mem_load_access_fault || mem_store_access_fault || pmp_load_fault || pmp_store_fault || mem_access_fault_q[cur_slot])
             ? mem_access_fault_vaddr
-        : trigger_exception_match ? pc
         : `WORD_SIZE'(0);
 
     /* Store data, pre-shifted into the byte lane(s) it'll land in. */

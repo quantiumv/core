@@ -125,7 +125,24 @@ already known to be wrong. After such a fix, regenerate
 `MANIFEST.sha256` (`sha256sum ref_*.sv ref_macros.svh > MANIFEST.sha256`
 run from this directory) and add an entry below.
 
-**Errata log:** (empty -- no post-freeze fixes yet)
+**Errata log:**
+
+- **E1 + E2 (2026-10-19, both found while planning the P6 debug port; fixed
+  together in `design/core.sv` and `ref_core.sv`).** Both are about an
+  action=0 execute trigger (a breakpoint exception, cause 3):
+  - E1: `trigger_exception_match` had no `!in_debug_mode` term, but it sits
+    in `mem_phase_needed`'s exclusion list. A Program Buffer load or store
+    whose drifting pc equalled an action=0 trigger's `tdata2` silently
+    lost its bus access (a load wrote stale read-bus data to rd). Triggers
+    never fire in Debug Mode, so the wire now includes `!in_debug_mode`.
+  - E2: `trap_val` ranked the misaligned and access-fault arms above the
+    trigger arm, while `exc_code` ranks the trigger above them, so a
+    trigger exception on a misaligned or PMP-denied access reported cause
+    3 with the data address as `mtval`. The trigger arm now sits just
+    below the illegal-instruction arm, so `mtval` is the pc.
+  Tests: `core_trigger_tb` scenarios `dut_trig_pbmem` and `dut_trig_misal`
+  (both failed before the fix). Behavior change on the mainline paths:
+  none; ACT, lockstep and the regression are unchanged.
 
 ## Running the reference as `core`
 
