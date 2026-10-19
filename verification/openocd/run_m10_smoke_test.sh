@@ -94,7 +94,7 @@ done
 
 echo "=== Running the OpenOCD acceptance test ==="
 OPENOCD_LOG="$OUT_DIR/openocd.log"
-( cd "$OOD_DIR" && openocd -f quantiumv.cfg -f m10_smoke.tcl ) > "$OPENOCD_LOG" 2>&1
+( cd "$OOD_DIR" && openocd -c "set QV_PORT $PORT" -f quantiumv.cfg -f m10_smoke.tcl ) > "$OPENOCD_LOG" 2>&1
 cat "$OPENOCD_LOG"
 
 summary=$(grep -E "^m10_smoke: [0-9]+ passed, [0-9]+ failed" "$OPENOCD_LOG" | tail -1)
