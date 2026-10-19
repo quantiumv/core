@@ -514,15 +514,17 @@ module lockstep_tb #(
     assign a_stopped = (stop_at != 0) && (longint'(a_rec_total) >= stop_at);
     assign b_stopped = (stop_at != 0) && (longint'(b_rec_total) >= stop_at);
 
-    // +RVFI_TRACE: one line per retirement of side A (debugging a hang or a divergence; the last field is
-    // 1 for a retirement made while the hart is in Debug Mode, i.e. a Program Buffer instruction)
+    // +RVFI_TRACE: one line per retirement of side A (debugging a hang or a divergence; dbg= is 1 for a
+    // retirement made while the hart is in Debug Mode, i.e. a Program Buffer instruction; mem= is the
+    // address, read mask, write mask and write data)
     logic rvfi_trace_on;
     initial rvfi_trace_on = $test$plusargs("RVFI_TRACE");
     always @(posedge clk_a)
         if (rvfi_trace_on && !rst && a_rvfi_valid)
-            $display("RT %0d pc=%016h insn=%08h rd=%0d/%016h mode=%0d trap=%0d intr=%0d dbg=%0d",
+            $display("RT %0d pc=%016h insn=%08h rd=%0d/%016h mode=%0d trap=%0d intr=%0d dbg=%0d mem=%016h/r%02h/w%02h/%016h",
                      a_rvfi_order, a_rvfi_pc_rdata, a_rvfi_insn, a_rvfi_rd_addr, a_rvfi_rd_wdata,
-                     a_rvfi_mode, a_rvfi_trap, a_rvfi_intr, side_a.dbg_halted);
+                     a_rvfi_mode, a_rvfi_trap, a_rvfi_intr, side_a.dbg_halted,
+                     a_rvfi_mem_addr, a_rvfi_mem_rmask, a_rvfi_mem_wmask, a_rvfi_mem_wdata);
 
     // Debug Mode entries by cause (dcsr.cause at each halt event of the script), side A: shown in the PASS
     // line so a run can be told from one that never entered Debug Mode the way it was meant to
