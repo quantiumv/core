@@ -399,6 +399,66 @@ module core_trigger_tb;
         if (dut_trig_div.core0.commit_now) div_commit_count <= div_commit_count + 1;
     end
 
+    /* ------------------------------------------------------------- *
+     * dut_trig_pbmem -- erratum E1: trigger_exception_match had no
+     * !in_debug_mode term, but it sits in mem_phase_needed's exclusion
+     * list, so a LOAD executed from the Program Buffer at a pc equal to
+     * an action=0 trigger's tdata2 silently lost its bus access (and
+     * wrote whatever stale data was on the read bus to rd). The first
+     * Program Buffer instruction runs at the drifting pc, which starts
+     * at dpc.
+     * ------------------------------------------------------------- */
+
+    logic rst_pbmem = 1;
+    logic [6:0]  reg_addr_pbmem;
+    logic [31:0] reg_wdata_pbmem;
+    logic        reg_we_pbmem = 1'b0;
+    logic [31:0] reg_rdata_pbmem;
+    dm_core_harness #(.NUM_WORDS(64)) dut_trig_pbmem (
+        .clk(clk), .rst(rst_pbmem),
+        .i_reg_addr(reg_addr_pbmem), .i_reg_wdata(reg_wdata_pbmem),
+        .i_reg_we(reg_we_pbmem), .o_reg_rdata(reg_rdata_pbmem)
+    );
+    task automatic pbmem_dmi_write(input [6:0] addr, input [31:0] wdata);
+        reg_addr_pbmem  = addr; reg_wdata_pbmem = wdata; reg_we_pbmem = 1'b1;
+        @(posedge clk); #1;
+        reg_we_pbmem    = 1'b0;
+    endtask
+    task automatic pbmem_dmi_read(input [6:0] addr, output [31:0] rdata);
+        reg_addr_pbmem = addr; #1; rdata = reg_rdata_pbmem;
+    endtask
+    int pbmem_commit_count = 0;
+    always @(posedge clk) begin
+        if (dut_trig_pbmem.core0.commit_now) pbmem_commit_count <= pbmem_commit_count + 1;
+    end
+
+    /* ------------------------------------------------------------- *
+     * dut_trig_misal -- erratum E2: trap_val ranked the misaligned and
+     * access-fault arms above the trigger arm while exc_code ranks the
+     * trigger (cause 3) above them, so an action=0 trigger on a
+     * misaligned load reported cause 3 with the DATA address as mtval.
+     * ------------------------------------------------------------- */
+
+    logic rst_misal = 1;
+    logic [6:0]  reg_addr_misal;
+    logic [31:0] reg_wdata_misal;
+    logic        reg_we_misal = 1'b0;
+    logic [31:0] reg_rdata_misal;
+    dm_core_harness #(.NUM_WORDS(32)) dut_trig_misal (
+        .clk(clk), .rst(rst_misal),
+        .i_reg_addr(reg_addr_misal), .i_reg_wdata(reg_wdata_misal),
+        .i_reg_we(reg_we_misal), .o_reg_rdata(reg_rdata_misal)
+    );
+    task automatic misal_dmi_write(input [6:0] addr, input [31:0] wdata);
+        reg_addr_misal  = addr; reg_wdata_misal = wdata; reg_we_misal = 1'b1;
+        @(posedge clk); #1;
+        reg_we_misal    = 1'b0;
+    endtask
+    int misal_commit_count = 0;
+    always @(posedge clk) begin
+        if (dut_trig_misal.core0.commit_now) misal_commit_count <= misal_commit_count + 1;
+    end
+
     initial begin
         #1;
 
@@ -1294,6 +1354,168 @@ module core_trigger_tb;
             dut_trig_div.core0.regfile0.gp_registers[3], 64'd5);
         check("dut_trig_div: x4 == 77 (ran after the divide)",
             dut_trig_div.core0.regfile0.gp_registers[4], 64'd77);
+
+        /* ----------------------------------------------------------- *
+         * dut_trig_pbmem (erratum E1): an action=0 trigger watching dpc,
+         * then a Program Buffer LOAD that runs at exactly that pc. The
+         * trigger must not fire in Debug Mode, so the load must reach
+         * the bus and rd must get the sentinel.
+         *  0x00  addi x1,x0,10
+         *  0x04.. nops, an ebreak at 0x1C
+         *  0x80  (memory[16]) sentinel dword
+         * ----------------------------------------------------------- */
+
+        dut_trig_pbmem.sram0.memory[0] = {encode_i(32'sd0, 5'd0, 3'b000, 5'd0, `OPC_OP_IMM),
+                                           encode_i(32'sd10, 5'd0, 3'b000, 5'd1, `OPC_OP_IMM)};
+        dut_trig_pbmem.sram0.memory[1] = {encode_i(32'sd0, 5'd0, 3'b000, 5'd0, `OPC_OP_IMM),
+                                           encode_i(32'sd0, 5'd0, 3'b000, 5'd0, `OPC_OP_IMM)};
+        dut_trig_pbmem.sram0.memory[2] = {encode_i(32'sd0, 5'd0, 3'b000, 5'd0, `OPC_OP_IMM),
+                                           encode_i(32'sd0, 5'd0, 3'b000, 5'd0, `OPC_OP_IMM)};
+        dut_trig_pbmem.sram0.memory[3] = {{11'b0, 1'b1, 13'b0, `OPC_SYSTEM},
+                                           encode_i(32'sd0, 5'd0, 3'b000, 5'd0, `OPC_OP_IMM)};
+        dut_trig_pbmem.sram0.memory[16] = 64'hCAFE_F00D_1234_5678;
+
+        @(posedge clk); #1;
+        rst_pbmem = 0;
+
+        pbmem_dmi_write(DMI_DMCONTROL, 32'h0000_0001);
+        while (pbmem_commit_count < 1) begin
+            @(posedge clk); #1;
+        end
+        pbmem_dmi_write(DMI_DMCONTROL, 32'h8000_0001);  // haltreq
+        fork
+            wait (dut_trig_pbmem.core0.o_debug_mode === 1'b1);
+            begin
+                repeat (2000) @(posedge clk);
+                $display("TIMEOUT: dut_trig_pbmem never reached its initial halt");
+                $finish;
+            end
+        join_any
+        disable fork;
+        #1;
+
+        // slot 0: action=0, m=1, execute=1, watching dpc itself
+        begin
+            logic [63:0] dpc_now;
+            dpc_now = dut_trig_pbmem.core0.dpc_w;
+            pbmem_dmi_write(DMI_DATA0, 32'd0);
+            pbmem_dmi_write(DMI_COMMAND, ar_cmd(1'b1, csr_regno(CSR_TSELECT)));
+            pbmem_dmi_write(DMI_DATA0, dpc_now[31:0]);
+            pbmem_dmi_write(DMI_COMMAND, ar_cmd(1'b1, csr_regno(CSR_TDATA2)));
+            pbmem_dmi_write(DMI_DATA0, (32'd0 << 12) | (32'd1 << 6) | (32'd1 << 2));
+            pbmem_dmi_write(DMI_COMMAND, ar_cmd(1'b1, csr_regno(CSR_TDATA1)));
+        end
+
+        // Program Buffer: ld x5,0x80(x0) ; ebreak ; postexec
+        pbmem_dmi_write(DMI_PROGBUF0, encode_i(32'sd128, 5'd0, 3'b011, 5'd5, `OPC_LOAD));
+        pbmem_dmi_write(DMI_PROGBUF1, {11'b0, 1'b1, 13'b0, `OPC_SYSTEM});
+        pbmem_dmi_write(DMI_COMMAND, {8'h00, 1'b0, 3'd3, 1'b0, 1'b1, 1'b0, 1'b0, 16'h0000});
+
+        begin
+            logic [31:0] rd;
+            int tries;
+            tries = 0;
+            rd = 32'h0000_1000;  // seed with busy=1
+            while (rd[12]) begin
+                if (tries >= BUSY_RETRY_LIMIT) begin
+                    $display("TIMEOUT: dut_trig_pbmem busy never cleared");
+                    $finish;
+                end
+                @(posedge clk); #1;
+                pbmem_dmi_read(DMI_ABSTRACTCS, rd);
+                tries++;
+            end
+            check("dut_trig_pbmem: abstractcs.cmderr == 0 (the run ended cleanly)", {61'b0, rd[10:8]}, 64'd0);
+        end
+        check("dut_trig_pbmem: x5 == the sentinel (the Program Buffer load reached the bus; no trigger fires in Debug Mode)",
+            dut_trig_pbmem.core0.regfile0.gp_registers[5], 64'hCAFE_F00D_1234_5678);
+
+        /* ----------------------------------------------------------- *
+         * dut_trig_misal (erratum E2): action=0 trigger on a MISALIGNED
+         * load. Cause is 3 (the trigger outranks the misaligned-access
+         * cause) and mtval must be the instruction's address.
+         *  0x00  addi x28,x0,0x40
+         *  0x04  csrrw x0,mtvec,x28
+         *  0x08  addi x1,x0,0x81         misaligned word address
+         *  0x0C..0x18  nops
+         *  0x1C  lw x2,0(x1)             <- trigger watches this address
+         *  0x20  ebreak                  ebreakm armed -- clean final stop
+         *  0x40  csrrs x22,mcause,x0     handler
+         *  0x44  csrrs x23,mtval,x0
+         *  0x48  csrrs x21,mepc,x0
+         *  0x4C  addi x24,x21,4          skip the trapped instruction
+         *  0x50  csrrw x0,mepc,x24
+         *  0x54  mret
+         * ----------------------------------------------------------- */
+
+        dut_trig_misal.sram0.memory[0] = {encode_csr(`CSR_MTVEC, 5'd28, `FUNCT3_CSRRW, 5'd0, `OPC_SYSTEM),
+                                           encode_i(32'sd64, 5'd0, 3'b000, 5'd28, `OPC_OP_IMM)};
+        dut_trig_misal.sram0.memory[1] = {encode_i(32'sd0, 5'd0, 3'b000, 5'd0, `OPC_OP_IMM),
+                                           encode_i(32'sd129, 5'd0, 3'b000, 5'd1, `OPC_OP_IMM)};
+        dut_trig_misal.sram0.memory[2] = {encode_i(32'sd0, 5'd0, 3'b000, 5'd0, `OPC_OP_IMM),
+                                           encode_i(32'sd0, 5'd0, 3'b000, 5'd0, `OPC_OP_IMM)};
+        dut_trig_misal.sram0.memory[3] = {encode_i(32'sd0, 5'd1, 3'b010, 5'd2, `OPC_LOAD),
+                                           encode_i(32'sd0, 5'd0, 3'b000, 5'd0, `OPC_OP_IMM)};
+        dut_trig_misal.sram0.memory[4] = {encode_i(32'sd0, 5'd0, 3'b000, 5'd0, `OPC_OP_IMM),
+                                           {11'b0, 1'b1, 13'b0, `OPC_SYSTEM}};
+        dut_trig_misal.sram0.memory[8] = {encode_csr(CSR_MTVAL, 5'd0, `FUNCT3_CSRRS, 5'd23, `OPC_SYSTEM),
+                                           encode_csr(CSR_MCAUSE, 5'd0, `FUNCT3_CSRRS, 5'd22, `OPC_SYSTEM)};
+        dut_trig_misal.sram0.memory[9] = {encode_i(32'sd4, 5'd21, 3'b000, 5'd24, `OPC_OP_IMM),
+                                           encode_csr(CSR_MEPC, 5'd0, `FUNCT3_CSRRS, 5'd21, `OPC_SYSTEM)};
+        dut_trig_misal.sram0.memory[10] = {`INSTR_HEX_MRET,
+                                            encode_csr(CSR_MEPC, 5'd24, `FUNCT3_CSRRW, 5'd0, `OPC_SYSTEM)};
+
+        @(posedge clk); #1;
+        rst_misal = 0;
+
+        misal_dmi_write(DMI_DMCONTROL, 32'h0000_0001);
+        while (misal_commit_count < 1) begin
+            @(posedge clk); #1;
+        end
+        misal_dmi_write(DMI_DMCONTROL, 32'h8000_0001);  // haltreq
+        fork
+            wait (dut_trig_misal.core0.o_debug_mode === 1'b1);
+            begin
+                repeat (2000) @(posedge clk);
+                $display("TIMEOUT: dut_trig_misal never reached its initial halt");
+                $finish;
+            end
+        join_any
+        disable fork;
+        #1;
+
+        misal_dmi_write(DMI_DATA0, 32'd0);
+        misal_dmi_write(DMI_COMMAND, ar_cmd(1'b1, csr_regno(CSR_TSELECT)));
+        misal_dmi_write(DMI_DATA0, 32'h0000_001C);
+        misal_dmi_write(DMI_COMMAND, ar_cmd(1'b1, csr_regno(CSR_TDATA2)));
+        misal_dmi_write(DMI_DATA0, (32'd0 << 12) | (32'd1 << 6) | (32'd1 << 2));  // action=0,m=1,execute=1
+        misal_dmi_write(DMI_COMMAND, ar_cmd(1'b1, csr_regno(CSR_TDATA1)));
+
+        misal_dmi_write(DMI_DATA0, 32'h0000_8000);  // dcsr.ebreakm
+        misal_dmi_write(DMI_DATA1, 32'd0);
+        misal_dmi_write(DMI_COMMAND, ar_cmd(1'b1, csr_regno(CSR_DCSR)));
+
+        misal_dmi_write(DMI_DMCONTROL, 32'h4000_0001);  // resumereq
+        fork
+            wait (dut_trig_misal.core0.o_debug_mode === 1'b1
+                  && dut_trig_misal.core0.dpc_w === 64'h20);
+            begin
+                repeat (4000) @(posedge clk);
+                $display("TIMEOUT: dut_trig_misal never reached its final EBREAK");
+                $finish;
+            end
+        join_any
+        disable fork;
+        #1;
+
+        check("dut_trig_misal: x22 == 3 (mcause == Breakpoint, not the misaligned-load cause 4)",
+            dut_trig_misal.core0.regfile0.gp_registers[22], 64'd3);
+        check("dut_trig_misal: x21 == 0x1C (mepc == the trigger's address)",
+            dut_trig_misal.core0.regfile0.gp_registers[21], 64'h1C);
+        check("dut_trig_misal: x23 == 0x1C (mtval == the trigger's address, not the misaligned data address 0x81)",
+            dut_trig_misal.core0.regfile0.gp_registers[23], 64'h1C);
+        check("dut_trig_misal: x2 == 0 (the load never wrote rd)",
+            dut_trig_misal.core0.regfile0.gp_registers[2], 64'd0);
 
         $display("");
         $display("core_trigger_tb: %0d passed, %0d failed", pass_count, fail_count);
