@@ -630,9 +630,11 @@ module core_pipe
 
     // An interrupt or a halt is only ever taken with nothing started on the data bus: the cycle before
     // retired something, so no memory op was in flight, and a head that would start in that cycle is held
-    // off by the flush. (A started access cannot be abandoned, so this is what makes taking either without
-    // waiting for the LSU safe.)
-    always @* assert (!((interrupt_taken || debug_halt_req_entry) && lsu_head_started));
+    // off by the flush. An EBREAK or trigger entry happens at a head that is not a memory op, and memory
+    // ops only start at the head. (A started access cannot be abandoned, so this is what makes entering
+    // Debug Mode without waiting for the LSU safe.)
+    always @* assert (!((interrupt_taken || debug_halt_req_entry || debug_ebreak_entry || trigger_debug_entry)
+                        && lsu_head_started));
     assign rvfi_any_debug_entry    = debug_ebreak_entry || debug_halt_req_entry || trigger_debug_entry
                                      || dm_access_active;
 `endif
