@@ -10,7 +10,8 @@
  * divides (including a divide by zero), loads and stores of every size, a misaligned load and store (causes 4 and
  * 6 ahead of which a trigger exception, cause 3 with tval = the pc, must rank), accesses that get a bus error
  * (causes 5 and 7), an LR / store / SC sequence (a store that traps still clears the reservation), an AMO, CSR
- * accesses, FENCE and FENCE.I, forward branches and jumps, ECALL and EBREAK. The handler skips whatever trapped.
+ * accesses, FENCE and FENCE.I, an illegal word (a trigger exception ranks below it), forward branches and jumps,
+ * ECALL and EBREAK. The handler skips whatever trapped.
  * At the end a run of `j .`: a skipped one lands on the next, which loops too.
  *
  * Build (as the other directed programs; see run_lockstep.sh's build_dbg_entries):
@@ -60,6 +61,10 @@ _start:
     csrrs   x31, mscratch, x0
     fence
     fence.i
+    .word   0xFFFFFFFF              # illegal instruction: a trigger exception must rank below it (cause 2)
+    lr.d    x30, (x27)
+    amoadd.d x28, x19, (x27)        # an AMO between the LR and the SC clears the reservation, trapped or not
+    sc.d    x31, x18, (x27)
     beq     x0, x0, 1f
     addi    x10, x10, 1             # skipped by the branch
 1:  bne     x10, x0, 2f

@@ -1,0 +1,53 @@
+{
+ "counts": [
+  24,
+  96,
+  256
+ ],
+ "sim": "verilator",
+ "memcfg": "sram",
+ "delay": 0,
+ "jobs": 3,
+ "inner_jobs": 2,
+ "profile": "--isa imac --priv msu --pmp --irq --smc",
+ "extra": [
+  "--irq-mode",
+  "2",
+  "--irq-density",
+  "1",
+  "--dbg-mode",
+  "1",
+  "--dbg-features",
+  "191"
+ ],
+ "mutants": [
+  {
+   "from": "p6a_unit_decode.json",
+   "only": [
+    0,
+    2,
+    3,
+    4
+   ]
+  },
+  {
+   "from": "p6b_unit_decode.json",
+   "only": [
+    5,
+    6
+   ]
+  },
+  {
+   "from": "p6c_unit_commit.json",
+   "only": [
+    20
+   ]
+  },
+  {
+   "from": "p6c_unit_lsu.json",
+   "only": [
+    2
+   ]
+  }
+ ]
+}

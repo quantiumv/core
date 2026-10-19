@@ -360,12 +360,16 @@ module lockstep_dbg (
                     pbw[4] = {20'b0, ra, 7'b0010111};                                     // auipc ra, 0
                     pbw[5] = EBREAK; pbn = 6;
                 end
-                3: begin   // memory through the sandbox base (qvgen programs only)
-                    pbw[0] = enc_s(12'd8,  rb, 5'd27, 3'b011);                            // sd rb, 8(x27)
-                    pbw[1] = enc_i(12'd8,  5'd27, 3'b011, ra, 7'b0000011);                // ld ra, 8(x27)
-                    pbw[2] = enc_s(12'd16, rb, 5'd27, 3'b010);                            // sw rb, 16(x27)
-                    pbw[3] = enc_i(12'd16, 5'd27, 3'b010, ra, 7'b0000011);                // lw ra, 16(x27)
-                    pbw[4] = enc_i(12'd3,  5'd27, 3'b100, rb, 7'b0000011);                // lbu rb, 3(x27)
+                3: begin   // memory through the sandbox base (qvgen programs only), anywhere in its first KiB:
+                           // that is where --pmp puts its pockets, which a Program Buffer access ignores
+                    k = 8 * rnd(128);
+                    i = 4 * rnd(256);
+                    pbw[0] = enc_s(12'(k), rb, 5'd27, 3'b011);                            // sd rb, k(x27)
+                    pbw[1] = enc_i(12'(k), 5'd27, 3'b011, ra, 7'b0000011);                // ld ra, k(x27)
+                    pbw[2] = enc_s(12'(i), rb, 5'd27, 3'b010);                            // sw rb, i(x27)
+                    pbw[3] = enc_i(12'(i), 5'd27, 3'b010, ra, 7'b0000011);                // lw ra, i(x27)
+                    k = rnd(1024);
+                    pbw[4] = enc_i(12'(k), 5'd27, 3'b100, rb, 7'b0000011);                // lbu rb, k(x27)
                     pbw[5] = EBREAK; pbn = 6;
                 end
                 4: begin   // system words: FENCE.I must drain fetch and flush the icache
@@ -420,6 +424,10 @@ module lockstep_dbg (
                     pbw[2] = enc_csr(12'h342, 5'd0, 3'b010, ra);                          // csrrs ra, mcause, x0
                     pbw[3] = enc_csr(12'h305, 5'd0, 3'b010, rb);                          // csrrs rb, mtvec, x0
                     pbw[4] = EBREAK; pbn = 5;
+                end
+                13: begin  // abort: a write to a read-only CSR, with a destination (neither it nor rd may change)
+                    pbw[0] = enc_csr(12'hF14, rb, 3'b001, ra);                            // csrrw ra, mhartid, rb
+                    pbw[1] = EBREAK; pbn = 2;
                 end
                 default: begin
                     pbw[0] = EBREAK; pbn = 1;
@@ -503,7 +511,7 @@ module lockstep_dbg (
                         ev(EV_WRITE, 64'(r), back);
                     end
                     6: if (feat_i[5]) begin                         // a Program Buffer run
-                        pb_run(rnd(13), reserved);
+                        pb_run(rnd(14), reserved);
                     end
                     default: if (feat_i[2]) begin
                         ar_read({4'b0, CSR_MINSTRET}, v);
@@ -570,7 +578,7 @@ module lockstep_dbg (
                     v[6]  = 1'b1;                                     // m
                     v[4]  = (rnd(2) == 0);                            // s
                     v[3]  = (rnd(2) == 0);                            // u
-                    v[2]  = 1'b1;                                     // execute
+                    v[2]  = (rnd(4) != 0);                            // execute (clear: a trigger that must never fire)
                     ar_write({4'b0, CSR_TDATA1}, v);
                 end
             end

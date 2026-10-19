@@ -460,6 +460,8 @@ _S_RO = ["sstatus", "sie", "stvec", "scounteren", "sip", "satp"]    # a write co
 _M_ANY = ["mstatus", "misa", "medeleg", "mideleg", "mie", "mtvec", "mscratch", "mepc", "mcause", "mtval",
           "mip", "mhartid", "pmpcfg0", "pmpaddr0", "mcycle", "minstret"]
 _U_RO = ["cycle", "instret", "time"]
+# dcsr, dpc, dscratch0/1, tselect, tdata1-3, tinfo: an illegal instruction outside Debug Mode, from every privilege
+_D_ANY = ["0x7b0", "0x7b1", "0x7b2", "0x7b3", "0x7a0", "0x7a1", "0x7a2", "0x7a3", "0x7a4"]
 
 
 def emit_priv_csr(p: Program, recent: list[int]):
@@ -476,8 +478,11 @@ def emit_priv_csr(p: Program, recent: list[int]):
     elif r < 0.55:
         csr = p.rng.choice(s_ro)
         form = "read"
-    elif r < 0.85:
+    elif r < 0.82:
         csr = p.rng.choice(m_any)
+        form = p.rng.choice(["csrrw", "csrrs", "csrrc", "csrrwi", "csrrsi", "csrrci", "read"])
+    elif r < 0.90:
+        csr = p.rng.choice(_D_ANY)
         form = p.rng.choice(["csrrw", "csrrs", "csrrc", "csrrwi", "csrrsi", "csrrci", "read"])
     else:
         csr = p.rng.choice(_U_RO)
