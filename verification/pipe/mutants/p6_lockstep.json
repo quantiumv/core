@@ -54,8 +54,6 @@
     "9": "timing only: the entry comes a cycle or two earlier, the architectural result is the same",
     "10": "timing only: the entry comes a cycle or two earlier, the architectural result is the same",
     "11": "killed by p6_lockstep_dense.json: it needs an EBREAK at the head in the very cycle a halt request or a step is sampled, which takes dense EBREAKs and halts",
-    "12": "needs an armed EBREAK or trigger complete at the head in the very cycle an interrupt is sampled: over 160 dense programs an armed EBREAK was complete at a sample point 4 times and an interrupt was taken in that cycle never; qv_commit_tb covers the priority",
-    "14": "needs an armed EBREAK or trigger complete at the head in the very cycle an interrupt is sampled: over 160 dense programs an armed EBREAK was complete at a sample point 4 times and an interrupt was taken in that cycle never; qv_commit_tb covers the priority",
     "15": "reporting wire only (compatibility and formal tap)",
     "18": "the redirect target of a head entry is never used: fetch is held in Debug Mode and the resume redirects to dpc",
     "20": "a fetch-fault marker never travels with an EBREAK word in generated programs; qv_commit_tb covers it",
@@ -80,7 +78,9 @@
     "20": "killed by p6_lockstep_dbgexc.json: it needs an action-0 trigger, which only the directed straight-line program can take (a skipped instruction ruins a random program)",
     "22": "killed by p6_lockstep_dbgexc.json: it needs an action-0 trigger, which only the directed straight-line program can take (a skipped instruction ruins a random program)",
     "23": "killed by p6_lockstep_dbgexc.json: it needs an action-0 trigger, which only the directed straight-line program can take (a skipped instruction ruins a random program)",
-    "24": "killed by p6_lockstep_dbgexc.json: it needs an action-0 trigger, which only the directed straight-line program can take (a skipped instruction ruins a random program)"
+    "24": "killed by p6_lockstep_dbgexc.json: it needs an action-0 trigger, which only the directed straight-line program can take (a skipped instruction ruins a random program)",
+    "3": "killed by p6_lockstep_extra.json: it needs a privilege-2 body (one program in eight) with a trigger armed in it, which the first 64 programs give only now and then",
+    "16": "killed by p6_lockstep_extra.json: it needs an action-1 trigger on an instruction that is illegal or has a fetch fault, which the first 64 programs give only now and then"
    }
   },
   {
