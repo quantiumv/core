@@ -436,10 +436,19 @@ module lockstep_dbg (
         end
     endtask
 
-    task automatic pb_run(input integer which, input logic reserved);
-        logic [2:0] ce;
-        integer i;
+    task automatic pb_run(input integer which_in, input logic reserved);
+        logic [2:0]  ce;
+        logic [63:0] x27v;
+        integer      i, which;
         begin
+            which = which_in;
+            // The sandbox snippets (3, 9, 10) go through x27, which the program's preamble sets to the sandbox base. A
+            // halt before that finds x27 = 0, and a store through it lands in the code ahead of the pc: no FENCE.I
+            // follows, so the two cores may fetch different bytes, and the program is wrecked anyway.
+            if (reserved && (which == 3 || which == 9 || which == 10)) begin
+                ar_read(gpr_regno(27), x27v);
+                if (x27v != 64'h10000) which = 0;
+            end
             make_snippet(which, reserved);
             for (i = 0; i < pbn; i = i + 1)
                 dmi_write(DMI_PROGBUF0 + 7'(i), pbw[i]);
