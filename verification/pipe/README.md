@@ -46,3 +46,35 @@ The qvgen profiles the specs use (`verification/lockstep/gen/qvgen.py`):
 | `p5c_lockstep.json` | `--isa imac --priv msu --smc` | |
 | `p5d_lockstep.json` | `--isa imac --priv msu --smc --irq` | `--irq-mode 2 --irq-density 1 --irq-late` |
 | `p5e_lockstep.json` | `--isa imac --priv msu --pmp --smc` (and `--priv m` for the lock bit and MPRV) | |
+
+## Where core_pipe differs from core.sv
+
+Architectural behavior is the same: the lockstep gate compares every retirement, a CSR snapshot, the bus
+write log and, with `--dbg-mode 1`, the debug-script event log. These differences are known and acceptable.
+
+Not architectural:
+- The pipe prefetches; the FSM does not. Without a FENCE.I, what each fetches from freshly written code is
+  unspecified, so a generated program must never store into the code except in the SMC idiom (which has
+  the FENCE.I). `lockstep/smc_hazard.py` classifies a failed run's trace as this hazard or not. (The
+  first P6 gate found qvgen's `lr rd, (rs1)` with rd == rs1 doing it through the loaded word.)
+- Fetch PMP is checked per instruction in decode, not before the bus request; a denied fetch never retires.
+- A DIV or FENCE.I that traps on an action-0 trigger: the FSM starts the divider and flushes the icache
+  before trapping, the pipe does neither (the flush is harmless).
+
+RVFI fields the FSM reports stale, which the comparator masks or the stimulus avoids:
+- `insn` on cause-1 records, `mem_*` on trapping AMO records, mip bits 7, 9 and 11 under `--irq-late`.
+- `mem_*` of a trapped action-0 load, store or AMO: the FSM reports the would-be access, the pipe zeros
+  (the comparator skips the memory fields of trap records).
+- A Program Buffer abort reports `rvfi_trap` 0, so its memory fields are compared. They differ for a
+  misaligned SC, AMO, LR or load and for a faulting load or AMO read (stale bus registers in the FSM), so the
+  script's snippets avoid those; `dm_tb` covers them.
+
+Debug Module corners the pipe resolves differently; the DM's spacing of DMI operations keeps JTAG from
+reaching them:
+- `i_progbuf_start` in the same cycle as a resume: the pipe resumes and ignores the start, the FSM accepts
+  both and leaves a run active with `in_debug_mode` 0. A start while a run is active or at its last commit
+  is ignored by the pipe.
+- A Program Buffer word rewritten while a run is in flight: the pipe executes the word it latched at
+  injection, the FSM the live one. A debugger that polls `busy` never does this.
+- After a debugger writes code with no FENCE.I, the pipe's icache can hold stale lines beyond the halt pc
+  that the FSM would not (the FSM has nothing prefetched).
