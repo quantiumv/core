@@ -312,6 +312,15 @@ module lockstep_dbg (
         enc_amo = {f5, 1'b0, 1'b0, rs2, rs1, f3, rd, 7'b0101111};
     endfunction
 
+    // What a snippet must not do, because the FSM and the pipe both do the right thing but report it differently:
+    //  - abort on a faulting load or AMO read, or on a misaligned load, LR, SC or AMO: rvfi_trap is 0 for a Program
+    //    Buffer abort, so the comparator checks mem_* and rdata/wdata, and the FSM reports the stale bus and AMO
+    //    registers (a misaligned SC without a reservation: wmask 0) where the pipe reports the would-be access
+    //    (rdata 0). dm_tb Test E covers those. Snippet 10, a misaligned plain store, is the one abort whose fields agree.
+    //  - store into the code: no FENCE.I follows, so what each core fetches next is unspecified.
+    //  - change a word of the Program Buffer while a run is in flight (the pipe latches the word at injection, the FSM
+    //    reads it until the commit); the script only touches it between runs, as a debugger that polls busy does.
+
     // Fill pbw[0..pbn-1] with one snippet. ra/rb are x22/x23 when the
     // program leaves them alone, x0 otherwise (so the words are still
     // there to be executed and retired, with no architectural effect).
