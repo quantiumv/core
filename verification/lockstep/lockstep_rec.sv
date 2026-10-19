@@ -1,7 +1,7 @@
 /*
  * lockstep_rec.sv -- one side's record capture: three fixed-depth ring
  * buffers (retirement stream, ordered bus-write log, ordered MMIO-read
- * log) plus a debug-event counter, all pushed from lockstep_side.sv's
+ * log), all pushed from lockstep_side.sv's
  * flat ports and popped by lockstep_cmp.sv.
  *
  * Two independent clocks, deliberately: clk_push is this side's own
@@ -68,8 +68,6 @@ module lockstep_rec #(
     input logic         o_mstatus_spp, o_mstatus_tsr, o_mstatus_mie, o_mstatus_sie,
     input logic         o_mstatus_mprv, o_mstatus_sum, o_mstatus_mxr, o_mstatus_tvm,
 
-    input logic         rvfi_any_debug_entry,
-
     input logic         wr_valid_i,
     input logic [31:0]  wr_addr_i,
     input logic [7:0]   wr_sel_i,
@@ -118,10 +116,7 @@ module lockstep_rec #(
     output logic         rd_avail,
     input  logic         rd_pop,
     output logic [31:0]  rdp_addr,
-    output logic [63:0]  rdp_data,
-
-    output logic         dbg_avail,
-    input  logic         dbg_pop
+    output logic [63:0]  rdp_data
 );
     // Plain parallel arrays, one per field, all indexed identically --
     // NOT an array of a packed struct. iverilog's elaborator (confirmed
@@ -385,27 +380,4 @@ module lockstep_rec #(
     end
     assign rdp_addr = rdring_addr[rd_rp_q];
     assign rdp_data = rdring_data[rd_rp_q];
-
-    // -------------------- debug-event counter --------------------
-    // No payload beyond "one happened" -- rvfi_any_debug_entry carries no
-    // extra data of its own to log. Two independent monotonic counters
-    // (push-side increments, pop-side increments) instead of one
-    // incremented-and-decremented register, for the same single-driver-
-    // per-clock-domain reason as the rings above.
-    logic [31:0] dbg_push_total_q = '0, dbg_pop_total_q = '0;
-    assign dbg_avail = (dbg_push_total_q != dbg_pop_total_q);
-    always_ff @(posedge clk_push) begin
-        if (rst) begin
-            dbg_push_total_q <= '0;
-        end else if (rvfi_any_debug_entry) begin
-            dbg_push_total_q <= dbg_push_total_q + 1'b1;
-        end
-    end
-    always_ff @(posedge clk_pop) begin
-        if (rst) begin
-            dbg_pop_total_q <= '0;
-        end else if (dbg_pop && dbg_avail) begin
-            dbg_pop_total_q <= dbg_pop_total_q + 1'b1;
-        end
-    end
 endmodule

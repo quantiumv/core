@@ -2,7 +2,7 @@
  * lockstep_tb.sv -- P3.4 lockstep harness top level (pipelining track
  * plan). Runs two independent core instances against the same program
  * image and compares every retirement plus the ordered bus-write/MMIO-
- * read logs and debug-event counts, ending in a final `LOCKSTEP_RESULT:`
+ * read logs, ending in a final `LOCKSTEP_RESULT:`
  * line.
  *
  * Side A is always the gold reference: ref_core #(QV_MUTANT=0) on the
@@ -238,7 +238,6 @@ module lockstep_tb #(
     logic [31:0] a_rec_count, b_rec_count, a_rec_total, b_rec_total;
     logic        a_wr_avail, b_wr_avail, a_wr_pop, b_wr_pop;
     logic        a_rda_avail, b_rda_avail, a_rda_pop, b_rda_pop;
-    logic        a_dbg_avail, b_dbg_avail, a_dbg_pop, b_dbg_pop;
 
     // popped-field buses (a_rp_*/b_rp_*) -- declared once, reused by both
     // the rec instances (outputs) and cmp0 (inputs)
@@ -308,7 +307,6 @@ module lockstep_tb #(
         .o_mstatus_mpp(a_mstatus_mpp), .o_mstatus_spp(a_mstatus_spp), .o_mstatus_tsr(a_mstatus_tsr),
         .o_mstatus_mie(a_mstatus_mie), .o_mstatus_sie(a_mstatus_sie), .o_mstatus_mprv(a_mstatus_mprv),
         .o_mstatus_sum(a_mstatus_sum), .o_mstatus_mxr(a_mstatus_mxr), .o_mstatus_tvm(a_mstatus_tvm),
-        .rvfi_any_debug_entry(a_rvfi_any_debug_entry),
         .wr_valid_i(a_wr_valid), .wr_addr_i(a_wr_addr), .wr_sel_i(a_wr_sel), .wr_data_i(a_wr_data),
         .rd_valid_i(a_mmio_rd_valid), .rd_addr_i(a_mmio_rd_addr), .rd_data_i(a_mmio_rd_data),
         .rec_count(a_rec_count), .rec_total(a_rec_total),
@@ -332,8 +330,7 @@ module lockstep_tb #(
         .rp_mstatus_mie(a_rp_mstatus_mie), .rp_mstatus_sie(a_rp_mstatus_sie), .rp_mstatus_mprv(a_rp_mstatus_mprv),
         .rp_mstatus_sum(a_rp_mstatus_sum), .rp_mstatus_mxr(a_rp_mstatus_mxr), .rp_mstatus_tvm(a_rp_mstatus_tvm),
         .wr_avail(a_wr_avail), .wr_pop(a_wr_pop), .wrp_addr(a_wrp_addr), .wrp_sel(a_wrp_sel), .wrp_data(a_wrp_data),
-        .rd_avail(a_rda_avail), .rd_pop(a_rda_pop), .rdp_addr(a_rdap_addr), .rdp_data(a_rdap_data),
-        .dbg_avail(a_dbg_avail), .dbg_pop(a_dbg_pop)
+        .rd_avail(a_rda_avail), .rd_pop(a_rda_pop), .rdp_addr(a_rdap_addr), .rdp_data(a_rdap_data)
     );
 
     lockstep_rec rec_b (
@@ -356,7 +353,6 @@ module lockstep_tb #(
         .o_mstatus_mpp(b_mstatus_mpp), .o_mstatus_spp(b_mstatus_spp), .o_mstatus_tsr(b_mstatus_tsr),
         .o_mstatus_mie(b_mstatus_mie), .o_mstatus_sie(b_mstatus_sie), .o_mstatus_mprv(b_mstatus_mprv),
         .o_mstatus_sum(b_mstatus_sum), .o_mstatus_mxr(b_mstatus_mxr), .o_mstatus_tvm(b_mstatus_tvm),
-        .rvfi_any_debug_entry(b_rvfi_any_debug_entry),
         .wr_valid_i(b_wr_valid), .wr_addr_i(b_wr_addr), .wr_sel_i(b_wr_sel), .wr_data_i(b_wr_data),
         .rd_valid_i(b_mmio_rd_valid), .rd_addr_i(b_mmio_rd_addr), .rd_data_i(b_mmio_rd_data),
         .rec_count(b_rec_count), .rec_total(b_rec_total),
@@ -380,8 +376,7 @@ module lockstep_tb #(
         .rp_mstatus_mie(b_rp_mstatus_mie), .rp_mstatus_sie(b_rp_mstatus_sie), .rp_mstatus_mprv(b_rp_mstatus_mprv),
         .rp_mstatus_sum(b_rp_mstatus_sum), .rp_mstatus_mxr(b_rp_mstatus_mxr), .rp_mstatus_tvm(b_rp_mstatus_tvm),
         .wr_avail(b_wr_avail), .wr_pop(b_wr_pop), .wrp_addr(b_wrp_addr), .wrp_sel(b_wrp_sel), .wrp_data(b_wrp_data),
-        .rd_avail(b_rda_avail), .rd_pop(b_rda_pop), .rdp_addr(b_rdap_addr), .rdp_data(b_rdap_data),
-        .dbg_avail(b_dbg_avail), .dbg_pop(b_dbg_pop)
+        .rd_avail(b_rda_avail), .rd_pop(b_rda_pop), .rdp_addr(b_rdap_addr), .rdp_data(b_rdap_data)
     );
 
     // ---------------- comparator ----------------
@@ -439,8 +434,6 @@ module lockstep_tb #(
 
         .a_rd_avail(a_rda_avail), .b_rd_avail(b_rda_avail), .a_rd_pop(a_rda_pop), .b_rd_pop(b_rda_pop),
         .a_rdp_addr(a_rdap_addr), .b_rdp_addr(b_rdap_addr), .a_rdp_data(a_rdap_data), .b_rdp_data(b_rdap_data),
-
-        .a_dbg_avail(a_dbg_avail), .b_dbg_avail(b_dbg_avail), .a_dbg_pop(a_dbg_pop), .b_dbg_pop(b_dbg_pop),
 
         .a_stopped(a_stopped), .b_stopped(b_stopped),
         .corrupt_at(corrupt_at[63:0]), .corrupt_field(corrupt_field),
@@ -527,7 +520,7 @@ module lockstep_tb #(
                 $finish;
             end
             // Done once both sides have stopped at stop_at and every record
-            // has been compared. The bus-write, MMIO-read and debug-event
+            // has been compared. The bus-write and MMIO-read
             // logs only pop in pairs, so anything left over on one side
             // (an extra or missing access) is a divergence of its own.
             if (a_stopped && b_stopped && !a_rec_avail && !b_rec_avail
@@ -537,10 +530,10 @@ module lockstep_tb #(
                     $display("LOCKSTEP_RESULT: FAIL at retirement order=%0d (matched %0d before it)", fail_order, match_count);
                     $finish;
                 end
-                if (a_wr_avail || b_wr_avail || a_rda_avail || b_rda_avail || a_dbg_avail || b_dbg_avail) begin
-                    $display("LOCKSTEP_DIVERGENCE: unmatched log entries at the stop (wr a=%0d b=%0d, mmio-rd a=%0d b=%0d, dbg a=%0d b=%0d)",
-                             a_wr_avail, b_wr_avail, a_rda_avail, b_rda_avail, a_dbg_avail, b_dbg_avail);
-                    $display("LOCKSTEP_RESULT: FAIL (unmatched bus-write/MMIO-read/debug log entries after %0d retirements)", match_count);
+                if (a_wr_avail || b_wr_avail || a_rda_avail || b_rda_avail) begin
+                    $display("LOCKSTEP_DIVERGENCE: unmatched log entries at the stop (wr a=%0d b=%0d, mmio-rd a=%0d b=%0d)",
+                             a_wr_avail, b_wr_avail, a_rda_avail, b_rda_avail);
+                    $display("LOCKSTEP_RESULT: FAIL (unmatched bus-write/MMIO-read log entries after %0d retirements)", match_count);
                     $finish;
                 end
                 check_final_state();

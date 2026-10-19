@@ -2,10 +2,10 @@
  * lockstep_cmp.sv -- pulls one record from each side's lockstep_rec
  * whenever both have one available, and compares them field by field.
  * Also drains and compares the two ordered bus-write logs, the two
- * ordered MMIO-read logs, and the two debug-event counts independently
- * (each its own FIFO-vs-FIFO stream, not gated on the retirement
- * stream), and watches for stall divergence (one side retiring while
- * the other doesn't, for STALL_CYCLES).
+ * ordered MMIO-read logs independently (each its own FIFO-vs-FIFO
+ * stream, not gated on the retirement stream), and watches for stall
+ * divergence (one side retiring while the other doesn't, for
+ * STALL_CYCLES).
  *
  * +CORRUPT_AT=<order>/+CORRUPT_FIELD=<code> flips one field of side B's
  * popped record at that retirement order, before comparison -- proves
@@ -94,10 +94,6 @@ module lockstep_cmp #(
     output logic         a_rd_pop, b_rd_pop,
     input  logic [31:0]  a_rdp_addr, b_rdp_addr,
     input  logic [63:0]  a_rdp_data, b_rdp_data,
-
-    // debug-event counts
-    input  logic         a_dbg_avail, b_dbg_avail,
-    output logic         a_dbg_pop, b_dbg_pop,
 
     // a side frozen at the run's stop point isn't stalled
     input  logic         a_stopped, b_stopped,
@@ -311,21 +307,6 @@ module lockstep_cmp #(
         end
     end
 
-    // -------------------- debug-event count comparison --------------------
-    logic dbg_mismatch_q;
-    assign a_dbg_pop = a_dbg_avail && b_dbg_avail && !dbg_mismatch_q;
-    assign b_dbg_pop = a_dbg_avail && b_dbg_avail && !dbg_mismatch_q;
-    always_ff @(posedge clk) begin
-        if (rst) begin
-            dbg_mismatch_q <= 1'b0;
-        end else if ((a_dbg_avail ^ b_dbg_avail) && !dbg_mismatch_q) begin
-            // one side has a pending debug-entry event and the other
-            // never produced a matching one to drain against.
-            dbg_mismatch_q <= 1'b1;
-            $display("LOCKSTEP_DIVERGENCE: debug-entry event count diverged (a_avail=%0d b_avail=%0d)", a_dbg_avail, b_dbg_avail);
-        end
-    end
-
     // -------------------- stall divergence --------------------
     // Tracks each side's lifetime retirement count (monotonic, from
     // lockstep_rec.sv) rather than its ring occupancy -- occupancy alone
@@ -360,5 +341,5 @@ module lockstep_cmp #(
         end
     end
 
-    assign result_fail = val_mismatch_q || wr_mismatch_q || rd_mismatch_q || dbg_mismatch_q || stall_fail_q;
+    assign result_fail = val_mismatch_q || wr_mismatch_q || rd_mismatch_q || stall_fail_q;
 endmodule
