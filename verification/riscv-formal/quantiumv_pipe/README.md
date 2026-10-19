@@ -57,17 +57,23 @@ log already says `DONE (PASS)`, so an interrupted sweep resumes. The RTL file li
   than the sweep's 8 GB limit (`bad_alloc`); core_pipe's does not try it.
 - **Fairness** (`RISCV_FORMAL_FAIRNESS`, liveness and hang only): every bus request is answered within 3
   cycles and no debug halt or resume is requested. The 91 checks keep fully free acks.
-- Interrupts are free in every check (the wrapper drives `i_mtip`, `i_meip` and `i_seip` as free inputs),
-  so the proofs cover interrupt entry too. PMP and `satp` are pinned for the `insn_*` and `c_*` families
-  exactly as for the FSM.
+- Interrupts and debug requests are free in every check (the wrapper drives `i_mtip`, `i_debug_halt_req`
+  and `i_debug_resume_req` as free inputs; `i_meip` and `i_seip` stay at their default of 0), so the proofs
+  cover interrupt entry, halt entry and resume too. The Debug Module's register-access and Program Buffer
+  inputs are not driven (they sit at their defaults), and `reg` excludes `rvfi_any_debug_entry` as for the
+  FSM, since Access Register would share its read port. PMP and `satp` are pinned for the `insn_*` and `c_*`
+  families exactly as for the FSM.
 
 ## Module proofs
 
-`verification/formal/pipe/run.sh [--mutants]` proves two units on their own with SymbiYosys
+`verification/formal/pipe/run.sh [--mutants]` proves three units on their own with SymbiYosys
 (k-induction, plus deep BMC and cover tasks): `qv_fetch` (never abandons a request, never pushes a stale
-response, at most one request outstanding) and `qv_lsu` (an access starts only at the ROB head and never
+response, at most one request outstanding), `qv_lsu` (an access starts only at the ROB head and never
 for a misaligned or PMP-denied uop, never abandons a request, one bus access per uop, the AMO sequence and
-its lock). The `--mutants` run shows each property set fails on known-bad versions of its unit.
+its lock) and `qv_dbg` (a Program Buffer run implies Debug Mode, a resume is accepted only while halted and
+not running, one word in flight at a time, the word index follows the retirements, the step arm is loaded
+by a resume and consumed by a halt). The `--mutants` run shows each property set fails on known-bad
+versions of its unit.
 
 ## Results
 

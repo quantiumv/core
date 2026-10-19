@@ -42,7 +42,7 @@ The core starts at pc 0 in M-mode, with no trap handler installed.
 
 Supported ISA, per core:
 - `fsm` and `ref`: RV64IMAC + Zicsr + Zifencei, M/S/U modes, Sv39 and PMP.
-- `pipe`: RV64IMAC, Zicsr and Zifencei, in M-mode only: no U/S modes, interrupts, PMP, debug or Sv39 yet.
+- `pipe`: RV64IMAC, Zicsr and Zifencei, M/S/U modes, PMP and debug; no Sv39 yet.
 
 ## Limits
 
