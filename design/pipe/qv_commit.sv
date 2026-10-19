@@ -47,8 +47,17 @@
  * would retire in the same cycle (nothing commits, everything younger is
  * flushed). mepc is then the architectural pc, the next instruction to
  * retire; the order counter and the previous-pc register are untouched, so
- * the handler's first retirement shows up with rvfi_intr set. There is no
- * halt or step term yet (debug comes later).
+ * the handler's first retirement shows up with rvfi_intr set.
+ *
+ * A debug halt request, or an armed single step, is sampled at the very same
+ * point and wins over both an interrupt and the head's commit: nothing
+ * commits, everything is flushed, and csr_file0 records dpc (the
+ * architectural pc: the next instruction to retire, or the trap vector if
+ * the retirement that led here was a trap), the privilege and the cause
+ * (4 for a step, 3 for a halt request). It is not a retirement. The hart is
+ * then halted (qv_dbg's in_debug) until the Debug Module's resume, which
+ * restarts the pipeline at the live dpc, since a debugger may have
+ * rewritten it. Nothing is sampled again until one instruction has retired.
  *
  * It also keeps the privilege level (updated exactly as core.sv's
  * current_priv is: trap, MRET, SRET; MPP is loaded raw, so privilege 2'b10
@@ -122,6 +131,16 @@ module qv_commit #(
     input  logic                             i_mstatus_sie = 1'b0,
     output logic                             o_irq_taken,
 
+    // Debug Mode (qv_dbg keeps its flags); the defaults are a hart that is never asked to halt
+    input  logic                             i_dbg_halt_req = 1'b0,     // the Debug Module's level
+    input  logic                             i_dbg_stepping = 1'b0,
+    input  logic                             i_dbg_in_debug = 1'b0,
+    input  logic                             i_dbg_resume   = 1'b0,     // an accepted resume
+    input  logic [63:0]                      i_dpc          = 64'b0,    // csr_file0's live dpc
+    output logic                             o_dbg_entry,               // any entry this cycle
+    output logic [2:0]                       o_dbg_cause,
+    output logic                             o_dbg_halt_entry,          // ... a halt or step one
+
     // FENCE.I: fetch is held while it is the head; it retires only once
     // fetch has nothing outstanding, flushing the icache in that cycle
     output logic                             o_fetch_hold,
@@ -186,9 +205,17 @@ module qv_commit #(
     wire [3:0]  int_cause = mei_take ? 4'd11 : mti_take ? 4'd7 : sei_take ? 4'd9 : 4'd0;
     wire        int_to_s  = mei_take ? mei_to_s : mti_take ? mti_to_s : sei_take ? sei_to_s : 1'b0;
 
-    logic commit_q;                       // a retirement happened last cycle: the sample point
-    wire  irq = commit_q && (mei_take || mti_take || sei_take);
-    assign o_irq_taken = irq;
+    // The sample point for interrupts, halt requests and single steps: the cycle after a retirement,
+    // outside Debug Mode. A halt request or an armed step is taken in preference to an interrupt
+    // (core.sv's debug_halt_req_entry / interrupt_taken pair), and to the head's commit.
+    logic commit_q;
+    wire  sample_pt  = commit_q && !i_dbg_in_debug;
+    wire  halt_take  = sample_pt && (i_dbg_halt_req || i_dbg_stepping);
+    wire  irq        = sample_pt && !(i_dbg_halt_req || i_dbg_stepping) && (mei_take || mti_take || sei_take);
+    assign o_irq_taken      = irq;
+    assign o_dbg_halt_entry = halt_take;
+    assign o_dbg_entry      = halt_take;
+    assign o_dbg_cause      = i_dbg_stepping ? 3'd4 : 3'd3;
 
     // ---------------- classify the head ----------------
     // a marked fault overrides whatever the entry would otherwise do, as
@@ -199,7 +226,7 @@ module qv_commit #(
     // FENCE.I waits for fetch to drain: an icache fill finishing in the
     // flush cycle would revalidate its line (icache.sv), and anything
     // fetched before the flush is refetched by the serializing redirect
-    wire commit = i_head_valid && i_head_entry.complete && (!is_fence_i || i_fetch_idle) && !irq;
+    wire commit = i_head_valid && i_head_entry.complete && (!is_fence_i || i_fetch_idle) && !irq && !halt_take;
     always_ff @(posedge clk) begin
         if (rst) commit_q <= 1'b0;
         else     commit_q <= commit;
@@ -304,6 +331,7 @@ module qv_commit #(
 
     // ---------------- next pc / redirect ----------------
     logic [63:0] actual_next_pc;
+    logic [63:0] arch_pc_q;
     always_comb begin
         if (is_trap)      actual_next_pc = trap_to_s ? {i_stvec[63:2], 2'b00} : {i_mtvec[63:2], 2'b00};
         else if (is_mret) actual_next_pc = i_mepc;
@@ -326,16 +354,19 @@ module qv_commit #(
 
     // an interrupt redirects to the vector of the mode it is taken in (direct mode only)
     wire [63:0] irq_vector = int_to_s ? {i_stvec[63:2], 2'b00} : {i_mtvec[63:2], 2'b00};
-    assign o_redirect_valid = irq || (commit && (is_trap || is_mret || is_sret || i_head_entry.mispredict
-                                                 || i_head_ctrl.serialize));
-    assign o_redirect_pc    = irq ? irq_vector : actual_next_pc;
+    // A halt entry redirects to the architectural pc (fetch is held, so it only records it and everything
+    // in flight is flushed); a resume restarts at the live dpc.
+    assign o_redirect_valid = irq || halt_take || i_dbg_resume
+                              || (commit && (is_trap || is_mret || is_sret || i_head_entry.mispredict
+                                             || i_head_ctrl.serialize));
+    assign o_redirect_pc    = irq ? irq_vector : halt_take ? arch_pc_q : i_dbg_resume ? i_dpc : actual_next_pc;
 
     // architectural PC: the next instruction to retire
-    logic [63:0] arch_pc_q;
     always_ff @(posedge clk) begin
-        if (rst)         arch_pc_q <= RESET_PC;
-        else if (irq)    arch_pc_q <= irq_vector;
-        else if (commit) arch_pc_q <= actual_next_pc;
+        if (rst)                arch_pc_q <= RESET_PC;
+        else if (irq)           arch_pc_q <= irq_vector;
+        else if (i_dbg_resume)  arch_pc_q <= i_dpc;
+        else if (commit)        arch_pc_q <= actual_next_pc;
     end
     assign o_pc      = arch_pc_q;
     assign o_next_pc = actual_next_pc;

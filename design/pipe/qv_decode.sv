@@ -58,6 +58,9 @@ module qv_decode (
     input  logic [1:0]        i_priv,
     input  logic              i_tsr,
     input  logic              i_tvm,
+    // Debug Mode: the debug and trigger CSRs exist only there (outside it they are illegal for every
+    // privilege level), and the usual privilege rule still applies inside it
+    input  logic              i_in_debug = 1'b0,
 
     // PMP configuration (csr_file0's exports); the defaults are the reset
     // state: region 0 NAPOT over everything, read/write/execute
@@ -323,9 +326,10 @@ module qv_decode (
     // follow below.
     wire [11:0] csr_addr = imm_2[11:0];
     wire csr_wsup = (csr_op != QV_CSR_RW) && (csr_imm ? (imm_1 == '0) : (sel_a == '0));
+    wire csr_debug_addr = csr_addr[11:2] == 10'h1EC
+                          || csr_addr[11:2] == 10'h1E8 || csr_addr == 12'h7A4;
     wire csr_illegal = is_csr && ((!csr_wsup && csr_addr[11:10] == 2'b11)
-                                  || csr_addr[11:2] == 10'h1EC
-                                  || csr_addr[11:2] == 10'h1E8 || csr_addr == 12'h7A4);
+                                  || (csr_debug_addr && !i_in_debug));
 
     // Privilege rules, literally core.sv's (its comments say why each is so):
     // a CSR above the current privilege (addr[9:8] is the lowest privilege

@@ -21,6 +21,7 @@
  *   X  qv_exu_alu  alu.sv
  *      qv_exu_div  divider.sv, one divide at a time
  *   C  qv_commit   in-order retirement, regfile0 write, RVFI
+ *      qv_dbg      Debug Mode state (halted, single-stepping)
  *
  * regfile0 and csr_file0 live here at top level (regfile0 is written
  * only at commit, so it always holds architectural state), so their
@@ -44,10 +45,11 @@
  * illegal-instruction trap. Interrupts (MEI, MTI, SEI) are taken as core.sv
  * takes them, only in the cycle after a retirement, and the PMP is
  * checked on the fetch (in decode) and on the data accesses (in the LSU).
- * Not yet: debug, Sv39.
- * The debug/progbuf outputs are held inert. The
- * Debug Module's GPR/CSR access mux (core.sv wires it around regfile0
- * and csr_file0) comes back with debug support.
+ * Debug: halt requests, resume and single steps, taken at the same sample
+ * point as interrupts, and the Debug Module's Access Register path, muxed
+ * around regfile0 and csr_file0 as core.sv does it. Not yet: EBREAK and
+ * triggers entering Debug Mode, the Program Buffer (its outputs stay
+ * inert), Sv39.
  *
  * Redirects: commit's (a trap, xRET, serialize, or a retiring
  * mispredicted branch or jump) kill everything in flight -- the same
@@ -110,23 +112,17 @@ module core_pipe
     input  logic         i_meip = 1'b0,
     input  logic         i_seip = 1'b0,
 
-    /* verilator lint_off UNUSEDSIGNAL */
     input  logic        i_debug_halt_req = 1'b0,
     input  logic        i_debug_resume_req = 1'b0,
-    /* verilator lint_on UNUSEDSIGNAL */
     output logic        o_debug_mode,
 
-    /* verilator lint_off UNUSEDSIGNAL */
     input  logic         i_dm_csr_we = 1'b0,
     input  logic [11:0]  i_dm_csr_addr = 12'b0,
     input  logic [63:0]  i_dm_csr_wdata = 64'b0,
-    /* verilator lint_on UNUSEDSIGNAL */
     output logic [63:0]  o_dm_csr_rdata,
-    /* verilator lint_off UNUSEDSIGNAL */
     input  logic         i_dm_gpr_we = 1'b0,
     input  logic [4:0]   i_dm_gpr_sel = 5'b0,
     input  logic [63:0]  i_dm_gpr_wdata = 64'b0,
-    /* verilator lint_on UNUSEDSIGNAL */
     output logic [63:0]  o_dm_gpr_rdata,
 
     /* verilator lint_off UNUSEDSIGNAL */
@@ -216,6 +212,11 @@ module core_pipe
     logic [1:0]  priv;                       // the privilege commit keeps
     logic        c_trap_to_s, c_sret_taken;
 
+    // ---------------- Debug Mode ----------------
+    // commit decides when the hart halts, qv_dbg keeps the flags
+    logic        dbg_entry, dbg_halt_entry, dbg_resume, dbg_in_debug, dbg_stepping, dm_access_active;
+    logic [2:0]  dbg_cause;
+
     // ---------------- redirects ----------------
     logic        redirect_valid, fe_redirect_valid;
     logic [63:0] redirect_pc, fe_redirect_pc;
@@ -226,7 +227,10 @@ module core_pipe
     // ---------------- F: fetch ----------------
     logic        fb_valid, fb_err, fb_pop;
     logic [63:0] fb_pc, fb_data;
-    logic        fetch_hold, fetch_idle;     // FENCE.I, with commit
+    logic        fetch_hold, fetch_idle;
+    logic        commit_fetch_hold;          // FENCE.I, from commit
+    // fetch is held for a FENCE.I and for as long as the hart is halted (including the entry cycle itself)
+    assign fetch_hold = commit_fetch_hold || dbg_in_debug || dbg_entry;
 
     qv_fetch #(.RESET_PC(RESET_PC)) fetch0 (
         .clk(clk), .rst(rst),
@@ -273,7 +277,7 @@ module core_pipe
 
     qv_decode decode0 (
         .clk(clk), .rst(rst), .i_flush(flush),
-        .i_priv(priv), .i_tsr(mstatus_tsr_w), .i_tvm(mstatus_tvm_w),
+        .i_priv(priv), .i_tsr(mstatus_tsr_w), .i_tvm(mstatus_tvm_w), .i_in_debug(dbg_in_debug),
         .i_pmpcfg0(pmpcfg0_w), .i_pmpaddr0(pmpaddr0_w), .i_pmpaddr1(pmpaddr1_w),
         .i_pmpaddr2(pmpaddr2_w), .i_pmpaddr3(pmpaddr3_w),
         .i_iq_valid(iq_valid), .i_iq_data(iq_head), .o_iq_pop(iq_pop),
@@ -420,7 +424,10 @@ module core_pipe
         .i_mstatus_mpp(mstatus_mpp_w), .i_mstatus_spp(mstatus_spp_w),
         .i_mip(mip_w), .i_mie(mie_w), .i_mideleg(mideleg_w),
         .i_mstatus_mie(mstatus_mie_w), .i_mstatus_sie(mstatus_sie_w), .o_irq_taken(c_irq_taken),
-        .o_fetch_hold(fetch_hold), .i_fetch_idle(fetch_idle), .o_icache_flush(icache_flush_o),
+        .i_dbg_halt_req(i_debug_halt_req), .i_dbg_stepping(dbg_stepping), .i_dbg_in_debug(dbg_in_debug),
+        .i_dbg_resume(dbg_resume), .i_dpc(dpc_o),
+        .o_dbg_entry(dbg_entry), .o_dbg_cause(dbg_cause), .o_dbg_halt_entry(dbg_halt_entry),
+        .o_fetch_hold(commit_fetch_hold), .i_fetch_idle(fetch_idle), .o_icache_flush(icache_flush_o),
         .o_commit_now(commit_now_w), .o_pc(arch_pc), .o_next_pc(retire_next_pc),
         .o_redirect_valid(redirect_valid), .o_redirect_pc(redirect_pc),
         .o_rvfi_order(c_order), .o_rvfi_insn(c_insn), .o_rvfi_trap(c_rvfi_trap), .o_rvfi_intr(c_intr),
@@ -432,12 +439,25 @@ module core_pipe
         .o_rvfi_mem_rdata(c_mem_rdata), .o_rvfi_mem_wdata(c_mem_wdata)
     );
 
+    qv_dbg dbg0 (
+        .clk(clk), .rst(rst),
+        .i_entry(dbg_entry), .i_halt_entry(dbg_halt_entry),
+        .i_resume_req(i_debug_resume_req), .i_dcsr_step(dcsr_o[2]),
+        .o_in_debug(dbg_in_debug), .o_stepping(dbg_stepping), .o_resume(dbg_resume),
+        .o_dm_access_active(dm_access_active)
+    );
+
     // ---------------- architectural state ----------------
+    // The Debug Module's GPR access shares read port B and the write port outright, as in core.sv: while the
+    // hart is halted (dm_access_active) nothing issues and nothing retires, so the two users are never live in
+    // the same cycle. o_dm_gpr_rdata is the very same wire rs2_data, trusted by the Debug Module only then.
     register_file regfile0 (
         .i_clk(clk),
         .i_read_gpr_A_sel(rs1_sel), .o_read_gpr_A_data(rs1_data),
-        .i_read_gpr_B_sel(rs2_sel), .o_read_gpr_B_data(rs2_data),
-        .i_load_gpr(rf_we), .i_load_gpr_sel(rf_sel), .i_load_gpr_data(rf_data)
+        .i_read_gpr_B_sel(dm_access_active ? i_dm_gpr_sel : rs2_sel), .o_read_gpr_B_data(rs2_data),
+        .i_load_gpr(dm_access_active ? i_dm_gpr_we : rf_we),
+        .i_load_gpr_sel(dm_access_active ? i_dm_gpr_sel : rf_sel),
+        .i_load_gpr_data(dm_access_active ? i_dm_gpr_wdata : rf_data)
     );
 
 `ifdef RISCV_FORMAL
@@ -446,14 +466,16 @@ module core_pipe
 
     csr_file csr_file0 (
         .i_clk(clk), .i_rst(rst),
-        .i_csr_addr(c_csr_addr), .o_csr_rdata(csr_rdata), .i_csr_we(c_csr_we), .i_csr_wdata(c_csr_wdata),
+        .i_csr_addr(dm_access_active ? i_dm_csr_addr : c_csr_addr), .o_csr_rdata(csr_rdata),
+        .i_csr_we(dm_access_active ? i_dm_csr_we : c_csr_we),
+        .i_csr_wdata(dm_access_active ? i_dm_csr_wdata : c_csr_wdata),
         .i_instr_retired(c_instr_retired),
         .i_current_priv(priv),
         .i_mtip(i_mtip), .i_meip(i_meip), .i_seip(i_seip),
         .i_trap_taken(c_trap_taken), .i_trap_cause(c_trap_cause), .i_trap_val(c_trap_val),
         .i_trap_pc(arch_pc),
         .i_trap_to_s(c_trap_to_s), .i_mret_taken(c_mret_taken), .i_sret_taken(c_sret_taken),
-        .i_debug_entry(1'b0), .i_debug_cause(3'b0),
+        .i_debug_entry(dbg_entry), .i_debug_cause(dbg_cause),
         .o_mtvec(mtvec_w), .o_stvec(stvec_w), .o_mepc(mepc_w), .o_sepc(sepc_w),
         .o_medeleg(medeleg_w),
         .o_mstatus_mpp(mstatus_mpp_w), .o_mstatus_spp(mstatus_spp_w), .o_mstatus_tsr(mstatus_tsr_w),
@@ -499,11 +521,14 @@ module core_pipe
     wire        interrupt_taken      = c_irq_taken;
     wire        route_to_s           = c_trap_to_s;
     wire        sret_taken           = c_sret_taken;
-    wire        debug_halt_req_entry = 1'b0;
+    wire        debug_halt_req_entry = dbg_halt_entry;
     wire        debug_ebreak_entry   = 1'b0;
     wire        trigger_debug_entry  = 1'b0;
-    wire        in_debug_mode        = 1'b0;
+    wire        in_debug_mode        = dbg_in_debug;
     wire        debug_progbuf_active = 1'b0;
+    wire        stepping_q           = dbg_stepping;
+    wire [2:0]  debug_cause_code     = dbg_cause;
+    wire        divider_o_busy       = !div_free;
     /* verilator lint_on UNUSEDSIGNAL */
 
     // Sv39 is a later stage: until it lands, a program that turns translation on would silently run
@@ -515,7 +540,7 @@ module core_pipe
     end
 `endif
 
-    // ---------------- inert ports ----------------
+    // ---------------- ports ----------------
     assign o_debug_mode    = in_debug_mode;
     assign o_dm_csr_rdata  = csr_rdata;
     assign o_dm_gpr_rdata  = rs2_data;
@@ -581,11 +606,12 @@ module core_pipe
     assign rvfi_csr_satp_wdata     = satp_w;
     assign rvfi_any_trap_taken     = trap_taken || interrupt_taken;
 
-    // An interrupt is only ever taken with nothing started on the data bus: the cycle before retired
-    // something, so no memory op was in flight, and a head that would start in the interrupt's own
-    // cycle is held off by the flush the interrupt causes. (A started access cannot be abandoned, so
-    // this is what makes taking an interrupt without waiting for the LSU safe.)
-    always @* assert (!(interrupt_taken && lsu_head_started));
-    assign rvfi_any_debug_entry    = debug_ebreak_entry || debug_halt_req_entry || trigger_debug_entry;
+    // An interrupt or a halt is only ever taken with nothing started on the data bus: the cycle before
+    // retired something, so no memory op was in flight, and a head that would start in that cycle is held
+    // off by the flush. (A started access cannot be abandoned, so this is what makes taking either without
+    // waiting for the LSU safe.)
+    always @* assert (!((interrupt_taken || debug_halt_req_entry) && lsu_head_started));
+    assign rvfi_any_debug_entry    = debug_ebreak_entry || debug_halt_req_entry || trigger_debug_entry
+                                     || dm_access_active;
 `endif
 endmodule
