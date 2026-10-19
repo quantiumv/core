@@ -134,6 +134,8 @@ package qv_pkg;
         logic [63:0] pred_tgt;
         logic        xcpt;
         logic [3:0]  xcpt_cause;
+        logic        trig_debug;   // an action-1 execute trigger matched its pc: Debug Mode entry instead of executing
+        logic        trig_exc;     // an action-0 one did (and no fetch/illegal fault came first): a breakpoint exception
     } uop_t;
 
     // One reorder-buffer entry.
@@ -191,6 +193,8 @@ package qv_pkg;
         logic        is_store_class; // store, SC or AMO: retiring clears it, faulting or not
         logic        xcpt;
         logic [3:0]  cause;
+        logic        trig_debug;   // see uop_t
+        logic        trig_exc;
     } rob_ctrl_t;
 
     // Issue -> functional unit.

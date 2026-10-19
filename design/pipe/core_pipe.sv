@@ -47,9 +47,9 @@
  * checked on the fetch (in decode) and on the data accesses (in the LSU).
  * Debug: halt requests, resume and single steps, taken at the same sample
  * point as interrupts, and the Debug Module's Access Register path, muxed
- * around regfile0 and csr_file0 as core.sv does it. Not yet: EBREAK and
- * triggers entering Debug Mode, the Program Buffer (its outputs stay
- * inert), Sv39.
+ * around regfile0 and csr_file0 as core.sv does it; EBREAK (dcsr.ebreak*)
+ * and the two execute triggers, matched in decode and acted on at the ROB
+ * head. Not yet: the Program Buffer (its outputs stay inert), Sv39.
  *
  * Redirects: commit's (a trap, xRET, serialize, or a retiring
  * mispredicted branch or jump) kill everything in flight -- the same
@@ -214,7 +214,8 @@ module core_pipe
 
     // ---------------- Debug Mode ----------------
     // commit decides when the hart halts, qv_dbg keeps the flags
-    logic        dbg_entry, dbg_halt_entry, dbg_resume, dbg_in_debug, dbg_stepping, dm_access_active;
+    logic        dbg_entry, dbg_halt_entry, dbg_ebreak_entry, dbg_trigger_entry;
+    logic        dbg_resume, dbg_in_debug, dbg_stepping, dm_access_active;
     logic [2:0]  dbg_cause;
 
     // ---------------- redirects ----------------
@@ -278,6 +279,7 @@ module core_pipe
     qv_decode decode0 (
         .clk(clk), .rst(rst), .i_flush(flush),
         .i_priv(priv), .i_tsr(mstatus_tsr_w), .i_tvm(mstatus_tvm_w), .i_in_debug(dbg_in_debug),
+        .i_tdata1_0(tdata1_0_w), .i_tdata2_0(tdata2_0_w), .i_tdata1_1(tdata1_1_w), .i_tdata2_1(tdata2_1_w),
         .i_pmpcfg0(pmpcfg0_w), .i_pmpaddr0(pmpaddr0_w), .i_pmpaddr1(pmpaddr1_w),
         .i_pmpaddr2(pmpaddr2_w), .i_pmpaddr3(pmpaddr3_w),
         .i_iq_valid(iq_valid), .i_iq_data(iq_head), .o_iq_pop(iq_pop),
@@ -425,8 +427,9 @@ module core_pipe
         .i_mip(mip_w), .i_mie(mie_w), .i_mideleg(mideleg_w),
         .i_mstatus_mie(mstatus_mie_w), .i_mstatus_sie(mstatus_sie_w), .o_irq_taken(c_irq_taken),
         .i_dbg_halt_req(i_debug_halt_req), .i_dbg_stepping(dbg_stepping), .i_dbg_in_debug(dbg_in_debug),
-        .i_dbg_resume(dbg_resume), .i_dpc(dpc_o),
+        .i_dbg_resume(dbg_resume), .i_dpc(dpc_o), .i_dcsr(dcsr_o),
         .o_dbg_entry(dbg_entry), .o_dbg_cause(dbg_cause), .o_dbg_halt_entry(dbg_halt_entry),
+        .o_dbg_ebreak_entry(dbg_ebreak_entry), .o_dbg_trigger_entry(dbg_trigger_entry),
         .o_fetch_hold(commit_fetch_hold), .i_fetch_idle(fetch_idle), .o_icache_flush(icache_flush_o),
         .o_commit_now(commit_now_w), .o_pc(arch_pc), .o_next_pc(retire_next_pc),
         .o_redirect_valid(redirect_valid), .o_redirect_pc(redirect_pc),
@@ -522,8 +525,8 @@ module core_pipe
     wire        route_to_s           = c_trap_to_s;
     wire        sret_taken           = c_sret_taken;
     wire        debug_halt_req_entry = dbg_halt_entry;
-    wire        debug_ebreak_entry   = 1'b0;
-    wire        trigger_debug_entry  = 1'b0;
+    wire        debug_ebreak_entry   = dbg_ebreak_entry;
+    wire        trigger_debug_entry  = dbg_trigger_entry;
     wire        in_debug_mode        = dbg_in_debug;
     wire        debug_progbuf_active = 1'b0;
     wire        stepping_q           = dbg_stepping;

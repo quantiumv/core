@@ -163,6 +163,8 @@ module qv_issue #(
                                       && !i_uop.xcpt;
         o_alloc_ctrl.xcpt      = i_uop.xcpt;
         o_alloc_ctrl.cause     = i_uop.xcpt_cause;
+        o_alloc_ctrl.trig_debug = i_uop.trig_debug;
+        o_alloc_ctrl.trig_exc   = i_uop.trig_exc;
     end
 
     // ---------------- dispatch: one request port per unit ----------------

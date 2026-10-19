@@ -43,6 +43,22 @@
  * marker a bus error gets. Unlike core.sv the bus request has already been
  * made by then; a denied fetch is just never used.
  *
+ * Execute triggers (the two mcontrol6 slots, core.sv's trig0/trig1) are
+ * matched here, on the instruction's own pc and the current privilege, and
+ * never in Debug Mode: an action-1 match marks the uop trig_debug (Debug Mode
+ * entry at the head, before the instruction has any effect, even over a fetch
+ * fault or an illegal instruction), an action-0 match with no such fault
+ * marks it trig_exc (a breakpoint exception, cause 3). A debug match beats an
+ * exception one. Either way the uop is neutralised -- sent through the ALU as
+ * a no-op that writes nothing -- so nothing can happen before it reaches the
+ * head: no memory access, divide, CSR write or system action, and no
+ * producer-table entry for a result that never comes. Only that: its
+ * operands and the flags that make commit clear the LR/SC reservation are
+ * left alone (core.sv clears it when a store, SC or AMO traps on an action-0
+ * trigger, and the trapping instruction still reports its real operands).
+ * An EBREAK keeps its identity: with dcsr.ebreak* set it enters Debug Mode
+ * ahead of the trigger.
+ *
  * Output is registered (a real D/I split): one uop held until issue
  * takes it.
  */
@@ -61,6 +77,14 @@ module qv_decode (
     // Debug Mode: the debug and trigger CSRs exist only there (outside it they are illegal for every
     // privilege level), and the usual privilege rule still applies inside it
     input  logic              i_in_debug = 1'b0,
+
+    // the two execute triggers (csr_file0's tdata1/tdata2 exports); the defaults are "never matches"
+    /* verilator lint_off UNUSEDSIGNAL */
+    input  logic [63:0]       i_tdata1_0  = 64'b0,
+    input  logic [63:0]       i_tdata2_0  = 64'b0,
+    input  logic [63:0]       i_tdata1_1  = 64'b0,
+    input  logic [63:0]       i_tdata2_1  = 64'b0,
+    /* verilator lint_on UNUSEDSIGNAL */
 
     // PMP configuration (csr_file0's exports); the defaults are the reset
     // state: region 0 NAPOT over everything, read/write/execute
@@ -294,6 +318,16 @@ module qv_decode (
     wire is_mem   = is_load || is_store || is_atomic;
     wire is_fence = (code == `INSTR_CODE(FENCE));
 
+    // ---------------- execute triggers ----------------
+    // priv_en is bit 6 (M), 4 (S) or 3 (anything else, privilege 2'b10 included), as in core.sv
+    wire t0_priv_en = (i_priv == QV_PRIV_M) ? i_tdata1_0[6] : (i_priv == QV_PRIV_S) ? i_tdata1_0[4] : i_tdata1_0[3];
+    wire t1_priv_en = (i_priv == QV_PRIV_M) ? i_tdata1_1[6] : (i_priv == QV_PRIV_S) ? i_tdata1_1[4] : i_tdata1_1[3];
+    wire t0_match   = i_tdata1_0[2] && t0_priv_en && (i_iq_data.pc == i_tdata2_0);
+    wire t1_match   = i_tdata1_1[2] && t1_priv_en && (i_iq_data.pc == i_tdata2_1);
+    wire trig_debug_c = !i_in_debug && ((t0_match && i_tdata1_0[15:12] == 4'd1) || (t1_match && i_tdata1_1[15:12] == 4'd1));
+    wire trig_exc_c   = !i_in_debug && !trig_debug_c
+                        && ((t0_match && i_tdata1_0[15:12] == 4'd0) || (t1_match && i_tdata1_1[15:12] == 4'd0));
+
     // DIV/DIVU/REM/REMU and the W forms (core.sv's is_div_family): a
     // multi-cycle unit of its own, qv_exu_div
     logic is_div, div_signed, div_quot, div_word;
@@ -431,6 +465,14 @@ module qv_decode (
         else if (is_div) uop_d.fu = QV_FU_DIV;
         else if (is_sys) uop_d.fu = QV_FU_SYS;
         else             uop_d.fu = QV_FU_ALU;
+        // a trigger match: Debug Mode entry or breakpoint exception at the head. An action-0 match gives way
+        // to a fault marker (fetch fault, illegal instruction), an action-1 one does not.
+        uop_d.trig_debug = trig_debug_c;
+        uop_d.trig_exc   = trig_exc_c && !uop_d.xcpt;
+        if ((uop_d.trig_debug || uop_d.trig_exc) && !(uop_d.fu == QV_FU_SYS && sys_op == QV_SYS_EBREAK)) begin
+            uop_d.fu     = QV_FU_ALU;
+            uop_d.rd_wen = 1'b0;
+        end
     end
 
     logic uop_valid_q;

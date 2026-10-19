@@ -59,6 +59,16 @@
  * restarts the pipeline at the live dpc, since a debugger may have
  * rewritten it. Nothing is sampled again until one instruction has retired.
  *
+ * The other two ways into Debug Mode happen at the ROB head, not at a sample
+ * point, and are not retirements either: an EBREAK while the dcsr ebreak bit
+ * of the current privilege is set (cause 1), and an action-1 execute trigger
+ * that decode matched on the head's pc (cause 2); the EBREAK wins when both
+ * apply. Nothing of the head takes effect (it was neutralised ahead of
+ * issue), dpc is its pc, everything younger is flushed. An action-0 trigger
+ * instead makes the head a breakpoint exception (cause 3, tval = the pc), for
+ * which a store, SC or AMO still clears the LR/SC reservation. A halt
+ * request or interrupt sampled in the same cycle goes first.
+ *
  * It also keeps the privilege level (updated exactly as core.sv's
  * current_priv is: trap, MRET, SRET; MPP is loaded raw, so privilege 2'b10
  * can occur and then behaves as written) and the LR/SC reservation (see
@@ -137,9 +147,15 @@ module qv_commit #(
     input  logic                             i_dbg_in_debug = 1'b0,
     input  logic                             i_dbg_resume   = 1'b0,     // an accepted resume
     input  logic [63:0]                      i_dpc          = 64'b0,    // csr_file0's live dpc
+    // only the ebreakm/ebreaks/ebreaku bits (15, 13, 12) are looked at
+    /* verilator lint_off UNUSEDSIGNAL */
+    input  logic [63:0]                      i_dcsr         = 64'b0,
+    /* verilator lint_on UNUSEDSIGNAL */
     output logic                             o_dbg_entry,               // any entry this cycle
     output logic [2:0]                       o_dbg_cause,
     output logic                             o_dbg_halt_entry,          // ... a halt or step one
+    output logic                             o_dbg_ebreak_entry,        // ... an EBREAK one
+    output logic                             o_dbg_trigger_entry,       // ... an execute-trigger one
 
     // FENCE.I: fetch is held while it is the head; it retires only once
     // fetch has nothing outstanding, flushing the icache in that cycle
@@ -214,8 +230,6 @@ module qv_commit #(
     wire  irq        = sample_pt && !(i_dbg_halt_req || i_dbg_stepping) && (mei_take || mti_take || sei_take);
     assign o_irq_taken      = irq;
     assign o_dbg_halt_entry = halt_take;
-    assign o_dbg_entry      = halt_take;
-    assign o_dbg_cause      = i_dbg_stepping ? 3'd4 : 3'd3;
 
     // ---------------- classify the head ----------------
     // a marked fault overrides whatever the entry would otherwise do, as
@@ -226,7 +240,20 @@ module qv_commit #(
     // FENCE.I waits for fetch to drain: an icache fill finishing in the
     // flush cycle would revalidate its line (icache.sv), and anything
     // fetched before the flush is refetched by the serializing redirect
-    wire commit = i_head_valid && i_head_entry.complete && (!is_fence_i || i_fetch_idle) && !irq && !halt_take;
+    // the head's own routes into Debug Mode (an interrupt or a halt sampled in the same cycle goes first). The
+    // dcsr bit follows the privilege exactly as core.sv's ebreak_to_debug does: M, S, else (U and 2'b10) U.
+    wire head_ready    = i_head_valid && i_head_entry.complete;
+    wire ebreak_bit    = (priv_q == QV_PRIV_M) ? i_dcsr[15] : (priv_q == QV_PRIV_S) ? i_dcsr[13] : i_dcsr[12];
+    wire ebreak_entry  = head_ready && is_sys && (i_head_ctrl.sys_op == QV_SYS_EBREAK) && ebreak_bit
+                         && !i_dbg_in_debug && !irq && !halt_take;
+    wire trigger_entry = head_ready && i_head_ctrl.trig_debug && !i_dbg_in_debug && !irq && !halt_take && !ebreak_entry;
+    wire head_dbg_entry = ebreak_entry || trigger_entry;
+    assign o_dbg_ebreak_entry  = ebreak_entry;
+    assign o_dbg_trigger_entry = trigger_entry;
+    assign o_dbg_entry         = halt_take || head_dbg_entry;
+    assign o_dbg_cause         = ebreak_entry ? 3'd1 : trigger_entry ? 3'd2 : i_dbg_stepping ? 3'd4 : 3'd3;
+
+    wire commit = head_ready && (!is_fence_i || i_fetch_idle) && !irq && !halt_take && !head_dbg_entry;
     always_ff @(posedge clk) begin
         if (rst) commit_q <= 1'b0;
         else     commit_q <= commit;
@@ -236,7 +263,7 @@ module qv_commit #(
     assign o_icache_flush = commit && is_fence_i;
     wire is_lsu  = (i_head_ctrl.cls == QV_FU_LSU) && !i_head_ctrl.xcpt;
     wire mem_xcpt = is_lsu && i_lsu_res.xcpt;          // found while executing, not at decode
-    wire is_trap = i_head_ctrl.xcpt || mem_xcpt
+    wire is_trap = i_head_ctrl.xcpt || mem_xcpt || i_head_ctrl.trig_exc
                 || (is_sys && (i_head_ctrl.sys_op == QV_SYS_ECALL || i_head_ctrl.sys_op == QV_SYS_EBREAK));
     wire is_mret = is_sys && (i_head_ctrl.sys_op == QV_SYS_MRET);
     wire is_sret = is_sys && (i_head_ctrl.sys_op == QV_SYS_SRET);
@@ -246,6 +273,7 @@ module qv_commit #(
     logic [3:0] cause;
     always_comb begin
         if (i_head_ctrl.xcpt)                          cause = i_head_ctrl.cause;
+        else if (i_head_ctrl.trig_exc)                 cause = 4'd3;        // an action-0 trigger: a breakpoint
         else if (mem_xcpt)                             cause = i_lsu_res.cause;
         else if (i_head_ctrl.sys_op == QV_SYS_EBREAK)  cause = 4'd3;
         else if (priv_q == QV_PRIV_U)                  cause = 4'd8;        // ECALL from U
@@ -260,6 +288,8 @@ module qv_commit #(
             tval = {32'b0, i_head_entry.raw};      // raw is already {16'b0, hw} for RVC
         else if (i_head_ctrl.xcpt && i_head_ctrl.cause == 4'd1)
             tval = i_head_entry.pc;
+        else if (i_head_ctrl.trig_exc)
+            tval = i_head_entry.pc;                // errata E2: the trigger ranks with its cause, so its tval is the pc
         else if (mem_xcpt)
             tval = i_lsu_res.tval;
         else
@@ -354,12 +384,12 @@ module qv_commit #(
 
     // an interrupt redirects to the vector of the mode it is taken in (direct mode only)
     wire [63:0] irq_vector = int_to_s ? {i_stvec[63:2], 2'b00} : {i_mtvec[63:2], 2'b00};
-    // A halt entry redirects to the architectural pc (fetch is held, so it only records it and everything
+    // A debug entry redirects to the architectural pc (fetch is held, so it only records it and everything
     // in flight is flushed); a resume restarts at the live dpc.
-    assign o_redirect_valid = irq || halt_take || i_dbg_resume
+    assign o_redirect_valid = irq || halt_take || head_dbg_entry || i_dbg_resume
                               || (commit && (is_trap || is_mret || is_sret || i_head_entry.mispredict
                                              || i_head_ctrl.serialize));
-    assign o_redirect_pc    = irq ? irq_vector : halt_take ? arch_pc_q : i_dbg_resume ? i_dpc : actual_next_pc;
+    assign o_redirect_pc    = irq ? irq_vector : (halt_take || head_dbg_entry) ? arch_pc_q : i_dbg_resume ? i_dpc : actual_next_pc;
 
     // architectural PC: the next instruction to retire
     always_ff @(posedge clk) begin
