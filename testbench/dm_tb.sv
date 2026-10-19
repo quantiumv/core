@@ -1583,8 +1583,15 @@ module dm_tb;
         disable fork;
         #1;
 
+`ifdef QV_PIPE_AS_CORE
+        // core_pipe has no fetch_fault_q/cur_slot. The same fact, halted right behind the faulting fetch's
+        // trap: mcause is the instruction access fault (1) and the halt left the trap vector (mtvec = 0) in dpc.
+        check("dut_progbuf_fetchfault: genuinely halted at the fault (mcause == 1, dpc == the trap vector)",
+            {63'b0, dut_progbuf_fetchfault.core0.csr_file0.mcause_q == 64'd1 && dut_progbuf_fetchfault.core0.dpc_w == 64'd0}, 64'd1);
+`else
         check("dut_progbuf_fetchfault: genuinely halted at the fault (fetch_fault_q[cur_slot] is really 1 here)",
             {63'b0, dut_progbuf_fetchfault.core0.fetch_fault_q[dut_progbuf_fetchfault.core0.cur_slot]}, 64'd1);
+`endif
 
         // An ordinary, entirely legal progbuf run -- must NOT abort.
         pbff_dmi_write(DMI_PROGBUF0, encode_i(32'sd55, 5'd0, 3'b000, 5'd9, `OPC_OP_IMM));  // addi x9,x0,55

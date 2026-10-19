@@ -5,6 +5,14 @@
 
 `include "riscv_encode.sv"
 
+// "The hart is halted and not running a Program Buffer": the FSM core says it with its state register,
+// core_pipe (-DQV_PIPE_AS_CORE) has no such state and says it with its two debug flags.
+`ifdef QV_PIPE_AS_CORE
+`define QV_TRIG_HALTED(c) (c.o_debug_mode === 1'b1 && c.debug_progbuf_active === 1'b0)
+`else
+`define QV_TRIG_HALTED(c) (c.state === c.S_DEBUG_HALTED)
+`endif
+
 
 /* ------------------------------------------------------------------------- */
 
@@ -515,7 +523,7 @@ module core_trigger_tb;
         debug_dmi_write(DMI_DMCONTROL, 32'h4000_0001);  // resumereq
         fork
             wait (dut_trig_debug.core0.o_debug_mode === 1'b1
-                  && dut_trig_debug.core0.state === dut_trig_debug.core0.S_DEBUG_HALTED
+                  && `QV_TRIG_HALTED(dut_trig_debug.core0)
                   && dut_trig_debug.core0.dpc_w === 64'h14);
             begin
                 repeat (2000) @(posedge clk);
@@ -613,7 +621,7 @@ module core_trigger_tb;
         exc_dmi_write(DMI_DMCONTROL, 32'h4000_0001);  // resumereq
         fork
             wait (dut_trig_exception.core0.o_debug_mode === 1'b1
-                  && dut_trig_exception.core0.state === dut_trig_exception.core0.S_DEBUG_HALTED
+                  && `QV_TRIG_HALTED(dut_trig_exception.core0)
                   && dut_trig_exception.core0.dpc_w === 64'h1C);
             begin
                 repeat (4000) @(posedge clk);
@@ -689,7 +697,7 @@ module core_trigger_tb;
         priv_dmi_write(DMI_DMCONTROL, 32'h4000_0001);  // resumereq
         fork
             wait (dut_trig_priv.core0.o_debug_mode === 1'b1
-                  && dut_trig_priv.core0.state === dut_trig_priv.core0.S_DEBUG_HALTED
+                  && `QV_TRIG_HALTED(dut_trig_priv.core0)
                   && dut_trig_priv.core0.dpc_w === 64'hC);
             begin
                 repeat (2000) @(posedge clk);
@@ -763,7 +771,7 @@ module core_trigger_tb;
         slots_dmi_write(DMI_DMCONTROL, 32'h4000_0001);  // resumereq
         fork
             wait (dut_trig_slots.core0.o_debug_mode === 1'b1
-                  && dut_trig_slots.core0.state === dut_trig_slots.core0.S_DEBUG_HALTED
+                  && `QV_TRIG_HALTED(dut_trig_slots.core0)
                   && dut_trig_slots.core0.dpc_w === 64'h8);
             begin
                 repeat (2000) @(posedge clk);
@@ -789,7 +797,7 @@ module core_trigger_tb;
         slots_dmi_write(DMI_DMCONTROL, 32'h4000_0001);  // resumereq
         fork
             wait (dut_trig_slots.core0.o_debug_mode === 1'b1
-                  && dut_trig_slots.core0.state === dut_trig_slots.core0.S_DEBUG_HALTED
+                  && `QV_TRIG_HALTED(dut_trig_slots.core0)
                   && dut_trig_slots.core0.dpc_w === 64'h10);
             begin
                 repeat (2000) @(posedge clk);
@@ -819,7 +827,7 @@ module core_trigger_tb;
         slots_dmi_write(DMI_DMCONTROL, 32'h4000_0001);
         fork
             wait (dut_trig_slots.core0.o_debug_mode === 1'b1
-                  && dut_trig_slots.core0.state === dut_trig_slots.core0.S_DEBUG_HALTED
+                  && `QV_TRIG_HALTED(dut_trig_slots.core0)
                   && dut_trig_slots.core0.dpc_w === 64'h18);
             begin
                 repeat (2000) @(posedge clk);
@@ -1058,7 +1066,7 @@ module core_trigger_tb;
         store_dmi_write(DMI_DMCONTROL, 32'h4000_0001);  // resumereq
         fork
             wait (dut_trig_store.core0.o_debug_mode === 1'b1
-                  && dut_trig_store.core0.state === dut_trig_store.core0.S_DEBUG_HALTED
+                  && `QV_TRIG_HALTED(dut_trig_store.core0)
                   && dut_trig_store.core0.dpc_w === 64'hC);
             begin
                 repeat (2000) @(posedge clk);
@@ -1132,7 +1140,7 @@ module core_trigger_tb;
         trap_race_dmi_write(DMI_DMCONTROL, 32'h4000_0001);  // resumereq
         fork
             wait (dut_trig_trap_race.core0.o_debug_mode === 1'b1
-                  && dut_trig_trap_race.core0.state === dut_trig_trap_race.core0.S_DEBUG_HALTED
+                  && `QV_TRIG_HALTED(dut_trig_trap_race.core0)
                   && dut_trig_trap_race.core0.dpc_w === 64'hC);
             begin
                 repeat (2000) @(posedge clk);
@@ -1234,7 +1242,7 @@ module core_trigger_tb;
         store_exc_dmi_write(DMI_DMCONTROL, 32'h4000_0001);  // resumereq
         fork
             wait (dut_trig_store_exc.core0.o_debug_mode === 1'b1
-                  && dut_trig_store_exc.core0.state === dut_trig_store_exc.core0.S_DEBUG_HALTED
+                  && `QV_TRIG_HALTED(dut_trig_store_exc.core0)
                   && dut_trig_store_exc.core0.dpc_w === 64'h1C);
             begin
                 repeat (4000) @(posedge clk);
@@ -1306,7 +1314,7 @@ module core_trigger_tb;
         div_dmi_write(DMI_DMCONTROL, 32'h4000_0001);  // resumereq
         fork
             wait (dut_trig_div.core0.o_debug_mode === 1'b1
-                  && dut_trig_div.core0.state === dut_trig_div.core0.S_DEBUG_HALTED
+                  && `QV_TRIG_HALTED(dut_trig_div.core0)
                   && dut_trig_div.core0.dpc_w === 64'hC);
             begin
                 repeat (2000) @(posedge clk);
@@ -1339,7 +1347,7 @@ module core_trigger_tb;
         div_dmi_write(DMI_DMCONTROL, 32'h4000_0001);  // resumereq
         fork
             wait (dut_trig_div.core0.o_debug_mode === 1'b1
-                  && dut_trig_div.core0.state === dut_trig_div.core0.S_DEBUG_HALTED
+                  && `QV_TRIG_HALTED(dut_trig_div.core0)
                   && dut_trig_div.core0.dpc_w === 64'h14);
             begin
                 repeat (2000) @(posedge clk);
