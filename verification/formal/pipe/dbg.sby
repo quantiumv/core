@@ -1,0 +1,26 @@
+# qv_dbg properties (dbg_props.sv): k-induction proof, deep BMC, covers.
+# Run with run.sh, or: sby -f dbg.sby
+[tasks]
+prove
+bmc
+cover
+
+[options]
+prove: mode prove
+prove: depth 10
+bmc: mode bmc
+bmc: depth 30
+cover: mode cover
+cover: depth 20
+
+[engines]
+smtbmc boolector
+
+[script]
+plugin -i /home/potato/yosys-slang-src/build/slang.so
+read_slang --single-unit qv_dbg.sv dbg_props.sv --top dbg_props
+prep -top dbg_props
+
+[files]
+../../../design/pipe/qv_dbg.sv
+dbg_props.sv

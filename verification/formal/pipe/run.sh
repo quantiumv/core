@@ -2,7 +2,7 @@
 # run.sh [--mutants] -- module-level SymbiYosys proofs for core_pipe units.
 # Run under WSL (sby, yosys-slang, boolector; see the riscv-formal README).
 #
-#   fetch.sby, lsu.sby: prove (k-induction), bmc and cover tasks must all
+#   fetch.sby, lsu.sby, dbg.sby: prove (k-induction), bmc and cover tasks must all
 #   PASS (cover: every non-vacuity cover point reached).
 #   --mutants: each property set must also catch known-bad versions, each
 #   FAILing a BMC: the pre-fix qv_fetch whose 1-bit epoch let a stale
@@ -10,7 +10,10 @@
 #   (for the LSU also the A extension's: an SC that ignores its
 #   reservation, a gap or a stray lock, a write after a faulting or
 #   flushed read, an AMO that never writes, and a PMP-denied access that
-#   still goes to the bus).
+#   still goes to the bus; for the debug flags a start outside Debug Mode,
+#   a resume during a Program Buffer run, an injector that ignores the word
+#   in flight or the queue, an index that moves at the run's last word, the
+#   Debug Module owning the ports during a run, a step that is never armed).
 set -u
 cd "$(dirname "$0")" || exit 1
 HERE=$(pwd)
@@ -19,7 +22,7 @@ fail=0
 
 status() { grep -o 'DONE ([A-Z]*' | head -1 | sed 's/DONE (//'; }
 
-for unit in fetch lsu; do
+for unit in fetch lsu dbg; do
     for task in prove bmc cover; do
         r=$(sby -f $unit.sby $task 2>&1 | status)
         printf '%-12s %s\n' "$unit $task" "$r"
@@ -83,6 +86,14 @@ EOF
     mutant lsu_write_after_err lsu 's/wb_mem_ack_i \&\& !wb_mem_err_i \&\& !i_flush;/wb_mem_ack_i \&\& !i_flush;/'
     mutant lsu_write_after_flush lsu 's/wb_mem_ack_i \&\& !wb_mem_err_i \&\& !i_flush;/wb_mem_ack_i \&\& !wb_mem_err_i;/'
     mutant lsu_amo_never_writes lsu 's/wire amo_read_ack = (state_q == S_BUS) \&\& amo_q \&\& !phase_wr_q \&\& wb_mem_ack_i \&\& !wb_mem_err_i \&\& !i_flush;/wire amo_read_ack = 1'"'"'b0;/'
+    mutant dbg_start_not_halted dbg 's/i_progbuf_start \&\& in_debug_q \&\& !active_q \&\& !i_resume_req)   active_q/i_progbuf_start \&\& !active_q \&\& !i_resume_req)   active_q/'
+    mutant dbg_start_beats_resume dbg 's/ \&\& !i_resume_req)   active_q/)   active_q/'
+    mutant dbg_resume_in_run   dbg 's/assign o_resume = i_resume_req \&\& in_debug_q \&\& !active_q;/assign o_resume = i_resume_req \&\& in_debug_q;/'
+    mutant dbg_multi_inject    dbg 's/assign o_inject_valid = active_q \&\& !outstanding_q \&\& i_inject_ready;/assign o_inject_valid = active_q \&\& i_inject_ready;/'
+    mutant dbg_inject_no_room  dbg 's/ \&\& i_inject_ready;/;/'
+    mutant dbg_idx_on_last     dbg 's/else if (i_pb_commit \&\& !i_pb_end)/else if (i_pb_commit)/'
+    mutant dbg_access_in_run   dbg 's/assign o_dm_access_active = in_debug_q \&\& !active_q;/assign o_dm_access_active = in_debug_q;/'
+    mutant dbg_step_unarmed    dbg 's/else if (o_resume)       stepping_q <= i_dcsr_step;/else if (o_resume)       stepping_q <= 1'"'"'b0;/'
     rm -rf "$T"
 fi
 
