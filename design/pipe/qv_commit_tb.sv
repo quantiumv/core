@@ -28,6 +28,13 @@
  * trap channel with the interrupt bit, no tval and its own delegation,
  * updates privilege and the architectural pc, and leaves the order counter
  * alone so the handler's first retirement reports rvfi_intr.
+ *
+ * Debug: a halt request or an armed single step is sampled at the very same
+ * point (the cycle after a retirement, outside Debug Mode) and beats both an
+ * interrupt and the head's commit; the entry reports the cause (3 for a halt
+ * request, 4 for a step, which wins when both hold), keeps the architectural
+ * pc (it becomes dpc) and is no retirement. Nothing is sampled in Debug Mode
+ * or right after a resume, and a resume restarts at the live dpc.
  */
 module qv_commit_tb;
     import qv_pkg::*;
@@ -70,6 +77,10 @@ module qv_commit_tb;
     logic                    spp = 1'b0;
     logic                    sret_taken, trap_to_s;
     logic [1:0]              priv;
+    logic                    dbg_halt = 1'b0, dbg_step = 1'b0, dbg_in = 1'b0, dbg_resume = 1'b0;
+    logic [63:0]             dpc = '0;
+    logic                    dbg_entry, dbg_halt_entry;
+    logic [2:0]              dbg_cause;
 
     qv_commit #(.RESET_PC(64'h1000)) dut (
         .clk(clk), .rst(rst),
@@ -81,6 +92,8 @@ module qv_commit_tb;
         .i_mstatus_mpp(mpp), .i_mstatus_spp(spp),
         .i_mip(mip), .i_mie(mie), .i_mideleg(mideleg),
         .i_mstatus_mie(mstatus_mie), .i_mstatus_sie(mstatus_sie), .o_irq_taken(irq_taken),
+        .i_dbg_halt_req(dbg_halt), .i_dbg_stepping(dbg_step), .i_dbg_in_debug(dbg_in), .i_dbg_resume(dbg_resume),
+        .i_dpc(dpc), .o_dbg_entry(dbg_entry), .o_dbg_cause(dbg_cause), .o_dbg_halt_entry(dbg_halt_entry),
         .o_regfile_we(rf_we), .o_regfile_sel(rf_sel), .o_regfile_data(rf_data),
         .o_commit_valid(c_valid), .o_commit_rd(c_rd), .o_commit_rd_wen(c_rd_wen), .o_commit_tag(c_tag),
         .o_csr_addr(csr_addr), .i_csr_rdata(csr_rdata), .o_csr_we(csr_we), .o_csr_wdata(csr_wdata),
@@ -221,6 +234,42 @@ module qv_commit_tb;
         check({name, ": head commits"}, b(commit_now), 64'd1);
         check({name, ": no trap"}, b(trap_taken), 64'd0);
         check({name, ": retirement counted"}, b(instr_retired), 64'd1);
+        retire();
+    endtask
+
+    // a sample cycle with a halt or step request: the head (a complete ALU entry) must not commit, nothing
+    // is a retirement, the architectural pc is kept (it becomes dpc), everything is flushed
+    task automatic expect_halt(input string name, input logic [2:0] cause);
+        logic [63:0] pc0, ord0;
+        logic [1:0]  priv0;
+        pc0 = arch_pc; ord0 = r_order; priv0 = priv;
+        set_entry(arch_pc, 32'h13, 2, 1'b1, 64'd9);
+        #1;
+        check({name, ": debug entry"}, b(dbg_entry), 64'd1);
+        check({name, ": a halt/step entry"}, b(dbg_halt_entry), 64'd1);
+        check({name, ": cause"}, {61'b0, dbg_cause}, {61'b0, cause});
+        check({name, ": no interrupt"}, b(irq_taken), 64'd0);
+        check({name, ": no trap"}, b(trap_taken), 64'd0);
+        check({name, ": head does not commit"}, b(commit_now), 64'd0);
+        check({name, ": head not popped"}, b(pop), 64'd0);
+        check({name, ": no rd write"}, b(rf_we), 64'd0);
+        check({name, ": no retirement counted"}, b(instr_retired), 64'd0);
+        check({name, ": no CSR write"}, b(csr_we), 64'd0);
+        check({name, ": redirect (flush)"}, b(redirect), 64'd1);
+        check({name, ": redirect to the architectural pc"}, redirect_pc, pc0);
+        check({name, ": arch pc (dpc) before the edge"}, arch_pc, pc0);
+        retire();
+        check({name, ": arch pc kept"}, arch_pc, pc0);
+        check({name, ": privilege kept"}, {62'b0, priv}, {62'b0, priv0});
+        check({name, ": order not advanced"}, r_order, ord0);
+    endtask
+
+    // a cycle in which the head just commits: no debug entry
+    task automatic expect_no_halt(input string name);
+        set_entry(arch_pc, 32'h13, 2, 1'b1, 64'd9);
+        #1;
+        check({name, ": no debug entry"}, b(dbg_entry), 64'd0);
+        check({name, ": head commits"}, b(commit_now), 64'd1);
         retire();
     endtask
 
@@ -912,6 +961,131 @@ module qv_commit_tb;
         check("fence.i vs interrupt: no commit", b(commit_now), 64'd0);
         retire();
         mip = '0; mie = '0; mstatus_mie = 1'b0; mideleg = '0;
+        go_priv(2'b11);
+
+        // ---- debug: halt requests, single steps, resume ----
+        dbg_halt = 1'b0; dbg_step = 1'b0; dbg_in = 1'b0; dbg_resume = 1'b0; dpc = 64'h7770;
+        plain_retire();
+        expect_no_halt("no request");
+
+        // sample point: halt request, empty-handed ROB (nothing presented) still enters
+        plain_retire();
+        dbg_halt = 1'b1;
+        #1;
+        check("empty ROB: debug entry", b(dbg_entry), 64'd1);
+        check("empty ROB: cause 3", {61'b0, dbg_cause}, 64'd3);
+        @(posedge clk); #1;
+        check("empty ROB: no second sample (commit_q was 0)", b(dbg_entry), 64'd0);
+        dbg_halt = 1'b0;
+
+        // not a sample point: the request waits for the next retirement
+        dbg_halt = 1'b1;
+        set_entry(arch_pc, 32'h13, 2, 1'b1, 64'd9);
+        #1;
+        check("request, previous cycle idle: not a sample point", b(dbg_entry), 64'd0);
+        check("request, previous cycle idle: head commits", b(commit_now), 64'd1);
+        retire();
+        expect_halt("request right after a retirement", 3'd3);
+        dbg_halt = 1'b0;
+
+        // a halt request beats a pending, enabled interrupt (core.sv's pair)
+        mie = 64'h80; mip = 64'h80; mstatus_mie = 1'b1;
+        plain_retire();
+        dbg_halt = 1'b1;
+        expect_halt("halt request vs MTI", 3'd3);
+        dbg_halt = 1'b0;
+        // ... and once the request is gone, the interrupt is taken at the next sample point
+        plain_retire();
+        expect_irq("MTI once the request is gone", 4'd7, 1'b0, {mtvec[63:2], 2'b00});
+        mip = '0; mie = '0; mstatus_mie = 1'b0;
+
+        // an armed single step: cause 4, wins over a halt request, and blocks interrupts
+        mie = 64'h80; mip = 64'h80; mstatus_mie = 1'b1;
+        plain_retire();
+        dbg_step = 1'b1;
+        expect_halt("step vs MTI", 3'd4);
+        plain_retire();
+        dbg_halt = 1'b1;
+        expect_halt("step and halt request: cause is step", 3'd4);
+        dbg_halt = 1'b0; dbg_step = 1'b0;
+        mip = '0; mie = '0; mstatus_mie = 1'b0;
+
+        // an interrupt is blocked while the step is armed, even with no halt request
+        mie = 64'h80; mip = 64'h80; mstatus_mie = 1'b1;
+        plain_retire();
+        dbg_step = 1'b1;
+        #1;
+        check("step armed, MTI pending: no interrupt", b(irq_taken), 64'd0);
+        check("step armed, MTI pending: halt entry instead", b(dbg_halt_entry), 64'd1);
+        dbg_step = 1'b0;
+        mip = '0; mie = '0; mstatus_mie = 1'b0;
+
+        // in Debug Mode nothing is sampled, however long the level is held
+        plain_retire();                                   // so this cycle would be a sample point
+        dbg_halt = 1'b1; dbg_in = 1'b1;
+        #1;
+        check("in debug mode: no entry", b(dbg_entry), 64'd0);
+        mie = 64'h80; mip = 64'h80; mstatus_mie = 1'b1;
+        #1;
+        check("in debug mode: no interrupt", b(irq_taken), 64'd0);
+        mip = '0; mie = '0; mstatus_mie = 1'b0;
+        dbg_in = 1'b0; dbg_halt = 1'b0;
+
+        // resume: restart at the live dpc (a debugger may have rewritten it); the architectural pc follows
+        dbg_in = 1'b1; dpc = 64'h0000_0000_0000_2346;
+        dbg_resume = 1'b1;
+        #1;
+        check("resume: redirect", b(redirect), 64'd1);
+        check("resume: restarts at dpc", redirect_pc, 64'h2346);
+        check("resume: not a retirement", b(commit_now), 64'd0);
+        @(posedge clk); #1;
+        dbg_resume = 1'b0; dbg_in = 1'b0;
+        check("resume: arch pc is dpc", arch_pc, 64'h2346);
+        check("resume: no sample point right after", b(dbg_entry), 64'd0);
+
+        // nothing is sampled after a resume until one instruction has retired, even with the request held
+        dbg_halt = 1'b1;
+        set_entry(arch_pc, 32'h13, 2, 1'b1, 64'd9);
+        #1;
+        check("after resume, request held: the first instruction commits", b(commit_now), 64'd1);
+        check("after resume, request held: no entry yet", b(dbg_entry), 64'd0);
+        check("after resume: the first retirement is flagged rvfi_intr (pc != previous pc_wdata)", b(r_intr), 64'd1);
+        retire();
+        expect_halt("after resume, one retirement later", 3'd3);
+        dbg_halt = 1'b0;
+
+        // dpc after a trap: the architectural pc is the vector
+        go_priv(2'b11);
+        set_entry(arch_pc, 32'h0000_0073, 0, 1'b0, 64'd0);       // ecall
+        c.cls = QV_FU_SYS; c.sys_op = QV_SYS_ECALL;
+        retire();
+        dbg_halt = 1'b1;
+        expect_halt("halt right after a trap", 3'd3);
+        check("halt right after a trap: dpc is the vector", arch_pc, {mtvec[63:2], 2'b00});
+        dbg_halt = 1'b0;
+
+        // FENCE.I at the head of a halt cycle: no flush
+        plain_retire();
+        dbg_halt = 1'b1;
+        set_entry(arch_pc, 32'h0000_100F, 0, 1'b0, 64'd0);
+        c.cls = QV_FU_SYS; c.sys_op = QV_SYS_FENCE_I; c.serialize = 1'b1;
+        #1;
+        check("fence.i vs halt: entry", b(dbg_entry), 64'd1);
+        check("fence.i vs halt: no flush", b(icache_flush), 64'd0);
+        check("fence.i vs halt: no commit", b(commit_now), 64'd0);
+        retire();
+        dbg_halt = 1'b0;
+
+        // a faulted head in the halt cycle: no trap is taken, the head is re-executed after the resume
+        plain_retire();
+        dbg_halt = 1'b1;
+        set_entry(arch_pc, 32'h0000_0000, 0, 1'b0, 64'd0);
+        c.xcpt = 1'b1; c.cause = 4'd2;
+        #1;
+        check("faulted head vs halt: entry", b(dbg_entry), 64'd1);
+        check("faulted head vs halt: no trap", b(trap_taken), 64'd0);
+        retire();
+        dbg_halt = 1'b0;
         go_priv(2'b11);
 
         $display("");

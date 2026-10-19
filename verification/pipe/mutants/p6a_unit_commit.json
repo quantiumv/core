@@ -1,0 +1,126 @@
+{
+ "dut": "design/pipe/qv_commit.sv",
+ "tb": "design/pipe/qv_commit_tb.sv",
+ "files": [
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_commit.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench"
+ ],
+ "cwd": "design",
+ "timeout": 600,
+ "mutants": [
+  {
+   "name": "halt/step sampled without a retirement in the cycle before",
+   "old": "wire  sample_pt  = commit_q && !i_dbg_in_debug;",
+   "new": "wire  sample_pt  = !i_dbg_in_debug;"
+  },
+  {
+   "name": "halt/step sampled in Debug Mode too",
+   "old": "wire  sample_pt  = commit_q && !i_dbg_in_debug;",
+   "new": "wire  sample_pt  = commit_q;"
+  },
+  {
+   "name": "halt/step sampled one cycle late",
+   "old": "    always_ff @(posedge clk) begin\n        if (rst) commit_q <= 1'b0;\n        else     commit_q <= commit;",
+   "new": "    logic commit_qq;\n    always_ff @(posedge clk) begin\n        if (rst) begin commit_q <= 1'b0; commit_qq <= 1'b0; end\n        else begin commit_qq <= commit; commit_q <= commit_qq; end"
+  },
+  {
+   "name": "a halt does not beat the head's commit",
+   "old": "(!is_fence_i || i_fetch_idle) && !irq && !halt_take;",
+   "new": "(!is_fence_i || i_fetch_idle) && !irq;"
+  },
+  {
+   "name": "an interrupt beats a halt request and a step",
+   "old": "wire  irq        = sample_pt && !(i_dbg_halt_req || i_dbg_stepping) && (mei_take || mti_take || sei_take);",
+   "new": "wire  irq        = sample_pt && (mei_take || mti_take || sei_take);"
+  },
+  {
+   "name": "an interrupt is not blocked while only a step is armed",
+   "old": "wire  irq        = sample_pt && !(i_dbg_halt_req || i_dbg_stepping) && (mei_take || mti_take || sei_take);",
+   "new": "wire  irq        = sample_pt && !(i_dbg_halt_req) && (mei_take || mti_take || sei_take);"
+  },
+  {
+   "name": "a step does not enter Debug Mode",
+   "old": "wire  halt_take  = sample_pt && (i_dbg_halt_req || i_dbg_stepping);",
+   "new": "wire  halt_take  = sample_pt && (i_dbg_halt_req);"
+  },
+  {
+   "name": "a halt request does not enter Debug Mode",
+   "old": "wire  halt_take  = sample_pt && (i_dbg_halt_req || i_dbg_stepping);",
+   "new": "wire  halt_take  = sample_pt && (i_dbg_stepping);"
+  },
+  {
+   "name": "the cause ignores the step",
+   "old": "assign o_dbg_cause      = i_dbg_stepping ? 3'd4 : 3'd3;",
+   "new": "assign o_dbg_cause      = 3'd3;"
+  },
+  {
+   "name": "the halt request outranks the step in the cause",
+   "old": "assign o_dbg_cause      = i_dbg_stepping ? 3'd4 : 3'd3;",
+   "new": "assign o_dbg_cause      = i_dbg_halt_req ? 3'd3 : 3'd4;"
+  },
+  {
+   "name": "the entry redirects to the next pc, not the architectural one",
+   "old": "o_redirect_pc    = irq ? irq_vector : halt_take ? arch_pc_q :",
+   "new": "o_redirect_pc    = irq ? irq_vector : halt_take ? actual_next_pc :"
+  },
+  {
+   "name": "no redirect (flush) on a halt entry",
+   "old": "assign o_redirect_valid = irq || halt_take || i_dbg_resume",
+   "new": "assign o_redirect_valid = irq || i_dbg_resume"
+  },
+  {
+   "name": "no redirect on a resume",
+   "old": "assign o_redirect_valid = irq || halt_take || i_dbg_resume",
+   "new": "assign o_redirect_valid = irq || halt_take"
+  },
+  {
+   "name": "a resume ignores the (rewritten) dpc in the redirect",
+   "old": "halt_take ? arch_pc_q : i_dbg_resume ? i_dpc : actual_next_pc;",
+   "new": "halt_take ? arch_pc_q : i_dbg_resume ? arch_pc_q : actual_next_pc;"
+  },
+  {
+   "name": "a resume does not load the architectural pc from dpc",
+   "old": "        else if (i_dbg_resume)  arch_pc_q <= i_dpc;\n",
+   "new": ""
+  },
+  {
+   "name": "a halt entry counts as a retirement",
+   "old": "assign o_instr_retired = commit && !is_trap;",
+   "new": "assign o_instr_retired = (commit && !is_trap) || halt_take;"
+  },
+  {
+   "name": "a halt entry goes out on the trap channel",
+   "old": "assign o_trap_taken    = (commit && is_trap) || irq;",
+   "new": "assign o_trap_taken    = (commit && is_trap) || irq || halt_take;"
+  },
+  {
+   "name": "FENCE.I flushes the icache in the halt cycle",
+   "old": "assign o_icache_flush = commit && is_fence_i;",
+   "new": "assign o_icache_flush = i_head_valid && is_fence_i && i_fetch_idle;"
+  },
+  {
+   "name": "a halt entry is not reported as a halt entry",
+   "old": "assign o_dbg_halt_entry = halt_take;",
+   "new": "assign o_dbg_halt_entry = 1'b0;"
+  },
+  {
+   "name": "a halt entry is not reported as an entry",
+   "old": "assign o_dbg_entry      = halt_take;",
+   "new": "assign o_dbg_entry      = 1'b0;"
+  },
+  {
+   "name": "the order counter advances on an entry",
+   "old": "        end else if (commit) begin\n            order_q         <= order_q + 64'd1;",
+   "new": "        end else if (commit || halt_take) begin\n            order_q         <= order_q + 64'd1;"
+  }
+ ]
+}

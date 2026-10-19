@@ -38,13 +38,14 @@ module qv_decode_tb;
     logic      flush = 1'b0;
     logic [1:0] priv = 2'b11;         // the privilege state the illegal-instruction rules read
     logic       tsr = 1'b0, tvm = 1'b0;
+    logic       in_debug = 1'b0;      // Debug Mode: the debug and trigger CSRs exist
     // PMP state (reset: region 0 NAPOT over everything, rwx) and the pc the next instruction is fed at
     logic [63:0] pmpcfg0 = 64'h1F, pmpaddr0 = 64'h003F_FFFF_FFFF_FFFF, pmpaddr1 = '0, pmpaddr2 = '0, pmpaddr3 = '0;
     logic [63:0] feed_pc = 64'h1000;
 
     qv_decode dut (
         .clk(clk), .rst(rst), .i_flush(flush),
-        .i_priv(priv), .i_tsr(tsr), .i_tvm(tvm),
+        .i_priv(priv), .i_tsr(tsr), .i_tvm(tvm), .i_in_debug(in_debug),
         .i_pmpcfg0(pmpcfg0), .i_pmpaddr0(pmpaddr0), .i_pmpaddr1(pmpaddr1),
         .i_pmpaddr2(pmpaddr2), .i_pmpaddr3(pmpaddr3),
         .i_iq_valid(iq_valid), .i_iq_data(iq_data), .o_iq_pop(iq_pop),
@@ -480,6 +481,35 @@ module qv_decode_tb;
         expect_fault("read dscratch1",       encode_csr(12'h7B3, 0, 3'b010, 5, `OPC_SYSTEM), 1'b0, 4'd0, 4'd2);
         expect_fault("read tselect",         encode_csr(12'h7A0, 0, 3'b010, 5, `OPC_SYSTEM), 1'b0, 4'd0, 4'd2);
         expect_fault("read tinfo",           encode_csr(12'h7A4, 0, 3'b010, 5, `OPC_SYSTEM), 1'b0, 4'd0, 4'd2);
+        // in Debug Mode the very same CSRs are legal (a Program Buffer reads and writes them) ...
+        in_debug = 1'b1;
+        expect_csr("read dcsr in debug mode", encode_csr(12'h7B0, 0, 3'b010, 5, `OPC_SYSTEM), `INSTR_CODE(CSRRS),
+                   QV_CSR_RS, 12'h7B0, 0, 0, 0, 1'b1, 5);
+        expect_csr("write dscratch0 in debug mode", encode_csr(12'h7B2, 6, 3'b001, 5, `OPC_SYSTEM),
+                   `INSTR_CODE(CSRRW), QV_CSR_RW, 12'h7B2, 6, 1, 0, 1'b0, 5);
+        expect_csr("write dpc in debug mode", encode_csr(12'h7B1, 6, 3'b001, 5, `OPC_SYSTEM),
+                   `INSTR_CODE(CSRRW), QV_CSR_RW, 12'h7B1, 6, 1, 0, 1'b0, 5);
+        expect_csr("read dscratch1 in debug mode", encode_csr(12'h7B3, 0, 3'b010, 5, `OPC_SYSTEM),
+                   `INSTR_CODE(CSRRS), QV_CSR_RS, 12'h7B3, 0, 0, 0, 1'b1, 5);
+        expect_csr("write tselect in debug mode", encode_csr(12'h7A0, 6, 3'b001, 5, `OPC_SYSTEM),
+                   `INSTR_CODE(CSRRW), QV_CSR_RW, 12'h7A0, 6, 1, 0, 1'b0, 5);
+        expect_csr("write tdata1 in debug mode", encode_csr(12'h7A1, 6, 3'b001, 5, `OPC_SYSTEM),
+                   `INSTR_CODE(CSRRW), QV_CSR_RW, 12'h7A1, 6, 1, 0, 1'b0, 5);
+        expect_csr("write tdata2 in debug mode", encode_csr(12'h7A2, 6, 3'b001, 5, `OPC_SYSTEM),
+                   `INSTR_CODE(CSRRW), QV_CSR_RW, 12'h7A2, 6, 1, 0, 1'b0, 5);
+        expect_csr("read tinfo in debug mode", encode_csr(12'h7A4, 0, 3'b010, 5, `OPC_SYSTEM),
+                   `INSTR_CODE(CSRRS), QV_CSR_RS, 12'h7A4, 0, 0, 0, 1'b1, 5);
+        // ... but the ordinary privilege check still applies inside it (addr[9:8] is 11 for every one of them)
+        priv = 2'b01;
+        expect_fault("read dcsr in debug mode from S",   encode_csr(12'h7B0, 0, 3'b010, 5, `OPC_SYSTEM), 1'b0, 4'd0, 4'd2);
+        expect_fault("write tdata1 in debug mode from S", encode_csr(12'h7A1, 6, 3'b001, 5, `OPC_SYSTEM), 1'b0, 4'd0, 4'd2);
+        priv = 2'b00;
+        expect_fault("read dscratch0 in debug mode from U", encode_csr(12'h7B2, 0, 3'b010, 5, `OPC_SYSTEM), 1'b0, 4'd0, 4'd2);
+        priv = 2'b11;
+        // a read-only CSR write is as illegal in Debug Mode as outside it
+        expect_fault("write mhartid in debug mode", encode_csr(12'hF14, 6, 3'b001, 5, `OPC_SYSTEM), 1'b0, 4'd0, 4'd2);
+        in_debug = 1'b0;
+        expect_fault("read dcsr again outside debug mode", encode_csr(12'h7B0, 0, 3'b010, 5, `OPC_SYSTEM), 1'b0, 4'd0, 4'd2);
         // the neighbours of those ranges are ordinary (unbacked) CSRs
         expect_csr("read 0x7A5", encode_csr(12'h7A5, 0, 3'b010, 5, `OPC_SYSTEM), `INSTR_CODE(CSRRS),
                    QV_CSR_RS, 12'h7A5, 0, 0, 0, 1'b1, 5);

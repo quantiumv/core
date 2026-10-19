@@ -1,0 +1,75 @@
+{
+ "dut": "design/pipe/qv_dbg.sv",
+ "tb": "design/pipe/qv_dbg_tb.sv",
+ "files": [
+  "design/pipe/qv_dbg.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench"
+ ],
+ "cwd": "design",
+ "timeout": 600,
+ "mutants": [
+  {
+   "name": "a resume is accepted while running",
+   "old": "assign o_resume = i_resume_req && in_debug_q;",
+   "new": "assign o_resume = i_resume_req;"
+  },
+  {
+   "name": "an entry does not set in_debug",
+   "old": "else if (i_entry)  in_debug_q <= 1'b1;",
+   "new": "else if (1'b0)     in_debug_q <= 1'b1;"
+  },
+  {
+   "name": "a resume does not clear in_debug",
+   "old": "else if (o_resume) in_debug_q <= 1'b0;",
+   "new": "else if (1'b0)     in_debug_q <= 1'b0;"
+  },
+  {
+   "name": "stepping is always armed by a resume",
+   "old": "else if (o_resume)       stepping_q <= i_dcsr_step;",
+   "new": "else if (o_resume)       stepping_q <= 1'b1;"
+  },
+  {
+   "name": "stepping is never armed",
+   "old": "else if (o_resume)       stepping_q <= i_dcsr_step;",
+   "new": "else if (o_resume)       stepping_q <= 1'b0;"
+  },
+  {
+   "name": "a resume that is not accepted still loads stepping",
+   "old": "else if (o_resume)       stepping_q <= i_dcsr_step;",
+   "new": "else if (i_resume_req)    stepping_q <= i_dcsr_step;"
+  },
+  {
+   "name": "a halt entry does not consume the step",
+   "old": "else if (i_halt_entry)   stepping_q <= 1'b0;",
+   "new": "else if (1'b0)           stepping_q <= 1'b0;"
+  },
+  {
+   "name": "any entry consumes the step",
+   "old": "else if (i_halt_entry)   stepping_q <= 1'b0;",
+   "new": "else if (i_entry)        stepping_q <= 1'b0;"
+  },
+  {
+   "name": "the Debug Module owns the ports outside Debug Mode too",
+   "old": "assign o_dm_access_active = in_debug_q;",
+   "new": "assign o_dm_access_active = 1'b1;"
+  },
+  {
+   "name": "the Debug Module never owns the ports",
+   "old": "assign o_dm_access_active = in_debug_q;",
+   "new": "assign o_dm_access_active = 1'b0;"
+  },
+  {
+   "name": "o_in_debug stuck low",
+   "old": "assign o_in_debug         = in_debug_q;",
+   "new": "assign o_in_debug         = 1'b0;"
+  }
+ ]
+}

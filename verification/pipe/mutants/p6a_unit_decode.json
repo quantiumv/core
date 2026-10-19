@@ -1,0 +1,55 @@
+{
+ "dut": "design/pipe/qv_decode.sv",
+ "tb": "design/pipe/qv_decode_tb.sv",
+ "files": [
+  "design/decoder.sv",
+  "design/alu.sv",
+  "design/c_expand.sv",
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_pmp.sv",
+  "design/pipe/qv_decode.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench"
+ ],
+ "cwd": "design",
+ "timeout": 600,
+ "mutants": [
+  {
+   "name": "debug CSRs legal outside Debug Mode",
+   "old": "|| (csr_debug_addr && !i_in_debug));",
+   "new": "|| (csr_debug_addr && 1'b0));"
+  },
+  {
+   "name": "debug CSRs illegal in Debug Mode too",
+   "old": "|| (csr_debug_addr && !i_in_debug));",
+   "new": "|| (csr_debug_addr));"
+  },
+  {
+   "name": "trigger CSRs (tselect..tdata3) legal outside Debug Mode",
+   "old": "wire csr_debug_addr = csr_addr[11:2] == 10'h1EC\n                          || csr_addr[11:2] == 10'h1E8 || csr_addr == 12'h7A4;",
+   "new": "wire csr_debug_addr = csr_addr[11:2] == 10'h1EC\n                          || csr_addr == 12'h7A4;"
+  },
+  {
+   "name": "dcsr..dscratch1 legal outside Debug Mode",
+   "old": "wire csr_debug_addr = csr_addr[11:2] == 10'h1EC\n                          || csr_addr[11:2] == 10'h1E8 || csr_addr == 12'h7A4;",
+   "new": "wire csr_debug_addr = csr_addr[11:2] == 10'h1E8 || csr_addr == 12'h7A4;"
+  },
+  {
+   "name": "tinfo legal outside Debug Mode",
+   "old": "wire csr_debug_addr = csr_addr[11:2] == 10'h1EC\n                          || csr_addr[11:2] == 10'h1E8 || csr_addr == 12'h7A4;",
+   "new": "wire csr_debug_addr = csr_addr[11:2] == 10'h1EC\n                          || csr_addr[11:2] == 10'h1E8;"
+  },
+  {
+   "name": "the privilege check is skipped in Debug Mode",
+   "old": "wire csr_priv_violation  = is_csr && (csr_addr[9:8] > i_priv);",
+   "new": "wire csr_priv_violation  = is_csr && (csr_addr[9:8] > i_priv) && !i_in_debug;"
+  }
+ ]
+}
