@@ -8,3 +8,4 @@
 # target | max_retire (hex file is verification/lockstep/<target>.hex, built with riscv64-unknown-elf-as/ld/objcopy
 # against gen/link.ld, see the program's own header)
 dbg_exc|6000
+dbg_res|6000
