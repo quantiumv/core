@@ -531,14 +531,28 @@ if [ "$MODE" == "corrupt" ]; then
     target_order=$((clean_matched / 2))
     all_ok=1
     for field in 1 2 3 4 5 6 7 8; do
-        out=$(cd "$REPO_ROOT" && timeout $WALL_TIMEOUT "${SIM_CMD[@]}" +HEXFILE="$hex" +TIMEOUT=$MAX_CYCLES \
-            $([ -n "$tohost" ] && echo +TOHOST_ADDR=$tohost) $([ -n "$max_retire" ] && echo +MAX_RETIRE=$max_retire) $dargs \
-            +CORRUPT_AT=$target_order +CORRUPT_FIELD=$field 2>&1 | grep -v "Unable to open")
-        fail_at=$(echo "$out" | grep "^LOCKSTEP_RESULT: FAIL" | grep -oE 'order=[0-9]+' | grep -oE '[0-9]+')
-        if [ "$fail_at" == "$target_order" ]; then
-            echo "field $field: OK (caught at order=$fail_at as expected)"
-        else
-            echo "field $field: MISMATCH (expected order=$target_order, got '$fail_at') -- $(echo "$out" | grep '^LOCKSTEP_RESULT:')"
+        # A field is only compared where it means something (rd data when rd != x0, the memory address of a memory
+        # access, ...), so a corruption of a retirement that has none of it passes by design. Try the next
+        # retirement then; a field the comparator really does not look at passes at all 16 of them.
+        caught=0; last=""
+        for k in 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+            tgt=$((target_order + k))
+            out=$(cd "$REPO_ROOT" && timeout $WALL_TIMEOUT "${SIM_CMD[@]}" +HEXFILE="$hex" +TIMEOUT=$MAX_CYCLES \
+                $([ -n "$tohost" ] && echo +TOHOST_ADDR=$tohost) $([ -n "$max_retire" ] && echo +MAX_RETIRE=$max_retire) $dargs \
+                +CORRUPT_AT=$tgt +CORRUPT_FIELD=$field 2>&1 | grep -v "Unable to open")
+            fail_at=$(echo "$out" | grep "^LOCKSTEP_RESULT: FAIL" | grep -oE 'order=[0-9]+' | grep -oE '[0-9]+')
+            last="$(echo "$out" | grep '^LOCKSTEP_RESULT:')"
+            if [ "$fail_at" == "$tgt" ]; then
+                echo "field $field: OK (caught at order=$fail_at as expected)"
+                caught=1
+                break
+            elif [ -n "$fail_at" ]; then
+                echo "field $field: MISMATCH (expected order=$tgt, got '$fail_at') -- $last"
+                break
+            fi
+        done
+        if [ "$caught" != "1" ]; then
+            [ -z "$fail_at" ] && echo "field $field: NOT CAUGHT at any of 16 consecutive retirements from order=$target_order -- $last"
             all_ok=0
         fi
     done
