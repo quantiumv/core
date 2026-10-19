@@ -77,6 +77,8 @@ module qv_decode (
     // Debug Mode: the debug and trigger CSRs exist only there (outside it they are illegal for every
     // privilege level), and the usual privilege rule still applies inside it
     input  logic              i_in_debug = 1'b0,
+    // a Program Buffer run is trusted: its instructions are not PMP-checked
+    input  logic              i_pb_active = 1'b0,
 
     // the two execute triggers (csr_file0's tdata1/tdata2 exports); the defaults are "never matches"
     /* verilator lint_off UNUSEDSIGNAL */
@@ -144,7 +146,7 @@ module qv_decode (
         .o_read_ok(), .o_write_ok(), .o_exec_ok(exec_ok_hi)
     );
     /* verilator lint_on PINCONNECTEMPTY */
-    wire pmp_fault = !exec_ok_lo || (fetch_hi_taken && !exec_ok_hi);
+    wire pmp_fault = !i_pb_active && (!exec_ok_lo || (fetch_hi_taken && !exec_ok_hi));
 
     // a denied fetch decodes as the inert placeholder too: nothing downstream may act on its bits
     wire [31:0] instr = (i_iq_data.xcpt || pmp_fault || c_illegal) ? 32'h0000_0013

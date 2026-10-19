@@ -92,6 +92,8 @@ module qv_lsu (
     input  logic [1:0]                       i_priv = 2'b11,
     input  logic                             i_mprv = 1'b0,
     input  logic [1:0]                       i_mpp  = 2'b11,
+    // a Program Buffer run is trusted: no PMP check on its data accesses
+    input  logic                             i_pmp_bypass = 1'b0,
     /* verilator lint_off UNUSEDSIGNAL */
     input  logic [63:0]                      i_pmpcfg0  = 64'h0000_0000_0000_001F,
     input  logic [63:0]                      i_pmpaddr0 = 64'h003F_FFFF_FFFF_FFFF,
@@ -167,7 +169,7 @@ module qv_lsu (
         .o_read_ok(pmp_r_ok), .o_write_ok(pmp_w_ok), .o_exec_ok()
     );
     /* verilator lint_on PINCONNECTEMPTY */
-    wire pmp_deny = !misaligned_q && !(fault_st ? pmp_w_ok : pmp_r_ok);
+    wire pmp_deny = !misaligned_q && !i_pmp_bypass && !(fault_st ? pmp_w_ok : pmp_r_ok);
 
     // ---------------- at the head ----------------
     wire at_head  = (state_q == S_WAIT_HEAD) && i_head_valid && (i_head_tag == tag_q) && !i_flush;

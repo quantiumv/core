@@ -49,7 +49,8 @@
  * point as interrupts, and the Debug Module's Access Register path, muxed
  * around regfile0 and csr_file0 as core.sv does it; EBREAK (dcsr.ebreak*)
  * and the two execute triggers, matched in decode and acted on at the ROB
- * head. Not yet: the Program Buffer (its outputs stay inert), Sv39.
+ * head; the Program Buffer, whose words qv_dbg feeds into the instruction
+ * queue one at a time (see there). Not yet: Sv39.
  *
  * Redirects: commit's (a trap, xRET, serialize, or a retiring
  * mispredicted branch or jump) kill everything in flight -- the same
@@ -125,13 +126,9 @@ module core_pipe
     input  logic [63:0]  i_dm_gpr_wdata = 64'b0,
     output logic [63:0]  o_dm_gpr_rdata,
 
-    /* verilator lint_off UNUSEDSIGNAL */
     input  logic         i_progbuf_start = 1'b0,
-    /* verilator lint_on UNUSEDSIGNAL */
     output logic [3:0]   o_progbuf_pc,
-    /* verilator lint_off UNUSEDSIGNAL */
     input  logic [31:0]  i_progbuf_data = 32'b0,
-    /* verilator lint_on UNUSEDSIGNAL */
     output logic         o_progbuf_done,
     output logic         o_progbuf_abort
 
@@ -215,7 +212,10 @@ module core_pipe
     // ---------------- Debug Mode ----------------
     // commit decides when the hart halts, qv_dbg keeps the flags
     logic        dbg_entry, dbg_halt_entry, dbg_ebreak_entry, dbg_trigger_entry;
-    logic        dbg_resume, dbg_in_debug, dbg_stepping, dm_access_active;
+    logic        dbg_resume, dbg_in_debug, dbg_stepping, dm_access_active, pb_active, pb_commit, pb_done, pb_abort;
+    logic        inj_valid;
+    logic [3:0]  pb_idx;
+    logic [63:0] arch_pc;                    // commit's architectural pc: the next instruction to retire
     logic [2:0]  dbg_cause;
 
     // ---------------- redirects ----------------
@@ -248,6 +248,9 @@ module core_pipe
 
     logic         p0_valid, p1_valid, iq_push_ready;
     fe_instr_t    p0_data, p1_data;
+    logic         a0_valid, a1_valid;
+    fe_instr_t    a0_data, a1_data;
+    fe_instr_t    inj_data;
     logic         iq_valid, iq_pop;
     logic [FE_W-1:0] iq_bits;
     fe_instr_t    iq_head;
@@ -257,11 +260,23 @@ module core_pipe
         .clk(clk), .rst(rst), .i_flush(flush),
         .i_buf_valid(fb_valid), .i_buf_pc(fb_pc), .i_buf_data(fb_data), .i_buf_err(fb_err),
         .o_buf_pop(fb_pop),
-        .o_push0_valid(p0_valid), .o_push0_data(p0_data),
-        .o_push1_valid(p1_valid), .o_push1_data(p1_data),
+        .o_push0_valid(a0_valid), .o_push0_data(a0_data),
+        .o_push1_valid(a1_valid), .o_push1_data(a1_data),
         .i_push_ready(iq_push_ready),
         .o_redirect_valid(fe_redirect_valid), .o_redirect_pc(fe_redirect_pc)
     );
+
+    // While halted the instruction queue is fed by the Program Buffer injector (nothing comes from fetch then):
+    // a 32-bit word at the architectural pc, no fault, no prediction.
+    always_comb begin
+        inj_data      = '0;
+        inj_data.pc   = arch_pc;
+        inj_data.raw  = i_progbuf_data;
+    end
+    assign p0_valid = dbg_in_debug ? inj_valid : a0_valid;
+    assign p0_data  = dbg_in_debug ? inj_data  : a0_data;
+    assign p1_valid = dbg_in_debug ? 1'b0      : a1_valid;
+    assign p1_data  = a1_data;
 
     qv_fifo #(.WIDTH(FE_W), .DEPTH(IQ_DEPTH)) iq0 (
         .clk(clk), .rst(rst), .i_flush(flush),
@@ -278,7 +293,7 @@ module core_pipe
 
     qv_decode decode0 (
         .clk(clk), .rst(rst), .i_flush(flush),
-        .i_priv(priv), .i_tsr(mstatus_tsr_w), .i_tvm(mstatus_tvm_w), .i_in_debug(dbg_in_debug),
+        .i_priv(priv), .i_tsr(mstatus_tsr_w), .i_tvm(mstatus_tvm_w), .i_in_debug(dbg_in_debug), .i_pb_active(pb_active),
         .i_tdata1_0(tdata1_0_w), .i_tdata2_0(tdata2_0_w), .i_tdata1_1(tdata1_1_w), .i_tdata2_1(tdata2_1_w),
         .i_pmpcfg0(pmpcfg0_w), .i_pmpaddr0(pmpaddr0_w), .i_pmpaddr1(pmpaddr1_w),
         .i_pmpaddr2(pmpaddr2_w), .i_pmpaddr3(pmpaddr3_w),
@@ -376,7 +391,7 @@ module core_pipe
         .i_req(lsu_req), .o_free(lsu_free),
         .i_head_valid(head_valid), .i_head_tag(head_tag),
         .i_res_valid(res_valid), .i_res_addr(res_addr),
-        .i_priv(priv), .i_mprv(mstatus_mprv_w), .i_mpp(mstatus_mpp_w),
+        .i_priv(priv), .i_mprv(mstatus_mprv_w), .i_mpp(mstatus_mpp_w), .i_pmp_bypass(pb_active),
         .i_pmpcfg0(pmpcfg0_w), .i_pmpaddr0(pmpaddr0_w), .i_pmpaddr1(pmpaddr1_w),
         .i_pmpaddr2(pmpaddr2_w), .i_pmpaddr3(pmpaddr3_w),
         .wb_mem_addr_o(wb_mem_addr_o), .wb_mem_dat_o(wb_mem_dat_o), .wb_mem_sel_o(wb_mem_sel_o),
@@ -392,7 +407,7 @@ module core_pipe
     logic [4:0]  rf_sel;
     logic [63:0] rf_data;
     logic        commit_now_w;
-    logic [63:0] arch_pc, retire_next_pc;
+    logic [63:0] retire_next_pc;
     logic [4:0]  c_rs1_addr, c_rs2_addr;
     logic [11:0] c_csr_addr;
     logic [63:0] c_csr_wdata, c_trap_cause, c_trap_val;
@@ -430,6 +445,7 @@ module core_pipe
         .i_dbg_resume(dbg_resume), .i_dpc(dpc_o), .i_dcsr(dcsr_o),
         .o_dbg_entry(dbg_entry), .o_dbg_cause(dbg_cause), .o_dbg_halt_entry(dbg_halt_entry),
         .o_dbg_ebreak_entry(dbg_ebreak_entry), .o_dbg_trigger_entry(dbg_trigger_entry),
+        .i_pb_active(pb_active), .o_pb_commit(pb_commit), .o_pb_done(pb_done), .o_pb_abort(pb_abort),
         .o_fetch_hold(commit_fetch_hold), .i_fetch_idle(fetch_idle), .o_icache_flush(icache_flush_o),
         .o_commit_now(commit_now_w), .o_pc(arch_pc), .o_next_pc(retire_next_pc),
         .o_redirect_valid(redirect_valid), .o_redirect_pc(redirect_pc),
@@ -446,8 +462,11 @@ module core_pipe
         .clk(clk), .rst(rst),
         .i_entry(dbg_entry), .i_halt_entry(dbg_halt_entry),
         .i_resume_req(i_debug_resume_req), .i_dcsr_step(dcsr_o[2]),
+        .i_progbuf_start(i_progbuf_start), .i_pb_commit(pb_commit), .i_pb_end(pb_done || pb_abort),
+        .i_inject_ready(iq_push_ready),
         .o_in_debug(dbg_in_debug), .o_stepping(dbg_stepping), .o_resume(dbg_resume),
-        .o_dm_access_active(dm_access_active)
+        .o_dm_access_active(dm_access_active), .o_progbuf_active(pb_active), .o_progbuf_pc(pb_idx),
+        .o_inject_valid(inj_valid)
     );
 
     // ---------------- architectural state ----------------
@@ -528,7 +547,7 @@ module core_pipe
     wire        debug_ebreak_entry   = dbg_ebreak_entry;
     wire        trigger_debug_entry  = dbg_trigger_entry;
     wire        in_debug_mode        = dbg_in_debug;
-    wire        debug_progbuf_active = 1'b0;
+    wire        debug_progbuf_active = pb_active;
     wire        stepping_q           = dbg_stepping;
     wire [2:0]  debug_cause_code     = dbg_cause;
     wire        divider_o_busy       = !div_free;
@@ -547,9 +566,9 @@ module core_pipe
     assign o_debug_mode    = in_debug_mode;
     assign o_dm_csr_rdata  = csr_rdata;
     assign o_dm_gpr_rdata  = rs2_data;
-    assign o_progbuf_pc    = 4'b0;
-    assign o_progbuf_done  = 1'b0;
-    assign o_progbuf_abort = 1'b0;
+    assign o_progbuf_pc    = pb_idx;
+    assign o_progbuf_done  = pb_done;
+    assign o_progbuf_abort = pb_abort;
 
     // ---------------- RVFI ----------------
 `ifdef RISCV_FORMAL

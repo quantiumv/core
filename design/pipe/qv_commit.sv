@@ -69,6 +69,15 @@
  * which a store, SC or AMO still clears the LR/SC reservation. A halt
  * request or interrupt sampled in the same cycle goes first.
  *
+ * A Program Buffer run (i_pb_active) retires its instructions like any
+ * other, one at a time and in order, but nothing it does counts
+ * architecturally beyond its own register and CSR writes: a trap is not
+ * taken (an exception ends the run as an abort, an EBREAK ends it cleanly;
+ * the Debug Module hears about either in the cycle the last instruction
+ * retires, and an aborted one writes nothing and is not counted by
+ * minstret), MRET and SRET have no effect, and instructions retired
+ * while dcsr.stopcount is set are not counted.
+ *
  * It also keeps the privilege level (updated exactly as core.sv's
  * current_priv is: trap, MRET, SRET; MPP is loaded raw, so privilege 2'b10
  * can occur and then behaves as written) and the LR/SC reservation (see
@@ -156,6 +165,12 @@ module qv_commit #(
     output logic                             o_dbg_halt_entry,          // ... a halt or step one
     output logic                             o_dbg_ebreak_entry,        // ... an EBREAK one
     output logic                             o_dbg_trigger_entry,       // ... an execute-trigger one
+
+    // Program Buffer run
+    input  logic                             i_pb_active = 1'b0,
+    output logic                             o_pb_commit,               // a Program Buffer instruction retires
+    output logic                             o_pb_done,                 // ... the run's last: an EBREAK
+    output logic                             o_pb_abort,                // ... the run's last: an exception
 
     // FENCE.I: fetch is held while it is the head; it retires only once
     // fetch has nothing outstanding, flushing the icache in that cycle
@@ -268,6 +283,16 @@ module qv_commit #(
     wire is_mret = is_sys && (i_head_ctrl.sys_op == QV_SYS_MRET);
     wire is_sret = is_sys && (i_head_ctrl.sys_op == QV_SYS_SRET);
 
+    // In a Program Buffer run a trap is not taken and xRET has no effect; an EBREAK retires (the run is done)
+    wire pb_ebreak = i_pb_active && is_sys && (i_head_ctrl.sys_op == QV_SYS_EBREAK);
+    wire trap_fx   = is_trap && !i_pb_active;           // the trap path proper: csr_file0, privilege, vector
+    wire mret_fx   = is_mret && !i_pb_active;
+    wire sret_fx   = is_sret && !i_pb_active;
+    wire faulted   = is_trap && !pb_ebreak;             // does not retire: no rd/CSR write, not counted
+    assign o_pb_commit = commit && i_pb_active;
+    assign o_pb_done   = commit && pb_ebreak;
+    assign o_pb_abort  = commit && i_pb_active && is_trap && !pb_ebreak;
+
     wire is_csr  = (i_head_ctrl.cls == QV_FU_CSR) && !i_head_ctrl.xcpt;
 
     logic [3:0] cause;
@@ -309,17 +334,17 @@ module qv_commit #(
     assign o_csr_we   = commit && is_csr && !i_head_ctrl.csr_wsup;
 
     // a trap from below M goes to S when medeleg says so; never from M
-    wire trap_to_s = is_trap && (priv_q != QV_PRIV_M) && i_medeleg[{2'b00, cause}];
+    wire trap_to_s = trap_fx && (priv_q != QV_PRIV_M) && i_medeleg[{2'b00, cause}];
 
     // an interrupt goes through the same csr_file0 trap channel: cause with
     // the interrupt bit, no tval, and its own delegation
-    assign o_trap_taken    = (commit && is_trap) || irq;
+    assign o_trap_taken    = (commit && trap_fx) || irq;
     assign o_trap_to_s     = irq ? int_to_s : trap_to_s;
-    assign o_sret_taken    = commit && is_sret;
+    assign o_sret_taken    = commit && sret_fx;
     assign o_trap_cause    = irq ? {1'b1, 59'b0, int_cause} : {60'b0, cause};
     assign o_trap_val      = irq ? 64'b0 : tval;
-    assign o_mret_taken    = commit && is_mret;
-    assign o_instr_retired = commit && !is_trap;
+    assign o_mret_taken    = commit && mret_fx;
+    assign o_instr_retired = commit && !faulted && !(i_dbg_in_debug && i_dcsr[10]);   // dcsr.stopcount
 
     // ---------------- retirement ----------------
     wire [63:0] rd_value = is_csr ? i_csr_rdata : i_head_entry.value;
@@ -363,9 +388,9 @@ module qv_commit #(
     logic [63:0] actual_next_pc;
     logic [63:0] arch_pc_q;
     always_comb begin
-        if (is_trap)      actual_next_pc = trap_to_s ? {i_stvec[63:2], 2'b00} : {i_mtvec[63:2], 2'b00};
-        else if (is_mret) actual_next_pc = i_mepc;
-        else if (is_sret) actual_next_pc = i_sepc;
+        if (trap_fx)      actual_next_pc = trap_to_s ? {i_stvec[63:2], 2'b00} : {i_mtvec[63:2], 2'b00};
+        else if (mret_fx) actual_next_pc = i_mepc;
+        else if (sret_fx) actual_next_pc = i_sepc;
         else              actual_next_pc = i_head_entry.next_pc;
     end
 
@@ -376,9 +401,9 @@ module qv_commit #(
         end else if (irq) begin
             priv_q <= int_to_s ? QV_PRIV_S : QV_PRIV_M;
         end else if (commit) begin
-            if (is_trap)      priv_q <= trap_to_s ? QV_PRIV_S : QV_PRIV_M;
-            else if (is_mret) priv_q <= i_mstatus_mpp;
-            else if (is_sret) priv_q <= i_mstatus_spp ? QV_PRIV_S : QV_PRIV_U;
+            if (trap_fx)      priv_q <= trap_to_s ? QV_PRIV_S : QV_PRIV_M;
+            else if (mret_fx) priv_q <= i_mstatus_mpp;
+            else if (sret_fx) priv_q <= i_mstatus_spp ? QV_PRIV_S : QV_PRIV_U;
         end
     end
 
@@ -387,7 +412,7 @@ module qv_commit #(
     // A debug entry redirects to the architectural pc (fetch is held, so it only records it and everything
     // in flight is flushed); a resume restarts at the live dpc.
     assign o_redirect_valid = irq || halt_take || head_dbg_entry || i_dbg_resume
-                              || (commit && (is_trap || is_mret || is_sret || i_head_entry.mispredict
+                              || (commit && (trap_fx || mret_fx || sret_fx || i_head_entry.mispredict
                                              || i_head_ctrl.serialize));
     assign o_redirect_pc    = irq ? irq_vector : (halt_take || head_dbg_entry) ? arch_pc_q : i_dbg_resume ? i_dpc : actual_next_pc;
 
@@ -415,7 +440,7 @@ module qv_commit #(
 
     assign o_rvfi_order     = order_q;
     assign o_rvfi_insn      = i_head_entry.raw;
-    assign o_rvfi_trap      = commit && is_trap;
+    assign o_rvfi_trap      = commit && trap_fx;
     assign o_rvfi_intr      = commit && (i_head_entry.pc != prev_pc_wdata_q);
     assign o_rvfi_rs1_addr  = i_head_shadow.rs1_addr;
     assign o_rvfi_rs2_addr  = i_head_shadow.rs2_addr;
