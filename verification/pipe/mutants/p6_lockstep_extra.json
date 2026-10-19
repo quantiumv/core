@@ -34,8 +34,10 @@
   {
    "from": "p6b_unit_decode.json",
    "only": [
+    3,
     5,
-    6
+    6,
+    16
    ]
   },
   {
