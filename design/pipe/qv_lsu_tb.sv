@@ -59,6 +59,7 @@ module qv_lsu_tb;
     // PMP state: the reset state (region 0 NAPOT over everything, rwx), M mode
     logic [1:0]              priv = 2'b11, mpp = 2'b11;
     logic                    mprv = 1'b0;
+    logic                    pmp_bypass = 1'b0;      // a Program Buffer run: no PMP check on its data accesses
     logic [63:0]             pmpcfg0 = 64'h1F, pmpaddr0 = 64'h003F_FFFF_FFFF_FFFF, pmpaddr1 = '0, pmpaddr2 = '0, pmpaddr3 = '0;
 
     qv_lsu dut (
@@ -66,7 +67,7 @@ module qv_lsu_tb;
         .i_req(req), .o_free(free),
         .i_head_valid(head_valid), .i_head_tag(head_tag),
         .i_res_valid(res_valid), .i_res_addr(res_addr),
-        .i_priv(priv), .i_mprv(mprv), .i_mpp(mpp),
+        .i_priv(priv), .i_mprv(mprv), .i_mpp(mpp), .i_pmp_bypass(pmp_bypass),
         .i_pmpcfg0(pmpcfg0), .i_pmpaddr0(pmpaddr0), .i_pmpaddr1(pmpaddr1),
         .i_pmpaddr2(pmpaddr2), .i_pmpaddr3(pmpaddr3),
         .wb_mem_addr_o(addr), .wb_mem_dat_o(dat_o), .wb_mem_sel_o(sel), .wb_mem_we_o(we),
@@ -863,6 +864,18 @@ module qv_lsu_tb;
         priv = 2'b01;
         run_pmp("S store denied ...", 1, 2'd3, 64'h40, 1'b1);
         run_pmp("... and the next load is fine", 0, 2'd3, 64'h48, 1'b0);
+        // a Program Buffer run is trusted: the very accesses denied above go through, each kind, and a misaligned
+        // one still traps first
+        priv = 2'b01; pmp_bypass = 1'b1;
+        run_pmp("bypass: S store in R region", 1, 2'd3, 64'h40, 1'b0);
+        run_pmp("bypass: S load, no region", 0, 2'd3, 64'h300, 1'b0);
+        run_pmp("bypass: S LR.D in R region", 2, 2'd3, 64'h40, 1'b0);
+        run_pmp("bypass: S AMOADD.D in R region", 4, 2'd3, 64'h48, 1'b0);
+        run_pmp("bypass: S SC.D in R region, with its reservation", 3, 2'd3, 64'h40, 1'b0, 1'b1);
+        run_pmp("bypass: S SC.D in R region, without one: rd = 1, no access", 3, 2'd3, 64'h40, 1'b0, 1'b0);
+        run_pmp("bypass: SW misaligned: 6", 1, 2'd2, 64'h42, 1'b0);
+        pmp_bypass = 1'b0;
+        run_pmp("bypass off: the same store is denied again", 1, 2'd3, 64'h40, 1'b1);
         // back to the reset state
         priv = 2'b11; mpp = 2'b11; mprv = 1'b0;
         pmpcfg0 = 64'h1F; pmpaddr0 = 64'h003F_FFFF_FFFF_FFFF; pmpaddr1 = '0; pmpaddr2 = '0;

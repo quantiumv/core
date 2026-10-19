@@ -290,6 +290,16 @@ module dm_tb;
     always @(posedge clk) begin
         if (dut_sba.core0.commit_now) sba_commit_count <= sba_commit_count + 1;
     end
+    // x1 as it is at the first edge after the 50th commit: sampled by the clock itself, so it doesn't depend on how
+    // many instructions the core retires between two looks of the test (a core with IPC 1 is a couple further on)
+    logic        sba_x1_snapped = 1'b0;
+    logic [63:0] sba_x1_at_50;
+    always @(posedge clk) begin
+        if (sba_commit_count >= 50 && !sba_x1_snapped) begin
+            sba_x1_snapped <= 1'b1;
+            sba_x1_at_50   <= dut_sba.core0.regfile0.gp_registers[1];
+        end
+    end
 
     task automatic sba_dmi_write(input [6:0] addr, input [31:0] wdata);
         reg_addr_sba  = addr;
@@ -1383,7 +1393,16 @@ module dm_tb;
         // accidental, non-discriminating pass.
         sba_dmi_write(DMI_SBCS, sba_cfg(1'b1, 3'd2, 1'b0, 1'b0));  // readonaddr=1, access=32-bit
         sba_dmi_write(DMI_SBADDRESS0, 32'h0000_1000);  // trigger -- out of range, a real bus error (edge N)
-        @(posedge clk); #1;                             // filler (edge N+1)
+        // the filler edge (N+1): with an idle fetch port the error is live right then; a core that is streaming
+        // instructions can make the SBA wait for its grant a few cycles longer, so look until it is
+        begin
+            int tries;
+            tries = 0;
+            do begin
+                @(posedge clk); #1;
+                tries++;
+            end while (!dut_sba.dm0.i_sba_err && tries < 100);
+        end
         check("dut_sba: Test L -- precondition: i_sba_err is genuinely live the same cycle the race write is about to land",
             {63'b0, dut_sba.dm0.i_sba_err}, 64'd1);
         sba_dmi_write(DMI_SBCS, 32'h0000_3000);         // races the hardware-set at edge N+2
@@ -1493,12 +1512,12 @@ module dm_tb;
         // testbench/wb_driver.sv's own header documents in detail for
         // ack_o. @(posedge clk); #1; after the condition is already true
         // guarantees a full settle past that edge first.
-        while (sba_commit_count < 50) begin
+        while (!sba_x1_snapped) begin
             @(posedge clk); #1;
         end
 
         check("dut_sba: Test G -- x1 == 50 -- core0's own loop finished correctly, undisturbed by concurrent SBA traffic",
-            dut_sba.core0.regfile0.gp_registers[1], 64'd50);
+            sba_x1_at_50, 64'd50);
 
         /* ----------------------------------------------------------- *
          * dut_amo_sba

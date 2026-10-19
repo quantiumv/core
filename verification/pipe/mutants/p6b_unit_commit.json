@@ -1,0 +1,151 @@
+{
+ "dut": "design/pipe/qv_commit.sv",
+ "tb": "design/pipe/qv_commit_tb.sv",
+ "files": [
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_commit.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench"
+ ],
+ "cwd": "design",
+ "timeout": 600,
+ "mutants": [
+  {
+   "name": "EBREAK entry uses ebreakm at every privilege",
+   "old": "wire ebreak_bit    = (priv_q == QV_PRIV_M) ? i_dcsr[15] : (priv_q == QV_PRIV_S) ? i_dcsr[13] : i_dcsr[12];",
+   "new": "wire ebreak_bit    = i_dcsr[15];"
+  },
+  {
+   "name": "EBREAK entry uses ebreaku in S",
+   "old": "wire ebreak_bit    = (priv_q == QV_PRIV_M) ? i_dcsr[15] : (priv_q == QV_PRIV_S) ? i_dcsr[13] : i_dcsr[12];",
+   "new": "wire ebreak_bit    = (priv_q == QV_PRIV_M) ? i_dcsr[15] : (priv_q == QV_PRIV_S) ? i_dcsr[12] : i_dcsr[12];"
+  },
+  {
+   "name": "EBREAK entry uses ebreaks in U",
+   "old": "wire ebreak_bit    = (priv_q == QV_PRIV_M) ? i_dcsr[15] : (priv_q == QV_PRIV_S) ? i_dcsr[13] : i_dcsr[12];",
+   "new": "wire ebreak_bit    = (priv_q == QV_PRIV_M) ? i_dcsr[15] : (priv_q == QV_PRIV_S) ? i_dcsr[13] : i_dcsr[13];"
+  },
+  {
+   "name": "privilege 2'b10 has no EBREAK entry",
+   "old": "wire ebreak_bit    = (priv_q == QV_PRIV_M) ? i_dcsr[15] : (priv_q == QV_PRIV_S) ? i_dcsr[13] : i_dcsr[12];",
+   "new": "wire ebreak_bit    = (priv_q == QV_PRIV_M) ? i_dcsr[15] : (priv_q == QV_PRIV_S) ? i_dcsr[13] : (priv_q == QV_PRIV_U) ? i_dcsr[12] : 1'b0;"
+  },
+  {
+   "name": "privilege 2'b10 uses ebreakm",
+   "old": "wire ebreak_bit    = (priv_q == QV_PRIV_M) ? i_dcsr[15] : (priv_q == QV_PRIV_S) ? i_dcsr[13] : i_dcsr[12];",
+   "new": "wire ebreak_bit    = (priv_q == QV_PRIV_S) ? i_dcsr[13] : (priv_q == QV_PRIV_U) ? i_dcsr[12] : i_dcsr[15];"
+  },
+  {
+   "name": "EBREAK entry reports cause 2",
+   "old": "assign o_dbg_cause         = ebreak_entry ? 3'd1 :",
+   "new": "assign o_dbg_cause         = ebreak_entry ? 3'd2 :"
+  },
+  {
+   "name": "trigger entry reports cause 1",
+   "old": "ebreak_entry ? 3'd1 : trigger_entry ? 3'd2 :",
+   "new": "ebreak_entry ? 3'd1 : trigger_entry ? 3'd1 :"
+  },
+  {
+   "name": "EBREAK entry in Debug Mode too",
+   "old": "&& ebreak_bit\n                         && !i_dbg_in_debug && !irq && !halt_take;",
+   "new": "&& ebreak_bit\n                         && !irq && !halt_take;"
+  },
+  {
+   "name": "trigger entry in Debug Mode too",
+   "old": "i_head_ctrl.trig_debug && !i_dbg_in_debug && !irq",
+   "new": "i_head_ctrl.trig_debug && !irq"
+  },
+  {
+   "name": "EBREAK entry needs no complete head",
+   "old": "wire ebreak_entry  = head_ready && is_sys",
+   "new": "wire ebreak_entry  = i_head_valid && is_sys"
+  },
+  {
+   "name": "trigger entry needs no complete head",
+   "old": "wire trigger_entry = head_ready && i_head_ctrl.trig_debug",
+   "new": "wire trigger_entry = i_head_valid && i_head_ctrl.trig_debug"
+  },
+  {
+   "name": "EBREAK entry beats a halt request/step",
+   "old": "&& !i_dbg_in_debug && !irq && !halt_take;\n    wire trigger_entry",
+   "new": "&& !i_dbg_in_debug && !irq;\n    wire trigger_entry"
+  },
+  {
+   "name": "EBREAK entry beats an interrupt",
+   "old": "&& !i_dbg_in_debug && !irq && !halt_take;\n    wire trigger_entry",
+   "new": "&& !i_dbg_in_debug && !halt_take;\n    wire trigger_entry"
+  },
+  {
+   "name": "trigger entry beats a halt request/step",
+   "old": "&& !i_dbg_in_debug && !irq && !halt_take && !ebreak_entry;",
+   "new": "&& !i_dbg_in_debug && !irq && !ebreak_entry;"
+  },
+  {
+   "name": "trigger entry beats an interrupt",
+   "old": "&& !i_dbg_in_debug && !irq && !halt_take && !ebreak_entry;",
+   "new": "&& !i_dbg_in_debug && !halt_take && !ebreak_entry;"
+  },
+  {
+   "name": "a trigger entry is also reported when the EBREAK enters",
+   "old": "&& !i_dbg_in_debug && !irq && !halt_take && !ebreak_entry;",
+   "new": "&& !i_dbg_in_debug && !irq && !halt_take;"
+  },
+  {
+   "name": "the entering head still commits",
+   "old": "(!is_fence_i || i_fetch_idle) && !irq && !halt_take && !head_dbg_entry;",
+   "new": "(!is_fence_i || i_fetch_idle) && !irq && !halt_take;"
+  },
+  {
+   "name": "a head entry does not redirect",
+   "old": "assign o_redirect_valid = irq || halt_take || head_dbg_entry || i_dbg_resume",
+   "new": "assign o_redirect_valid = irq || halt_take || i_dbg_resume"
+  },
+  {
+   "name": "a head entry redirects to the next pc",
+   "old": "(halt_take || head_dbg_entry) ? arch_pc_q :",
+   "new": "halt_take ? arch_pc_q : head_dbg_entry ? actual_next_pc :"
+  },
+  {
+   "name": "an entering head counts as a retirement",
+   "old": "assign o_instr_retired = commit && !is_trap;",
+   "new": "assign o_instr_retired = (commit && !is_trap) || head_dbg_entry;"
+  },
+  {
+   "name": "an EBREAK word under a fetch fault enters",
+   "old": "wire ebreak_entry  = head_ready && is_sys && (i_head_ctrl.sys_op == QV_SYS_EBREAK) && ebreak_bit",
+   "new": "wire ebreak_entry  = head_ready && (i_head_ctrl.cls == QV_FU_SYS) && (i_head_ctrl.sys_op == QV_SYS_EBREAK) && ebreak_bit"
+  },
+  {
+   "name": "the trigger flag is not looked at (trig_exc used)",
+   "old": "head_ready && i_head_ctrl.trig_debug && !i_dbg_in_debug",
+   "new": "head_ready && i_head_ctrl.trig_exc && !i_dbg_in_debug"
+  },
+  {
+   "name": "an action-0 trigger is no trap",
+   "old": "wire is_trap = i_head_ctrl.xcpt || mem_xcpt || i_head_ctrl.trig_exc",
+   "new": "wire is_trap = i_head_ctrl.xcpt || mem_xcpt"
+  },
+  {
+   "name": "an action-0 trigger has no cause of its own",
+   "old": "        else if (i_head_ctrl.trig_exc)                 cause = 4'd3;        // an action-0 trigger: a breakpoint\n",
+   "new": ""
+  },
+  {
+   "name": "an action-0 trigger outranks a fault marker",
+   "old": "        if (i_head_ctrl.xcpt)                          cause = i_head_ctrl.cause;\n        else if (i_head_ctrl.trig_exc)                 cause = 4'd3;        // an action-0 trigger: a breakpoint\n",
+   "new": "        if (i_head_ctrl.trig_exc)                      cause = 4'd3;\n        else if (i_head_ctrl.xcpt)                     cause = i_head_ctrl.cause;\n"
+  },
+  {
+   "name": "an action-0 trigger's tval is 0 (errata E2)",
+   "old": "        else if (i_head_ctrl.trig_exc)\n            tval = i_head_entry.pc;                // errata E2: the trigger ranks with its cause, so its tval is the pc\n",
+   "new": ""
+  }
+ ]
+}

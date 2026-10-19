@@ -9,7 +9,13 @@
  *     re-armed on each resume for as long as the debugger leaves the bit on),
  *     and consumed by a halt/step entry only
  *   - dm_access_active (the Debug Module owns the register file and the CSR
- *     port) follows in_debug
+ *     port) follows in_debug, except while a Program Buffer run is active
+ *   - the Program Buffer: a start pulse while halted begins a run; one word
+ *     is injected at a time, only once the previous has retired and only when
+ *     the queue has room; the slot index counts the retirements and stops at
+ *     the run's last; a resume is ignored while a run is active, a start is
+ *     ignored when not halted or already running, and a resume wins a start
+ *     in the same cycle
  */
 module qv_dbg_tb;
     int   pass_count = 0;
@@ -22,19 +28,23 @@ module qv_dbg_tb;
     logic rst = 1'b1;
 
     logic entry = 1'b0, halt_entry = 1'b0, resume_req = 1'b0, dcsr_step = 1'b0;
-    logic in_debug, stepping, resume, dm_access;
+    logic start = 1'b0, pb_commit = 1'b0, pb_end = 1'b0, inject_ready = 1'b1;
+    logic in_debug, stepping, resume, dm_access, active, inject;
+    logic [3:0] idx;
 
     qv_dbg dut (
         .clk(clk), .rst(rst),
         .i_entry(entry), .i_halt_entry(halt_entry), .i_resume_req(resume_req), .i_dcsr_step(dcsr_step),
-        .o_in_debug(in_debug), .o_stepping(stepping), .o_resume(resume), .o_dm_access_active(dm_access)
+        .i_progbuf_start(start), .i_pb_commit(pb_commit), .i_pb_end(pb_end), .i_inject_ready(inject_ready),
+        .o_in_debug(in_debug), .o_stepping(stepping), .o_resume(resume), .o_dm_access_active(dm_access),
+        .o_progbuf_active(active), .o_progbuf_pc(idx), .o_inject_valid(inject)
     );
 
     function automatic logic [63:0] b(input logic x); return {63'b0, x}; endfunction
 
     task automatic cycle();
         @(posedge clk); #1;
-        entry = 1'b0; halt_entry = 1'b0; resume_req = 1'b0;
+        entry = 1'b0; halt_entry = 1'b0; resume_req = 1'b0; start = 1'b0; pb_commit = 1'b0; pb_end = 1'b0;
     endtask
 
     initial begin
@@ -114,6 +124,123 @@ module qv_dbg_tb;
         dcsr_step = 1'b0; resume_req = 1'b1;
         cycle();
         check("the next resume reloads stepping from dcsr.step", b(stepping), 64'd0);
+
+        // ---------------- Program Buffer ----------------
+        // a start while running is ignored
+        start = 1'b1;
+        cycle();
+        check("start while running: no run", b(active), 64'd0);
+        entry = 1'b1; halt_entry = 1'b1;
+        cycle();
+        check("halted for the Program Buffer", b(in_debug), 64'd1);
+        check("halted: no run yet", b(active), 64'd0);
+        check("halted, no run: the Debug Module owns the ports", b(dm_access), 64'd1);
+        #1;
+        check("halted, no run: nothing injected", b(inject), 64'd0);
+
+        // start: the run begins, slot 0, and the Debug Module no longer owns the ports
+        start = 1'b1;
+        cycle();
+        check("run: active", b(active), 64'd1);
+        check("run: still in Debug Mode", b(in_debug), 64'd1);
+        check("run: slot 0", {60'b0, idx}, 64'd0);
+        check("run: the Debug Module doesn't own the ports", b(dm_access), 64'd0);
+        #1;
+        check("run: the first word is injected", b(inject), 64'd1);
+        // one word in flight at a time
+        cycle();
+        #1;
+        check("word in flight: no second injection", b(inject), 64'd0);
+        cycle();
+        #1;
+        check("word in flight, a cycle later: still none", b(inject), 64'd0);
+        // it retires: the index moves on and the next word goes in
+        pb_commit = 1'b1;
+        cycle();
+        check("after the first retirement: slot 1", {60'b0, idx}, 64'd1);
+        #1;
+        check("after the first retirement: the next word is injected", b(inject), 64'd1);
+        // a full queue holds the next injection back
+        inject_ready = 1'b0;
+        #1;
+        check("no room in the queue: nothing injected", b(inject), 64'd0);
+        cycle();
+        check("no room in the queue: the run goes on", b(active), 64'd1);
+        inject_ready = 1'b1;
+        #1;
+        check("room again: injected", b(inject), 64'd1);
+        // an injected word retires: the index moves on
+        cycle();                                           // injected (in flight)
+        pb_commit = 1'b1;
+        cycle();
+        check("slot 2", {60'b0, idx}, 64'd2);
+        // a resume is ignored while the run is active
+        resume_req = 1'b1;
+        #1;
+        check("resume during a run: not accepted", b(resume), 64'd0);
+        cycle();
+        check("resume during a run: still in Debug Mode", b(in_debug), 64'd1);
+        check("resume during a run: still running", b(active), 64'd1);
+        // a second start while running changes nothing (the index is not restarted)
+        start = 1'b1;
+        cycle();
+        check("start during a run: the index is kept", {60'b0, idx}, 64'd2);
+        // the run's last instruction: the index stays, the run ends, nothing more is injected
+        #1;
+        check("the last word is in flight: nothing more is injected", b(inject), 64'd0);
+        pb_commit = 1'b1; pb_end = 1'b1;
+        cycle();
+        check("run over: inactive", b(active), 64'd0);
+        check("run over: the index stays on the last slot", {60'b0, idx}, 64'd2);
+        check("run over: back in Debug Mode proper", b(in_debug), 64'd1);
+        check("run over: the Debug Module owns the ports again", b(dm_access), 64'd1);
+        #1;
+        check("run over: nothing injected", b(inject), 64'd0);
+        cycle();
+        #1;
+        check("run over, a cycle later: nothing injected", b(inject), 64'd0);
+
+        // a new run restarts at slot 0
+        start = 1'b1;
+        cycle();
+        check("second run: slot 0 again", {60'b0, idx}, 64'd0);
+        check("second run: active", b(active), 64'd1);
+        // the index wraps (4 bits) if a run is 16 words long without an end
+        for (int i = 0; i < 16; i++) begin
+            cycle();                                       // inject
+            pb_commit = 1'b1;
+            cycle();
+        end
+        check("sixteen retirements without an end: the index wrapped", {60'b0, idx}, 64'd0);
+        pb_commit = 1'b1; pb_end = 1'b1;
+        cycle();
+        check("ended", b(active), 64'd0);
+
+        // a resume wins a start in the same cycle (the Debug Module can't produce both)
+        start = 1'b1; resume_req = 1'b1;
+        #1;
+        check("resume + start: the resume is accepted", b(resume), 64'd1);
+        cycle();
+        check("resume + start: running again", b(in_debug), 64'd0);
+        check("resume + start: no run", b(active), 64'd0);
+        // and a start right after a resume, while running, is ignored
+        start = 1'b1;
+        cycle();
+        check("start after the resume: ignored", b(active), 64'd0);
+
+        // reset in the middle of a run clears it
+        entry = 1'b1; halt_entry = 1'b1;
+        cycle();
+        start = 1'b1;
+        cycle();
+        check("run again: active", b(active), 64'd1);
+        rst = 1'b1;
+        cycle();
+        rst = 1'b0;
+        check("reset: no run", b(active), 64'd0);
+        check("reset: idx 0", {60'b0, idx}, 64'd0);
+        #1;
+        check("reset: nothing injected", b(inject), 64'd0);
 
         // an entry while already halted would be a design error, but a resume in the same cycle as an entry
         // can't happen either (entry needs running, resume needs halted): halted + resume only

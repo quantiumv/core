@@ -1,0 +1,105 @@
+{
+ "dut": "design/pipe/qv_dbg.sv",
+ "tb": "design/pipe/qv_dbg_tb.sv",
+ "files": [
+  "design/pipe/qv_dbg.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench"
+ ],
+ "cwd": "design",
+ "timeout": 900,
+ "mutants": [
+  {
+   "name": "a start is accepted while running (not halted)",
+   "old": "        else if (i_progbuf_start && in_debug_q && !active_q && !i_resume_req)   active_q <= 1'b1;",
+   "new": "        else if (i_progbuf_start && !active_q && !i_resume_req)   active_q <= 1'b1;"
+  },
+  {
+   "name": "a start during a run restarts the index",
+   "old": "        else if (i_progbuf_start && in_debug_q && !active_q && !i_resume_req)   idx_q <= 4'b0;",
+   "new": "        else if (i_progbuf_start && in_debug_q && !i_resume_req)   idx_q <= 4'b0;"
+  },
+  {
+   "name": "a start wins a same-cycle resume",
+   "old": "        else if (i_progbuf_start && in_debug_q && !active_q && !i_resume_req)   active_q <= 1'b1;",
+   "new": "        else if (i_progbuf_start && in_debug_q && !active_q)   active_q <= 1'b1;"
+  },
+  {
+   "name": "a resume is accepted during a run",
+   "old": "assign o_resume = i_resume_req && in_debug_q && !active_q;",
+   "new": "assign o_resume = i_resume_req && in_debug_q;"
+  },
+  {
+   "name": "the run never ends",
+   "old": "        else if (i_pb_end)                                                      active_q <= 1'b0;\n",
+   "new": ""
+  },
+  {
+   "name": "the index is not restarted by a start",
+   "old": "        else if (i_progbuf_start && in_debug_q && !active_q && !i_resume_req)   idx_q <= 4'b0;\n",
+   "new": ""
+  },
+  {
+   "name": "the index moves on at the run's last instruction too",
+   "old": "        else if (i_pb_commit && !i_pb_end)                                      idx_q <= idx_q + 4'b1;",
+   "new": "        else if (i_pb_commit)                                      idx_q <= idx_q + 4'b1;"
+  },
+  {
+   "name": "the index moves on at the injection, not the retirement",
+   "old": "        else if (i_pb_commit && !i_pb_end)                                      idx_q <= idx_q + 4'b1;",
+   "new": "        else if (o_inject_valid)                                      idx_q <= idx_q + 4'b1;"
+  },
+  {
+   "name": "the index is held",
+   "old": "        else if (i_pb_commit && !i_pb_end)                                      idx_q <= idx_q + 4'b1;\n",
+   "new": ""
+  },
+  {
+   "name": "injection ignores the word in flight",
+   "old": "assign o_inject_valid = active_q && !outstanding_q && i_inject_ready;",
+   "new": "assign o_inject_valid = active_q && i_inject_ready;"
+  },
+  {
+   "name": "injection ignores the queue",
+   "old": "assign o_inject_valid = active_q && !outstanding_q && i_inject_ready;",
+   "new": "assign o_inject_valid = active_q && !outstanding_q;"
+  },
+  {
+   "name": "injection outside a run",
+   "old": "assign o_inject_valid = active_q && !outstanding_q && i_inject_ready;",
+   "new": "assign o_inject_valid = in_debug_q && !outstanding_q && i_inject_ready;"
+  },
+  {
+   "name": "a retirement does not free the injector",
+   "old": "        else if (i_pb_commit)     outstanding_q <= 1'b0;\n",
+   "new": ""
+  },
+  {
+   "name": "an injection does not occupy the injector",
+   "old": "        else if (o_inject_valid)  outstanding_q <= 1'b1;\n",
+   "new": ""
+  },
+  {
+   "name": "the Debug Module owns the ports during a run",
+   "old": "assign o_dm_access_active = in_debug_q && !active_q;",
+   "new": "assign o_dm_access_active = in_debug_q;"
+  },
+  {
+   "name": "o_progbuf_active stuck low",
+   "old": "assign o_progbuf_active   = active_q;",
+   "new": "assign o_progbuf_active   = 1'b0;"
+  },
+  {
+   "name": "o_progbuf_pc stuck at 0",
+   "old": "assign o_progbuf_pc       = idx_q;",
+   "new": "assign o_progbuf_pc       = 4'b0;"
+  }
+ ]
+}

@@ -38,14 +38,17 @@ module qv_decode_tb;
     logic      flush = 1'b0;
     logic [1:0] priv = 2'b11;         // the privilege state the illegal-instruction rules read
     logic       tsr = 1'b0, tvm = 1'b0;
-    logic       in_debug = 1'b0;      // Debug Mode: the debug and trigger CSRs exist
+    logic       in_debug = 1'b0;      // Debug Mode: the debug and trigger CSRs exist, the triggers do not fire
+    logic [63:0] tdata1_0 = '0, tdata2_0 = '0, tdata1_1 = '0, tdata2_1 = '0;   // the two execute triggers
+    logic       pb_active = 1'b0;     // a Program Buffer run: its instructions are not PMP-checked
     // PMP state (reset: region 0 NAPOT over everything, rwx) and the pc the next instruction is fed at
     logic [63:0] pmpcfg0 = 64'h1F, pmpaddr0 = 64'h003F_FFFF_FFFF_FFFF, pmpaddr1 = '0, pmpaddr2 = '0, pmpaddr3 = '0;
     logic [63:0] feed_pc = 64'h1000;
 
     qv_decode dut (
         .clk(clk), .rst(rst), .i_flush(flush),
-        .i_priv(priv), .i_tsr(tsr), .i_tvm(tvm), .i_in_debug(in_debug),
+        .i_priv(priv), .i_tsr(tsr), .i_tvm(tvm), .i_in_debug(in_debug), .i_pb_active(pb_active),
+        .i_tdata1_0(tdata1_0), .i_tdata2_0(tdata2_0), .i_tdata1_1(tdata1_1), .i_tdata2_1(tdata2_1),
         .i_pmpcfg0(pmpcfg0), .i_pmpaddr0(pmpaddr0), .i_pmpaddr1(pmpaddr1),
         .i_pmpaddr2(pmpaddr2), .i_pmpaddr3(pmpaddr3),
         .i_iq_valid(iq_valid), .i_iq_data(iq_data), .o_iq_pop(iq_pop),
@@ -233,6 +236,18 @@ module qv_decode_tb;
         check({name, ": fault"}, {63'b0, uop.xcpt}, 64'd1);
         check({name, ": cause"}, {60'b0, uop.xcpt_cause}, {60'b0, exp_cause});
         check({name, ": no rd write"}, {63'b0, uop.rd_wen}, 64'd0);
+    endtask
+
+    // feed one instruction at feed_pc and check its trigger bits, the unit it is sent to and its rd write
+    task automatic expect_trig(input string name, input logic [31:0] instr, input logic exp_dbg, input logic exp_exc,
+                               input qv_fu_e exp_fu, input logic exp_rd_wen,
+                               input logic xcpt_in = 1'b0, input logic [3:0] cause_in = 4'd0, input logic rvc = 1'b0);
+        feed(instr, xcpt_in, cause_in, rvc);
+        check({name, ": valid"}, {63'b0, valid}, 64'd1);
+        check({name, ": trig_debug"}, {63'b0, uop.trig_debug}, {63'b0, exp_dbg});
+        check({name, ": trig_exc"}, {63'b0, uop.trig_exc}, {63'b0, exp_exc});
+        check({name, ": unit"}, {61'b0, uop.fu}, {61'b0, exp_fu});
+        check({name, ": rd_wen"}, {63'b0, uop.rd_wen}, {63'b0, exp_rd_wen});
     endtask
 
     localparam logic [6:0] OP = `OPC_OP, OPI = `OPC_OP_IMM, OP32 = `OPC_OP_32, OPI32 = `OPC_OP_IMM_32;
@@ -735,6 +750,10 @@ module qv_decode_tb;
         feed_pc = 64'h1006; feed(encode_i(1, 7, 3'b000, 5, OPI));
         check("pmp: crossing instruction, the second span runs past the top", {63'b0, uop.xcpt}, 64'd1);
         check("pmp: ... cause 1", {60'b0, uop.xcpt_cause}, 64'd1);
+        pb_active = 1'b1; in_debug = 1'b1;                                           // the same crossing instruction, in a Program Buffer run
+        feed_pc = 64'h1006; feed(encode_i(1, 7, 3'b000, 5, OPI));
+        check("pmp: crossing instruction, second span denied, but in a Program Buffer run: no fault", {63'b0, uop.xcpt}, 64'd0);
+        pb_active = 1'b0; in_debug = 1'b0;
         feed_pc = 64'h1006; feed({16'b0, 16'h0001}, 1'b0, 4'd0, 1'b1);               // 16-bit at the same pc: no second dword
         check("pmp: 16-bit instruction at pc[2:1] == 3 needs no second span", {63'b0, uop.xcpt}, 64'd0);
         feed_pc = 64'h1002; feed(encode_i(1, 7, 3'b000, 5, OPI));                    // pc[2:1] == 1: no crossing
@@ -772,6 +791,15 @@ module qv_decode_tb;
         check("pmp: no region matches, S denied", {63'b0, uop.xcpt}, 64'd1);
         priv = 2'b11; feed(encode_i(1, 7, 3'b000, 5, OPI));
         check("pmp: no region matches, M allowed", {63'b0, uop.xcpt}, 64'd0);
+        // a Program Buffer run is trusted: the same denied fetch is no fault
+        pmpcfg0 = 64'h0; priv = 2'b01; pb_active = 1'b1; in_debug = 1'b1;
+        feed(encode_i(1, 7, 3'b000, 5, OPI));
+        check("pmp: S denied everywhere, but in a Program Buffer run: no fault", {63'b0, uop.xcpt}, 64'd0);
+        check("pmp: ... the instruction is an ordinary ALU one", {63'b0, uop.rd_wen}, 64'd1);
+        pb_active = 1'b0; in_debug = 1'b0;
+        feed(encode_i(1, 7, 3'b000, 5, OPI));
+        check("pmp: the same fetch outside the run is denied again", {63'b0, uop.xcpt}, 64'd1);
+        priv = 2'b11;
         // a 32-bit instruction at pc[2:1] == 2 (pc[2] set, pc[1] clear) does not cross: one span only
         pmpcfg0 = 64'h0D; pmpaddr0 = 64'h1010 >> 2; priv = 2'b01;
         feed_pc = 64'h1004; feed(encode_i(1, 7, 3'b000, 5, OPI));
@@ -799,6 +827,135 @@ module qv_decode_tb;
         check("pmp: below region 1's lower bound", {63'b0, uop.xcpt}, 64'd1);
         // back to the reset state for the rest
         pmpcfg0 = 64'h1F; pmpaddr0 = 64'h003F_FFFF_FFFF_FFFF; pmpaddr1 = '0; pmpaddr2 = '0; feed_pc = 64'h1000; priv = 2'b11;
+
+        // ---------------- execute triggers ----------------
+        // tdata1: [15:12] action (1 Debug Mode entry, 0 breakpoint exception), [6] M, [4] S, [3] U, [2] execute
+        priv = 2'b11; in_debug = 1'b0; feed_pc = 64'h2000;
+        tdata2_0 = 64'h2000;
+        tdata1_0 = (64'd1 << 12) | (64'd1 << 6) | (64'd1 << 2);
+        expect_trig("action 1 on an addi", encode_i(5, 6, 3'b000, 7, OPI), 1'b1, 1'b0, QV_FU_ALU, 1'b0);
+        check("action 1 on an addi: still has its operands", {59'b0, uop.rs1}, 64'd6);
+        check("action 1 on an addi: rs1_used kept", {63'b0, uop.rs1_used}, 64'd1);
+        check("action 1 on an addi: no fault marker", {63'b0, uop.xcpt}, 64'd0);
+        check("action 1 on an addi: rd kept for RVFI", {59'b0, uop.rd}, 64'd7);
+        // action 0: a breakpoint exception, not a debug entry
+        tdata1_0 = (64'd0 << 12) | (64'd1 << 6) | (64'd1 << 2);
+        expect_trig("action 0 on an addi", encode_i(5, 6, 3'b000, 7, OPI), 1'b0, 1'b1, QV_FU_ALU, 1'b0);
+        // no match: the execute bit clear, another pc, the high bits of the pc, no enable for the privilege
+        tdata1_0 = (64'd1 << 12) | (64'd1 << 6);
+        expect_trig("execute bit clear", encode_i(5, 6, 3'b000, 7, OPI), 1'b0, 1'b0, QV_FU_ALU, 1'b1);
+        tdata1_0 = (64'd1 << 12) | (64'd1 << 6) | (64'd1 << 2);
+        tdata2_0 = 64'h2004;
+        expect_trig("another pc", encode_i(5, 6, 3'b000, 7, OPI), 1'b0, 1'b0, QV_FU_ALU, 1'b1);
+        tdata2_0 = 64'h1_0000_2000;
+        expect_trig("pc differs in the high bits", encode_i(5, 6, 3'b000, 7, OPI), 1'b0, 1'b0, QV_FU_ALU, 1'b1);
+        tdata2_0 = 64'h2000;
+        // the privilege enables: M bit 6, S bit 4, U bit 3, and privilege 2'b10 takes the U bit
+        tdata1_0 = (64'd1 << 12) | (64'd1 << 4) | (64'd1 << 3) | (64'd1 << 2);      // S and U, not M
+        priv = 2'b11;
+        expect_trig("M, only S/U enabled", encode_i(5, 6, 3'b000, 7, OPI), 1'b0, 1'b0, QV_FU_ALU, 1'b1);
+        priv = 2'b01;
+        expect_trig("S, S enabled", encode_i(5, 6, 3'b000, 7, OPI), 1'b1, 1'b0, QV_FU_ALU, 1'b0);
+        priv = 2'b00;
+        expect_trig("U, U enabled", encode_i(5, 6, 3'b000, 7, OPI), 1'b1, 1'b0, QV_FU_ALU, 1'b0);
+        priv = 2'b10;
+        expect_trig("privilege 2 follows the U bit", encode_i(5, 6, 3'b000, 7, OPI), 1'b1, 1'b0, QV_FU_ALU, 1'b0);
+        tdata1_0 = (64'd1 << 12) | (64'd1 << 6) | (64'd1 << 4) | (64'd1 << 2);      // M and S, not U
+        priv = 2'b00;
+        expect_trig("U, only M/S enabled", encode_i(5, 6, 3'b000, 7, OPI), 1'b0, 1'b0, QV_FU_ALU, 1'b1);
+        priv = 2'b10;
+        expect_trig("privilege 2, U bit clear", encode_i(5, 6, 3'b000, 7, OPI), 1'b0, 1'b0, QV_FU_ALU, 1'b1);
+        priv = 2'b01;
+        tdata1_0 = (64'd1 << 12) | (64'd1 << 6) | (64'd1 << 3) | (64'd1 << 2);      // M and U, not S
+        expect_trig("S, S bit clear", encode_i(5, 6, 3'b000, 7, OPI), 1'b0, 1'b0, QV_FU_ALU, 1'b1);
+        priv = 2'b11;
+        // never in Debug Mode
+        tdata1_0 = (64'd1 << 12) | (64'd1 << 6) | (64'd1 << 2);
+        in_debug = 1'b1;
+        expect_trig("action 1 in Debug Mode", encode_i(5, 6, 3'b000, 7, OPI), 1'b0, 1'b0, QV_FU_ALU, 1'b1);
+        tdata1_0 = (64'd0 << 12) | (64'd1 << 6) | (64'd1 << 2);
+        expect_trig("action 0 in Debug Mode", encode_i(5, 6, 3'b000, 7, OPI), 1'b0, 1'b0, QV_FU_ALU, 1'b1);
+        in_debug = 1'b0;
+        // slot 1, and a debug match beats an exception one wherever they sit
+        tdata1_0 = '0; tdata2_0 = '0;
+        tdata2_1 = 64'h2000; tdata1_1 = (64'd1 << 12) | (64'd1 << 6) | (64'd1 << 2);
+        expect_trig("slot 1, action 1", encode_i(5, 6, 3'b000, 7, OPI), 1'b1, 1'b0, QV_FU_ALU, 1'b0);
+        tdata1_1 = (64'd0 << 12) | (64'd1 << 6) | (64'd1 << 2);
+        expect_trig("slot 1, action 0", encode_i(5, 6, 3'b000, 7, OPI), 1'b0, 1'b1, QV_FU_ALU, 1'b0);
+        tdata2_0 = 64'h2000; tdata1_0 = (64'd0 << 12) | (64'd1 << 6) | (64'd1 << 2);
+        tdata1_1 = (64'd1 << 12) | (64'd1 << 6) | (64'd1 << 2);
+        expect_trig("slot 0 action 0 + slot 1 action 1: the debug entry wins", encode_i(5, 6, 3'b000, 7, OPI), 1'b1, 1'b0, QV_FU_ALU, 1'b0);
+        tdata1_0 = (64'd1 << 12) | (64'd1 << 6) | (64'd1 << 2);
+        tdata1_1 = (64'd0 << 12) | (64'd1 << 6) | (64'd1 << 2);
+        expect_trig("slot 0 action 1 + slot 1 action 0: the debug entry wins", encode_i(5, 6, 3'b000, 7, OPI), 1'b1, 1'b0, QV_FU_ALU, 1'b0);
+        tdata1_1 = (64'd1 << 12) | (64'd1 << 6);                                    // slot 1 with the execute bit clear
+        tdata1_0 = '0; tdata2_0 = '0; tdata2_1 = 64'h2000;
+        expect_trig("slot 1, execute bit clear", encode_i(5, 6, 3'b000, 7, OPI), 1'b0, 1'b0, QV_FU_ALU, 1'b1);
+        tdata1_1 = '0; tdata2_1 = '0;
+
+        // fault markers: an action-1 match goes over them, an action-0 one gives way
+        tdata2_0 = 64'h2000;
+        tdata1_0 = (64'd1 << 12) | (64'd1 << 6) | (64'd1 << 2);
+        expect_trig("action 1 over a fetch fault", encode_i(5, 6, 3'b000, 7, OPI), 1'b1, 1'b0, QV_FU_ALU, 1'b0, 1'b1, 4'd1);
+        check("action 1 over a fetch fault: the marker stays", {63'b0, uop.xcpt}, 64'd1);
+        check("action 1 over a fetch fault: the cause stays", {60'b0, uop.xcpt_cause}, 64'd1);
+        expect_trig("action 1 over an illegal instruction", 32'h0000_0000, 1'b1, 1'b0, QV_FU_ALU, 1'b0);
+        check("action 1 over an illegal instruction: the marker stays", {60'b0, uop.xcpt_cause}, 64'd2);
+        tdata1_0 = (64'd0 << 12) | (64'd1 << 6) | (64'd1 << 2);
+        expect_trig("action 0 under a fetch fault", encode_i(5, 6, 3'b000, 7, OPI), 1'b0, 1'b0, QV_FU_ALU, 1'b0, 1'b1, 4'd1);
+        check("action 0 under a fetch fault: the marker stays", {60'b0, uop.xcpt_cause}, 64'd1);
+        expect_trig("action 0 under an illegal instruction", 32'h0000_0000, 1'b0, 1'b0, QV_FU_ALU, 1'b0);
+        check("action 0 under an illegal instruction: the marker stays", {60'b0, uop.xcpt_cause}, 64'd2);
+
+        // a compressed instruction matches on its own pc
+        tdata1_0 = (64'd1 << 12) | (64'd1 << 6) | (64'd1 << 2);
+        feed_pc = 64'h2000; tdata2_0 = 64'h2002;
+        expect_trig("compressed at the other halfword: no match", {16'b0, encode_c_addi(1, 8)}, 1'b0, 1'b0, QV_FU_ALU, 1'b1,
+                    1'b0, 4'd0, 1'b1);
+        feed_pc = 64'h2002;
+        expect_trig("compressed at the matching halfword", {16'b0, encode_c_addi(1, 8)}, 1'b1, 1'b0, QV_FU_ALU, 1'b0,
+                    1'b0, 4'd0, 1'b1);
+        feed_pc = 64'h2000; tdata2_0 = 64'h2000;
+
+        // every kind of instruction is neutralised: it must reach commit as an ALU no-op that writes nothing, with
+        // its operands and its memory/atomic flags (the LR/SC reservation) untouched
+        expect_trig("lw", encode_i(8, 6, 3'b010, 7, `OPC_LOAD), 1'b1, 1'b0, QV_FU_ALU, 1'b0);
+        check("lw: still a load", {63'b0, uop.is_load}, 64'd1);
+        expect_trig("sd", encode_s(16, 7, 6, 3'b011, `OPC_STORE), 1'b1, 1'b0, QV_FU_ALU, 1'b0);
+        check("sd: still a store", {63'b0, uop.is_store}, 64'd1);
+        check("sd: rs2 kept", {63'b0, uop.rs2_used}, 64'd1);
+        expect_trig("sc.d", encode_amo(5'b00011, 1'b0, 1'b0, 5'd8, 5'd7, `FUNCT3_AMO_D, 5'd5, `OPC_AMO), 1'b1, 1'b0, QV_FU_ALU, 1'b0);
+        check("sc.d: still an atomic", {63'b0, uop.is_atomic}, 64'd1);
+        expect_trig("divu", encode_r(F7_M, 8, 7, 3'b101, 5, OP), 1'b1, 1'b0, QV_FU_ALU, 1'b0);
+        expect_trig("csrrw", encode_csr(12'h340, 6, 3'b001, 5, `OPC_SYSTEM), 1'b1, 1'b0, QV_FU_ALU, 1'b0);
+        expect_trig("beq", encode_b(16, 7, 6, 3'b000, `OPC_BRANCH), 1'b1, 1'b0, QV_FU_ALU, 1'b0);
+        expect_trig("jal", encode_j(64, 1, `OPC_JAL), 1'b1, 1'b0, QV_FU_ALU, 1'b0);
+        expect_trig("jalr", encode_i(0, 6, 3'b000, 1, `OPC_JALR), 1'b1, 1'b0, QV_FU_ALU, 1'b0);
+        expect_trig("mret", `INSTR_HEX_MRET, 1'b1, 1'b0, QV_FU_ALU, 1'b0);
+        expect_trig("ecall", 32'h0000_0073, 1'b1, 1'b0, QV_FU_ALU, 1'b0);
+        expect_trig("fence.i", 32'h0000_100F, 1'b1, 1'b0, QV_FU_ALU, 1'b0);
+        // the same under an action-0 trigger
+        tdata1_0 = (64'd0 << 12) | (64'd1 << 6) | (64'd1 << 2);
+        expect_trig("lw, action 0", encode_i(8, 6, 3'b010, 7, `OPC_LOAD), 1'b0, 1'b1, QV_FU_ALU, 1'b0);
+        expect_trig("amoadd.w, action 0", encode_amo(5'b00000, 1'b0, 1'b0, 5'd8, 5'd7, `FUNCT3_AMO_W, 5'd5, `OPC_AMO), 1'b0, 1'b1, QV_FU_ALU, 1'b0);
+        check("amoadd.w, action 0: still an atomic", {63'b0, uop.is_atomic}, 64'd1);
+        expect_trig("sret, action 0", 32'h1020_0073, 1'b0, 1'b1, QV_FU_ALU, 1'b0);
+
+        // an EBREAK keeps its identity (with dcsr.ebreak* it enters Debug Mode ahead of the trigger)
+        tdata1_0 = (64'd1 << 12) | (64'd1 << 6) | (64'd1 << 2);
+        expect_trig("ebreak, action 1", 32'h0010_0073, 1'b1, 1'b0, QV_FU_SYS, 1'b0);
+        check("ebreak, action 1: sys_op EBREAK", {61'b0, uop.sys_op}, {61'b0, QV_SYS_EBREAK});
+        tdata1_0 = (64'd0 << 12) | (64'd1 << 6) | (64'd1 << 2);
+        expect_trig("ebreak, action 0", 32'h0010_0073, 1'b0, 1'b1, QV_FU_SYS, 1'b0);
+        check("ebreak, action 0: sys_op EBREAK", {61'b0, uop.sys_op}, {61'b0, QV_SYS_EBREAK});
+        // ... and a compressed EBREAK
+        feed_pc = 64'h2002; tdata2_0 = 64'h2002;
+        expect_trig("c.ebreak, action 0", 32'h0000_9002, 1'b0, 1'b1, QV_FU_SYS, 1'b0, 1'b0, 4'd0, 1'b1);
+        feed_pc = 64'h1000;
+        tdata1_0 = '0; tdata2_0 = '0; priv = 2'b11; in_debug = 1'b0;
+
+        // an instruction that is not near any trigger is untouched
+        expect_trig("no trigger armed", encode_i(5, 6, 3'b000, 7, OPI), 1'b0, 1'b0, QV_FU_ALU, 1'b1);
 
         // ---------------- pipeline register behavior ----------------
         // held while issue isn't ready; IQ not popped meanwhile

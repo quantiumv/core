@@ -1,0 +1,150 @@
+{
+ "dut": "design/pipe/qv_decode.sv",
+ "tb": "design/pipe/qv_decode_tb.sv",
+ "files": [
+  "design/decoder.sv",
+  "design/alu.sv",
+  "design/c_expand.sv",
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_pmp.sv",
+  "design/pipe/qv_decode.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench"
+ ],
+ "cwd": "design",
+ "timeout": 600,
+ "mutants": [
+  {
+   "name": "slot 0 priv enable: M uses bit 4",
+   "old": "wire t0_priv_en = (i_priv == QV_PRIV_M) ? i_tdata1_0[6] : (i_priv == QV_PRIV_S) ? i_tdata1_0[4] : i_tdata1_0[3];",
+   "new": "wire t0_priv_en = (i_priv == QV_PRIV_M) ? i_tdata1_0[4] : (i_priv == QV_PRIV_S) ? i_tdata1_0[4] : i_tdata1_0[3];"
+  },
+  {
+   "name": "slot 0 priv enable: S uses bit 6",
+   "old": "wire t0_priv_en = (i_priv == QV_PRIV_M) ? i_tdata1_0[6] : (i_priv == QV_PRIV_S) ? i_tdata1_0[4] : i_tdata1_0[3];",
+   "new": "wire t0_priv_en = (i_priv == QV_PRIV_M) ? i_tdata1_0[6] : (i_priv == QV_PRIV_S) ? i_tdata1_0[6] : i_tdata1_0[3];"
+  },
+  {
+   "name": "slot 0 priv enable: U uses bit 4",
+   "old": "wire t0_priv_en = (i_priv == QV_PRIV_M) ? i_tdata1_0[6] : (i_priv == QV_PRIV_S) ? i_tdata1_0[4] : i_tdata1_0[3];",
+   "new": "wire t0_priv_en = (i_priv == QV_PRIV_M) ? i_tdata1_0[6] : (i_priv == QV_PRIV_S) ? i_tdata1_0[4] : i_tdata1_0[4];"
+  },
+  {
+   "name": "slot 0 priv enable: privilege 2 never matches",
+   "old": "wire t0_priv_en = (i_priv == QV_PRIV_M) ? i_tdata1_0[6] : (i_priv == QV_PRIV_S) ? i_tdata1_0[4] : i_tdata1_0[3];",
+   "new": "wire t0_priv_en = (i_priv == QV_PRIV_M) ? i_tdata1_0[6] : (i_priv == QV_PRIV_S) ? i_tdata1_0[4] : (i_priv == QV_PRIV_U) ? i_tdata1_0[3] : 1'b0;"
+  },
+  {
+   "name": "slot 1 priv enable: M uses bit 4",
+   "old": "wire t1_priv_en = (i_priv == QV_PRIV_M) ? i_tdata1_1[6] :",
+   "new": "wire t1_priv_en = (i_priv == QV_PRIV_M) ? i_tdata1_1[4] :"
+  },
+  {
+   "name": "the execute bit is ignored (slot 0)",
+   "old": "wire t0_match   = i_tdata1_0[2] && t0_priv_en",
+   "new": "wire t0_match   = t0_priv_en"
+  },
+  {
+   "name": "the execute bit is ignored (slot 1)",
+   "old": "wire t1_match   = i_tdata1_1[2] && t1_priv_en",
+   "new": "wire t1_match   = t1_priv_en"
+  },
+  {
+   "name": "only the low 32 pc bits are compared",
+   "old": "(i_iq_data.pc == i_tdata2_0);",
+   "new": "(i_iq_data.pc[31:0] == i_tdata2_0[31:0]);"
+  },
+  {
+   "name": "slot 1 never matches",
+   "old": "wire t1_match   = i_tdata1_1[2] && t1_priv_en && (i_iq_data.pc == i_tdata2_1);",
+   "new": "wire t1_match   = 1'b0;"
+  },
+  {
+   "name": "slot 0 never matches",
+   "old": "wire t0_match   = i_tdata1_0[2] && t0_priv_en && (i_iq_data.pc == i_tdata2_0);",
+   "new": "wire t0_match   = 1'b0;"
+  },
+  {
+   "name": "actions swapped: action 0 enters Debug Mode",
+   "old": "wire trig_debug_c = !i_in_debug && ((t0_match && i_tdata1_0[15:12] == 4'd1) || (t1_match && i_tdata1_1[15:12] == 4'd1));",
+   "new": "wire trig_debug_c = !i_in_debug && ((t0_match && i_tdata1_0[15:12] == 4'd0) || (t1_match && i_tdata1_1[15:12] == 4'd0));"
+  },
+  {
+   "name": "slot 1 action ignored: always a debug entry",
+   "old": "wire trig_debug_c = !i_in_debug && ((t0_match && i_tdata1_0[15:12] == 4'd1) || (t1_match && i_tdata1_1[15:12] == 4'd1));",
+   "new": "wire trig_debug_c = !i_in_debug && ((t0_match && i_tdata1_0[15:12] == 4'd1) || (t1_match));"
+  },
+  {
+   "name": "triggers fire in Debug Mode (debug entry)",
+   "old": "wire trig_debug_c = !i_in_debug && ((t0_match && i_tdata1_0[15:12] == 4'd1) || (t1_match && i_tdata1_1[15:12] == 4'd1));",
+   "new": "wire trig_debug_c = ((t0_match && i_tdata1_0[15:12] == 4'd1) || (t1_match && i_tdata1_1[15:12] == 4'd1));"
+  },
+  {
+   "name": "triggers fire in Debug Mode (exception)",
+   "old": "wire trig_exc_c   = !i_in_debug && !trig_debug_c",
+   "new": "wire trig_exc_c   = !trig_debug_c"
+  },
+  {
+   "name": "a debug match does not beat an exception one",
+   "old": "wire trig_exc_c   = !i_in_debug && !trig_debug_c",
+   "new": "wire trig_exc_c   = !i_in_debug"
+  },
+  {
+   "name": "an action-0 match overrides a fault marker",
+   "old": "uop_d.trig_exc   = trig_exc_c && !uop_d.xcpt;",
+   "new": "uop_d.trig_exc   = trig_exc_c;"
+  },
+  {
+   "name": "an action-1 match gives way to a fault marker",
+   "old": "uop_d.trig_debug = trig_debug_c;",
+   "new": "uop_d.trig_debug = trig_debug_c && !uop_d.xcpt;"
+  },
+  {
+   "name": "a matched uop is not neutralised (unit)",
+   "old": "            uop_d.fu     = QV_FU_ALU;\n            uop_d.rd_wen = 1'b0;\n        end\n    end",
+   "new": "            uop_d.rd_wen = 1'b0;\n        end\n    end"
+  },
+  {
+   "name": "a matched uop still writes rd",
+   "old": "            uop_d.fu     = QV_FU_ALU;\n            uop_d.rd_wen = 1'b0;\n        end\n    end",
+   "new": "            uop_d.fu     = QV_FU_ALU;\n        end\n    end"
+  },
+  {
+   "name": "an EBREAK loses its identity",
+   "old": "if ((uop_d.trig_debug || uop_d.trig_exc) && !(uop_d.fu == QV_FU_SYS && sys_op == QV_SYS_EBREAK)) begin",
+   "new": "if ((uop_d.trig_debug || uop_d.trig_exc)) begin"
+  },
+  {
+   "name": "only action-1 matches are neutralised",
+   "old": "if ((uop_d.trig_debug || uop_d.trig_exc) && !(uop_d.fu",
+   "new": "if ((uop_d.trig_debug) && !(uop_d.fu"
+  },
+  {
+   "name": "only action-0 matches are neutralised",
+   "old": "if ((uop_d.trig_debug || uop_d.trig_exc) && !(uop_d.fu",
+   "new": "if ((uop_d.trig_exc) && !(uop_d.fu"
+  },
+  {
+   "name": "neutralising also drops the operands",
+   "old": "            uop_d.fu     = QV_FU_ALU;\n            uop_d.rd_wen = 1'b0;\n        end\n    end",
+   "new": "            uop_d.fu     = QV_FU_ALU;\n            uop_d.rd_wen = 1'b0;\n            uop_d.rs1_used = 1'b0;\n        end\n    end"
+  },
+  {
+   "name": "neutralising also drops the store flag (reservation)",
+   "old": "            uop_d.fu     = QV_FU_ALU;\n            uop_d.rd_wen = 1'b0;\n        end\n    end",
+   "new": "            uop_d.fu     = QV_FU_ALU;\n            uop_d.rd_wen = 1'b0;\n            uop_d.is_store = 1'b0;\n        end\n    end"
+  },
+  {
+   "name": "neutralising also drops the atomic flag (reservation)",
+   "old": "            uop_d.fu     = QV_FU_ALU;\n            uop_d.rd_wen = 1'b0;\n        end\n    end",
+   "new": "            uop_d.fu     = QV_FU_ALU;\n            uop_d.rd_wen = 1'b0;\n            uop_d.is_atomic = 1'b0;\n        end\n    end"
+  }
+ ]
+}

@@ -1,0 +1,40 @@
+{
+ "dut": "design/pipe/qv_decode.sv",
+ "tb": "design/pipe/qv_decode_tb.sv",
+ "files": [
+  "design/decoder.sv",
+  "design/alu.sv",
+  "design/c_expand.sv",
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_pmp.sv",
+  "design/pipe/qv_decode.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench"
+ ],
+ "cwd": "design",
+ "timeout": 900,
+ "mutants": [
+  {
+   "name": "a Program Buffer run is PMP-checked",
+   "old": "    wire pmp_fault = !i_pb_active && (!exec_ok_lo || (fetch_hi_taken && !exec_ok_hi));",
+   "new": "    wire pmp_fault = !exec_ok_lo || (fetch_hi_taken && !exec_ok_hi);"
+  },
+  {
+   "name": "the PMP is off for everyone",
+   "old": "    wire pmp_fault = !i_pb_active && (!exec_ok_lo || (fetch_hi_taken && !exec_ok_hi));",
+   "new": "    wire pmp_fault = 1'b0;"
+  },
+  {
+   "name": "only the first span is exempt in a run",
+   "old": "    wire pmp_fault = !i_pb_active && (!exec_ok_lo || (fetch_hi_taken && !exec_ok_hi));",
+   "new": "    wire pmp_fault = (!i_pb_active && !exec_ok_lo) || (fetch_hi_taken && !exec_ok_hi);"
+  }
+ ]
+}

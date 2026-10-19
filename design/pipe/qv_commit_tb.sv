@@ -35,6 +35,22 @@
  * request, 4 for a step, which wins when both hold), keeps the architectural
  * pc (it becomes dpc) and is no retirement. Nothing is sampled in Debug Mode
  * or right after a resume, and a resume restarts at the live dpc.
+ *
+ * At the head: an EBREAK with the dcsr ebreak bit of the current privilege
+ * (M: 15, S: 13, U and privilege 2'b10: 12) enters Debug Mode with cause 1,
+ * a head decode matched against an action-1 trigger does with cause 2 (cause 1
+ * when both apply); neither is a retirement, and neither happens in Debug
+ * Mode, in a sample cycle (the halt request or interrupt goes first) or
+ * before the head is complete. An action-0 match is a breakpoint exception
+ * (cause 3, tval = pc) behind a fault marker; a store, SC or AMO under it
+ * still clears the LR/SC reservation.
+ *
+ * A Program Buffer run retires its instructions like any other, but takes no
+ * trap: an exception ends the run as an abort (nothing written, not counted,
+ * the privilege and the trap CSRs untouched, execution simply goes on at the
+ * next pc), an EBREAK ends it as done (and is counted), MRET/SRET have no
+ * effect, and nothing is counted while dcsr.stopcount is set. The Debug
+ * Module is told in the cycle the run's last instruction retires.
  */
 module qv_commit_tb;
     import qv_pkg::*;
@@ -78,8 +94,9 @@ module qv_commit_tb;
     logic                    sret_taken, trap_to_s;
     logic [1:0]              priv;
     logic                    dbg_halt = 1'b0, dbg_step = 1'b0, dbg_in = 1'b0, dbg_resume = 1'b0;
-    logic [63:0]             dpc = '0;
-    logic                    dbg_entry, dbg_halt_entry;
+    logic [63:0]             dpc = '0, dcsr = '0;
+    logic                    dbg_entry, dbg_halt_entry, dbg_ebreak_entry, dbg_trigger_entry;
+    logic                    pb_act = 1'b0, pb_commit, pb_done, pb_abort;
     logic [2:0]              dbg_cause;
 
     qv_commit #(.RESET_PC(64'h1000)) dut (
@@ -93,7 +110,9 @@ module qv_commit_tb;
         .i_mip(mip), .i_mie(mie), .i_mideleg(mideleg),
         .i_mstatus_mie(mstatus_mie), .i_mstatus_sie(mstatus_sie), .o_irq_taken(irq_taken),
         .i_dbg_halt_req(dbg_halt), .i_dbg_stepping(dbg_step), .i_dbg_in_debug(dbg_in), .i_dbg_resume(dbg_resume),
-        .i_dpc(dpc), .o_dbg_entry(dbg_entry), .o_dbg_cause(dbg_cause), .o_dbg_halt_entry(dbg_halt_entry),
+        .i_dpc(dpc), .i_dcsr(dcsr), .o_dbg_entry(dbg_entry), .o_dbg_cause(dbg_cause), .o_dbg_halt_entry(dbg_halt_entry),
+        .o_dbg_ebreak_entry(dbg_ebreak_entry), .o_dbg_trigger_entry(dbg_trigger_entry),
+        .i_pb_active(pb_act), .o_pb_commit(pb_commit), .o_pb_done(pb_done), .o_pb_abort(pb_abort),
         .o_regfile_we(rf_we), .o_regfile_sel(rf_sel), .o_regfile_data(rf_data),
         .o_commit_valid(c_valid), .o_commit_rd(c_rd), .o_commit_rd_wen(c_rd_wen), .o_commit_tag(c_tag),
         .o_csr_addr(csr_addr), .i_csr_rdata(csr_rdata), .o_csr_we(csr_we), .o_csr_wdata(csr_wdata),
@@ -271,6 +290,71 @@ module qv_commit_tb;
         check({name, ": no debug entry"}, b(dbg_entry), 64'd0);
         check({name, ": head commits"}, b(commit_now), 64'd1);
         retire();
+    endtask
+
+    // a head that enters Debug Mode on its own (EBREAK or trigger): nothing of it happens, no retirement, the
+    // architectural pc is kept (dpc), everything is flushed
+    task automatic expect_head_entry(input string name, input logic [2:0] cause, input logic ebreak, input logic trig);
+        logic [63:0] pc0, ord0;
+        logic [1:0]  priv0;
+        pc0 = arch_pc; ord0 = r_order; priv0 = priv;
+        #1;
+        check({name, ": debug entry"}, b(dbg_entry), 64'd1);
+        check({name, ": cause"}, {61'b0, dbg_cause}, {61'b0, cause});
+        check({name, ": an EBREAK entry"}, b(dbg_ebreak_entry), b(ebreak));
+        check({name, ": a trigger entry"}, b(dbg_trigger_entry), b(trig));
+        check({name, ": not a halt/step entry"}, b(dbg_halt_entry), 64'd0);
+        check({name, ": no trap"}, b(trap_taken), 64'd0);
+        check({name, ": no interrupt"}, b(irq_taken), 64'd0);
+        check({name, ": head does not commit"}, b(commit_now), 64'd0);
+        check({name, ": head not popped"}, b(pop), 64'd0);
+        check({name, ": no rd write"}, b(rf_we), 64'd0);
+        check({name, ": no retirement counted"}, b(instr_retired), 64'd0);
+        check({name, ": no CSR write"}, b(csr_we), 64'd0);
+        check({name, ": no mret"}, b(mret_taken), 64'd0);
+        check({name, ": no icache flush"}, b(icache_flush), 64'd0);
+        check({name, ": redirect (flush)"}, b(redirect), 64'd1);
+        check({name, ": redirect to the architectural pc"}, redirect_pc, pc0);
+        retire();
+        check({name, ": arch pc kept"}, arch_pc, pc0);
+        check({name, ": privilege kept"}, {62'b0, priv}, {62'b0, priv0});
+        check({name, ": order not advanced"}, r_order, ord0);
+    endtask
+
+    // a Program Buffer head that raised an exception: the run ends as an abort and nothing else happens
+    task automatic expect_pb_abort(input string name);
+        logic [63:0] ord0, pc0;
+        logic [1:0]  priv0;
+        ord0 = r_order; pc0 = arch_pc; priv0 = priv;
+        #1;
+        check({name, ": abort"}, b(pb_abort), 64'd1);
+        check({name, ": not done"}, b(pb_done), 64'd0);
+        check({name, ": a Program Buffer retirement"}, b(pb_commit), 64'd1);
+        check({name, ": no trap"}, b(trap_taken), 64'd0);
+        check({name, ": rvfi_trap 0"}, b(r_trap), 64'd0);
+        check({name, ": still a retirement as far as RVFI goes"}, b(commit_now), 64'd1);
+        check({name, ": not counted by minstret"}, b(instr_retired), 64'd0);
+        check({name, ": no rd write"}, b(rf_we), 64'd0);
+        check({name, ": no CSR write"}, b(csr_we), 64'd0);
+        check({name, ": no mret"}, b(mret_taken), 64'd0);
+        check({name, ": no sret"}, b(sret_taken), 64'd0);
+        check({name, ": no redirect"}, b(redirect), 64'd0);
+        check({name, ": the pc goes on"}, next_pc, pc0 + 64'd4);
+        retire();
+        check({name, ": arch pc drifts on"}, arch_pc, pc0 + 64'd4);
+        check({name, ": privilege unchanged"}, {62'b0, priv}, {62'b0, priv0});
+        check({name, ": order advanced"}, r_order, ord0 + 64'd1);
+    endtask
+
+    // retire the presented LR cleanly (no LSU exception): sets the reservation
+    task automatic retire_lr_ok();
+        retire();
+    endtask
+
+    // an EBREAK at the head: the ebreak bit for each privilege, as core.sv's ebreak_to_debug
+    task automatic ebreak_head();
+        set_entry(arch_pc, 32'h0010_0073, 0, 1'b0, 64'd0);
+        c.cls = QV_FU_SYS; c.sys_op = QV_SYS_EBREAK;
     endtask
 
     initial begin
@@ -1086,6 +1170,445 @@ module qv_commit_tb;
         check("faulted head vs halt: no trap", b(trap_taken), 64'd0);
         retire();
         dbg_halt = 1'b0;
+        go_priv(2'b11);
+
+        // ---- debug: EBREAK and execute triggers at the head ----
+        dbg_halt = 1'b0; dbg_step = 1'b0; dbg_in = 1'b0; dbg_resume = 1'b0; dcsr = '0;
+        mie = '0; mip = '0; mstatus_mie = 1'b0;
+
+        // EBREAK with no ebreak bit set is the ordinary breakpoint trap
+        go_priv(2'b11);
+        plain_retire(); plain_retire();                    // away from the sample cycle
+        @(posedge clk); #1;
+        ebreak_head();
+        #1;
+        check("ebreak, bits clear: no entry", b(dbg_entry), 64'd0);
+        expect_trap("ebreak, bits clear", 64'd3, 64'd0);
+        retire();
+
+        // each privilege has its own bit
+        dcsr = 64'h0000_0000_0000_8000;                    // ebreakm
+        go_priv(2'b11);
+        @(posedge clk); #1;                                // not a sample cycle
+        ebreak_head();
+        expect_head_entry("ebreak in M, ebreakm", 3'd1, 1'b1, 1'b0);
+        dcsr = 64'h0000_0000_0000_2000 | 64'h0000_0000_0000_1000;   // ebreaks and ebreaku, not ebreakm
+        go_priv(2'b11);
+        @(posedge clk); #1;
+        ebreak_head();
+        #1;
+        check("ebreak in M, only ebreaks/ebreaku set: no entry", b(dbg_entry), 64'd0);
+        check("ebreak in M, only ebreaks/ebreaku set: a plain trap", b(trap_taken), 64'd1);
+        retire();
+        dcsr = 64'h0000_0000_0000_2000;                    // ebreaks
+        go_priv(2'b01);
+        @(posedge clk); #1;
+        ebreak_head();
+        expect_head_entry("ebreak in S, ebreaks", 3'd1, 1'b1, 1'b0);
+        dcsr = 64'h0000_0000_0000_8000 | 64'h0000_0000_0000_1000;   // ebreakm and ebreaku, not ebreaks
+        go_priv(2'b01);
+        @(posedge clk); #1;
+        ebreak_head();
+        #1;
+        check("ebreak in S, only ebreakm/ebreaku set: no entry", b(dbg_entry), 64'd0);
+        retire();
+        dcsr = 64'h0000_0000_0000_1000;                    // ebreaku
+        go_priv(2'b00);
+        @(posedge clk); #1;
+        ebreak_head();
+        expect_head_entry("ebreak in U, ebreaku", 3'd1, 1'b1, 1'b0);
+        dcsr = 64'h0000_0000_0000_A000;                    // ebreakm and ebreaks, not ebreaku
+        go_priv(2'b00);
+        @(posedge clk); #1;
+        ebreak_head();
+        #1;
+        check("ebreak in U, only ebreakm/ebreaks set: no entry", b(dbg_entry), 64'd0);
+        retire();
+        // privilege 2'b10 (reachable through a raw MPP) takes the U bit
+        dcsr = 64'h0000_0000_0000_1000;
+        go_priv(2'b10);
+        @(posedge clk); #1;
+        ebreak_head();
+        expect_head_entry("ebreak at privilege 2, ebreaku", 3'd1, 1'b1, 1'b0);
+        dcsr = 64'h0000_0000_0000_A000;
+        go_priv(2'b10);
+        @(posedge clk); #1;
+        ebreak_head();
+        #1;
+        check("ebreak at privilege 2, ebreakm/ebreaks only: no entry", b(dbg_entry), 64'd0);
+        retire();
+
+        // a head must be complete; a marked fetch fault is no EBREAK
+        dcsr = 64'h0000_0000_0000_8000;
+        go_priv(2'b11);
+        @(posedge clk); #1;
+        ebreak_head();
+        e.complete = 1'b0;
+        #1;
+        check("incomplete EBREAK head: no entry", b(dbg_entry), 64'd0);
+        retire();
+        ebreak_head();
+        c.xcpt = 1'b1; c.cause = 4'd1;
+        #1;
+        check("EBREAK word under a fetch fault: no entry", b(dbg_entry), 64'd0);
+        retire();
+
+        // not in Debug Mode only
+        dbg_in = 1'b1;
+        ebreak_head();
+        #1;
+        check("EBREAK in Debug Mode: no entry", b(dbg_entry), 64'd0);
+        retire();
+        dbg_in = 1'b0;
+
+        // the sample cycle goes first: a halt request, a step, an interrupt
+        plain_retire();
+        dbg_halt = 1'b1;
+        ebreak_head();
+        #1;
+        check("halt request vs EBREAK entry: the halt", b(dbg_halt_entry), 64'd1);
+        check("halt request vs EBREAK entry: cause 3", {61'b0, dbg_cause}, 64'd3);
+        check("halt request vs EBREAK entry: not an EBREAK entry", b(dbg_ebreak_entry), 64'd0);
+        retire();
+        dbg_halt = 1'b0;
+        plain_retire();
+        dbg_step = 1'b1;
+        ebreak_head();
+        #1;
+        check("step vs EBREAK entry: cause 4", {61'b0, dbg_cause}, 64'd4);
+        check("step vs EBREAK entry: not an EBREAK entry", b(dbg_ebreak_entry), 64'd0);
+        retire();
+        dbg_step = 1'b0;
+        mie = 64'h80; mip = 64'h80; mstatus_mie = 1'b1;
+        plain_retire();
+        ebreak_head();
+        #1;
+        check("interrupt vs EBREAK entry: the interrupt", b(irq_taken), 64'd1);
+        check("interrupt vs EBREAK entry: no debug entry", b(dbg_entry), 64'd0);
+        retire();
+        mie = '0; mip = '0; mstatus_mie = 1'b0;
+        // a step armed while the EBREAK is the head but not at a sample cycle: the EBREAK enters
+        go_priv(2'b11);
+        @(posedge clk); #1;
+        dbg_step = 1'b1;
+        ebreak_head();
+        expect_head_entry("EBREAK entry with a step armed", 3'd1, 1'b1, 1'b0);
+        dbg_step = 1'b0;
+
+        // execute triggers: an action-1 match at the head (decode marked it and neutralised the uop)
+        dcsr = '0;
+        go_priv(2'b11);
+        @(posedge clk); #1;
+        set_entry(arch_pc, 32'h13, 0, 1'b0, 64'd0);
+        c.trig_debug = 1'b1;
+        expect_head_entry("trigger entry on an ALU head", 3'd2, 1'b0, 1'b1);
+        // ... with an EBREAK word that would also enter: EBREAK has the cause
+        dcsr = 64'h0000_0000_0000_8000;
+        go_priv(2'b11);
+        @(posedge clk); #1;
+        ebreak_head();
+        c.trig_debug = 1'b1;
+        expect_head_entry("EBREAK + trigger, ebreakm: cause 1", 3'd1, 1'b1, 1'b0);
+        dcsr = '0;
+        go_priv(2'b11);
+        @(posedge clk); #1;
+        ebreak_head();
+        c.trig_debug = 1'b1;
+        expect_head_entry("EBREAK + trigger, ebreakm clear: the trigger, cause 2", 3'd2, 1'b0, 1'b1);
+        // over a fetch fault
+        go_priv(2'b11);
+        @(posedge clk); #1;
+        set_entry(arch_pc, 32'h0, 0, 1'b0, 64'd0);
+        c.xcpt = 1'b1; c.cause = 4'd1; c.trig_debug = 1'b1;
+        expect_head_entry("trigger over a fetch fault", 3'd2, 1'b0, 1'b1);
+        // a store-class head under an action-1 trigger leaves the reservation alone
+        go_priv(2'b11);
+        @(posedge clk); #1;
+        set_entry(arch_pc, 32'h13, 0, 1'b0, 64'd0);
+        c.cls = QV_FU_LSU; c.is_lr = 1'b1;
+        lres = '0; lres.vaddr = 64'h4000;
+        retire_lr_ok();
+        check("reservation set by a clean LR", b(res_valid), 64'd1);
+        @(posedge clk); #1;
+        set_entry(arch_pc, 32'h13, 0, 1'b0, 64'd0);
+        c.is_store_class = 1'b1; c.trig_debug = 1'b1;
+        expect_head_entry("trigger entry on a store", 3'd2, 1'b0, 1'b1);
+        check("trigger entry on a store: the reservation is untouched", b(res_valid), 64'd1);
+        // not in Debug Mode only, complete only, and the sample cycle goes first
+        dbg_in = 1'b1;
+        set_entry(arch_pc, 32'h13, 0, 1'b0, 64'd0);
+        c.trig_debug = 1'b1;
+        #1;
+        check("trigger head in Debug Mode: no entry", b(dbg_entry), 64'd0);
+        retire();
+        dbg_in = 1'b0;
+        @(posedge clk); #1;
+        set_entry(arch_pc, 32'h13, 0, 1'b0, 64'd0);
+        c.trig_debug = 1'b1;
+        e.complete = 1'b0;
+        #1;
+        check("incomplete trigger head: no entry", b(dbg_entry), 64'd0);
+        retire();
+        mie = 64'h80; mip = 64'h80; mstatus_mie = 1'b1;
+        plain_retire();
+        set_entry(arch_pc, 32'h13, 0, 1'b0, 64'd0);
+        c.trig_debug = 1'b1;
+        #1;
+        check("interrupt vs trigger entry: the interrupt", b(irq_taken), 64'd1);
+        check("interrupt vs trigger entry: no debug entry", b(dbg_entry), 64'd0);
+        retire();
+        mie = '0; mip = '0; mstatus_mie = 1'b0;
+        plain_retire();
+        dbg_halt = 1'b1;
+        set_entry(arch_pc, 32'h13, 0, 1'b0, 64'd0);
+        c.trig_debug = 1'b1;
+        #1;
+        check("halt request vs trigger entry: the halt", b(dbg_halt_entry), 64'd1);
+        check("halt request vs trigger entry: cause 3", {61'b0, dbg_cause}, 64'd3);
+        check("halt request vs trigger entry: not a trigger entry", b(dbg_trigger_entry), 64'd0);
+        retire();
+        dbg_halt = 1'b0;
+
+        // action 0: a breakpoint exception on an ordinary head, tval = the pc, nothing written
+        go_priv(2'b11);
+        @(posedge clk); #1;
+        set_entry(arch_pc, 32'h13, 5, 1'b0, 64'd77);
+        c.trig_exc = 1'b1;
+        expect_trap("action-0 trigger on an ALU head", 64'd3, arch_pc);
+        retire();
+        // on an EBREAK head the tval is the pc too (a plain EBREAK has 0)
+        go_priv(2'b11);
+        @(posedge clk); #1;
+        ebreak_head();
+        c.trig_exc = 1'b1;
+        expect_trap("action-0 trigger on an EBREAK", 64'd3, arch_pc);
+        retire();
+        // a fault marker outranks it
+        go_priv(2'b11);
+        @(posedge clk); #1;
+        set_entry(arch_pc, 32'h0, 0, 1'b0, 64'd0);
+        c.xcpt = 1'b1; c.cause = 4'd2; c.trig_exc = 1'b1;
+        expect_trap("illegal marker vs action-0 trigger", 64'd2, 64'd0);
+        retire();
+        // a trapping store-class head still clears the reservation; a trapping LR does not set it
+        go_priv(2'b11);
+        @(posedge clk); #1;
+        set_entry(arch_pc, 32'h13, 0, 1'b0, 64'd0);
+        c.cls = QV_FU_LSU; c.is_lr = 1'b1;
+        lres = '0; lres.vaddr = 64'h5000;
+        retire_lr_ok();
+        check("reservation set again", b(res_valid), 64'd1);
+        @(posedge clk); #1;
+        set_entry(arch_pc, 32'h13, 0, 1'b0, 64'd0);
+        c.is_store_class = 1'b1; c.trig_exc = 1'b1;
+        expect_trap("action-0 trigger on a store", 64'd3, arch_pc);
+        retire();
+        check("action-0 trigger on a store: the reservation is cleared", b(res_valid), 64'd0);
+        @(posedge clk); #1;
+        set_entry(arch_pc, 32'h13, 0, 1'b0, 64'd0);
+        c.is_lr = 1'b1; c.trig_exc = 1'b1;
+        retire();
+        check("action-0 trigger on an LR: no reservation", b(res_valid), 64'd0);
+        // the trigger exception goes to S when delegated, like any breakpoint
+        medeleg = 64'h8; go_priv(2'b01);
+        @(posedge clk); #1;
+        set_entry(arch_pc, 32'h13, 0, 1'b0, 64'd0);
+        c.trig_exc = 1'b1;
+        #1;
+        check("action-0 trigger delegated: cause", trap_cause, 64'd3);
+        check("action-0 trigger delegated: to S", b(trap_to_s), 64'd1);
+        check("action-0 trigger delegated: tval", trap_val, arch_pc);
+        retire();
+        medeleg = '0; dcsr = '0;
+        go_priv(2'b11);
+
+        // ---- debug: a Program Buffer run ----
+        go_priv(2'b11);
+        mip = '0; mie = '0; mstatus_mie = 1'b0; medeleg = '0; dcsr = '0; dbg_halt = 1'b0; dbg_step = 1'b0;
+        @(posedge clk); #1;
+        dbg_in = 1'b1; pb_act = 1'b1;
+
+        // an ordinary instruction retires, is counted, writes rd, and the pc moves on
+        begin
+            logic [63:0] pc0, ord0;
+            pc0 = arch_pc; ord0 = r_order;
+            set_entry(arch_pc, 32'h13, 5, 1'b1, 64'd9);
+            #1;
+            check("pb alu: a Program Buffer retirement", b(pb_commit), 64'd1);
+            check("pb alu: not the last", b(pb_done) | b(pb_abort), 64'd0);
+            check("pb alu: retires", b(commit_now), 64'd1);
+            check("pb alu: counted", b(instr_retired), 64'd1);
+            check("pb alu: writes rd", b(rf_we), 64'd1);
+            check("pb alu: no trap", b(trap_taken), 64'd0);
+            check("pb alu: no redirect", b(redirect), 64'd0);
+            retire();
+            check("pb alu: the pc drifts", arch_pc, pc0 + 64'd4);
+            check("pb alu: order advanced", r_order, ord0 + 64'd1);
+        end
+        // a head that isn't complete is no retirement
+        set_entry(arch_pc, 32'h13, 5, 1'b1, 64'd9);
+        e.complete = 1'b0;
+        #1;
+        check("pb incomplete head: no commit", b(commit_now), 64'd0);
+        check("pb incomplete head: no Program Buffer retirement", b(pb_commit), 64'd0);
+        retire();
+        // dcsr.stopcount: executed, but not counted
+        dcsr = 64'h0000_0000_0000_0400;
+        set_entry(arch_pc, 32'h13, 5, 1'b1, 64'd9);
+        #1;
+        check("pb alu, stopcount: still writes rd", b(rf_we), 64'd1);
+        check("pb alu, stopcount: not counted", b(instr_retired), 64'd0);
+        retire();
+        dcsr = '0;
+
+        // EBREAK ends the run cleanly: counted, no trap, no redirect, done
+        begin
+            logic [63:0] pc0, ord0;
+            pc0 = arch_pc; ord0 = r_order;
+            ebreak_head();
+            #1;
+            check("pb ebreak: done", b(pb_done), 64'd1);
+            check("pb ebreak: not an abort", b(pb_abort), 64'd0);
+            check("pb ebreak: a Program Buffer retirement", b(pb_commit), 64'd1);
+            check("pb ebreak: no trap", b(trap_taken), 64'd0);
+            check("pb ebreak: rvfi_trap 0", b(r_trap), 64'd0);
+            check("pb ebreak: counted by minstret", b(instr_retired), 64'd1);
+            check("pb ebreak: no redirect", b(redirect), 64'd0);
+            check("pb ebreak: retires", b(commit_now), 64'd1);
+            check("pb ebreak: no debug entry", b(dbg_entry), 64'd0);
+            retire();
+            check("pb ebreak: the pc drifts", arch_pc, pc0 + 64'd4);
+            check("pb ebreak: order advanced", r_order, ord0 + 64'd1);
+        end
+        // ... even with ebreakm set (it is Debug Mode already), and with stopcount (nothing counted then)
+        dcsr = 64'h0000_0000_0000_8400;
+        ebreak_head();
+        #1;
+        check("pb ebreak, ebreakm set: no entry", b(dbg_entry), 64'd0);
+        check("pb ebreak, ebreakm set: done", b(pb_done), 64'd1);
+        check("pb ebreak, stopcount: not counted", b(instr_retired), 64'd0);
+        retire();
+        dcsr = '0;
+
+        // every exception ends the run as an abort
+        set_entry(arch_pc, 32'h0000_0073, 0, 1'b0, 64'd0);
+        c.cls = QV_FU_SYS; c.sys_op = QV_SYS_ECALL;
+        expect_pb_abort("pb ecall");
+        set_entry(arch_pc, 32'h0000_0000, 0, 1'b0, 64'd0);
+        c.xcpt = 1'b1; c.cause = 4'd2;
+        expect_pb_abort("pb illegal instruction");
+        set_entry(arch_pc, 32'h13, 7, 1'b1, 64'd5);
+        c.cls = QV_FU_LSU;
+        lres = '0; lres.xcpt = 1'b1; lres.cause = 4'd4; lres.tval = 64'h1234;
+        expect_pb_abort("pb misaligned load");
+        set_entry(arch_pc, 32'h13, 0, 1'b0, 64'd0);
+        c.cls = QV_FU_LSU; c.is_store_class = 1'b1;
+        lres = '0; lres.xcpt = 1'b1; lres.cause = 4'd7; lres.tval = 64'h1234;
+        expect_pb_abort("pb store access fault");
+        lres = '0;
+        // with a delegating medeleg, in a lower privilege: still no trap, no privilege change
+        medeleg = 64'hFFFF;
+        dbg_in = 1'b0; pb_act = 1'b0;
+        go_priv(2'b01);
+        @(posedge clk); #1;
+        dbg_in = 1'b1; pb_act = 1'b1;
+        set_entry(arch_pc, 32'h0000_0073, 0, 1'b0, 64'd0);
+        c.cls = QV_FU_SYS; c.sys_op = QV_SYS_ECALL;
+        expect_pb_abort("pb ecall in S, medeleg set");
+        medeleg = '0;
+        dbg_in = 1'b0; pb_act = 1'b0;
+        go_priv(2'b11);
+        @(posedge clk); #1;
+        dbg_in = 1'b1; pb_act = 1'b1;
+
+        // MRET and SRET have no effect: no strobe, no privilege change, no jump to mepc/sepc
+        begin
+            logic [63:0] pc0;
+            pc0 = arch_pc;
+            mpp = 2'b00;
+            set_entry(arch_pc, 32'h3020_0073, 0, 1'b0, 64'd0);
+            c.cls = QV_FU_SYS; c.sys_op = QV_SYS_MRET;
+            #1;
+            check("pb mret: no mret strobe", b(mret_taken), 64'd0);
+            check("pb mret: no abort", b(pb_abort), 64'd0);
+            check("pb mret: a Program Buffer retirement", b(pb_commit), 64'd1);
+            check("pb mret: no redirect", b(redirect), 64'd0);
+            check("pb mret: the pc goes on, not to mepc", next_pc, pc0 + 64'd4);
+            retire();
+            check("pb mret: privilege unchanged", {62'b0, priv}, 64'd3);
+            check("pb mret: arch pc drifts", arch_pc, pc0 + 64'd4);
+            pc0 = arch_pc;
+            spp = 1'b0;
+            set_entry(arch_pc, 32'h1020_0073, 0, 1'b0, 64'd0);
+            c.cls = QV_FU_SYS; c.sys_op = QV_SYS_SRET;
+            #1;
+            check("pb sret: no sret strobe", b(sret_taken), 64'd0);
+            check("pb sret: no abort", b(pb_abort), 64'd0);
+            check("pb sret: the pc goes on, not to sepc", next_pc, pc0 + 64'd4);
+            retire();
+            check("pb sret: privilege unchanged", {62'b0, priv}, 64'd3);
+            mpp = 2'b11;
+        end
+
+        // a serializing instruction still redirects (harmless: nothing is fetched while halted)
+        set_entry(arch_pc, 32'h0000_100F, 0, 1'b0, 64'd0);
+        c.cls = QV_FU_SYS; c.sys_op = QV_SYS_FENCE_I; c.serialize = 1'b1;
+        #1;
+        check("pb fence.i: retires once fetch is idle", b(commit_now), 64'd1);
+        check("pb fence.i: flushes the icache", b(icache_flush), 64'd1);
+        check("pb fence.i: serializing redirect", b(redirect), 64'd1);
+        retire();
+
+        // a CSR write retires and writes, as ever
+        set_entry(arch_pc, 32'h7B2_01073, 0, 1'b0, 64'd0);
+        c.cls = QV_FU_CSR; c.csr_op = QV_CSR_RW; c.csr_addr = 12'h7B2; c.serialize = 1'b1;
+        #1;
+        check("pb csr: writes the CSR", b(csr_we), 64'd1);
+        check("pb csr: counted", b(instr_retired), 64'd1);
+        retire();
+
+        // reservation rules inside a run: a clean LR sets it, a faulting one doesn't, an aborted store clears it
+        set_entry(arch_pc, 32'h13, 5, 1'b1, 64'd1);
+        c.cls = QV_FU_LSU; c.is_lr = 1'b1;
+        lres = '0; lres.vaddr = 64'h6000;
+        retire();
+        check("pb lr: reservation set", b(res_valid), 64'd1);
+        set_entry(arch_pc, 32'h13, 0, 1'b0, 64'd0);
+        c.cls = QV_FU_LSU; c.is_store_class = 1'b1;
+        lres = '0; lres.xcpt = 1'b1; lres.cause = 4'd6;
+        expect_pb_abort("pb aborted store");
+        lres = '0;
+        check("pb aborted store: reservation cleared", b(res_valid), 64'd0);
+        set_entry(arch_pc, 32'h13, 5, 1'b1, 64'd1);
+        c.cls = QV_FU_LSU; c.is_lr = 1'b1;
+        lres = '0; lres.xcpt = 1'b1; lres.cause = 4'd5;
+        expect_pb_abort("pb faulting load-reserved");
+        lres = '0;
+        check("pb faulting LR: no reservation", b(res_valid), 64'd0);
+
+        // outside a run the very same heads trap/retire as before (stopcount only counts in Debug Mode)
+        dbg_in = 1'b0; pb_act = 1'b0;
+        dcsr = 64'h0000_0000_0000_0400;
+        go_priv(2'b11);
+        @(posedge clk); #1;
+        set_entry(arch_pc, 32'h13, 5, 1'b1, 64'd9);
+        #1;
+        check("stopcount outside Debug Mode: still counted", b(instr_retired), 64'd1);
+        check("no run: no Program Buffer retirement", b(pb_commit), 64'd0);
+        retire();
+        dcsr = '0;
+        set_entry(arch_pc, 32'h0000_0073, 0, 1'b0, 64'd0);
+        c.cls = QV_FU_SYS; c.sys_op = QV_SYS_ECALL;
+        #1;
+        check("no run: ecall traps", b(trap_taken), 64'd1);
+        check("no run: ecall is no abort", b(pb_abort), 64'd0);
+        retire();
+        ebreak_head();
+        #1;
+        check("no run: ebreak is a plain breakpoint trap", b(trap_taken), 64'd1);
+        check("no run: ebreak ends nothing", b(pb_done), 64'd0);
+        check("no run: ebreak is no Program Buffer retirement", b(pb_commit), 64'd0);
+        retire();
         go_priv(2'b11);
 
         $display("");

@@ -1,0 +1,37 @@
+{
+ "dut": "design/pipe/qv_lsu.sv",
+ "tb": "design/pipe/qv_lsu_tb.sv",
+ "files": [
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_pmp.sv",
+  "design/pipe/qv_lsu.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench"
+ ],
+ "cwd": "design",
+ "timeout": 900,
+ "mutants": [
+  {
+   "name": "a Program Buffer run is PMP-checked",
+   "old": "    wire pmp_deny = !misaligned_q && !i_pmp_bypass && !(fault_st ? pmp_w_ok : pmp_r_ok);",
+   "new": "    wire pmp_deny = !misaligned_q && !(fault_st ? pmp_w_ok : pmp_r_ok);"
+  },
+  {
+   "name": "the bypass only exempts loads",
+   "old": "    wire pmp_deny = !misaligned_q && !i_pmp_bypass && !(fault_st ? pmp_w_ok : pmp_r_ok);",
+   "new": "    wire pmp_deny = !misaligned_q && !(i_pmp_bypass && !fault_st) && !(fault_st ? pmp_w_ok : pmp_r_ok);"
+  },
+  {
+   "name": "the bypass only exempts stores",
+   "old": "    wire pmp_deny = !misaligned_q && !i_pmp_bypass && !(fault_st ? pmp_w_ok : pmp_r_ok);",
+   "new": "    wire pmp_deny = !misaligned_q && !(i_pmp_bypass && fault_st) && !(fault_st ? pmp_w_ok : pmp_r_ok);"
+  }
+ ]
+}
