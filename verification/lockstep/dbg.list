@@ -1,0 +1,10 @@
+# Directed programs for the scripted debugger (--dbg-mode) with action-0 execute triggers
+# (--dbg-features bit 256, which run_lockstep.sh sets for the programs of this list). An action-0 trigger is a
+# breakpoint exception whose handler skips the instruction, which the random programs cannot take (a skipped
+# set-up instruction or loop decrement ruins them), so the corpus here is straight-line code that is safe to
+# skip, see dbg_exc.s. Not part of --corpus all: it needs --dbg-mode 1 (without the script it is only a
+# program that runs its body once and spins). MAX_RETIRE-terminated, like irq.list and smc.list.
+#
+# target | max_retire (hex file is verification/lockstep/<target>.hex, built with riscv64-unknown-elf-as/ld/objcopy
+# against gen/link.ld, see the program's own header)
+dbg_exc|6000

@@ -56,8 +56,10 @@
  * `lui`/`addi` pair or the `la` of a call site corrupts the program (and
  * usually makes it run forever). So the random corpus leaves bit 8 off
  * (triggers then only ever enter Debug Mode) and the directed
- * straight-line programs of dbg.list, where every instruction is safe to
- * skip, turn it on.
+ * straight-line programs of dbg.list, where every instruction of the body
+ * (from 0x40) is safe to skip, turn it on. Even then the script arms an
+ * action-0 trigger only for a halt in [0x40, 0x8000): the set-up code and
+ * the handler stay out of reach.
  */
 `include "lockstep_defs.svh"
 
@@ -415,7 +417,7 @@ module lockstep_dbg (
         logic [31:0] lo, hi;
         logic [2:0]  cause;
         logic        reserved, wind_down;
-        integer      nops, k, choice, r, slot, cnt;
+        integer      nops, k, choice, r, slot, cnt, b15, b13, b12;
         begin
             reserved  = feat_i[6];
             wind_down = last_phase || (max_retire_i != 64'b0 && (retired_q + 64'(PHASE_MARGIN) > max_retire_i));
@@ -507,10 +509,14 @@ module lockstep_dbg (
                         newdcsr[2] = 1'b1;
                     end
                 end
-                if (feat_i[3] && rnd(3) == 0) begin                   // arm EBREAK-to-debug for some privilege levels
-                    newdcsr[15] = (rnd(2) == 0);
-                    newdcsr[13] = (rnd(2) == 0);
-                    newdcsr[12] = (rnd(2) == 0);
+                if (feat_i[3] && rnd(2) == 0) begin                   // arm EBREAK-to-debug for some privilege levels
+                    k   = rnd(4);                                     // all privilege levels, or a random subset
+                    b15 = rnd(2);
+                    b13 = rnd(2);
+                    b12 = rnd(2);
+                    newdcsr[15] = (k == 0) || (b15 == 0);
+                    newdcsr[13] = (k == 0) || (b13 == 0);
+                    newdcsr[12] = (k == 0) || (b12 == 0);
                 end
                 if (feat_i[2] && rnd(4) == 0) newdcsr[10] = ~newdcsr[10];    // stopcount
                 if (feat_i[4] && rnd(3) == 0) begin                   // arm one trigger a few instructions ahead
@@ -520,7 +526,10 @@ module lockstep_dbg (
                     ar_write({4'b0, CSR_TDATA2},  dpc + 64'(2 * cnt));
                     v = 64'b0;
                     k = rnd(2);
-                    v[12] = (k == 0) || !feat_i[8];                   // action: 1 debug entry, or 0 breakpoint trap if allowed
+                    // action: 1 debug entry, or 0 breakpoint trap -- only where it is safe: outside the set-up
+                    // code (below 0x40) and the trap handler (from 0x8000), whose own instructions must not
+                    // be skipped or trapped on
+                    v[12] = (k == 0) || !feat_i[8] || (dpc < 64'h40) || (dpc >= 64'h8000);
                     v[6]  = 1'b1;                                     // m
                     v[4]  = (rnd(2) == 0);                            // s
                     v[3]  = (rnd(2) == 0);                            // u
@@ -547,7 +556,7 @@ module lockstep_dbg (
         logic        raised;
         begin
             rng = (seed_i == 32'b0) ? 32'h5EED_D0C5 : seed_i;
-            phases        = 5 + rnd(12);
+            phases        = 6 + rnd(20);
             steps_left    = 0;
             hold_across_q = 1'b0;
             last_phase    = 1'b0;

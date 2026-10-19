@@ -524,6 +524,13 @@ module lockstep_tb #(
                      a_rvfi_order, a_rvfi_pc_rdata, a_rvfi_insn, a_rvfi_rd_addr, a_rvfi_rd_wdata,
                      a_rvfi_mode, a_rvfi_trap, a_rvfi_intr, side_a.dbg_halted);
 
+    // Debug Mode entries by cause (dcsr.cause at each halt event of the script), side A: shown in the PASS
+    // line so a run can be told from one that never entered Debug Mode the way it was meant to
+    longint halt_cause_cnt [0:7];
+    initial for (int i = 0; i < 8; i++) halt_cause_cnt[i] = 0;
+    always @(posedge clk_a)
+        if (!rst && a_ev_valid && a_ev_kind == 4'd1) halt_cause_cnt[a_ev_b[8:6]] = halt_cause_cnt[a_ev_b[8:6]] + 1;
+
     // interrupt entries seen (retirements flagged rvfi_intr), side A: shown in the PASS line so a run
     // that was supposed to take interrupts can be told from one that never did
     longint intr_count_a;
@@ -596,11 +603,12 @@ module lockstep_tb #(
                 end
                 check_final_state();
                 if (tohost_addr != 32'b0 && max_retire == 0)
-                    $display("LOCKSTEP_RESULT: PASS (%0d retirements matched, %0d interrupt entries, %0d debug events, tohost=%0h)",
-                             match_count, intr_count_a, ev_match_count, side_a.mem0.sram0.memory[tohost_addr[31:3]]);
+                    $display("LOCKSTEP_RESULT: PASS (%0d retirements matched, %0d interrupt entries, %0d debug events [entries: %0d ebreak %0d trigger %0d halt %0d step], tohost=%0h)",
+                             match_count, intr_count_a, ev_match_count, halt_cause_cnt[1], halt_cause_cnt[2], halt_cause_cnt[3], halt_cause_cnt[4],
+                             side_a.mem0.sram0.memory[tohost_addr[31:3]]);
                 else
-                    $display("LOCKSTEP_RESULT: PASS (%0d retirements matched, %0d interrupt entries, %0d debug events, MAX_RETIRE reached)",
-                             match_count, intr_count_a, ev_match_count);
+                    $display("LOCKSTEP_RESULT: PASS (%0d retirements matched, %0d interrupt entries, %0d debug events [entries: %0d ebreak %0d trigger %0d halt %0d step], MAX_RETIRE reached)",
+                             match_count, intr_count_a, ev_match_count, halt_cause_cnt[1], halt_cause_cnt[2], halt_cause_cnt[3], halt_cause_cnt[4]);
                 $finish;
             end
             if (cycle_q >= max_cycles) begin

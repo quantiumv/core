@@ -191,13 +191,14 @@ module lockstep_side #(
         if (CORE_PIPE) begin : g_core
             core_pipe core0 (`LS_CORE_PORTS);
 `ifdef LS_HAVE_PIPE
-            // core_pipe takes an interrupt without waiting for the LSU, which is only safe because nothing can
-            // be on the data bus at a sample point (it asserts that too, but an assertion only prints): make
-            // it fatal here. (Only when core_pipe is in the build: Verilator checks the names even in a branch
-            // that is not taken.)
+            // core_pipe takes an interrupt, a halt or an EBREAK/trigger entry without waiting for the LSU, which is
+            // only safe because nothing can be on the data bus then (it asserts that too, but an assertion only
+            // prints): make it fatal here. (Only when core_pipe is in the build: Verilator checks the names even
+            // in a branch that is not taken.)
             always @(posedge clk) begin
-                if (!rst && core0.interrupt_taken && core0.lsu_head_started) begin
-                    $display("LOCKSTEP_RESULT: FAIL (core_pipe took an interrupt with a data access started)");
+                if (!rst && (core0.interrupt_taken || core0.debug_halt_req_entry || core0.debug_ebreak_entry
+                             || core0.trigger_debug_entry) && core0.lsu_head_started) begin
+                    $display("LOCKSTEP_RESULT: FAIL (core_pipe entered an interrupt or Debug Mode with a data access started)");
                     $finish;
                 end
             end

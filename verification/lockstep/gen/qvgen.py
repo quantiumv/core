@@ -1370,7 +1370,9 @@ def emit_main_body(p: Program):
             emit_fault(p, "illegal")
         elif r < 0.87 + a.illegal_rate + a.ecall_rate:
             emit_fault(p, p.rng.choice(["ecall", "ebreak"]))
-        elif p.priv_ext and r < 0.87 + a.illegal_rate + a.ecall_rate + 0.07:
+        elif r < 0.87 + a.illegal_rate + a.ecall_rate + a.ebreak_rate:
+            emit_fault(p, "ebreak")
+        elif p.priv_ext and r < 0.87 + a.illegal_rate + a.ecall_rate + a.ebreak_rate + 0.07:
             emit_priv_op(p, recent)
         else:
             emit_alu(p, recent)
@@ -1516,6 +1518,9 @@ def main():
     ap.add_argument("--dep-bias", type=float, default=0.3, dest="dep_bias")
     ap.add_argument("--illegal-rate", type=float, default=0.02)
     ap.add_argument("--ecall-rate", type=float, default=0.01)
+    ap.add_argument("--ebreak-rate", type=float, default=None,
+                    help="extra EBREAKs on top of --ecall-rate's share (default 0; 0.012 with --dbg, "
+                         "so dcsr.ebreak* armed by the debugger script has something to catch)")
     ap.add_argument("--misalign-rate", type=float, default=0.05)
     ap.add_argument("--badaddr-rate", type=float, default=0.03)
     ap.add_argument("--max-call-depth", type=int, default=3)
@@ -1541,6 +1546,8 @@ def main():
 
     if args.dbg:
         del FREE_POOL[-2:]      # x22, x23 (in place: every user of the pool sees it)
+    if args.ebreak_rate is None:
+        args.ebreak_rate = 0.012 if args.dbg else 0.0
 
     if args.output is None:
         args.output = GEN_DIR / f"gen_{args.seed}"

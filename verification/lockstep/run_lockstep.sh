@@ -79,7 +79,7 @@ IRQ_LATE=0
 # qvgen --dbg output), 128 hold the halt request across a resume.
 DBG_MODE=0
 DBG_FEAT=191
-DBG_DENSITY=4
+DBG_DENSITY=0     # 0 = auto: 4, 8, ... 256 by program, so the halts spread over runs of any length
 DBG_LATE=0
 CORPUS=all
 ONLY=""
@@ -126,9 +126,10 @@ Usage: run_lockstep.sh --mode selfproof|mutant|corrupt [options]
   --dbg-features MASK   which parts of the script run (default 191 = everything but the per-program bit 64):
                         1 halt, 2 step, 4 Access Register, 8 ebreak, 16 trigger, 32 Program Buffer,
                         128 hold the halt request across a resume
-  --dbg-density N       halts are about 8*N retirements apart (default 4)
+  --dbg-density N       halts are about 8*N retirements apart (default 0 = auto: 4, 8, ..., 256, by program)
   --dbg-late            the script's halt level is visible one cycle later
-  --corpus WHICH        act, fw, random, irq, smc, or all (default all --
+  --corpus WHICH        act, fw, random, irq, smc, dbg, or all (default all -- dbg is the directed
+                        straight-line program for action-0 triggers, needs --dbg-mode 1 --
                         irq/smc are NOT part of all, since each needs a
                         non-default flag passed explicitly -- --irq-mode 2
                         for irq, --memcfg-b cache for smc; see each
@@ -410,14 +411,36 @@ build_smc_entries() {
     done < "$REPO_ROOT/verification/lockstep/smc.list"
 }
 
+# the directed programs for the debug script's action-0 triggers (dbg.list): same build as the smc ones
+build_dbg_entries() {
+    while IFS= read -r line; do
+        line="${line%%#*}"; line="$(echo "$line" | xargs)"
+        [ -n "$line" ] || continue
+        IFS='|' read -r target max_retire <<< "$line"
+        target="$(echo "$target" | xargs)"; max_retire="$(echo "$max_retire" | xargs)"
+        [ -n "$target" ] || continue
+        local src="$REPO_ROOT/verification/lockstep/${target}.s"
+        local hex="$OUTDIR/dbg_${target}.hex"
+        if [ ! -e "$hex" ] || [ "$FORCE" == "1" ] || [ "$src" -nt "$hex" ]; then
+            riscv64-unknown-elf-as -march=rv64imac_zicsr_zifencei -mabi=lp64 -mno-relax                 "$src" -o "$OUTDIR/dbg_${target}.o" > "$OUTDIR/dbgbuild_${target}.log" 2>&1 &&             riscv64-unknown-elf-ld -T "$REPO_ROOT/verification/lockstep/gen/link.ld"                 -o "$OUTDIR/dbg_${target}.elf" "$OUTDIR/dbg_${target}.o" >> "$OUTDIR/dbgbuild_${target}.log" 2>&1 &&             riscv64-unknown-elf-objcopy -O verilog -j .text.entry -j .text.handlers -j .data.misc                 --verilog-data-width=8 "$OUTDIR/dbg_${target}.elf" "$hex" >> "$OUTDIR/dbgbuild_${target}.log" 2>&1
+        fi
+        [ -e "$hex" ] || { echo "WARN: $hex missing after build -- see $OUTDIR/dbgbuild_${target}.log, skipping" >&2; continue; }
+        # one run per script seed (--random-count of them): the script's seed follows the tag
+        for i in $(seq 1 "$RANDOM_COUNT"); do
+            echo "dbg_${target}_${i}|${hex}||${max_retire}" >> "$ENTRIES_FILE"
+        done
+    done < "$REPO_ROOT/verification/lockstep/dbg.list"
+}
+
 case "$CORPUS" in
     act) build_act_entries ;;
     fw) build_fw_entries ;;
     random) build_random_entries ;;
     irq) build_irq_entries ;;
     smc) build_smc_entries ;;
+    dbg) build_dbg_entries ;;
     all) build_act_entries; build_fw_entries; build_random_entries ;;
-    *) echo "Unknown --corpus: $CORPUS (expected act, fw, random, irq, smc, or all)" >&2; exit 1 ;;
+    *) echo "Unknown --corpus: $CORPUS (expected act, fw, random, irq, smc, dbg, or all)" >&2; exit 1 ;;
 esac
 
 if [ -n "$ONLY" ]; then
@@ -440,9 +463,13 @@ result_path() {
 dbg_args() {
     local tag="$1" feat="$DBG_FEAT" seed
     [ "$DBG_MODE" == "0" ] && return
-    case "$tag" in random_*) feat=$((feat | 64)) ;; *) feat=$((feat & ~64)) ;; esac
+    # (random programs are qvgen --dbg output, the dbg_* directed ones keep to x27 and to straight-line code that
+    # is safe to skip, which action-0 triggers need)
+    case "$tag" in random_*) feat=$((feat | 64)) ;; dbg_*) feat=$((feat | 64 | 256)) ;; *) feat=$((feat & ~64)) ;; esac
     seed=$(( (RUN_SEED * 7919 + $(printf '%s' "$tag" | cksum | cut -d' ' -f1)) % 2147483646 + 1 ))
-    echo "+DBG_MODE=$DBG_MODE +DBG_SEED=$seed +DBG_DENSITY=$DBG_DENSITY +DBG_FEAT=$feat +DBG_LATE=$DBG_LATE"
+    local density="$DBG_DENSITY"
+    [ "$density" == "0" ] && density=$((4 << (seed % 7)))
+    echo "+DBG_MODE=$DBG_MODE +DBG_SEED=$seed +DBG_DENSITY=$density +DBG_FEAT=$feat +DBG_LATE=$DBG_LATE"
 }
 
 run_one() {
