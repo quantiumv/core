@@ -66,8 +66,6 @@
   {
    "from": "p6b_unit_decode.json",
    "unit_only": {
-    "5": "killed by p6_lockstep_extra.json: a trigger armed with the execute bit clear must never fire",
-    "6": "killed by p6_lockstep_extra.json: a trigger armed with the execute bit clear must never fire",
     "7": "all generated code sits below 4 GiB",
     "11": "killed by p6_lockstep_dbgexc.json: it needs an action-0 trigger, which only the directed straight-line program can take (a skipped instruction ruins a random program)",
     "13": "killed by p6_lockstep_dbgexc.json: it needs an action-0 trigger, which only the directed straight-line program can take (a skipped instruction ruins a random program)",
@@ -113,10 +111,7 @@
    }
   },
   {
-   "from": "p6c_unit_lsu.json",
-   "unit_only": {
-    "2": "killed by p6_lockstep_extra.json: a Program Buffer load into a read-denied pocket"
-   }
+   "from": "p6c_unit_lsu.json"
   }
  ]
 }

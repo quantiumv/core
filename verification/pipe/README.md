@@ -46,6 +46,16 @@ The qvgen profiles the specs use (`verification/lockstep/gen/qvgen.py`):
 | `p5c_lockstep.json` | `--isa imac --priv msu --smc` | |
 | `p5d_lockstep.json` | `--isa imac --priv msu --smc --irq` | `--irq-mode 2 --irq-density 1 --irq-late` |
 | `p5e_lockstep.json` | `--isa imac --priv msu --pmp --smc` (and `--priv m` for the lock bit and MPRV) | |
+| `p6_lockstep.json` | `--isa imac --priv msu --pmp --irq --smc` | `--irq-mode 2 --irq-density 1 --dbg-mode 1 --dbg-features 191` |
+| `p6_lockstep_extra.json` | the same (`--priv m` for the debug-CSR legality mutants, which only an M-mode body reaches) | the same |
+| `p6_lockstep_dense.json` | the same plus `--ebreak-rate 0.1` | the same plus `--dbg-density 1` |
+| `p6_lockstep_dbgexc.json` | the same, `--corpus dbg`: the directed programs `dbg_exc.s` and `dbg_res.s`, the only ones that can take an action-0 trigger | `--irq-mode 0 --dbg-mode 1 --dbg-features 191` |
+
+`p6_lockstep.json` holds every mutant of the P6 unit specs. 85 of its 134 are killed by the random programs
+alone and 49 survive them; each survivor is annotated (`unit_only`) with the reason, either the spec that kills it
+(the three other P6 specs above) or why no generated program can show it (the Debug Module never produces the
+input, the decoder or commit makes the difference unobservable, the RVFI fields differ for a reason both cores
+get right). Run all four specs for the full record.
 
 ## Where core_pipe differs from core.sv
 
