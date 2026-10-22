@@ -36,13 +36,20 @@ Memory map (1 MiB image, see verification/lockstep/gen/link.ld):
 --sv39 (P7.0): the page tables are static data (set A is what satp points at, set B a variant the body can switch
 to, always followed by SFENCE.VMA). Per seed: random page flags (A and D often clear, U for a U body or now and then
 for an S body, execute-only, read-only, malformed), a data window through a 2 MiB or 1 GiB leaf (x27 moves into it),
-holes that page-fault (misaligned superpage, W without R, a reserved bit, a pointer at the last level, unmapped,
-non-canonical), the MAGIC page for --irq, and probes of every fault: the page-fault handlers fix A/D and retry (a
-fault that comes back is a real one and is skipped, or for a fetch fault resumes at x25). The body also toggles
-SUM/MXR, rewrites satp and thrashes the TLB. --no-sv39-fetch keeps every fetch fault-free. Two rules the stimulus
+holes that page-fault (misaligned superpage with ppn0, ppn1 or both set, W without R, a reserved/PBMT/N bit in a
+leaf or in a pointer, a pointer at the last level, V clear with the rest of a good leaf, unmapped, non-canonical
+addresses that alias a mapped page) or take an access fault (a leaf onto physical 2^40, a pointer to a table above
+2^38, a pointer and a leaf into the bus-error region at FAR_BASE, accesses past the image through a 2 MiB or 1 GiB
+window; with --pmp an NA4 word cuts one PTE of a table in half), the MAGIC page for --irq, and probes of every
+fault: the page-fault handlers fix A/D and retry (a fault that comes back is a real one and is skipped, or for a
+fetch fault resumes at x25; the handler follows a pointer by its PPN field alone and never a far one: only access
+faults come out of those). The body also toggles SUM/MXR (also just before a fetch probe: SUM never lets S fetch
+from a user page), rewrites satp and thrashes the TLB. --no-sv39-fetch keeps every fetch fault-free. Two rules the stimulus
 keeps because the FSM and the pipe legitimately differ where they are broken (speculation contract of the plan's
 P7): R1 -- every PTE store and satp root switch is followed by an SFENCE.VMA before anything depends on it; R2 --
-every non-leaf PTE and every executable leaf points into RAM.
+no non-leaf PTE and no executable leaf leads to a device: tables and code are in RAM, and what is not (the far
+pointers and leaves, a probe page now and then) goes to an address above 2^38 that the PMP always denies, or to
+FAR_BASE, where the harness answers with a bus error.
 
 Register allocation (never overlapping -- the trap handlers and the
 random body touch disjoint sets, so no save/restore dance is needed
@@ -151,6 +158,7 @@ class Program:
         self.pocket_code: list[str] = []      # --pmp, --sv39: what sits at POCKET_X
         self.probe_code: list[str] = []       # --sv39: what sits at PROBE_X
         self.pockets: list[tuple[int, int]] = []   # --pmp: the byte ranges [lo, hi) of the sandbox pockets
+        self.ptpmp_k = None                   # --pmp --sv39: the PTE of the PMPT_VA table that a PMP word cuts in half
         self.subroutines: list[str] = []  # appended to .text.entry at the end
         self.call_depth = 0
         self.open_labels: list[Label] = []  # forward branches waiting to land
@@ -742,7 +750,8 @@ def _emit_pagetable_walk_and_fix(p: Program, va_reg: int, done_label, ordinary_l
         f"    bnez    x11, {leaf}",
         "    li      x11, 12",         # a pointer at level 0 has nothing below it
         f"    beq     x12, x11, {fall}",
-        "    srli    x7, x10, 10",
+        "    slli    x7, x10, 10",     # the PPN field [53:10] only: a malformed pointer has reserved, PBMT or N bits above it
+        "    srli    x7, x7, 20",
         "    slli    x7, x7, 12",
         "    addi    x12, x12, -9",
         f"    j       {walk}",
@@ -1099,6 +1108,12 @@ def emit_pmp(p: Program):
         entries[0] = sandbox_pocket() if rng.random() < 0.85 else (0, 0)
         entries[1] = bad_page_pocket()
         entries[2] = sandbox_pocket() if rng.random() < 0.5 else (0, 0)
+        if p.args.sv39 and rng.random() < 0.35:
+            # an NA4 word over the first half of one PTE of the PMPT_VA table, ahead of the region that covers the
+            # whole table: a PTE read is eight bytes, so it only partly overlaps the word and is no match for it,
+            # where a read of a single byte would match it (and get its permissions)
+            p.ptpmp_k = rng.randrange(8)
+            entries[0] = (pocket_cfg(_PMP_A_NA4, lockable=False), (PMPT_PA + 8 * p.ptpmp_k) >> 2)
     if p.irq:
         entries[2] = (0x18 | 0x3, napot_pmpaddr(MAGIC_BASE, 8))          # NAPOT, read+write, unlocked
     entries.append((0x18 | 0x7, napot_pmpaddr(0, 0x100000)))               # the base: NAPOT rwx over the image
@@ -1132,12 +1147,12 @@ def emit_pmp_jump(p: Program):
 # The tables are static data at fixed physical addresses: the link script puts .data.pagetables at
 # PAGETABLE_BASE and every table is exactly 4 KB. Set A is what satp points at when the body starts;
 # set B is the same map with a few deliberate differences, which the body may switch to (satp write +
-# SFENCE.VMA, speculation contract R1). A page-table walk reads RAM only (contract R2): every pointer
-# PTE below points at one of these eight tables, and the only executable leaves map the code, the
-# probe pages (all RAM).
+# SFENCE.VMA, speculation contract R1). A page-table walk reads no device (contract R2): every pointer
+# PTE below points at one of these eight tables, except the far ones (above 2^38, which the PMP denies, and
+# FAR_BASE, a bus error), and the only executable leaves map the code and the probe pages (RAM, or now and then
+# FAR_BASE).
 
 PTE_V, PTE_R, PTE_W, PTE_X, PTE_U, PTE_A, PTE_D = 0x01, 0x02, 0x04, 0x08, 0x10, 0x40, 0x80
-PTE_RSVD = 1 << 58               # a reserved bit (60:54): the PTE is malformed
 
 SV_SET_A, SV_SET_B = 0, 1
 SV_TABLE_NAMES = ["l2_table", "l1_table", "l0_table", "l0x_table",
@@ -1166,11 +1181,36 @@ PMPT_VA     = 0x00E0_0000        # L1[7]: a pointer to the L0 table in the page 
 PMPT_PA     = 0x0008_F000
 GIGA_VA     = 0x4000_0000        # L2[1]: a 1 GiB window onto PA 0 (the data window of a "giga" seed)
 MISGIGA_VA  = 0x8000_0000        # L2[2]: a 1 GiB leaf that is not 1 GiB aligned -> page fault
-HOLE_VAS    = [BAD_ADDR_BASE, MISMEGA_VA, MALF_VA, RSVD_VA, PTR0_VA, UNMAP_VA, MISGIGA_VA, FAR_BASE, PMPT_VA, PMPT_VA]
-NONCANON_VAS = [0x0000_0080_0000_0000, 0x0000_0040_0000_0000, 0x0100_0000_0000_0000,
-                0x8000_0000_0000_0000, 0xFFFF_FFBF_FFFF_F000, 0x0000_00FF_FFFF_F000]
+# the entries below are about the bits of a PTE and of a physical address that the ordinary map never sets
+DEAD_VA     = 0x0120_0000        # L1[9]: a 2 MiB leaf with V clear but R, W, A, D set -> page fault
+FARLEAF_VA  = 0x0140_0000        # L1[10]: a 2 MiB leaf onto a PA with one high bit set: the PMP sees all 56 bits and
+                                 # denies it, an address cut short would reach the RAM (access fault 5/7)
+FARPTR_VA   = 0x0160_0000        # L1[11]: a pointer to a table far out (PA bit 32..55): the walk's PTE read is denied (5/7)
+BUSPTR_VA   = 0x0180_0000        # L1[12]: a pointer to the bus-error region at FAR_BASE: the PTE read is denied by
+                                 # PMP or, where a PMP entry lets it through, ends in a bus error (5/7 either way)
+RSVDPTR_VA  = 0x01A0_0000        # L1[13]: a pointer with a reserved, PBMT or N bit set, to a valid table -> page fault
+BUSLEAF_VA  = 0x01C0_0000        # L1[14]: a 2 MiB leaf onto FAR_BASE: PMP denial or a bus error after the translation
+DEADGIGA_VA = 0xC000_0000        # L2[3]: a 1 GiB "leaf" with V clear -> page fault
+FARGIGA_VA  = 0x1_8000_0000      # L2[6]: a 1 GiB leaf onto a far PA (access fault); an M body, which does not
+                                 # translate, reaches the bus-error region with it
+FAR_PA_BITS = [32, 36, 38, 40, 44, 48, 52, 55]    # the one bit a far physical address has set (bit 55 is the last of a PTE's PPN)
+# (virtual address, span the offset may cover) of every hole; the first group faults in the first 4 KB only
+HOLE_VAS    = [(BAD_ADDR_BASE, 0x800), (MISMEGA_VA, 0x1000), (MALF_VA, 0x1000), (RSVD_VA, 0x1000), (PTR0_VA, 0x1000),
+               (UNMAP_VA, 0x1000), (MISGIGA_VA, 0x1000), (FAR_BASE, 0x1000), (PMPT_VA, 0x8000), (PMPT_VA, 0x8000),
+               (DEAD_VA, 0x1000), (DEADGIGA_VA, 0x1000), (FARPTR_VA, 0x1000), (BUSPTR_VA, 0x1000),
+               (RSVDPTR_VA, 0x1000), (FARLEAF_VA, 0x20_0000), (BUSLEAF_VA, 0x20_0000), (FARGIGA_VA, 0x4000_0000)]
+# addresses whose upper bits (63:39) are not a sign extension of bit 38; the low part of each is added at use
+NONCANON_UPPER = [0x0000_0080_0000_0000, 0x0000_0100_0000_0000, 0x0001_0000_0000_0000, 0x4000_0000_0000_0000,
+                  0x8000_0000_0000_0000, 0xFFFF_FF80_0000_0000, 0xFFFF_FF80_0000_0000, 0x7FFF_FF80_0000_0000,
+                  0xFFFF_FE00_0000_0000]
+NONCANON_VAS = [0x0000_0040_0000_0000, 0xFFFF_FFBF_FFFF_F000, 0x0000_00FF_FFFF_F000, 0xFFFF_FFC0_0000_0000]
 PROBE_LO_VPN, PROBE_HI_VPN = 0x91, 0x92
 PROBE_X = (PROBE_LO_VPN << 12) + 0xFFE      # a 32-bit `jr x25` straddling the 0x92000 page boundary
+
+
+def sv_rsvd_bit(p: Program) -> int:
+    """A bit that makes a PTE malformed: reserved (60:54), PBMT (62:61) or N (63), the last two favoured."""
+    return p.rng.choice(list(range(54, 61)) + [61, 62, 63] * 3)
 
 
 def sv_leaf(pa: int, flags: int) -> int:
@@ -1183,13 +1223,16 @@ def sv_ptr(pa: int) -> int:
 
 def sv_data_flags(p: Program, user: bool) -> int:
     """Random flags for a page of data: usually plain read/write, now and then read-only, execute-only
-    (a load needs MXR), malformed (W without R) or invalid. A and D are often clear: the page-fault
-    handler sets them (and R1 makes sure it follows with an SFENCE.VMA). 0 means not mapped."""
+    (a load needs MXR), malformed (W without R), invalid, or invalid with the bits of a good leaf (V alone
+    clear). A and D are often clear: the page-fault handler sets them (and R1 makes sure it follows with an
+    SFENCE.VMA). 0 means not mapped."""
     rng = p.rng
-    perm = rng.choices([PTE_R | PTE_W, PTE_R, PTE_X, PTE_R | PTE_X, PTE_R | PTE_W | PTE_X, PTE_W, 0],
-                       weights=[60, 10, 6, 4, 6, 3, 2])[0]
+    perm = rng.choices([PTE_R | PTE_W, PTE_R, PTE_X, PTE_R | PTE_X, PTE_R | PTE_W | PTE_X, PTE_W, 0, -1],
+                       weights=[60, 10, 6, 4, 6, 3, 1, 2])[0]
     if perm == 0:
         return 0
+    if perm < 0:                           # V clear, everything else a good leaf: the entry must not be used
+        return PTE_R | PTE_W | PTE_A | PTE_D | (PTE_U if user else 0)
     f = PTE_V | perm
     if rng.random() < 0.85:
         f |= PTE_A
@@ -1206,7 +1249,7 @@ def sv_exec_flags(p: Program, user: bool, ok_bias: float) -> int:
     rng = p.rng
     if rng.random() < ok_bias:
         return PTE_V | PTE_R | PTE_X | PTE_A | (PTE_U if user else 0)
-    kind = rng.choice(["invalid", "noexec", "noA", "wrongU", "rwx"])
+    kind = rng.choice(["invalid", "noexec", "noA", "wrongU", "wrongU", "rwx"])
     if kind == "invalid":
         return 0
     if kind == "noexec":
@@ -1255,8 +1298,13 @@ def sv39_pages(p: Program) -> dict:
     # the bad-address page (also where a PMP pocket's `jr x25` lives) and the two pages of a straddling probe
     bad = sv_exec_flags(p, user or rng.random() < 0.15, 0.5) if rng.random() < 0.6 else sv_data_flags(p, user)
     pages[BAD_ADDR_BASE >> 12] = (BAD_ADDR_BASE, bad)
-    pages[PROBE_LO_VPN] = (PROBE_LO_VPN << 12, sv_exec_flags(p, user or rng.random() < 0.1, 0.8))
-    pages[PROBE_HI_VPN] = (PROBE_HI_VPN << 12, sv_exec_flags(p, user or rng.random() < 0.1, 0.5))
+    # a probe page now and then maps the bus-error region instead of its own code: a fetch that translates fine and
+    # then gets a bus error (cause 1, in the second half of the straddling instruction when it is the high page).
+    # The region holds no device, so a wrong-path fetch of it reads nothing (R2 is about devices)
+    pa_lo = FAR_BASE if rng.random() < 0.15 else PROBE_LO_VPN << 12
+    pa_hi = FAR_BASE if rng.random() < 0.25 else PROBE_HI_VPN << 12
+    pages[PROBE_LO_VPN] = (pa_lo, sv_exec_flags(p, user or rng.random() < 0.1, 0.8))
+    pages[PROBE_HI_VPN] = (pa_hi, sv_exec_flags(p, user or rng.random() < 0.1, 0.5))
     return pages
 
 
@@ -1296,14 +1344,26 @@ def sv39_tables(p: Program, pages: dict, setno: int):
         l1[(MEGA_VA >> 21) & 0x1FF] = sv_leaf(0, window_flags())
     if p.sv_mode == "giga":
         root[(GIGA_VA >> 30) & 0x1FF] = sv_leaf(0, window_flags())
-    # holes: every access to them page-faults
-    l1[(MISMEGA_VA >> 21) & 0x1FF] = sv_leaf(0x1000, PTE_V | PTE_R | PTE_W | PTE_A | PTE_D)       # misaligned superpage
+    # holes: every access to them page-faults, or (the far ones) takes an access fault
+    good = PTE_R | PTE_W | PTE_A | PTE_D
+    # which low bits of a superpage's physical page number are set: ppn0 alone, ppn1 alone, or both
+    l1[(MISMEGA_VA >> 21) & 0x1FF] = sv_leaf(rng.choice([0x1000, 0x201000, 0x1000_1000]), PTE_V | good)    # misaligned superpage
     l1[(MALF_VA >> 21) & 0x1FF] = sv_leaf(0x200000, PTE_V | PTE_W | PTE_A | PTE_D)                  # W without R
-    l1[(RSVD_VA >> 21) & 0x1FF] = sv_leaf(0x400000, PTE_V | PTE_R | PTE_W | PTE_A | PTE_D) | PTE_RSVD
+    l1[(RSVD_VA >> 21) & 0x1FF] = sv_leaf(0x400000, PTE_V | good) | (1 << sv_rsvd_bit(p))            # a reserved, PBMT or N bit
     l1[(PTR0_VA >> 21) & 0x1FF] = sv_ptr(l0x_pa)
     l0x[0] = sv_ptr(l0_pa)                                                                          # a pointer at the last level
     l1[(PMPT_VA >> 21) & 0x1FF] = sv_ptr(PMPT_PA)                                                   # the L0 table behind the PMP pocket
-    root[(MISGIGA_VA >> 30) & 0x1FF] = sv_leaf(0x1000, PTE_V | PTE_R | PTE_W | PTE_A | PTE_D)       # misaligned gigapage
+    root[(MISGIGA_VA >> 30) & 0x1FF] = sv_leaf(rng.choice([0x1000, 0x20_0000, 0x20_1000]), PTE_V | good)  # misaligned gigapage
+    l1[(DEAD_VA >> 21) & 0x1FF] = sv_leaf(0, good)                                                  # V clear, the rest of a good leaf
+    root[(DEADGIGA_VA >> 30) & 0x1FF] = sv_leaf(0, good)
+    farf = PTE_V | good | (PTE_U if user else 0)
+    far = lambda: 1 << rng.choice(FAR_PA_BITS)
+    l1[(FARLEAF_VA >> 21) & 0x1FF] = sv_leaf(far(), farf)                                           # a high PA bit: the PMP denies it
+    root[(FARGIGA_VA >> 30) & 0x1FF] = sv_leaf(far(), farf)
+    l1[(BUSLEAF_VA >> 21) & 0x1FF] = sv_leaf(FAR_BASE, farf)                                        # the bus-error region
+    l1[(FARPTR_VA >> 21) & 0x1FF] = sv_ptr(far() + l0_pa)                                           # a table far out
+    l1[(BUSPTR_VA >> 21) & 0x1FF] = sv_ptr(FAR_BASE)                                                # a table in the bus-error region
+    l1[(RSVDPTR_VA >> 21) & 0x1FF] = sv_ptr(l0_pa) | (1 << sv_rsvd_bit(p))                          # a malformed pointer to a good table
     if p.irq:                                                       # the S handler's write of the MAGIC clear
         l1[(MAGIC_BASE >> 21) & 0x1FF] = sv_leaf(MAGIC_BASE & ~0x1FFFFF, PTE_V | PTE_R | PTE_W | PTE_A | PTE_D)
     return root, l1, l0, l0x
@@ -1349,38 +1409,78 @@ def emit_sv39(p: Program):
 
 def emit_hole_access(p: Program, recent: list[int]):
     """A load, store, LR or AMO at an address that page-faults (a hole in the map, or a page whose flags forbid
-    it), or at the bad-address page and FAR_BASE, which fault too under Sv39."""
+    it), or that takes an access fault (a far physical address, a far page table, the bus-error region), or at the
+    bad-address page and FAR_BASE, which fault too under Sv39. An access into a superpage behind a far address comes
+    in twos and threes: the first fills the TLB, the others hit it."""
     rng = p.rng
-    va = rng.choice(HOLE_VAS)
-    if va == PMPT_VA:
-        va += rng.randrange(8) << 12                    # one of the eight pages the PMP-pocketed table maps
-    va += rng.randrange(0, 0x800 if va == BAD_ADDR_BASE else 0x1000, 8)      # below the pocket at POCKET_X
-    p.li(6, va)
-    r = rng.random()
-    if r < 0.15:
-        rd, rs = p.reg_biased(recent), p.reg_biased(recent)
-        w = rng.choice(["w", "d"])
-        if rng.random() < 0.5:
-            p.e(f"    lr.{w}    x{rd}, (x6)")
+    va0, span = rng.choice(HOLE_VAS)
+    if va0 == PMPT_VA and p.ptpmp_k is not None and rng.random() < 0.7:
+        va0, span = PMPT_VA + (p.ptpmp_k << 12), 0x1000      # the page behind the PTE a PMP word cuts in half
+    if va0 == BUSLEAF_VA and rng.random() < 0.5:
+        span = 0x1000                                        # the first page: where a PMP entry may let it through to the bus
+    for _ in range(rng.choice([1, 2, 3]) if span > 0x8000 else 1):
+        va = va0 + rng.randrange(0, span, 8)                # below the pocket at POCKET_X for the bad-address page
+        if rng.random() < 0.2:
+            va += rng.choice([1, 2, 3, 5, 6, 7])            # misaligned for every access wider than a byte: the
+                                                            # misaligned trap comes first, before any walk
+        p.li(6, va)
+        r = rng.random()
+        if r < 0.15:
+            rd, rs = p.reg_biased(recent), p.reg_biased(recent)
+            w = rng.choice(["w", "d"])
+            if rng.random() < 0.5:
+                p.e(f"    lr.{w}    x{rd}, (x6)")
+            else:
+                p.e(f"    {rng.choice(_AMO_RMW)}.{w} x{rd}, x{rs}, (x6)")
+            recent.append(rd)
+        elif r < 0.6:
+            mnem, _ = rng.choice(_LOADS)
+            rd = p.reg_biased(recent)
+            p.e(f"    {mnem:<7} x{rd}, 0(x6)")
+            recent.append(rd)
         else:
-            p.e(f"    {rng.choice(_AMO_RMW)}.{w} x{rd}, x{rs}, (x6)")
-        recent.append(rd)
-    elif r < 0.6:
+            mnem, _ = rng.choice(_STORES)
+            p.e(f"    {mnem:<7} x{p.reg_biased(recent)}, 0(x6)")
+        del recent[:-8]
+
+
+def emit_window_probe(p: Program, recent: list[int]):
+    """An access through the 2 MiB or 1 GiB data window at an offset the sandbox accesses never use: another page of
+    the memory behind it (a read only, below 1 MiB: a store could land in the code or in a page table), or past the
+    image, where the PMP denies it. Page-number bits of the virtual address that the physical address has to take
+    from the virtual one are the point."""
+    rng = p.rng
+    if p.sv_mode == "mega":
+        k = rng.randrange(0, 512)
+        va = MEGA_VA + (k << 12) + rng.randrange(0, 0x1000, 8)
+        may_store = k >= 256
+    else:
+        k = rng.randrange(0, 16)
+        va = GIGA_VA + (k << 21) + (rng.randrange(0, 512) << 12) + rng.randrange(0, 0x1000, 8)
+        may_store = k >= 1
+    p.li(6, va)
+    if may_store and rng.random() < 0.4:
+        mnem, _ = rng.choice(_STORES)
+        p.e(f"    {mnem:<7} x{p.reg_biased(recent)}, 0(x6)")
+    else:
         mnem, _ = rng.choice(_LOADS)
         rd = p.reg_biased(recent)
         p.e(f"    {mnem:<7} x{rd}, 0(x6)")
         recent.append(rd)
-    else:
-        mnem, _ = rng.choice(_STORES)
-        p.e(f"    {mnem:<7} x{p.reg_biased(recent)}, 0(x6)")
     del recent[:-8]
 
 
 def emit_noncanonical(p: Program, recent: list[int]):
     """An access to a virtual address whose upper bits are not a sign extension of bit 38: a page fault whatever
-    the map says (but the walk still reads the root PTE first, so a PTE-read fault would win)."""
+    the map says (but the walk still reads the root PTE first, so a PTE-read fault would win). Mostly an alias of a
+    mapped address: the sandbox's page-number bits with other bits above 38, so that a core that checks the wrong
+    bits, or too few, translates it."""
     rng = p.rng
-    p.li(6, rng.choice(NONCANON_VAS) + rng.randrange(0, 0x1000, 8) * (rng.random() < 0.5))
+    if rng.random() < 0.65:
+        va = rng.choice(NONCANON_UPPER) | ((p.data_base & ((1 << 38) - 1)) + rng.randrange(0, 0x800, 8))
+    else:
+        va = rng.choice(NONCANON_VAS) + rng.randrange(0, 0x1000, 8) * (rng.random() < 0.5)
+    p.li(6, va)
     if rng.random() < 0.5:
         mnem, _ = rng.choice(_LOADS)
         rd = p.reg_biased(recent)
@@ -1413,6 +1513,37 @@ def emit_sum_mxr(p: Program):
     p.e(f"    {rng.choice(['csrs', 'csrc'])}    sstatus, x6")
 
 
+def emit_flip_pair(p: Program, recent: list[int]):
+    """SUM and/or MXR set for one access to a sandbox page and cleared for the next, or the other way round: the
+    first access fills the TLB, the second hits the entry, and the live check has to apply the bit as it is now,
+    not as it was at the fill (an execute-only page is readable only while MXR is set, a user page is reachable from S
+    only while SUM is set). Every access reloads x6: a trap in the middle clobbers it."""
+    rng = p.rng
+    bits = rng.choice([1 << 18, 1 << 19, (1 << 18) | (1 << 19)])
+    off = rng.randrange(8) * 0x1000 + rng.randrange(0, 0x800, 8)
+    first, second = ("csrs", "csrc") if rng.random() < 0.7 else ("csrc", "csrs")
+
+    def access():
+        p.li(6, off)
+        p.e("    add     x6, x6, x27")
+        if rng.random() < 0.35:                              # a store: the entry's W and D count as well
+            mnem, _ = rng.choice(_STORES)
+            p.e(f"    {mnem:<7} x{p.reg_biased(recent)}, 0(x6)")
+        else:
+            mnem, _ = rng.choice(_LOADS)
+            rd = p.reg_biased(recent)
+            p.e(f"    {mnem:<7} x{rd}, 0(x6)")
+            recent.append(rd)
+
+    p.li(6, bits)
+    p.e(f"    {first}    sstatus, x6")
+    access()
+    p.li(6, bits)
+    p.e(f"    {second}    sstatus, x6")
+    access()
+    del recent[:-8]
+
+
 def emit_satp_op(p: Program):
     """satp: a write of the value it already holds (flushes nothing, changes nothing), a switch to the other
     table set followed by the SFENCE.VMA that speculation contract R1 requires, or the SFENCE.VMA alone."""
@@ -1435,6 +1566,11 @@ def emit_fetch_probe(p: Program):
     second half, where the trap value is pc + 8). x25 holds the label after the jump: the instruction returns
     there if the fetch works, and a fetch fault resumes there."""
     nxt = Label("svprobe")
+    if p.priv_ext and not p.body_u and p.rng.random() < 0.5:
+        # SUM lets S read and write user pages, never fetch from one: with it set, a probe page that is a user page
+        # still has to fault
+        p.li(6, 1 << 18)
+        p.e("    csrs    sstatus, x6")
     p.e(f"    la      x25, {nxt}")
     p.li(6, p.rng.choice([POCKET_X, PROBE_X]))
     p.e("    jalr    x0, 0(x6)")
@@ -1446,14 +1582,18 @@ def emit_sv39_op(p: Program, recent: list[int]):
     rng = p.rng
     r = rng.random()
     can_csr = p.priv_ext and not p.body_u            # an S (or privilege 2) body can touch sstatus and satp
-    if r < 0.32:
+    if r < 0.30:
         emit_hole_access(p, recent)
-    elif r < 0.47 and can_csr:
+    elif r < 0.40 and can_csr:
         emit_sum_mxr(p)
+    elif r < 0.50 and can_csr:
+        emit_flip_pair(p, recent)
     elif r < 0.60 and can_csr:
         emit_satp_op(p)
-    elif r < 0.75:
+    elif r < 0.70:
         emit_tlb_thrash(p, recent)
+    elif r < 0.78 and p.sv_mode != "ident":
+        emit_window_probe(p, recent)
     elif r < 0.90 and p.args.sv39_fetch:
         emit_fetch_probe(p)
     else:
@@ -1535,6 +1675,12 @@ def emit_msu_minimal_pmp(p: Program):
         p.li(6, 0x0400F000 >> 2)
         p.e("    csrw    pmpaddr1, x6")
         cfg |= 0x1B << 8
+    if p.args.sv39:
+        # entry 2: the bus-error region at FAR_BASE, read + write. A PTE read or a translated access that gets there
+        # ends in a bus error (an access fault), where it would otherwise stop at the PMP
+        p.li(6, napot_pmpaddr(FAR_BASE, 0x1000))
+        p.e("    csrw    pmpaddr2, x6")
+        cfg |= 0x1B << 16
     p.li(6, cfg)
     p.e("    csrw    pmpcfg0, x6")
 

@@ -13,7 +13,8 @@ Two hazards are looked for. Both make the program invalid, not the core wrong:
           wrong paths. This is speculation contract R1 (a PTE store, satp write or root swap is followed by an
           SFENCE.VMA before anything depends on it).
 
-Contract R2 (every non-leaf PTE and every executable leaf points into RAM) cannot be read from a trace; a walk that
+Contract R2 (no non-leaf PTE and no executable leaf leads to a device: tables and code are in RAM, the deliberate far
+pointers and leaves go where the PMP denies them or to the bus-error region) cannot be read from a trace; a walk that
 reached MMIO shows up as an MMIO-read log mismatch instead.
 
 Usage:
