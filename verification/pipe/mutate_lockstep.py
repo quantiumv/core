@@ -17,7 +17,9 @@ or the build failed; SURVIVED = every entry passed. "counts" escalates: a mutant
 over the first count programs, and only a survivor goes on to the next count (the results of the
 programs already run are cached in its outdir), so a mutant that is easy to kill costs little.
 ("count": N is a single count.) A mutant marked "equivalent": true is known to
-change nothing observable and is expected to survive. With no mutants selected the baseline
+change nothing observable and is expected to survive. --skip-annotated leaves out every mutant marked
+equivalent or carrying a unit_only reason (they are listed as not run): each survives the full count of programs,
+which is most of a run's time. With no mutants selected the baseline
 (unmutated) is run, which must PASS: use "baseline" as the selector.
 """
 import json, os, shutil, subprocess, sys, tempfile
@@ -88,9 +90,11 @@ def run_one(args):
 
 
 def main():
-    spec = json.load(open(sys.argv[1]))
+    skip = "--skip-annotated" in sys.argv
+    argv = [a for a in sys.argv if a != "--skip-annotated"]
+    spec = json.load(open(argv[1]))
     muts = expand(spec)
-    sel = sys.argv[2] if len(sys.argv) > 2 else None
+    sel = argv[2] if len(argv) > 2 else None
     tmp = tempfile.mkdtemp(prefix="mutl_")
     if sel == "baseline":
         _, st, info = run_one((0, None, spec, tmp))
@@ -99,6 +103,11 @@ def main():
         sys.exit(0 if st == "SURVIVED" else 1)
     only = set(sel.split(",")) if sel else None
     jobs = [(i, m, spec, tmp) for i, m in enumerate(muts) if only is None or str(i) in only]
+    if skip:       # the annotated ones are expected to survive: running them costs the full count each
+        for i, m, _, _ in jobs:
+            if m.get("equivalent", False) or "unit_only" in m:
+                print(f"  [{i}] {m['name']}: not run ({'unit-test only: ' + m['unit_only'] if 'unit_only' in m else 'equivalent'})", flush=True)
+        jobs = [j for j in jobs if not (j[1].get("equivalent", False) or "unit_only" in j[1])]
     survived = 0
     with ThreadPoolExecutor(max_workers=spec.get("jobs", 3)) as ex:
         for i, status, info in ex.map(run_one, jobs):
