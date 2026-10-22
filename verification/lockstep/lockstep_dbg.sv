@@ -324,7 +324,7 @@ module lockstep_dbg (
     // Fill pbw[0..pbn-1] with one snippet. ra/rb are x22/x23 when the
     // program leaves them alone, x0 otherwise (so the words are still
     // there to be executed and retired, with no architectural effect).
-    // The sandbox snippets (3, 9, 10) need the qvgen sandbox base in x27, so
+    // The sandbox snippets (3, 9, 10, 14) need the qvgen sandbox base in x27, so
     // they only exist for reserved programs.
     task automatic make_snippet(input integer which_in, input logic reserved);
         logic [4:0] ra, rb;
@@ -332,7 +332,7 @@ module lockstep_dbg (
         begin
             ra    = reserved ? 5'd22 : 5'd0;
             rb    = reserved ? 5'd23 : 5'd0;
-            which = ((which_in == 3 || which_in == 9 || which_in == 10) && !reserved) ? 0 : which_in;
+            which = ((which_in == 3 || which_in == 9 || which_in == 10 || which_in == 14) && !reserved) ? 0 : which_in;
             pbn   = 0;
             case (which)
                 0: begin   // ALU chain
@@ -429,6 +429,17 @@ module lockstep_dbg (
                     pbw[0] = enc_csr(12'hF14, rb, 3'b001, ra);                            // csrrw ra, mhartid, rb
                     pbw[1] = EBREAK; pbn = 2;
                 end
+                14: begin  // memory through x27 + 0x1000, qvgen --sv39's remapped page (VA 0x11000 -> PA 0x31000): a
+                           // Program Buffer access is not translated, so it must land at PA 0x11000 + k. The data
+                           // read back is the same either way; what tells them apart is the address (RVFI mem_addr,
+                           // the bus-write log)
+                    k = 8 * rnd(100);
+                    pbw[0] = {20'd1, ra, 7'b0110111};                                     // lui ra, 1
+                    pbw[1] = enc_r(7'b0000000, 5'd27, ra, 3'b000, ra, 7'b0110011);        // add ra, ra, x27
+                    pbw[2] = enc_s(12'(k), rb, ra, 3'b011);                               // sd rb, k(ra)
+                    pbw[3] = enc_i(12'(k), ra, 3'b011, rb, 7'b0000011);                   // ld rb, k(ra)
+                    pbw[4] = EBREAK; pbn = 5;
+                end
                 default: begin
                     pbw[0] = EBREAK; pbn = 1;
                 end
@@ -442,10 +453,11 @@ module lockstep_dbg (
         integer      i, which;
         begin
             which = which_in;
-            // The sandbox snippets (3, 9, 10) go through x27, which the program's preamble sets to the sandbox base. A
-            // halt before that finds x27 = 0, and a store through it lands in the code ahead of the pc: no FENCE.I
-            // follows, so the two cores may fetch different bytes, and the program is wrecked anyway.
-            if (reserved && (which == 3 || which == 9 || which == 10)) begin
+            // The sandbox snippets (3, 9, 10, 14) go through x27, which the program's preamble sets to the sandbox base.
+            // A halt before that finds x27 = 0, and a store through it lands in the code ahead of the pc: no FENCE.I
+            // follows, so the two cores may fetch different bytes, and the program is wrecked anyway. (Under --sv39 a
+            // seed with a data window has x27 elsewhere: no sandbox snippets then either.)
+            if (reserved && (which == 3 || which == 9 || which == 10 || which == 14)) begin
                 ar_read(gpr_regno(27), x27v);
                 if (x27v != 64'h10000) which = 0;
             end
@@ -520,7 +532,7 @@ module lockstep_dbg (
                         ev(EV_WRITE, 64'(r), back);
                     end
                     6: if (feat_i[5]) begin                         // a Program Buffer run
-                        pb_run(rnd(14), reserved);
+                        pb_run(rnd(15), reserved);
                     end
                     default: if (feat_i[2]) begin
                         ar_read({4'b0, CSR_MINSTRET}, v);

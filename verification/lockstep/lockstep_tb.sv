@@ -539,6 +539,15 @@ module lockstep_tb #(
     initial intr_count_a = 0;
     always @(posedge clk_a) if (!rst && a_rvfi_valid && a_rvfi_intr) intr_count_a = intr_count_a + 1;
 
+    // synchronous traps by cause (retirements flagged rvfi_trap that are not interrupt entries), side A:
+    // shown in the PASS line so a stimulus that is meant to provoke page faults or access faults can be
+    // told from one that never does
+    longint trap_cause_cnt [0:15];
+    initial for (int i = 0; i < 16; i++) trap_cause_cnt[i] = 0;
+    always @(posedge clk_a)
+        if (!rst && a_rvfi_valid && a_rvfi_trap && !a_rvfi_intr)
+            trap_cause_cnt[a_cause[3:0]] = trap_cause_cnt[a_cause[3:0]] + 1;
+
     // ---------------- pacing: hold a side's clock once it's too far ahead or done ----------------
     assign pace_a_hold = (a_rec_count >= `QV_LOCKSTEP_AHEAD_MAX) || (a_ev_count >= `QV_LOCKSTEP_EV_AHEAD_MAX) || a_stopped;
     assign pace_b_hold = (b_rec_count >= `QV_LOCKSTEP_AHEAD_MAX) || (b_ev_count >= `QV_LOCKSTEP_EV_AHEAD_MAX) || b_stopped;
@@ -605,12 +614,18 @@ module lockstep_tb #(
                 end
                 check_final_state();
                 if (tohost_addr != 32'b0 && max_retire == 0)
-                    $display("LOCKSTEP_RESULT: PASS (%0d retirements matched, %0d interrupt entries, %0d debug events [entries: %0d ebreak %0d trigger %0d halt %0d step], tohost=%0h)",
+                    $display("LOCKSTEP_RESULT: PASS (%0d retirements matched, %0d interrupt entries, %0d debug events [entries: %0d ebreak %0d trigger %0d halt %0d step], traps [c1 %0d c2 %0d c3 %0d c4 %0d c5 %0d c6 %0d c7 %0d c8 %0d c9 %0d c11 %0d c12 %0d c13 %0d c15 %0d], tohost=%0h)",
                              match_count, intr_count_a, ev_match_count, halt_cause_cnt[1], halt_cause_cnt[2], halt_cause_cnt[3], halt_cause_cnt[4],
+                             trap_cause_cnt[1], trap_cause_cnt[2], trap_cause_cnt[3], trap_cause_cnt[4], trap_cause_cnt[5], trap_cause_cnt[6],
+                             trap_cause_cnt[7], trap_cause_cnt[8], trap_cause_cnt[9], trap_cause_cnt[11], trap_cause_cnt[12], trap_cause_cnt[13],
+                             trap_cause_cnt[15],
                              side_a.mem0.sram0.memory[tohost_addr[31:3]]);
                 else
-                    $display("LOCKSTEP_RESULT: PASS (%0d retirements matched, %0d interrupt entries, %0d debug events [entries: %0d ebreak %0d trigger %0d halt %0d step], MAX_RETIRE reached)",
-                             match_count, intr_count_a, ev_match_count, halt_cause_cnt[1], halt_cause_cnt[2], halt_cause_cnt[3], halt_cause_cnt[4]);
+                    $display("LOCKSTEP_RESULT: PASS (%0d retirements matched, %0d interrupt entries, %0d debug events [entries: %0d ebreak %0d trigger %0d halt %0d step], traps [c1 %0d c2 %0d c3 %0d c4 %0d c5 %0d c6 %0d c7 %0d c8 %0d c9 %0d c11 %0d c12 %0d c13 %0d c15 %0d], MAX_RETIRE reached)",
+                             match_count, intr_count_a, ev_match_count, halt_cause_cnt[1], halt_cause_cnt[2], halt_cause_cnt[3], halt_cause_cnt[4],
+                             trap_cause_cnt[1], trap_cause_cnt[2], trap_cause_cnt[3], trap_cause_cnt[4], trap_cause_cnt[5], trap_cause_cnt[6],
+                             trap_cause_cnt[7], trap_cause_cnt[8], trap_cause_cnt[9], trap_cause_cnt[11], trap_cause_cnt[12], trap_cause_cnt[13],
+                             trap_cause_cnt[15]);
                 $finish;
             end
             if (cycle_q >= max_cycles) begin
