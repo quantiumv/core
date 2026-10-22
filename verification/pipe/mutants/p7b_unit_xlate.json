@@ -1,0 +1,171 @@
+{
+ "dut": "design/pipe/qv_xlate.sv",
+ "tb": "design/pipe/qv_xlate_tb.sv",
+ "files": [
+  "design/pipe/qv_pmp.sv",
+  "design/pipe/qv_pte.sv",
+  "design/pipe/qv_tlb.sv",
+  "design/pipe/qv_ptw.sv",
+  "design/pipe/qv_xlate.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench"
+ ],
+ "cwd": "design",
+ "timeout": 1800,
+ "mutants": [
+  {
+   "name": "a walk that was cancelled fills",
+   "old": "wire fill = i_w_done && i_w_ok && i_req && !i_cancel && !i_flush_tlb;",
+   "new": "wire fill = i_w_done && i_w_ok && i_req && !i_flush_tlb;"
+  },
+  {
+   "name": "a walk overtaken by a flush fills (unobservable: qv_tlb itself lets a flush beat a fill in the same cycle)",
+   "old": "wire fill = i_w_done && i_w_ok && i_req && !i_cancel && !i_flush_tlb;",
+   "new": "wire fill = i_w_done && i_w_ok && i_req && !i_cancel;",
+   "equivalent": true
+  },
+  {
+   "name": "a walk fills although the request is gone",
+   "old": "wire fill = i_w_done && i_w_ok && i_req && !i_cancel && !i_flush_tlb;",
+   "new": "wire fill = i_w_done && i_w_ok && !i_cancel && !i_flush_tlb;"
+  },
+  {
+   "name": "a failed walk fills",
+   "old": "wire fill = i_w_done && i_w_ok && i_req && !i_cancel && !i_flush_tlb;",
+   "new": "wire fill = i_w_done && i_req && !i_cancel && !i_flush_tlb;"
+  },
+  {
+   "name": "a hit is not judged again",
+   "old": "o_pf   = h_fault;",
+   "new": "o_pf   = 1'b0;"
+  },
+  {
+   "name": "a hit answers with the identity address",
+   "old": "o_ppn  = h_ppn;",
+   "new": "o_ppn  = va_ppn;"
+  },
+  {
+   "name": "the entry is judged as not accessed",
+   "old": "wire [63:0] syn = {10'b0, t_ppn, 2'b00, t_d, 1'b1, 1'b0, t_u, t_x, t_w, t_r, 1'b1};",
+   "new": "wire [63:0] syn = {10'b0, t_ppn, 2'b00, t_d, 1'b0, 1'b0, t_u, t_x, t_w, t_r, 1'b1};"
+  },
+  {
+   "name": "the entry is judged as always dirty",
+   "old": "wire [63:0] syn = {10'b0, t_ppn, 2'b00, t_d, 1'b1, 1'b0, t_u, t_x, t_w, t_r, 1'b1};",
+   "new": "wire [63:0] syn = {10'b0, t_ppn, 2'b00, 1'b1, 1'b1, 1'b0, t_u, t_x, t_w, t_r, 1'b1};"
+  },
+  {
+   "name": "the entry is judged as never a user page",
+   "old": "wire [63:0] syn = {10'b0, t_ppn, 2'b00, t_d, 1'b1, 1'b0, t_u, t_x, t_w, t_r, 1'b1};",
+   "new": "wire [63:0] syn = {10'b0, t_ppn, 2'b00, t_d, 1'b1, 1'b0, 1'b0, t_x, t_w, t_r, 1'b1};"
+  },
+  {
+   "name": "the entry is judged without its x",
+   "old": "wire [63:0] syn = {10'b0, t_ppn, 2'b00, t_d, 1'b1, 1'b0, t_u, t_x, t_w, t_r, 1'b1};",
+   "new": "wire [63:0] syn = {10'b0, t_ppn, 2'b00, t_d, 1'b1, 1'b0, t_u, 1'b0, t_w, t_r, 1'b1};"
+  },
+  {
+   "name": "the entry is judged at the wrong level",
+   "old": ".i_va(i_va), .i_level(t_level),",
+   "new": ".i_va(i_va), .i_level(2'd0),"
+  },
+  {
+   "name": "a walk fault is forgotten",
+   "old": "flt_q <= 1'b1;\n            fpf_q <= i_w_pf;",
+   "new": "flt_q <= 1'b0;\n            fpf_q <= i_w_pf;"
+  },
+  {
+   "name": "a walk fault outlives the request",
+   "old": "end else if (!i_req || i_cancel || i_flush_tlb) begin",
+   "new": "end else if (i_cancel || i_flush_tlb) begin"
+  },
+  {
+   "name": "a walk fault survives a cancel",
+   "old": "end else if (!i_req || i_cancel || i_flush_tlb) begin",
+   "new": "end else if (!i_req || i_flush_tlb) begin"
+  },
+  {
+   "name": "page fault and access fault swapped",
+   "old": "fpf_q <= i_w_pf;\n            faf_q <= i_w_af;",
+   "new": "fpf_q <= i_w_af;\n            faf_q <= i_w_pf;"
+  },
+  {
+   "name": "the walker is asked although translation is off",
+   "old": "assign o_w_req    = i_req && i_active && !flt_q && !t_hit && !i_w_done;",
+   "new": "assign o_w_req    = i_req && !flt_q && !t_hit && !i_w_done;"
+  },
+  {
+   "name": "the walker is asked again while a fault is held",
+   "old": "assign o_w_req    = i_req && i_active && !flt_q && !t_hit && !i_w_done;",
+   "new": "assign o_w_req    = i_req && i_active && !t_hit && !i_w_done;"
+  },
+  {
+   "name": "the walker is asked although the TLB hits",
+   "old": "assign o_w_req    = i_req && i_active && !flt_q && !t_hit && !i_w_done;",
+   "new": "assign o_w_req    = i_req && i_active && !flt_q && !i_w_done;"
+  },
+  {
+   "name": "the walker is asked again in its done cycle (unobservable: the walker itself does not accept a client in the cycle of its done pulse)",
+   "old": "assign o_w_req    = i_req && i_active && !flt_q && !t_hit && !i_w_done;",
+   "new": "assign o_w_req    = i_req && i_active && !flt_q && !t_hit;",
+   "equivalent": true
+  },
+  {
+   "name": "a flush does not kill the walk",
+   "old": "assign o_w_cancel = i_cancel || i_flush_tlb;",
+   "new": "assign o_w_cancel = i_cancel;"
+  },
+  {
+   "name": "a cancel does not kill the walk",
+   "old": "assign o_w_cancel = i_cancel || i_flush_tlb;",
+   "new": "assign o_w_cancel = i_flush_tlb;"
+  },
+  {
+   "name": "the identity answer is shifted",
+   "old": "wire [43:0] va_ppn = i_va[55:12];",
+   "new": "wire [43:0] va_ppn = i_va[56:13];"
+  },
+  {
+   "name": "translation off still faults on the walker's sticky fault",
+   "old": "if (!i_active) begin\n                o_done = 1'b1;\n            end else if (flt_q) begin",
+   "new": "if (flt_q) begin"
+  },
+  {
+   "name": "the fill is at the wrong level",
+   "old": ".i_fill_level(i_w_level),",
+   "new": ".i_fill_level(2'd0),"
+  },
+  {
+   "name": "the fill loses a page-number bit",
+   "old": ".i_fill_ppn(i_w_ppn),",
+   "new": ".i_fill_ppn({i_w_ppn[43:1], 1'b0}),"
+  },
+  {
+   "name": "the fill drops d",
+   "old": ".i_fill_d(i_w_d)",
+   "new": ".i_fill_d(1'b1)"
+  },
+  {
+   "name": "the fill drops u",
+   "old": ".i_fill_u(i_w_u)",
+   "new": ".i_fill_u(1'b0)"
+  },
+  {
+   "name": "the TLB lookup uses the wrong vpn bits",
+   "old": ".i_vpn(i_va[38:12]),",
+   "new": ".i_vpn(i_va[39:13]),"
+  },
+  {
+   "name": "the fill uses the live address as the tag",
+   "old": ".i_fill_vpn(i_w_vpn),",
+   "new": ".i_fill_vpn(i_va[38:12] ^ 27'd1),"
+  }
+ ]
+}

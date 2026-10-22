@@ -1,0 +1,209 @@
+{
+ "dut": "design/pipe/qv_ptw.sv",
+ "tb": "design/pipe/qv_ptw_tb.sv",
+ "files": [
+  "design/pipe/qv_pmp.sv",
+  "design/pipe/qv_pte.sv",
+  "design/pipe/qv_ptw.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench"
+ ],
+ "cwd": "design",
+ "timeout": 900,
+ "mutants": [
+  {
+   "name": "F wins a tie at an idle walker",
+   "old": "wire accept_d = (st_q == W_IDLE) && d_can;\n    wire accept_f = (st_q == W_IDLE) && !d_can && f_can;",
+   "new": "wire accept_d = (st_q == W_IDLE) && d_can && !f_can;\n    wire accept_f = (st_q == W_IDLE) && f_can;"
+  },
+  {
+   "name": "a request is accepted while the walker is deciding the last PTE (unobservable: accept_d is read only in W_IDLE, where st_q is already known to be W_IDLE)",
+   "old": "wire accept_d = (st_q == W_IDLE) && d_can;",
+   "new": "wire accept_d = (st_q == W_IDLE || st_q == W_DEC) && d_can;",
+   "equivalent": true
+  },
+  {
+   "name": "a client whose done pulse shows is accepted again",
+   "old": "wire d_can = i_d_req && !i_d_cancel && !d_done_q;",
+   "new": "wire d_can = i_d_req && !i_d_cancel;"
+  },
+  {
+   "name": "a cancelled request is still accepted",
+   "old": "wire d_can = i_d_req && !i_d_cancel && !d_done_q;",
+   "new": "wire d_can = i_d_req && !d_done_q;"
+  },
+  {
+   "name": "the PTE read is PMP-checked at M privilege",
+   "old": ".i_end({8'b0, pte_addr} + 64'd7), .i_priv(2'b01),",
+   "new": ".i_end({8'b0, pte_addr} + 64'd7), .i_priv(2'b11),"
+  },
+  {
+   "name": "the PTE read is not PMP-checked",
+   "old": "wire pmp_deny = !pmp_r_ok;",
+   "new": "wire pmp_deny = 1'b0;"
+  },
+  {
+   "name": "the PMP span is one byte, not a dword",
+   "old": ".i_end({8'b0, pte_addr} + 64'd7)",
+   "new": ".i_end({8'b0, pte_addr})"
+  },
+  {
+   "name": "the PMP sees the wrong address (the bus address, 32 bits)",
+   "old": ".i_addr({8'b0, pte_addr}), .i_end({8'b0, pte_addr} + 64'd7)",
+   "new": ".i_addr({32'b0, pte_addr[31:0]}), .i_end({32'b0, pte_addr[31:0]} + 64'd7)"
+  },
+  {
+   "name": "a PMP denial is reported as a page fault",
+   "old": "rep_any = 1'b1; rep_af = 1'b1;                  // the PTE read is denied: it never reaches the bus",
+   "new": "rep_any = 1'b1; rep_pf = 1'b1;                  // the PTE read is denied: it never reaches the bus"
+  },
+  {
+   "name": "a bus error is read as a PTE",
+   "old": "err_q  <= i_bus_err;",
+   "new": "err_q  <= 1'b0;"
+  },
+  {
+   "name": "a bus error that comes with ack is read as a PTE",
+   "old": "err_q  <= i_bus_err;",
+   "new": "err_q  <= i_bus_err && !i_bus_ack;"
+  },
+  {
+   "name": "a bus error is reported as a page fault",
+   "old": "if (err_q) begin\n                rep_any = 1'b1; rep_af = 1'b1;",
+   "new": "if (err_q) begin\n                rep_any = 1'b1; rep_pf = 1'b1;"
+  },
+  {
+   "name": "an err alone is no response",
+   "old": "wire resp = beat_q && (i_bus_ack || i_bus_err);",
+   "new": "wire resp = beat_q && i_bus_ack;"
+  },
+  {
+   "name": "cyc stays high in the response cycle",
+   "old": "assign o_bus_cyc  = beat_q && !(i_bus_ack || i_bus_err);",
+   "new": "assign o_bus_cyc  = beat_q;"
+  },
+  {
+   "name": "the walker does not say it has a beat in flight",
+   "old": "assign o_beat     = beat_q;",
+   "new": "assign o_beat     = 1'b0;"
+  },
+  {
+   "name": "a beat starts while the LSU is busy",
+   "old": "wire go_beat = (st_q == W_GO) && !i_lsu_busy;",
+   "new": "wire go_beat = (st_q == W_GO);"
+  },
+  {
+   "name": "a stale walk in W_GO is not dropped",
+   "old": "W_GO: begin\n                    if (stale_eff) begin",
+   "new": "W_GO: begin\n                    if (1'b0) begin"
+  },
+  {
+   "name": "a stale result in W_DEC is not dropped there (W_GO drops it one cycle later: unobservable)",
+   "old": "default: begin                              // W_DEC\n                    if (stale_eff) begin",
+   "new": "default: begin                              // W_DEC\n                    if (1'b0) begin",
+   "equivalent": true
+  },
+  {
+   "name": "the done pulse of a stale walk is not suppressed",
+   "old": "if (st_q == W_DEC && !stale_eff) begin",
+   "new": "if (st_q == W_DEC) begin"
+  },
+  {
+   "name": "a cancel does not mark the walk stale",
+   "old": "if (st_q != W_IDLE && cancel_srv) stale_q <= 1'b1;",
+   "new": "if (st_q != W_IDLE && 1'b0) stale_q <= 1'b1;"
+  },
+  {
+   "name": "the done pulse goes to the other client",
+   "old": "if (cl_q) f_done_q <= 1'b1; else d_done_q <= 1'b1;",
+   "new": "if (cl_q) d_done_q <= 1'b1; else f_done_q <= 1'b1;"
+  },
+  {
+   "name": "the walk starts at level 1",
+   "old": "level_q  <= 2'd2;",
+   "new": "level_q  <= 2'd1;"
+  },
+  {
+   "name": "descending skips a level",
+   "old": "level_q <= level_q - 2'd1;",
+   "new": "level_q <= level_q - 2'd2;"
+  },
+  {
+   "name": "the next table loses its low page-number bits",
+   "old": "base_q  <= pte_next_ppn;",
+   "new": "base_q  <= {pte_next_ppn[43:9], 9'b0};"
+  },
+  {
+   "name": "the vpn of level 1 and 0 swapped",
+   "old": "(level_q == 2'd1) ? va_q[29:21] : va_q[20:12];",
+   "new": "(level_q == 2'd1) ? va_q[20:12] : va_q[29:21];"
+  },
+  {
+   "name": "a PTE index is not scaled by eight",
+   "old": "wire [55:0] pte_addr = {base_q, vpn_cur, 3'b000};",
+   "new": "wire [55:0] pte_addr = {base_q, 3'b000, vpn_cur};"
+  },
+  {
+   "name": "the privilege of the walk is always S",
+   "old": "priv_q   <= accept_f ? i_f_priv : i_d_priv;",
+   "new": "priv_q   <= 2'b01;"
+  },
+  {
+   "name": "SUM is ignored",
+   "old": "sum_q    <= accept_d && i_d_sum;",
+   "new": "sum_q    <= 1'b0;"
+  },
+  {
+   "name": "MXR is ignored",
+   "old": "mxr_q    <= accept_d && i_d_mxr;",
+   "new": "mxr_q    <= 1'b0;"
+  },
+  {
+   "name": "a store is walked as a load",
+   "old": "wr_q     <= accept_d && i_d_wr;",
+   "new": "wr_q     <= 1'b0;"
+  },
+  {
+   "name": "a fetch walk is a data walk",
+   "old": "is_mem_q <= accept_d;",
+   "new": "is_mem_q <= 1'b1;"
+  },
+  {
+   "name": "a pointer that faults is followed anyway",
+   "old": "end else if (rep_any) begin\n                        st_q    <= W_IDLE;                  // reported below",
+   "new": "end else if (rep_any && pte_leaf) begin\n                        st_q    <= W_IDLE;                  // reported below"
+  },
+  {
+   "name": "the result carries the wrong level",
+   "old": "res_level_q <= level_q;",
+   "new": "res_level_q <= 2'd0;"
+  },
+  {
+   "name": "the result carries the wrong page number",
+   "old": "res_ppn_q   <= pte_q[53:10];",
+   "new": "res_ppn_q   <= pte_q[43:0];"
+  },
+  {
+   "name": "the result carries the wrong d",
+   "old": "res_d_q     <= pte_q[7];",
+   "new": "res_d_q     <= pte_q[6];"
+  },
+  {
+   "name": "the result carries the wrong u",
+   "old": "res_u_q     <= pte_q[4];",
+   "new": "res_u_q     <= pte_q[3];"
+  },
+  {
+   "name": "the result carries the wrong vpn",
+   "old": "res_vpn_q   <= va_q[38:12];",
+   "new": "res_vpn_q   <= va_q[37:11];"
+  }
+ ]
+}
