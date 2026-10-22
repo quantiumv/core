@@ -11,9 +11,10 @@ verification/perf/run_perf.sh --core fsm     # writes baseline_fsm.csv
 verification/perf/run_perf.sh --core pipe    # writes baseline_pipe.csv
 ```
 
-The kernels are built with `-mno-div`, and division goes through libgcc so
-they also run on core_pipe, which has no divider yet. Only setup loops
-divide; the timed regions never do.
+The kernels are built with `-mno-div`, and division goes through libgcc. core_pipe
+has had a divider since P5, but the kernels keep the flag until the P8
+re-baseline, so the numbers stay comparable. Only setup loops divide; the
+timed regions never do.
 
 ## Results (2026-10-05)
 
@@ -32,3 +33,21 @@ CPI (cycles per retired instruction):
 core_pipe (P4) is 1.4–2.4× faster than the FSM on every kernel. Loads and
 stores still execute one at a time at the ROB head, and branches resolve
 at commit; those are the P9 performance steps.
+
+These pipe numbers are unchanged through P5, P6 and P7 (`baseline_pipe.csv`
+reproduces exactly at the P7 head): with satp Bare, translation costs nothing,
+and a redirect that changes the translation context waits one fetch cycle only
+while satp is on or being written.
+
+What Sv39 costs (`testbench/core_sv39_cpi_tb.sv`, run by the regression): the
+same loop of 300 iterations (8 instructions: ALU, a load, a store, a branch)
+in M-mode and in S-mode under an identity 1 GiB leaf, in cycles:
+
+| core | M-mode | S-mode, Sv39 | ratio |
+|---|---|---|---|
+| FSM (`core.sv`) | 8400 | 11400 | 1.35 |
+| core_pipe | 4805 | 5113 | 1.06 |
+
+A translated fetch dword and a translated access each take one more cycle
+(the answer is registered before it is used); the pipeline hides most of it.
+P9a overlaps the instruction-TLB lookup with the previous fetch beat.

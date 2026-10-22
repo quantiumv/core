@@ -31,11 +31,12 @@ The core resets to address 0 in M-mode.
 
 **Pipelined core** (`design/pipe/`, in progress): a ROB-based replacement for
 `core.sv`. It runs RV64IMAC, Zicsr and Zifencei in M/S/U modes with
-interrupts, PMP and the full debug path (halt, resume, step, EBREAK and
-triggers into Debug Mode, Access Register, Program Buffer), everything but
-Sv39. Every retired instruction is checked against a frozen copy of
-`core.sv` (`verification/reference/`). It will replace `core.sv` once it
-reaches feature parity.
+interrupts, PMP, Sv39 (a TLB each for instruction fetch and data, one
+page-table walker) and the full debug path (halt, resume, step, EBREAK and
+triggers into Debug Mode, Access Register, Program Buffer). Every retired
+instruction is checked against a frozen copy of `core.sv`
+(`verification/reference/`). It will replace `core.sv` once it reaches
+feature parity.
 
 ## Requirements
 
