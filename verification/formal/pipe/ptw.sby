@@ -1,0 +1,29 @@
+# qv_ptw properties (ptw_props.sv): k-induction proof, plus a deep BMC as a
+# cross-check. Run with run.sh, or: sby -f ptw.sby
+[tasks]
+prove
+bmc
+cover
+
+[options]
+prove: mode prove
+prove: depth 10
+bmc: mode bmc
+bmc: depth 30
+cover: mode cover
+cover: depth 30
+
+[engines]
+smtbmc boolector
+
+[script]
+plugin -i /home/potato/yosys-slang-src/build/slang.so
+read_slang --single-unit qv_pkg.sv qv_pmp.sv qv_pte.sv qv_ptw.sv ptw_props.sv --top ptw_props
+prep -top ptw_props
+
+[files]
+../../../design/pipe/qv_pkg.sv
+../../../design/pipe/qv_pmp.sv
+../../../design/pipe/qv_pte.sv
+../../../design/pipe/qv_ptw.sv
+ptw_props.sv

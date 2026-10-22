@@ -2,7 +2,7 @@
 # run.sh [--mutants] -- module-level SymbiYosys proofs for core_pipe units.
 # Run under WSL (sby, yosys-slang, boolector; see the riscv-formal README).
 #
-#   fetch.sby, lsu.sby, dbg.sby: prove (k-induction), bmc and cover tasks must all
+#   fetch.sby, lsu.sby, dbg.sby, ptw.sby: prove (k-induction), bmc and cover tasks must all
 #   PASS (cover: every non-vacuity cover point reached).
 #   --mutants: each property set must also catch known-bad versions, each
 #   FAILing a BMC: the pre-fix qv_fetch whose 1-bit epoch let a stale
@@ -13,7 +13,10 @@
 #   still goes to the bus; for the debug flags a start outside Debug Mode,
 #   a resume during a Program Buffer run, an injector that ignores the word
 #   in flight or the queue, an index that moves at the run's last word, the
-#   Debug Module owning the ports during a run, a step that is never armed).
+#   Debug Module owning the ports during a run, a step that is never armed;
+#   for the walker a cancelled walk that reports, a beat that starts while the
+#   LSU is busy or for a denied address, a beat abandoned on a cancel or held
+#   into its response cycle).
 set -u
 cd "$(dirname "$0")" || exit 1
 HERE=$(pwd)
@@ -22,7 +25,7 @@ fail=0
 
 status() { grep -o 'DONE ([A-Z]*' | head -1 | sed 's/DONE (//'; }
 
-for unit in fetch lsu dbg; do
+for unit in fetch lsu dbg ptw; do
     for task in prove bmc cover; do
         r=$(sby -f $unit.sby $task 2>&1 | status)
         printf '%-12s %s\n' "$unit $task" "$r"
@@ -37,7 +40,7 @@ if [ "${1:-}" == "--mutants" ]; then
         local name=$1 unit=$2 src=$3 defs=${4:-}
         local d=$T/$name
         mkdir -p "$d"
-        cp "$REPO/design/pipe/qv_pkg.sv" "$REPO/design/pipe/qv_pmp.sv" "$HERE/${unit}_props.sv" "$d/"
+        cp "$REPO/design/pipe/qv_pkg.sv" "$REPO/design/pipe/qv_pmp.sv" "$REPO/design/pipe/qv_pte.sv" "$HERE/${unit}_props.sv" "$d/"
         if [ -f "$src" ]; then
             cp "$src" "$d/qv_$unit.sv"
         else
@@ -54,11 +57,12 @@ depth 24
 smtbmc boolector
 [script]
 plugin -i /home/potato/yosys-slang-src/build/slang.so
-read_slang --single-unit $defs qv_pkg.sv qv_pmp.sv qv_$unit.sv ${unit}_props.sv --top ${unit}_props
+read_slang --single-unit $defs qv_pkg.sv qv_pmp.sv qv_pte.sv qv_$unit.sv ${unit}_props.sv --top ${unit}_props
 prep -top ${unit}_props
 [files]
 qv_pkg.sv
 qv_pmp.sv
+qv_pte.sv
 qv_$unit.sv
 ${unit}_props.sv
 EOF
@@ -73,11 +77,11 @@ EOF
     git -C "$REPO" show 'ade0d1c^:design/pipe/qv_fetch.sv' > "$T/qv_fetch_epoch.sv"
     mutant fetch_epoch_aba     fetch "$T/qv_fetch_epoch.sv" "-D FETCH_OLD"
     mutant fetch_no_stale      fetch 's/wire resp_ok  = resp \&\& !req_stale_q \&\& !i_redirect_valid;/wire resp_ok  = resp \&\& !i_redirect_valid;/'
-    mutant fetch_ignores_hold  fetch 's/ \&\& !i_hold;/;/'
-    mutant fetch_abandons      fetch 's/assign wb_fetch_cyc_o  = req_valid_q \&\& !(wb_fetch_ack_i || wb_fetch_err_i);/assign wb_fetch_cyc_o  = req_valid_q \&\& !(wb_fetch_ack_i || wb_fetch_err_i) \&\& !i_redirect_valid;/'
+    mutant fetch_ignores_hold  fetch 's/ \&\& !i_hold$//'
+    mutant fetch_abandons      fetch 's/assign wb_fetch_cyc_o  = bus \&\& !(wb_fetch_ack_i || wb_fetch_err_i);/assign wb_fetch_cyc_o  = bus \&\& !(wb_fetch_ack_i || wb_fetch_err_i) \&\& !i_redirect_valid;/'
     mutant lsu_ignores_head    lsu 's/wire at_head  = (state_q == S_WAIT_HEAD) \&\& i_head_valid \&\& (i_head_tag == tag_q) \&\& !i_flush;/wire at_head  = (state_q == S_WAIT_HEAD) \&\& !i_flush;/'
-    mutant lsu_misaligned_bus  lsu 's/wire start    = at_head \&\& !misaligned_q \&\& !pmp_deny \&\& !sc_fail;/wire start    = at_head \&\& !pmp_deny \&\& !sc_fail;/'
-    mutant lsu_pmp_bus         lsu 's/wire start    = at_head \&\& !misaligned_q \&\& !pmp_deny \&\& !sc_fail;/wire start    = at_head \&\& !misaligned_q \&\& !sc_fail;/'
+    mutant lsu_misaligned_bus  lsu 's/wire start_raw = at_head \&\& !misaligned_q \&\& !pmp_deny \&\& !sc_fail \&\& pa_valid;/wire start_raw = at_head \&\& !pmp_deny \&\& !sc_fail \&\& pa_valid;/'
+    mutant lsu_pmp_bus         lsu 's/wire start_raw = at_head \&\& !misaligned_q \&\& !pmp_deny \&\& !sc_fail \&\& pa_valid;/wire start_raw = at_head \&\& !misaligned_q \&\& !sc_fail \&\& pa_valid;/'
     mutant lsu_reissues        lsu 's/^                        state_q <= S_IDLE;/                        state_q <= S_WAIT_HEAD;/'
     mutant lsu_abandons        lsu 's/assign wb_mem_cyc_o  = (start || in_bus) \&\& !resp;/assign wb_mem_cyc_o  = (start || in_bus) \&\& !resp \&\& !i_flush;/'
     mutant lsu_sc_no_reservation lsu 's/wire sc_fail  = sc_q \&\& !(i_res_valid \&\& i_res_addr == addr_q);/wire sc_fail  = 1'"'"'b0;/'
@@ -94,6 +98,12 @@ EOF
     mutant dbg_idx_on_last     dbg 's/else if (i_pb_commit \&\& !i_pb_end)/else if (i_pb_commit)/'
     mutant dbg_access_in_run   dbg 's/assign o_dm_access_active = in_debug_q \&\& !active_q;/assign o_dm_access_active = in_debug_q;/'
     mutant dbg_step_unarmed    dbg 's/else if (o_resume)       stepping_q <= i_dcsr_step;/else if (o_resume)       stepping_q <= 1'"'"'b0;/'
+    mutant ptw_cancelled_reports ptw 's/wire stale_eff  = stale_q || cancel_srv;/wire stale_eff  = 1'"'"'b0;/'
+    mutant ptw_ignores_lsu     ptw 's/wire go_beat = (st_q == W_GO) \&\& !i_lsu_busy;/wire go_beat = (st_q == W_GO);/'
+    mutant ptw_denied_reaches_bus ptw 's/end else if (pmp_deny) begin/end else if (1'"'"'b0) begin/'
+    mutant ptw_cyc_in_response ptw 's/assign o_bus_cyc  = beat_q \&\& !(i_bus_ack || i_bus_err);/assign o_bus_cyc  = beat_q;/'
+    mutant ptw_abandons_on_cancel ptw 's/assign o_bus_cyc  = beat_q \&\& !(i_bus_ack || i_bus_err);/assign o_bus_cyc  = beat_q \&\& !(i_bus_ack || i_bus_err) \&\& !cancel_srv;/'
+    mutant ptw_stale_decoded   ptw 's/if (st_q == W_DEC \&\& !stale_eff) begin/if (st_q == W_DEC) begin/'
     rm -rf "$T"
 fi
 
