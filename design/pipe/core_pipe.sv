@@ -68,13 +68,15 @@
 `ifndef QV_PIPE_BYPASS_EN
 `define QV_PIPE_BYPASS_EN 1'b1
 `endif
-// QV_FORMAL_SMALL: a smaller ROB and IQ, to keep riscv-formal's models small
+// QV_FORMAL_SMALL: a smaller ROB, IQ and TLBs, to keep riscv-formal's models small
 `ifdef QV_FORMAL_SMALL
 `define QV_PIPE_ROB_DEPTH 4
 `define QV_PIPE_IQ_DEPTH  2
+`define QV_PIPE_TLB_ENTRIES 1
 `else
 `define QV_PIPE_ROB_DEPTH qv_pkg::QV_ROB_DEPTH
 `define QV_PIPE_IQ_DEPTH  4
+`define QV_PIPE_TLB_ENTRIES 4
 `endif
 
 // QV_FORMAL_NO_SV39: no translation at all (no walker, no TLB): the Bare paths only. The riscv-formal sweep that
@@ -98,7 +100,8 @@ module core_pipe
     parameter bit BYPASS_EN = `QV_PIPE_BYPASS_EN,
     parameter int ROB_DEPTH = `QV_PIPE_ROB_DEPTH,   // power of 2, <= qv_pkg::QV_ROB_DEPTH
     parameter int IQ_DEPTH  = `QV_PIPE_IQ_DEPTH,    // power of 2, >= 2
-    parameter bit SV39_EN   = `QV_PIPE_SV39_EN      // address translation present
+    parameter bit SV39_EN   = `QV_PIPE_SV39_EN,     // address translation present
+    parameter int TLB_ENTRIES = `QV_PIPE_TLB_ENTRIES // entries in each of the two TLBs
 ) (
     input logic clk,
     input logic rst,
@@ -493,7 +496,7 @@ module core_pipe
                 .o_res_ppn(w_ppn), .o_res_r(w_r), .o_res_w(w_w), .o_res_x(w_x), .o_res_u(w_u), .o_res_d(w_d)
             );
 
-            qv_xlate #(.TLB_ENTRIES(4)) xlate_d (
+            qv_xlate #(.TLB_ENTRIES(TLB_ENTRIES)) xlate_d (
                 .clk(clk), .rst(rst),
                 .i_req(x_req), .i_va(x_va), .i_is_mem(1'b1), .i_wr(x_wr), .i_active(x_active), .i_priv(x_priv),
                 .i_sum(mstatus_sum_w), .i_mxr(mstatus_mxr_w), .i_cancel(x_cancel), .i_flush_tlb(c_sfence),
@@ -505,7 +508,7 @@ module core_pipe
             );
 
             // the instruction side: its own TLB, asked by fetch; no SUM or MXR for an execute
-            qv_xlate #(.TLB_ENTRIES(4)) xlate_f (
+            qv_xlate #(.TLB_ENTRIES(TLB_ENTRIES)) xlate_f (
                 .clk(clk), .rst(rst),
                 .i_req(f_xl_req), .i_va(f_xl_va), .i_is_mem(1'b0), .i_wr(1'b0), .i_active(fetch_xl_on), .i_priv(priv),
                 .i_sum(1'b0), .i_mxr(1'b0), .i_cancel(f_xl_cancel), .i_flush_tlb(c_sfence),
