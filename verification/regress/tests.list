@@ -96,13 +96,15 @@ tb_core_priv_tb|testbench/core_priv_tb.sv|testbench/core_wb4_sram_harness.sv,tes
 tb_core_priv_u_ecall_tb|testbench/core_priv_u_ecall_tb.sv|testbench/core_wb4_sram_harness.sv,testbench/pc_trigger_sample_monitor.sv|design|fsm,ref,pipe|pass|
 tb_core_reservation_fault_tb|testbench/core_reservation_fault_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm,ref,pipe|pass|
 tb_core_sfence_vma_priv_tb|testbench/core_sfence_vma_priv_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm,ref,pipe|pass|
-tb_core_sv39_fetch_tb|testbench/core_sv39_fetch_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm,ref|pass|
-tb_core_sv39_mem_tb|testbench/core_sv39_mem_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm,ref|pass|
-tb_core_sv39_tlb_tb|testbench/core_sv39_tlb_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm,ref|pass|
-tb_core_sv39_cache_tb|testbench/core_sv39_cache_tb.sv|testbench/core_cache_harness.sv|design|fsm,ref|pass|
-tb_core_sv39_random_tb|testbench/core_sv39_random_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm,ref|pass|
-tb_core_sv39_realfw_tb|testbench/core_sv39_realfw_tb.sv||design|fsm,ref|pass|
-tb_core_sv39_irq_tb|testbench/core_sv39_irq_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm,ref|pass|
+tb_core_sv39_fetch_tb|testbench/core_sv39_fetch_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm,ref,pipe|pass|
+tb_core_sv39_mem_tb|testbench/core_sv39_mem_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm,ref,pipe|pass|
+tb_core_sv39_tlb_tb|testbench/core_sv39_tlb_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm,ref,pipe|pass|
+tb_core_sv39_cache_tb|testbench/core_sv39_cache_tb.sv|testbench/core_cache_harness.sv|design|fsm,ref,pipe|pass|
+tb_core_sv39_random_tb|testbench/core_sv39_random_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm,ref,pipe|pass|
+tb_core_sv39_realfw_tb|testbench/core_sv39_realfw_tb.sv||design|fsm,ref,pipe|pass|
+tb_core_sv39_irq_tb|testbench/core_sv39_irq_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm,ref,pipe|pass|
+tb_core_sv39_spec_tb|testbench/core_sv39_spec_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm,ref,pipe|pass|
+tb_core_sv39_cpi_tb|testbench/core_sv39_cpi_tb.sv|testbench/core_wb4_sram_harness.sv|design|fsm,ref,pipe|pass|
 tb_core_zicsr_tb|testbench/core_zicsr_tb.sv|testbench/core_wb4_sram_harness.sv,testbench/pc_trigger_sample_monitor.sv|design|fsm,ref,pipe|pass|
 
 # === testbench/*_tb.sv (core_cache_harness) ===
@@ -123,6 +125,7 @@ tb_core_trigger_tb|testbench/core_trigger_tb.sv|testbench/dm_core_harness.sv|des
 # === design/pipe/*_tb.sv (core_pipe modules) ===
 # Module-level tests; the pipe file list compiles every module they use.
 pipe_fetch_tb|design/pipe/qv_fetch_tb.sv||design|pipe|pass|
+pipe_fetch_xl_tb|design/pipe/qv_fetch_xl_tb.sv||design|pipe|pass|
 pipe_align_fifo_tb|design/pipe/qv_align_fifo_tb.sv||design|pipe|pass|600
 pipe_decode_tb|design/pipe/qv_decode_tb.sv||design|pipe|pass|
 pipe_pmp_tb|design/pipe/qv_pmp_tb.sv||design|pipe|pass||

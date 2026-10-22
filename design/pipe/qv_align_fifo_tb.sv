@@ -37,8 +37,10 @@ module qv_align_fifo_tb;
     localparam int W = $bits(fe_instr_t);
 
     // ---------------- align -> fifo ----------------
-    logic        buf_valid, buf_err;
+    logic        buf_valid, buf_err, buf_xl;
     logic [63:0] buf_pc, buf_data;
+    logic [3:0]  buf_cause;
+    logic [43:0] buf_pg;
     logic        buf_pop;
     logic        p0_valid, p1_valid, push_ready;
     fe_instr_t   p0_data, p1_data;
@@ -58,6 +60,7 @@ module qv_align_fifo_tb;
     qv_align align0 (
         .clk(clk), .rst(rst), .i_flush(flush),
         .i_buf_valid(buf_valid), .i_buf_pc(buf_pc), .i_buf_data(buf_data), .i_buf_err(buf_err),
+        .i_buf_cause(buf_cause), .i_buf_xl(buf_xl), .i_buf_pg(buf_pg),
         .o_buf_pop(buf_pop),
         .o_push0_valid(p0_valid), .o_push0_data(p0_data),
         .o_push1_valid(p1_valid), .o_push1_data(p1_data),
@@ -88,6 +91,9 @@ module qv_align_fifo_tb;
     logic        log_hi   [0:MAXI-1];
     logic        log_pred [0:MAXI-1];
     logic [63:0] log_tgt  [0:MAXI-1];
+    logic        log_xl   [0:MAXI-1];
+    logic [43:0] log_pgl  [0:MAXI-1];
+    logic [43:0] log_pgh  [0:MAXI-1];
     int log_n = 0;
     always @(posedge clk) begin
         if (!rst && !flush && pop && head_valid && log_n < MAXI) begin
@@ -99,6 +105,9 @@ module qv_align_fifo_tb;
             log_hi[log_n]    <= head.xcpt_hi;
             log_pred[log_n]  <= head.pred_taken;
             log_tgt[log_n]   <= head.pred_tgt;
+            log_xl[log_n]    <= head.xl;
+            log_pgl[log_n]   <= head.pg_lo;
+            log_pgh[log_n]   <= head.pg_hi;
             log_n            <= log_n + 1;
         end
     end
@@ -120,11 +129,19 @@ module qv_align_fifo_tb;
         else if (src_en && fe_redir)   fpc <= fe_redir_pc;
         else if (src_en && buf_pop)    fpc <= {fpc[63:3], 3'b000} + 64'd8;
     end
+    // Translated fetch (xl_en): every dword comes with its physical page (any value, per dword) and a fault marker with
+    // its cause
+    logic        xl_en = 1'b0;
+    logic [43:0] pg_d    [0:MEM_HW/4-1];
+    logic [3:0]  cause_d [0:MEM_HW/4-1];
     always_comb begin
         buf_valid = src_en && (fpc < flimit);
         buf_pc    = fpc;
         buf_data  = {mem[{fpc[11:3], 2'd3}], mem[{fpc[11:3], 2'd2}], mem[{fpc[11:3], 2'd1}], mem[{fpc[11:3], 2'd0}]};
         buf_err   = buf_valid && err_d[fpc[11:3]];
+        buf_cause = cause_d[fpc[11:3]];
+        buf_xl    = xl_en;
+        buf_pg    = xl_en ? pg_d[fpc[11:3]] : 44'b0;
     end
 
     // ---------------- program layout ----------------
@@ -149,7 +166,11 @@ module qv_align_fifo_tb;
             pred_at[i] = 1'b0;
             tgt_at[i] = '0;
         end
-        for (int i = 0; i < MEM_HW / 4; i++) err_d[i] = 1'b0;
+        for (int i = 0; i < MEM_HW / 4; i++) begin
+            err_d[i]   = 1'b0;
+            cause_d[i] = 4'd1;
+            pg_d[i]    = {$urandom, $urandom};      // (44 bits of it)
+        end
     endtask
 
     task automatic put16(input logic [63:0] a, input logic [15:0] h, input logic pred = 1'b0,
@@ -273,6 +294,13 @@ module qv_align_fifo_tb;
             check($sformatf("%s: #%0d predicted", name, k), {63'b0, log_pred[k]}, {63'b0, exp_pred[k]});
             if (exp_pred[k]) check($sformatf("%s: #%0d target", name, k), log_tgt[k], exp_tgt[k]);
             check($sformatf("%s: #%0d no fault", name, k), {63'b0, log_xcpt[k]}, 64'd0);
+            // where it is: the page of the dword it starts in, and for a 32-bit instruction that crosses, of the next
+            check($sformatf("%s: #%0d translated flag", name, k), {63'b0, log_xl[k]}, {63'b0, xl_en});
+            check($sformatf("%s: #%0d page of its dword", name, k), {20'b0, log_pgl[k]},
+                  xl_en ? {20'b0, pg_d[exp_pc[k][11:3]]} : 64'd0);
+            if (xl_en && !exp_rvc[k] && exp_pc[k][2:1] == 2'b11)
+                check($sformatf("%s: #%0d page of the next dword (it crosses)", name, k), {20'b0, log_pgh[k]},
+                      {20'b0, pg_d[exp_pc[k][11:3] + 9'd1]});
         end
     endtask
 
@@ -418,6 +446,58 @@ module qv_align_fifo_tb;
         check("D6b: marker at the crossing pc", log_pc[3], 64'hE06);
         check("D6b: marker faulted", {63'b0, log_xcpt[3]}, 64'd1);
         check("D6b: marker xcpt_hi", {63'b0, log_hi[3]}, 64'd1);
+
+        // ---- X: translated fetch -- where each instruction is, and faults with their own cause ----
+        xl_en = 1'b1;
+        for (s = 0; s < 150; s++) begin
+            clear_mem();
+            st = 64'h100 + 64'(($urandom % 64) * 2);
+            flush_all(st);
+            pop_pct = 20 + $urandom % 81;
+            make_prog(st, 2 + $urandom % 40, (s % 3 == 0) ? 0 : (s % 3 == 1) ? 50 : 90, (s % 4) * 10);
+            walk(st, 40);
+            run_check($sformatf("X1 program %0d", s), 40, 600);
+        end
+        pop_pct = 100;
+        // a page fault (cause 12) in a dword: a marker with that cause; the plain access fault keeps cause 1
+        clear_mem();
+        flush_all(64'hD00);
+        make_prog(64'hD00, 10, 50, 0);
+        err_d[64'hD08 >> 3] = 1'b1;
+        cause_d[64'hD08 >> 3] = 4'd12;
+        walk(64'hD00, 10);
+        cut = 0;
+        while (cut < exp_n && exp_pc[cut] + (exp_rvc[cut] ? 64'd2 : 64'd4) <= 64'hD08) cut++;
+        src_en = 1'b1; pop_en = 1'b1;
+        repeat (30) @(posedge clk);
+        #1;
+        check("X2: instructions up to the fault", 64'(log_n >= cut + 1), 64'd1);
+        check("X2: marker pc", log_pc[cut], exp_pc[cut]);
+        check("X2: marker faulted", {63'b0, log_xcpt[cut]}, 64'd1);
+        check("X2: marker cause 12", {60'b0, log_cause[cut]}, 64'd12);
+        if (exp_pc[cut] < 64'hD08) begin
+            // it crossed in: the marker is for the instruction that starts in the clean dword
+            check("X2: marker xcpt_hi", {63'b0, log_hi[cut]}, 64'd1);
+            check("X2: a high-dword marker is translated, with the page of the low dword", {63'b0, log_xl[cut]}, 64'd1);
+            check("X2: ... that page", {20'b0, log_pgl[cut]}, {20'b0, pg_d[exp_pc[cut][11:3]]});
+        end else begin
+            check("X2: marker xcpt_hi clear", {63'b0, log_hi[cut]}, 64'd0);
+        end
+        clear_mem();
+        put32(64'hE06, w32(6));                         // crosses into a faulting dword
+        err_d[64'hE08 >> 3] = 1'b1;
+        cause_d[64'hE08 >> 3] = 4'd12;
+        flush_all(64'hE00);
+        src_en = 1'b1; pop_en = 1'b1;
+        repeat (10) @(posedge clk);
+        #1;
+        check("X3: three rvc then the marker", 64'(log_n >= 4), 64'd1);
+        check("X3: marker at the crossing pc", log_pc[3], 64'hE06);
+        check("X3: marker xcpt_hi", {63'b0, log_hi[3]}, 64'd1);
+        check("X3: marker cause 12", {60'b0, log_cause[3]}, 64'd12);
+        check("X3: translated", {63'b0, log_xl[3]}, 64'd1);
+        check("X3: the low dword's page", {20'b0, log_pgl[3]}, {20'b0, pg_d[64'hE00 >> 3]});
+        xl_en = 1'b0;
 
         // ---- R1: random programs with control flow, random backpressure ----
         for (s = 0; s < 300; s++) begin

@@ -128,6 +128,13 @@ module core_sv39_realfw_tb;
     logic ptw_prev = 1'b0;
     int ptw_count_fetch = 0;
     int ptw_count_mem   = 0;
+`ifdef QV_PIPE_AS_CORE
+    // core_pipe has one walker with a data and a fetch client: a walk is a request it accepts
+    always @(negedge clk) begin
+        if (dut.g_sv39.ptw0.accept_d) ptw_count_mem   <= ptw_count_mem + 1;
+        if (dut.g_sv39.ptw0.accept_f) ptw_count_fetch <= ptw_count_fetch + 1;
+    end
+`else
     always @(negedge clk) begin
         if ((dut.state == dut.S_PTW) && !ptw_prev) begin
             if (dut.ptw_reason_q[dut.cur_slot] == dut.PTW_REASON_MEM) ptw_count_mem   <= ptw_count_mem + 1;
@@ -135,6 +142,7 @@ module core_sv39_realfw_tb;
         end
         ptw_prev <= (dut.state == dut.S_PTW);
     end
+`endif
 
     /*
      * current_priv snapshot, taken on the SAME edge the terminal

@@ -98,7 +98,7 @@ module qv_commit_tb;
     logic                    dbg_entry, dbg_halt_entry, dbg_ebreak_entry, dbg_trigger_entry;
     logic                    pb_act = 1'b0, pb_commit, pb_done, pb_abort;
     logic [2:0]              dbg_cause;
-    logic                    sfence;
+    logic                    sfence, redirect_ctx;
 
     qv_commit #(.RESET_PC(64'h1000)) dut (
         .clk(clk), .rst(rst),
@@ -122,7 +122,7 @@ module qv_commit_tb;
         .o_trap_val(trap_val), .o_mret_taken(mret_taken), .i_mtvec(mtvec), .i_mepc(mepc),
         .o_fetch_hold(fetch_hold), .i_fetch_idle(fetch_idle), .o_icache_flush(icache_flush),
         .o_commit_now(commit_now), .o_pc(arch_pc), .o_next_pc(next_pc),
-        .o_redirect_valid(redirect), .o_redirect_pc(redirect_pc),
+        .o_redirect_valid(redirect), .o_redirect_pc(redirect_pc), .o_redirect_ctx(redirect_ctx),
         .o_rvfi_order(r_order), .o_rvfi_insn(r_insn), .o_rvfi_trap(r_trap), .o_rvfi_intr(r_intr),
         .o_rvfi_rs1_addr(r_rs1_addr), .o_rvfi_rs2_addr(r_rs2_addr),
         .o_rvfi_rs1_rdata(r_rs1_rdata), .o_rvfi_rs2_rdata(r_rs2_rdata),
@@ -170,6 +170,7 @@ module qv_commit_tb;
         check({name, ": no rd write"}, b(rf_we), 64'd0);
         check({name, ": redirect"}, b(redirect), 64'd1);
         check({name, ": redirect to mtvec base"}, redirect_pc, {mtvec[63:2], 2'b00});
+        check({name, ": a context change (the privilege may change)"}, b(redirect_ctx), 64'd1);
         check({name, ": rvfi pc_wdata = vector"}, r_pc_wdata, {mtvec[63:2], 2'b00});
         check({name, ": still a commit (rvfi_valid)"}, b(commit_now), 64'd1);
     endtask
@@ -188,6 +189,7 @@ module qv_commit_tb;
         check({name, ": redirect"}, b(redirect), 64'd1);
         check({name, ": redirect to stvec's base"}, redirect_pc, vec);
         check({name, ": rvfi pc_wdata = vector"}, r_pc_wdata, vec);
+        check({name, ": a context change"}, b(redirect_ctx), 64'd1);
     endtask
 
     task automatic expect_plain(input string name, input logic exp_redirect);
@@ -198,6 +200,8 @@ module qv_commit_tb;
         check({name, ": redirect"}, b(redirect), b(exp_redirect));
         check({name, ": next pc"}, next_pc, e.next_pc);
         if (exp_redirect) check({name, ": redirect pc"}, redirect_pc, e.next_pc);
+        // (a retirement that doesn't redirect changes no translation context either; one that does, may)
+        if (!exp_redirect) check({name, ": no context change"}, b(redirect_ctx), 64'd0);
     endtask
 
     // retire one plain ALU entry at the architectural pc, with no interrupt pending while it
@@ -240,6 +244,7 @@ module qv_commit_tb;
         check({name, ": no rvfi trap flag"}, b(r_trap), 64'd0);
         check({name, ": redirect"}, b(redirect), 64'd1);
         check({name, ": redirect to the vector"}, redirect_pc, vec);
+        check({name, ": a context change (the privilege may change)"}, b(redirect_ctx), 64'd1);
         check({name, ": arch pc is still the next instruction (becomes mepc)"}, arch_pc, pc0);
         retire();
         check({name, ": arch pc is the vector"}, arch_pc, vec);
@@ -278,6 +283,7 @@ module qv_commit_tb;
         check({name, ": no CSR write"}, b(csr_we), 64'd0);
         check({name, ": redirect (flush)"}, b(redirect), 64'd1);
         check({name, ": redirect to the architectural pc"}, redirect_pc, pc0);
+        check({name, ": not a context change (fetch is held anyway)"}, b(redirect_ctx), 64'd0);
         check({name, ": arch pc (dpc) before the edge"}, arch_pc, pc0);
         retire();
         check({name, ": arch pc kept"}, arch_pc, pc0);
@@ -317,6 +323,7 @@ module qv_commit_tb;
         check({name, ": no icache flush"}, b(icache_flush), 64'd0);
         check({name, ": redirect (flush)"}, b(redirect), 64'd1);
         check({name, ": redirect to the architectural pc"}, redirect_pc, pc0);
+        check({name, ": not a context change"}, b(redirect_ctx), 64'd0);
         retire();
         check({name, ": arch pc kept"}, arch_pc, pc0);
         check({name, ": privilege kept"}, {62'b0, priv}, {62'b0, priv0});
@@ -341,6 +348,7 @@ module qv_commit_tb;
         check({name, ": no mret"}, b(mret_taken), 64'd0);
         check({name, ": no sret"}, b(sret_taken), 64'd0);
         check({name, ": no redirect"}, b(redirect), 64'd0);
+        check({name, ": no context change"}, b(redirect_ctx), 64'd0);
         check({name, ": the pc goes on"}, next_pc, pc0 + 64'd4);
         retire();
         check({name, ": arch pc drifts on"}, arch_pc, pc0 + 64'd4);
@@ -401,11 +409,13 @@ module qv_commit_tb;
         e.next_pc = 64'h2000; e.mispredict = 1'b1;
         expect_plain("mispredict", 1'b1);
         check("mispredict: link written", rf_data, 64'h1008);
+        check("mispredict: not a context change (fetch need not wait)", b(redirect_ctx), 64'd0);
         retire();
         check("mispredict: arch pc = target", arch_pc, 64'h2000);
         set_entry(64'h2000, 32'h13, 0, 1'b0, 64'd0);
         c.serialize = 1'b1;
         expect_plain("serialize", 1'b1);
+        check("serialize: a context change (a CSR write, FENCE.I, SFENCE.VMA)", b(redirect_ctx), 64'd1);
         retire();
 
         // ---- traps ----
@@ -719,6 +729,7 @@ module qv_commit_tb;
         check("sret: no trap", b(trap_taken), 64'd0);
         check("sret: counted", b(instr_retired), 64'd1);
         check("sret: redirect", b(redirect), 64'd1);
+        check("sret: a context change (the privilege changes)", b(redirect_ctx), 64'd1);
         check("sret: to sepc", redirect_pc, 64'h5554);
         check("sret: rvfi pc_wdata", r_pc_wdata, 64'h5554);
         check("sret: no rd", b(rf_we), 64'd0);
@@ -802,6 +813,7 @@ module qv_commit_tb;
         #1;
         check("mret from S is just executed (decode guards legality)", b(mret_taken), 64'd1);
         check("mret: no TLB flush", b(sfence), 64'd0);
+        check("mret: a context change (the privilege changes)", b(redirect_ctx), 64'd1);
         retire();
         check("mret with MPP = M", {62'b0, priv}, 64'd3);
 
@@ -824,6 +836,8 @@ module qv_commit_tb;
         mpp = 2'b00;
         set_entry(64'h4444, 32'h3020_0073, 0, 1'b0, 64'd0);
         c.cls = QV_FU_SYS; c.sys_op = QV_SYS_MRET; e.complete = 1'b0;
+        #1;
+        check("incomplete mret: no redirect, no context change", b(redirect) + b(redirect_ctx), 64'd0);
         retire();
         check("incomplete mret: priv unchanged", {62'b0, priv}, 64'd3);
         set_entry(64'h4444, 32'h13, 5, 1'b1, 64'd1);
@@ -838,6 +852,26 @@ module qv_commit_tb;
         retire();
         check("wfi/alu/sfence.vma: priv unchanged", {62'b0, priv}, 64'd3);
         mpp = 2'b11; spp = 1'b0; medeleg = '0;
+
+        // ---- fetch page faults (cause 12): tval is the pc, or pc + 8 when the fault is in the second dword of a crossing instruction ----
+        set_entry(64'h4F00, 32'h0, 0, 1'b0, 64'd0);
+        c.xcpt = 1'b1; c.cause = 4'd12;
+        expect_trap("fetch page fault", 64'd12, 64'h4F00);
+        retire();
+        set_entry(64'h4F06, 32'h0, 0, 1'b0, 64'd0);
+        c.xcpt = 1'b1; c.cause = 4'd12; c.xcpt_hi = 1'b1;
+        expect_trap("fetch page fault in the second dword", 64'd12, 64'h4F0E);
+        retire();
+        set_entry(64'h4F16, 32'h0, 0, 1'b0, 64'd0);
+        c.xcpt = 1'b1; c.cause = 4'd1; c.xcpt_hi = 1'b1;
+        expect_trap("fetch access fault in the second dword", 64'd1, 64'h4F16);
+        retire();
+        set_entry(64'h4F20, 32'h0, 0, 1'b0, 64'd0);
+        c.xcpt = 1'b1; c.cause = 4'd12; c.xcpt_hi = 1'b0;
+        c.cls = QV_FU_ALU;
+        #1;
+        check("fetch page fault: not an illegal-instruction tval", trap_val, 64'h4F20);
+        retire();
 
         // ---- SFENCE.VMA flushes the TLBs (o_sfence) in its commit cycle, and only when it retires ----
         set_entry(64'h4450, 32'h1200_0073, 0, 1'b0, 64'd0);

@@ -1,0 +1,154 @@
+{
+ "dut": "design/pipe/qv_fetch.sv",
+ "tb": "design/pipe/qv_fetch_xl_tb.sv",
+ "files": [
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_fetch.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench"
+ ],
+ "cwd": "design",
+ "timeout": 900,
+ "mutants": [
+  {
+   "name": "a failed request is on the bus too",
+   "old": "wire bus      = req_valid_q && !req_xl_q && !req_flt_q;",
+   "new": "wire bus      = req_valid_q && !req_xl_q;"
+  },
+  {
+   "name": "a translating request is on the bus",
+   "old": "wire bus      = req_valid_q && !req_xl_q && !req_flt_q;",
+   "new": "wire bus      = req_valid_q && !req_flt_q;"
+  },
+  {
+   "name": "a failed request has no answer",
+   "old": "wire resp     = bus_resp || flt_resp;",
+   "new": "wire resp     = bus_resp;"
+  },
+  {
+   "name": "a redirect does not end a translating request",
+   "old": "wire drop     = i_redirect_valid && req_valid_q && (req_xl_q || req_flt_q);",
+   "new": "wire drop     = i_redirect_valid && req_valid_q && req_flt_q;"
+  },
+  {
+   "name": "a redirect does not end a failed request (unobservable: a failed request answers in the very next cycle, which ends it as a drop would)",
+   "old": "wire drop     = i_redirect_valid && req_valid_q && (req_xl_q || req_flt_q);",
+   "new": "wire drop     = i_redirect_valid && req_valid_q && req_xl_q;",
+   "equivalent": true
+  },
+  {
+   "name": "the translation is not cancelled by a redirect",
+   "old": "assign o_xl_cancel = drop;",
+   "new": "assign o_xl_cancel = 1'b0;"
+  },
+  {
+   "name": "the slot is not reused in the redirect's own cycle",
+   "old": "wire can_issue = (!req_valid_q || resp || drop) &&",
+   "new": "wire can_issue = (!req_valid_q || resp) &&"
+  },
+  {
+   "name": "a context-changing redirect does not wait",
+   "old": "\n                     && !(i_redirect_valid && i_redirect_ctx);",
+   "new": ";"
+  },
+  {
+   "name": "o_idle includes the translation phase",
+   "old": "assign o_idle = !bus;",
+   "new": "assign o_idle = !req_valid_q;"
+  },
+  {
+   "name": "a held translation starts a bus beat",
+   "old": "end else if (!i_hold) begin             // a held fetch starts no bus beat",
+   "new": "end else begin"
+  },
+  {
+   "name": "a fault waits for the hold to drop",
+   "old": "if (i_xl_pf || i_xl_af) begin          // a fault needs no bus: it is allowed under hold",
+   "new": "if ((i_xl_pf || i_xl_af) && !i_hold) begin"
+  },
+  {
+   "name": "no request is translated (it goes to the bus at once)",
+   "old": "req_xl_q    <= i_xl_on;",
+   "new": "req_xl_q    <= 1'b0;"
+  },
+  {
+   "name": "the bus address is not the translated one",
+   "old": "req_isxl_q  <= i_xl_on;",
+   "new": "req_isxl_q  <= 1'b0;"
+  },
+  {
+   "name": "the physical page is lost",
+   "old": "req_pa_q  <= i_xl_ppn;",
+   "new": "req_pa_q  <= 44'b0;"
+  },
+  {
+   "name": "the bus address takes the wrong page bits",
+   "old": "{req_pa_q[19:0], req_pc_q[11:3], 3'b000}",
+   "new": "{req_pa_q[23:4], req_pc_q[11:3], 3'b000}"
+  },
+  {
+   "name": "the bus address loses the page offset",
+   "old": "{req_pa_q[19:0], req_pc_q[11:3], 3'b000}",
+   "new": "{req_pa_q[19:0], 9'b0, 3'b000}"
+  },
+  {
+   "name": "an access fault is reported as a page fault",
+   "old": "req_pf_q  <= i_xl_pf;",
+   "new": "req_pf_q  <= 1'b1;"
+  },
+  {
+   "name": "a page fault is reported as an access fault",
+   "old": "req_pf_q  <= i_xl_pf;",
+   "new": "req_pf_q  <= 1'b0;"
+  },
+  {
+   "name": "an access fault is taken for an answer",
+   "old": "if (i_xl_pf || i_xl_af) begin          // a fault needs no bus: it is allowed under hold",
+   "new": "if (i_xl_pf) begin"
+  },
+  {
+   "name": "a bus error after a page fault carries the earlier fault's kind",
+   "old": "fb_cause[fb_wr_q] <= (flt_resp && req_pf_q) ? 4'd12 : 4'd1;",
+   "new": "fb_cause[fb_wr_q] <= req_pf_q ? 4'd12 : 4'd1;"
+  },
+  {
+   "name": "every fault is cause 12",
+   "old": "fb_cause[fb_wr_q] <= (flt_resp && req_pf_q) ? 4'd12 : 4'd1;",
+   "new": "fb_cause[fb_wr_q] <= 4'd12;"
+  },
+  {
+   "name": "every fault is cause 1",
+   "old": "fb_cause[fb_wr_q] <= (flt_resp && req_pf_q) ? 4'd12 : 4'd1;",
+   "new": "fb_cause[fb_wr_q] <= 4'd1;"
+  },
+  {
+   "name": "the entry loses its translated flag",
+   "old": "fb_xl[fb_wr_q]    <= req_isxl_q;",
+   "new": "fb_xl[fb_wr_q]    <= 1'b0;"
+  },
+  {
+   "name": "the entry loses its physical page",
+   "old": "fb_pg[fb_wr_q]    <= req_isxl_q ? req_pa_q : 44'b0;",
+   "new": "fb_pg[fb_wr_q]    <= 44'b0;"
+  },
+  {
+   "name": "a result in the redirect's own cycle is taken (unobservable: the request is dropped in that cycle anyway)",
+   "old": "if (req_valid_q && req_xl_q && i_xl_done && !i_redirect_valid) begin",
+   "new": "if (req_valid_q && req_xl_q && i_xl_done) begin",
+   "equivalent": true
+  },
+  {
+   "name": "a fault entry carries the bus data (unobservable: the data of a fault entry is not looked at)",
+   "old": "fb_data[fb_wr_q]  <= flt_resp ? 64'b0 : wb_fetch_dat_i;",
+   "new": "fb_data[fb_wr_q]  <= wb_fetch_dat_i;",
+   "equivalent": true
+  }
+ ]
+}

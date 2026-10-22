@@ -429,6 +429,12 @@ module core_sv39_fetch_tb;
                 // Backdoor SFENCE.VMA-equivalent: force every TLB entry
                 // invalid for one cycle, then release -- same reason a
                 // real SFENCE.VMA instruction can't be used here either.
+`ifdef QV_PIPE_AS_CORE
+                // core_pipe: the commit stage's SFENCE.VMA strobe empties both TLBs at the next edge
+                force dut_l.core0.c_sfence = 1'b1;
+                @(posedge clk); #1;                    // (released after the edge that samples it)
+                release dut_l.core0.c_sfence;
+`else
                 force dut_l.core0.tlb0_valid_q = 1'b0;
                 force dut_l.core0.tlb1_valid_q = 1'b0;
                 force dut_l.core0.tlb2_valid_q = 1'b0;
@@ -438,6 +444,7 @@ module core_sv39_fetch_tb;
                 release dut_l.core0.tlb1_valid_q;
                 release dut_l.core0.tlb2_valid_q;
                 release dut_l.core0.tlb3_valid_q;
+`endif
             end else if (dut_l_remapped && dut_l.core0.trap_taken && dut_l.core0.pc == 64'h40403000) begin
                 // Only reachable pre-fix (see header comment) -- install
                 // a safe halt in place of the handler's own mret so the

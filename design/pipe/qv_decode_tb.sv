@@ -44,6 +44,9 @@ module qv_decode_tb;
     // PMP state (reset: region 0 NAPOT over everything, rwx) and the pc the next instruction is fed at
     logic [63:0] pmpcfg0 = 64'h1F, pmpaddr0 = 64'h003F_FFFF_FFFF_FFFF, pmpaddr1 = '0, pmpaddr2 = '0, pmpaddr3 = '0;
     logic [63:0] feed_pc = 64'h1000;
+    // where the fetched instruction really is (translated fetch), and a fault marker for the second dword of a crossing one
+    logic        feed_xl = 1'b0, feed_hi = 1'b0;
+    logic [43:0] feed_pg_lo = '0, feed_pg_hi = '0;
 
     qv_decode dut (
         .clk(clk), .rst(rst), .i_flush(flush),
@@ -81,6 +84,10 @@ module qv_decode_tb;
         iq_data.pred_tgt   = tgt;
         iq_data.xcpt       = xcpt;
         iq_data.xcpt_cause = cause;
+        iq_data.xcpt_hi    = feed_hi;
+        iq_data.xl         = feed_xl;
+        iq_data.pg_lo      = feed_pg_lo;
+        iq_data.pg_hi      = feed_pg_hi;
         @(posedge clk);
         #1;
         iq_valid = 1'b0;
@@ -826,6 +833,77 @@ module qv_decode_tb;
         feed_pc = 64'h0FF8; feed(encode_i(1, 7, 3'b000, 5, OPI));
         check("pmp: below region 1's lower bound", {63'b0, uop.xcpt}, 64'd1);
         // back to the reset state for the rest
+        pmpcfg0 = 64'h1F; pmpaddr0 = 64'h003F_FFFF_FFFF_FFFF; pmpaddr1 = '0; pmpaddr2 = '0; feed_pc = 64'h1000; priv = 2'b11;
+
+        // ---------------- PMP on a translated fetch ----------------
+        // the spans are physical: {pg_lo, pc[11:0]} for the dword the instruction starts in, {pg_hi, (pc + 8)[11:0]} for the
+        // next one of a crossing instruction -- the virtual pc decides nothing. Same region as above: TOR [0, 0x1010), r-x.
+        pmpcfg0 = 64'h0D; pmpaddr0 = 64'h1010 >> 2;
+        priv = 2'b01;
+        feed_xl = 1'b1;
+        feed_pc = 64'h4000_0000; feed_pg_lo = 44'h1;
+        feed(encode_i(1, 7, 3'b000, 5, OPI));
+        check("xl pmp: the virtual pc is outside the region, the physical page is inside: fine", {63'b0, uop.xcpt}, 64'd0);
+        feed_pc = 64'h1000; feed_pg_lo = 44'h80;
+        feed(encode_i(1, 7, 3'b000, 5, OPI));
+        check("xl pmp: the virtual pc is inside the region, the physical page is outside: denied", {63'b0, uop.xcpt}, 64'd1);
+        check("xl pmp: ... cause 1", {60'b0, uop.xcpt_cause}, 64'd1);
+        feed_pc = 64'h4000_0008; feed_pg_lo = 44'h1;
+        feed(encode_i(1, 7, 3'b000, 5, OPI));
+        check("xl pmp: physical [0x1008, 0x100F] inside", {63'b0, uop.xcpt}, 64'd0);
+        feed_pc = 64'h4000_000C; feed_pg_lo = 44'h1;
+        feed(encode_i(1, 7, 3'b000, 5, OPI));
+        check("xl pmp: physical [0x100C, 0x1013] runs past the top", {63'b0, uop.xcpt}, 64'd1);
+        // a crossing instruction: the second dword is in another page; its offset wraps within the page
+        feed_pc = 64'h4000_0FFE; feed_pg_lo = 44'h0; feed_pg_hi = 44'h1;
+        feed(encode_i(1, 7, 3'b000, 5, OPI));
+        check("xl pmp: crossing, physical [0xFFE, 0x1005] and [0x1006, 0x100D] both inside", {63'b0, uop.xcpt}, 64'd0);
+        // the second span is [(pc + 8) mod 4 KiB in the second page, +7] = [0x1006, 0x100D]: a region ending at 0x100C cuts it
+        pmpaddr0 = 64'h100C >> 2;
+        feed(encode_i(1, 7, 3'b000, 5, OPI));
+        check("xl pmp: crossing, the second span [0x1006, 0x100D] runs past a region ending at 0x100C: denied", {63'b0, uop.xcpt}, 64'd1);
+        pmpaddr0 = 64'h1010 >> 2;
+        feed_pg_hi = 44'h80;
+        feed(encode_i(1, 7, 3'b000, 5, OPI));
+        check("xl pmp: crossing, the second page outside the region: denied", {63'b0, uop.xcpt}, 64'd1);
+        check("xl pmp: ... cause 1", {60'b0, uop.xcpt_cause}, 64'd1);
+        feed_pg_lo = 44'h80; feed_pg_hi = 44'h1;
+        feed(encode_i(1, 7, 3'b000, 5, OPI));
+        check("xl pmp: crossing, the first page outside the region: denied", {63'b0, uop.xcpt}, 64'd1);
+        feed_pg_lo = 44'h0; feed_pg_hi = 44'h80;
+        feed({16'b0, 16'h0001}, 1'b0, 4'd0, 1'b1);                                    // 16-bit at the same pc: no second dword
+        check("xl pmp: a 16-bit instruction at pc[2:1] == 3 needs no second span", {63'b0, uop.xcpt}, 64'd0);
+        // a Program Buffer run is not checked at all
+        pb_active = 1'b1; in_debug = 1'b1;
+        feed_pc = 64'h1000; feed_pg_lo = 44'h80; feed_pg_hi = 44'h80;
+        feed(encode_i(1, 7, 3'b000, 5, OPI));
+        check("xl pmp: Program Buffer run: no fault", {63'b0, uop.xcpt}, 64'd0);
+        pb_active = 1'b0; in_debug = 1'b0;
+        // fault markers: a page-fault marker keeps its cause and says if it was in the second dword ...
+        feed_pc = 64'h4000_0FFE; feed_pg_lo = 44'h0; feed_pg_hi = '0; feed_hi = 1'b1;
+        feed(32'h0, 1'b1, 4'd12);
+        check("xl marker: a page fault in the high dword: cause 12", {60'b0, uop.xcpt_cause}, 64'd12);
+        check("xl marker: ... marked as the high dword's", {63'b0, uop.xcpt_hi}, 64'd1);
+        check("xl marker: ... a fault", {63'b0, uop.xcpt}, 64'd1);
+        // ... but core.sv looks at the low dword first: if the PMP denies it, the fetch ends there with an access fault
+        feed_pg_lo = 44'h80;
+        feed(32'h0, 1'b1, 4'd12);
+        check("xl marker: the low span denied: an access fault (cause 1) instead of the page fault", {60'b0, uop.xcpt_cause}, 64'd1);
+        check("xl marker: ... still a fault", {63'b0, uop.xcpt}, 64'd1);
+        // ... and the high span is not looked at for a marker of the high dword: that dword's translation failed
+        feed_pc = 64'h4000_0FFE; feed_pg_lo = 44'h0; feed_pg_hi = 44'h80; feed_hi = 1'b1;
+        feed(32'h0, 1'b1, 4'd12);
+        check("xl marker: the high span (meaningless here) is not checked: cause 12 stands", {60'b0, uop.xcpt_cause}, 64'd12);
+        feed_pg_hi = '0;
+        // a marker for the dword the instruction starts in is not overridden: its own translation failed, nothing was fetched
+        feed_hi = 1'b0; feed_pg_lo = 44'h80;
+        feed(32'h0, 1'b1, 4'd12);
+        check("xl marker: not for the high dword: cause 12 whatever the (meaningless) page says", {60'b0, uop.xcpt_cause}, 64'd12);
+        check("xl marker: ... not marked high", {63'b0, uop.xcpt_hi}, 64'd0);
+        // a plain instruction carries no xcpt_hi
+        feed(encode_i(1, 7, 3'b000, 5, OPI));
+        check("xl: an ordinary instruction has no xcpt_hi", {63'b0, uop.xcpt_hi}, 64'd0);
+        feed_xl = 1'b0; feed_pg_lo = '0; feed_pg_hi = '0; feed_hi = 1'b0;
         pmpcfg0 = 64'h1F; pmpaddr0 = 64'h003F_FFFF_FFFF_FFFF; pmpaddr1 = '0; pmpaddr2 = '0; feed_pc = 64'h1000; priv = 2'b11;
 
         // ---------------- execute triggers ----------------

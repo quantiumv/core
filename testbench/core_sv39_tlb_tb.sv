@@ -132,10 +132,16 @@ module core_sv39_tlb_tb;
     always @(posedge clk) if (dut_a.core0.trap_taken && dut_a.core0.is_ebreak) halted_a <= 1'b1;
     logic ptw_prev_a = 1'b0;
     int ptw_count_a = 0;
+`ifdef QV_PIPE_AS_CORE
+    // core_pipe has one walker: a walk is a request it accepts, from either client
+    always @(negedge clk)
+        if (dut_a.core0.g_sv39.ptw0.accept_d || dut_a.core0.g_sv39.ptw0.accept_f) ptw_count_a <= ptw_count_a + 1;
+`else
     always @(negedge clk) begin
         if ((dut_a.core0.state == dut_a.core0.S_PTW) && !ptw_prev_a) ptw_count_a <= ptw_count_a + 1;
         ptw_prev_a <= (dut_a.core0.state == dut_a.core0.S_PTW);
     end
+`endif
 
     /* ----------------------------------------------------------------
      * Test B: a miss on a different VPN still walks, right after an
@@ -153,10 +159,16 @@ module core_sv39_tlb_tb;
     always @(posedge clk) if (dut_b.core0.trap_taken && dut_b.core0.is_ebreak) halted_b <= 1'b1;
     logic ptw_prev_b = 1'b0;
     int ptw_count_b = 0;
+`ifdef QV_PIPE_AS_CORE
+    // core_pipe has one walker: a walk is a request it accepts, from either client
+    always @(negedge clk)
+        if (dut_b.core0.g_sv39.ptw0.accept_d || dut_b.core0.g_sv39.ptw0.accept_f) ptw_count_b <= ptw_count_b + 1;
+`else
     always @(negedge clk) begin
         if ((dut_b.core0.state == dut_b.core0.S_PTW) && !ptw_prev_b) ptw_count_b <= ptw_count_b + 1;
         ptw_prev_b <= (dut_b.core0.state == dut_b.core0.S_PTW);
     end
+`endif
     int ptw_count_b_mid;
     logic captured_b_mid = 1'b0;
     always @(posedge clk) if (!captured_b_mid && dut_b.core0.commit_now && dut_b.core0.pc == 64'h40403004) begin
@@ -184,10 +196,16 @@ module core_sv39_tlb_tb;
     always @(posedge clk) if (dut_c.core0.trap_taken && dut_c.core0.is_ebreak) halted_c <= 1'b1;
     logic ptw_prev_c = 1'b0;
     int ptw_count_c = 0;
+`ifdef QV_PIPE_AS_CORE
+    // core_pipe has one walker: a walk is a request it accepts, from either client
+    always @(negedge clk)
+        if (dut_c.core0.g_sv39.ptw0.accept_d || dut_c.core0.g_sv39.ptw0.accept_f) ptw_count_c <= ptw_count_c + 1;
+`else
     always @(negedge clk) begin
         if ((dut_c.core0.state == dut_c.core0.S_PTW) && !ptw_prev_c) ptw_count_c <= ptw_count_c + 1;
         ptw_prev_c <= (dut_c.core0.state == dut_c.core0.S_PTW);
     end
+`endif
 
     /* ----------------------------------------------------------------
      * Test D: SFENCE.VMA genuinely invalidates a cached entry. VA =
@@ -206,10 +224,16 @@ module core_sv39_tlb_tb;
     always @(posedge clk) if (dut_d.core0.trap_taken && dut_d.core0.is_ebreak) halted_d <= 1'b1;
     logic ptw_prev_d = 1'b0;
     int ptw_count_d = 0;
+`ifdef QV_PIPE_AS_CORE
+    // core_pipe has one walker: a walk is a request it accepts, from either client
+    always @(negedge clk)
+        if (dut_d.core0.g_sv39.ptw0.accept_d || dut_d.core0.g_sv39.ptw0.accept_f) ptw_count_d <= ptw_count_d + 1;
+`else
     always @(negedge clk) begin
         if ((dut_d.core0.state == dut_d.core0.S_PTW) && !ptw_prev_d) ptw_count_d <= ptw_count_d + 1;
         ptw_prev_d <= (dut_d.core0.state == dut_d.core0.S_PTW);
     end
+`endif
 
     /* ----------------------------------------------------------------
      * Test E: superpage partial-tag matching. L1@0x2000 entry[vpn1=6]
@@ -230,10 +254,16 @@ module core_sv39_tlb_tb;
     always @(posedge clk) if (dut_e.core0.trap_taken && dut_e.core0.is_ebreak) halted_e <= 1'b1;
     logic ptw_prev_e = 1'b0;
     int ptw_count_e = 0;
+`ifdef QV_PIPE_AS_CORE
+    // core_pipe has one walker: a walk is a request it accepts, from either client
+    always @(negedge clk)
+        if (dut_e.core0.g_sv39.ptw0.accept_d || dut_e.core0.g_sv39.ptw0.accept_f) ptw_count_e <= ptw_count_e + 1;
+`else
     always @(negedge clk) begin
         if ((dut_e.core0.state == dut_e.core0.S_PTW) && !ptw_prev_e) ptw_count_e <= ptw_count_e + 1;
         ptw_prev_e <= (dut_e.core0.state == dut_e.core0.S_PTW);
     end
+`endif
 
     /* ----------------------------------------------------------------
      * Test F: SFENCE.VMA that TRAPS must NOT flush the TLB -- the
@@ -258,10 +288,16 @@ module core_sv39_tlb_tb;
     always @(posedge clk) if (dut_f.core0.trap_taken && dut_f.core0.is_ebreak) halted_f <= 1'b1;
     logic ptw_prev_f = 1'b0;
     int ptw_count_f = 0;
+`ifdef QV_PIPE_AS_CORE
+    // core_pipe has one walker: a walk is a request it accepts, from either client
+    always @(negedge clk)
+        if (dut_f.core0.g_sv39.ptw0.accept_d || dut_f.core0.g_sv39.ptw0.accept_f) ptw_count_f <= ptw_count_f + 1;
+`else
     always @(negedge clk) begin
         if ((dut_f.core0.state == dut_f.core0.S_PTW) && !ptw_prev_f) ptw_count_f <= ptw_count_f + 1;
         ptw_prev_f <= (dut_f.core0.state == dut_f.core0.S_PTW);
     end
+`endif
     logic [63:0] mcause_f;
     logic        captured_f = 1'b0;
     always @(posedge clk) if (!captured_f && dut_f.core0.commit_now && dut_f.core0.pc == 64'h104) begin
@@ -465,7 +501,12 @@ module core_sv39_tlb_tb;
         // ---- Test B ----
         check("B: page1 marker reached (x20==1)", dut_b.core0.regfile0.gp_registers[20], 64'd1);
         check("B: page2 marker reached (x21==1)", dut_b.core0.regfile0.gp_registers[21], 64'd1);
+`ifdef QV_PIPE_AS_CORE
+        // (fetch runs ahead of retirement: by the time the JAL retires the second page's walk may have begun)
+        check("B: page1 cost at least one walk by the time its JAL retired", ptw_count_b_mid >= 1, 1'b1);
+`else
         check("B: page1 alone cost exactly one walk", ptw_count_b_mid, 64'd1);
+`endif
         check("B: page2 (different VPN) added a SECOND walk", ptw_count_b, 64'd2);
 
         // ---- Test C ----

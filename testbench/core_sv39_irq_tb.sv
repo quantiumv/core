@@ -472,7 +472,14 @@ module core_sv39_irq_tb;
         // (no SFENCE.VMA can execute while parked in S_DEBUG_HALTED).
         // addi x2,x0,777 ; jal x0,0 (spin -- not ebreak, see test A's own
         // handler comment).
+`ifdef QV_PIPE_AS_CORE
+        // The halt lands on either instruction of the loop, depending on the core's timing: the new page sets x2 from
+        // both of its first two instructions, then spins
+        dut_d2.sram0.memory[3584] = {enc_addi(5'd2,5'd0,777), enc_addi(5'd2,5'd0,777)};
+        dut_d2.sram0.memory[3585] = {encode_j(0, 5'd0, `OPC_JAL), encode_j(0, 5'd0, `OPC_JAL)};
+`else
         dut_d2.sram0.memory[3584] = {encode_j(0, 5'd0, `OPC_JAL), enc_addi(5'd2,5'd0,777)};
+`endif
 
         seip_a  = 1'b0;
         // i_mtip_b: driven entirely by its own always block above (the
@@ -538,10 +545,17 @@ module core_sv39_irq_tb;
         // and force-clear the TLB -- mirrors what a real SFENCE.VMA would
         // do, done directly since no instruction can execute while halted.
         dut_d2.sram0.memory[1536 + 3] = 64'h0000_0000_0000_1CCF;
+`ifdef QV_PIPE_AS_CORE
+        // core_pipe: the commit stage's SFENCE.VMA strobe empties both TLBs at the next edge
+        force dut_d2.core0.c_sfence = 1'b1;
+        @(posedge clk); #1;
+        release dut_d2.core0.c_sfence;
+`else
         dut_d2.core0.tlb0_valid_q = 1'b0;
         dut_d2.core0.tlb1_valid_q = 1'b0;
         dut_d2.core0.tlb2_valid_q = 1'b0;
         dut_d2.core0.tlb3_valid_q = 1'b0;
+`endif
 
         @(negedge clk);
         halt_req_d1 = 1'b0;

@@ -1,0 +1,90 @@
+{
+ "dut": "design/pipe/qv_decode.sv",
+ "tb": "design/pipe/qv_decode_tb.sv",
+ "files": [
+  "design/decoder.sv",
+  "design/c_expand.sv",
+  "design/alu.sv",
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_pmp.sv",
+  "design/pipe/qv_decode.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench"
+ ],
+ "cwd": "design",
+ "timeout": 900,
+ "mutants": [
+  {
+   "name": "the first span ignores where the dword really is",
+   "old": "wire [63:0] pa_lo = i_iq_data.xl ? {8'b0, i_iq_data.pg_lo, i_iq_data.pc[11:0]} : i_iq_data.pc;",
+   "new": "wire [63:0] pa_lo = i_iq_data.pc;"
+  },
+  {
+   "name": "the second span ignores where the next dword really is",
+   "old": "wire [63:0] pa_hi = i_iq_data.xl ? {8'b0, i_iq_data.pg_hi, pc_hi_off}          : i_iq_data.pc + 64'd8;",
+   "new": "wire [63:0] pa_hi = i_iq_data.pc + 64'd8;"
+  },
+  {
+   "name": "an untranslated fetch is taken for a translated one",
+   "old": "wire [63:0] pa_lo = i_iq_data.xl ? ",
+   "new": "wire [63:0] pa_lo = 1'b1 ? "
+  },
+  {
+   "name": "the second span's offset is not wrapped within the page",
+   "old": "wire [11:0] pc_hi_off = i_iq_data.pc[11:0] + 12'd8;",
+   "new": "wire [11:0] pc_hi_off = i_iq_data.pc[11:0];"
+  },
+  {
+   "name": "the second span's offset is off",
+   "old": "wire [11:0] pc_hi_off = i_iq_data.pc[11:0] + 12'd8;",
+   "new": "wire [11:0] pc_hi_off = i_iq_data.pc[11:0] + 12'd4;"
+  },
+  {
+   "name": "the first span uses the page of the next dword",
+   "old": "{8'b0, i_iq_data.pg_lo, i_iq_data.pc[11:0]}",
+   "new": "{8'b0, i_iq_data.pg_hi, i_iq_data.pc[11:0]}"
+  },
+  {
+   "name": "the second span uses the page of the first dword",
+   "old": "{8'b0, i_iq_data.pg_hi, pc_hi_off}",
+   "new": "{8'b0, i_iq_data.pg_lo, pc_hi_off}"
+  },
+  {
+   "name": "a fault marker of the high dword is never given way to a denial of the low span",
+   "old": "if (i_iq_data.xcpt && !marker_lo_denied) begin",
+   "new": "if (i_iq_data.xcpt) begin"
+  },
+  {
+   "name": "any fault marker gives way to a denial of the low span",
+   "old": "wire marker_lo_denied = i_iq_data.xcpt && i_iq_data.xcpt_hi && lo_denied;",
+   "new": "wire marker_lo_denied = i_iq_data.xcpt && lo_denied;"
+  },
+  {
+   "name": "a marker for the high dword gives way to a denial of the high span too",
+   "old": "wire marker_lo_denied = i_iq_data.xcpt && i_iq_data.xcpt_hi && lo_denied;",
+   "new": "wire marker_lo_denied = i_iq_data.xcpt && i_iq_data.xcpt_hi && pmp_fault;"
+  },
+  {
+   "name": "xcpt_hi is lost",
+   "old": "uop_d.xcpt_hi    = i_iq_data.xcpt_hi;",
+   "new": "uop_d.xcpt_hi    = 1'b0;"
+  },
+  {
+   "name": "xcpt_hi is set for every fault",
+   "old": "uop_d.xcpt_hi    = i_iq_data.xcpt_hi;",
+   "new": "uop_d.xcpt_hi    = i_iq_data.xcpt;"
+  },
+  {
+   "name": "a Program Buffer run is checked on the first span",
+   "old": "wire lo_denied = !i_pb_active && !exec_ok_lo;",
+   "new": "wire lo_denied = !exec_ok_lo;"
+  }
+ ]
+}

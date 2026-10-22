@@ -23,18 +23,19 @@
  "mutants": [
   {
    "name": "a Program Buffer run is PMP-checked",
-   "old": "    wire pmp_fault = !i_pb_active && (!exec_ok_lo || (fetch_hi_taken && !exec_ok_hi));",
-   "new": "    wire pmp_fault = !exec_ok_lo || (fetch_hi_taken && !exec_ok_hi);"
+   "old": "!i_pb_active && ",
+   "new": "",
+   "count": 2
   },
   {
    "name": "the PMP is off for everyone",
-   "old": "    wire pmp_fault = !i_pb_active && (!exec_ok_lo || (fetch_hi_taken && !exec_ok_hi));",
-   "new": "    wire pmp_fault = 1'b0;"
+   "old": "wire pmp_fault = lo_denied || (!i_pb_active && fetch_hi_taken && !exec_ok_hi);",
+   "new": "wire pmp_fault = 1'b0;"
   },
   {
    "name": "only the first span is exempt in a run",
-   "old": "    wire pmp_fault = !i_pb_active && (!exec_ok_lo || (fetch_hi_taken && !exec_ok_hi));",
-   "new": "    wire pmp_fault = (!i_pb_active && !exec_ok_lo) || (fetch_hi_taken && !exec_ok_hi);"
+   "old": "(!i_pb_active && fetch_hi_taken && !exec_ok_hi)",
+   "new": "(fetch_hi_taken && !exec_ok_hi)"
   }
  ]
 }
