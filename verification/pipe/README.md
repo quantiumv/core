@@ -50,12 +50,47 @@ The qvgen profiles the specs use (`verification/lockstep/gen/qvgen.py`):
 | `p6_lockstep_extra.json` | the same (`--priv m` for the debug-CSR legality mutants, which only an M-mode body reaches) | the same |
 | `p6_lockstep_dense.json` | the same plus `--ebreak-rate 0.1` | the same plus `--dbg-density 1` |
 | `p6_lockstep_dbgexc.json` | the same, `--corpus dbg`: the directed programs `dbg_exc.s` and `dbg_res.s`, the only ones that can take an action-0 trigger | `--irq-mode 0 --dbg-mode 1 --dbg-features 191` |
+| `p7_lockstep.json` | `--isa imac --priv msu --pmp --irq --smc --sv39` | `--irq-mode 2 --irq-density 1 --dbg-mode 1 --dbg-features 191 --timeout 2000000` |
+| `p7_lockstep_extra.json` | an M-mode body (`--priv m --pmp --smc --sv39`: MPRV, a locked pocket binding M); `--priv msu --pmp --irq --smc` without `--sv39` (satp Bare below M); `--priv msu --irq --smc --sv39` without `--pmp` (the bus-error region is reachable); `--priv msu --pmp --smc --sv39` without `--irq` (a pocket of its own over the high probe page) | `--irq-mode 0` where the profile has no `--irq` |
+| `p7_lockstep_slow.json` | the first profile (and the no-`--pmp` one) on the cache with 8 wait states, where the caches answer with ack and err together | `--timeout 3000000` |
 
 `p6_lockstep.json` holds every mutant of the P6 unit specs. 85 of its 134 are killed by the random programs
 alone and 49 survive them; each survivor is annotated (`unit_only`) with the reason, either the spec that kills it
 (the three other P6 specs above) or why no generated program can show it (the Debug Module never produces the
 input, the decoder or commit makes the difference unobservable, the RVFI fields differ for a reason both cores
 get right). Run all four specs for the full record.
+
+`p7_lockstep.json` holds every mutant of the ten P7 unit specs (`qv_pte`, `qv_tlb`, `qv_ptw`, `qv_xlate`, and the translation
+rows of `qv_lsu`, `qv_commit`, `qv_fetch`, `qv_align`, `qv_decode`): 250. The generated programs kill 182: 169 in the main
+profile, 13 more in `p7_lockstep_extra.json` and `p7_lockstep_slow.json` (listed there, and as `unit_only` with the spec that
+kills them in the main one). A mutant counts as killed when the run fails, hangs, or stops on an assertion: the
+`RISCV_FORMAL` block of core_pipe is compiled into the lockstep build, so the invariants that a held translation request does
+not change, and that the walker and the LSU never drive the memory port together, stop the run (the lockstep reports an error
+with no result line). The other 68 survive: 11 are marked `"equivalent"` in their unit spec, and 57 carry a `unit_only` reason.
+Every unit-spec mutant is also killed by its unit testbench. The reasons fall in four groups:
+- *only the number of walks or flushes changes* (31): an extra TLB flush (7), the order the TLB replaces entries in, an
+  over-strict tag compare, a second entry for one address, the TLB's state before reset in a two-state simulation, a fill that
+  races a flush, a tag taken from the live address (11 in all), what `qv_xlate` does when asked while translation is off or the
+  TLB hits or a fault is held (6), which of two simultaneous walker requests goes first (2), a slot reused or a fault answered a
+  cycle later (2), a redirect that waits one cycle more (3);
+- *an orphan walk or a coincidence with no request waiting* (10): what the walker does after a cancel or below a faulting
+  pointer, a fill for a request that was just cancelled, a held fetch whose translation starts a beat for the right address, a
+  misaligned op that is walked before it traps (its trap comes first), a flush while the head waits for its walk;
+- *not reachable through core_pipe's wiring or design* (6): the instruction-side translator is given SUM = 0, no translation
+  runs at M privilege, a fetch never asks for write, an entry with W and no R is malformed whether it is read as a leaf or as a
+  pointer, a store walked as a load is judged again on the TLB hit, an access fault that is not taken as an answer ends in the
+  same cause 1 through a bus error;
+- *needs a rarer combination, or is covered elsewhere* (10): a redirect has to wait only when it turns fetch translation on (the
+  MRET into the body is killed; an interrupt, a trap, an SRET and a serializing instruction never go from untranslated to
+  translated), a straddling fetch whose two frames sit in pockets with the same verdict, a high-page fault in a pocket that
+  forbids X, a Program Buffer run's PMP bypass (`p6_lockstep.json`) and SFENCE.VMA (`qv_commit_tb`).
+
+What made the difference was stimulus (`qvgen --sv39`): bits of a PTE and of a physical address the ordinary map never sets
+(V clear with a good leaf at every level, reserved, PBMT and N bits in leaves and in pointers, a physical address with one high
+bit, a pointer to a far table or to the bus-error region), aliases of mapped pages with wrong upper bits, misaligned hole
+accesses, SUM/MXR flip pairs, an NA4 PMP word through one PTE, fetch probes through far tables and through windows above the
+image, and S and U bodies that run through a 2 MiB window at a virtual address that is not their physical one. The first pass
+(the stimulus before these) killed 149; the survivors were re-run on the final stimulus (20 more) and in the two extra specs (13).
 
 ## Where core_pipe differs from core.sv
 
@@ -71,8 +106,35 @@ Not architectural:
 - A DIV or FENCE.I that traps on an action-0 trigger: the FSM starts the divider and flushes the icache
   before trapping, the pipe does neither (the flush is harmless).
 
+Sv39 (the data side and the instruction side are both translated; same pages, same faults, same causes and
+mtvals per instruction):
+- The FSM translates once per instruction (the pc, and pc + 8 for a 32-bit one that crosses); the pipe translates
+  once per fetched dword and once per data access. The number of TLB lookups and fills differs, so a test that
+  counts them counts walks (`core_sv39_tlb_tb`), not lookups.
+- The pipe has two 4-entry TLBs (instruction and data, round-robin each) against the FSM's one unified 4-entry
+  TLB. Neither flushes on a satp write, a privilege change or a trap: only SFENCE.VMA does (a clean one: a
+  TVM-trapped SFENCE.VMA flushes nothing).
+- The pipe walks speculatively: a fetch past a taken branch, or on a wrong path, translates and fills the
+  instruction TLB; the FSM never does. A dword past a branch can become a fault marker that never reaches the head
+  and so never traps. Generated programs keep to two rules, so both cores agree: every PTE store, satp write or root
+  swap is followed by an SFENCE.VMA before anything depends on it (R1), and no non-leaf PTE and no executable leaf
+  leads to a device (R2: the tables and the code are in RAM; the deliberate far pointers and leaves go to an
+  address above 2^32 that the PMP always denies, or to the bus-error region). There is no hardware limit or
+  attribute check on a PTE read (the FSM has none; a speculative walk through a junk pointer could read a device
+  register, a hardening item for a Linux build).
+  `lockstep/smc_hazard.py` also triages a divergence that follows a violation of either rule.
+- A redirect that changes what translation depends on (a trap, an xRET, an interrupt, a serializing instruction)
+  makes fetch wait one cycle before it issues from the target, so the request is translated against the new
+  privilege, satp and TLB. It is skipped while satp is Bare and the retiring instruction is not a satp access.
+- The walker and the LSU share the memory port: the LSU wins every gap between two PTE reads, a PTE read is never
+  abandoned (a cancelled walk's beat completes and its result is dropped), and a data walk can wait for a whole
+  instruction-side walk. PTE reads are PMP-checked at S privilege, read only, and a denial or a bus error is an
+  access fault of the original access's class.
+- A page fault in the second dword of a 32-bit instruction that crosses reports pc + 8, as core.sv does; a low-dword
+  PMP denial ends the fetch before the high dword is looked at, so it wins over a high-dword page fault.
+
 RVFI fields the FSM reports stale, which the comparator masks or the stimulus avoids:
-- `insn` on cause-1 records, `mem_*` on trapping AMO records, mip bits 7, 9 and 11 under `--irq-late`.
+- `insn` on cause-1 and cause-12 records, `mem_*` on trapping AMO records, mip bits 7, 9 and 11 under `--irq-late`.
 - `mem_*` of a trapped action-0 load, store or AMO: the FSM reports the would-be access, the pipe zeros
   (the comparator skips the memory fields of trap records).
 - A Program Buffer abort reports `rvfi_trap` 0, so its memory fields are compared. They differ for a

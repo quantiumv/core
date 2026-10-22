@@ -1,0 +1,147 @@
+{
+ "counts": [
+  8,
+  24,
+  64
+ ],
+ "sim": "verilator",
+ "memcfg": "sram",
+ "delay": 0,
+ "jobs": 3,
+ "inner_jobs": 2,
+ "profile": "--isa imac --priv msu --pmp --irq --smc --sv39",
+ "extra": [
+  "--irq-mode",
+  "2",
+  "--irq-density",
+  "1",
+  "--dbg-mode",
+  "1",
+  "--dbg-features",
+  "191",
+  "--timeout",
+  "2000000"
+ ],
+ "mutants": [
+  {
+   "from": "p7a_unit_pte.json",
+   "unit_only": {
+    "1": "equivalent: W without R is malformed, which faults whether the entry is read as a leaf or as a pointer",
+    "18": "core_pipe gives the instruction-side translator SUM = 0, so a fetch never sees the bit this mutant looks at",
+    "23": "no translation runs at M privilege (fetch translates below M, data below M by its effective privilege), so the PTE check never sees it",
+    "34": "the walker presents a fetch with write clear, so the fetch-and-write combination the mutant changes never occurs"
+   }
+  },
+  {
+   "from": "p7a_unit_tlb.json",
+   "unit_only": {
+    "0": "two entries never match one address: a fill is made only for a miss, and a program that obeys R1 never changes a mapping under a live entry",
+    "1": "the replacement order is not architectural: another victim only changes which later accesses walk again",
+    "2": "the replacement order is not architectural: another victim only changes which later accesses walk again",
+    "3": "the replacement order is not architectural: another victim only changes which later accesses walk again",
+    "5": "the replacement order is not architectural: another victim only changes which later accesses walk again",
+    "6": "qv_xlate never fills in a cycle that also flushes",
+    "7": "the harness simulates two-state: registers start at 0 whatever the reset does",
+    "9": "an over-strict tag compare only adds misses (a walk that refills the same entry); no timing is compared",
+    "11": "an over-strict tag compare only adds misses (a walk that refills the same entry); no timing is compared",
+    "16": "an over-strict tag compare only adds misses (a walk that refills the same entry); no timing is compared",
+    "20": "qv_xlate holds the request address from the start of the walk to the fill, so the lookup address and the fill address are the same"
+   }
+  },
+  {
+   "from": "p7b_unit_ptw.json",
+   "unit_only": {
+    "0": "which of two simultaneous requests the walker takes first is timing only: both are served",
+    "2": "a second walk for a request just answered ends in the same fill: timing only: the same translations come out, later or after one more walk",
+    "3": "a cancelled walk goes on as an orphan whose done pulse reaches no waiting request in generated programs (the trap that follows the cancel takes longer than the walk), and a fill needs a request held at that moment; ptw_props proves the rule",
+    "9": "killed by p7_lockstep_extra.json (an M-mode body, a Bare satp, no PMP, or PMP without interrupts: the profile that reaches it)",
+    "10": "killed by p7_lockstep_slow.json (the cache with 8 wait states: the caches answer with ack and err together, and a refill races a flush)",
+    "11": "killed by p7_lockstep_extra.json (an M-mode body, a Bare satp, no PMP, or PMP without interrupts: the profile that reaches it)",
+    "12": "killed by p7_lockstep_extra.json (an M-mode body, a Bare satp, no PMP, or PMP without interrupts: the profile that reaches it)",
+    "16": "a cancelled walk goes on as an orphan whose done pulse reaches no waiting request in generated programs (the trap that follows the cancel takes longer than the walk), and a fill needs a request held at that moment; ptw_props proves the rule",
+    "18": "a cancelled walk goes on as an orphan whose done pulse reaches no waiting request in generated programs (the trap that follows the cancel takes longer than the walk), and a fill needs a request held at that moment; ptw_props proves the rule",
+    "29": "the held request is judged again on the TLB hit with its access kind, which finds the same fault",
+    "31": "the fault is reported in the same cycle either way; what the walker does below a faulting pointer afterwards is an orphan walk whose done pulse reaches no waiting request (the trap takes longer than the walk)"
+   }
+  },
+  {
+   "from": "p7b_unit_xlate.json",
+   "unit_only": {
+    "0": "a fill for a request that was just cancelled is a correct translation of its address, and the SFENCE.VMA that could expose it comes a fetch, a decode and an issue later",
+    "2": "a fill for a request that has just gone is a correct translation of its address, and the SFENCE.VMA that could expose it comes a fetch, a decode and an issue later",
+    "13": "the sticky fault is cleared when the request drops or is cancelled; the difference shows only when a redirect cancels the request in the very cycle after a walk fault, with a new request waiting at once; qv_xlate_tb covers it",
+    "15": "the client asks only while translation is on, so the standalone interface this mutant changes is never used",
+    "16": "a second walk while a fault is held ends in the same fault: timing only: the same translations come out, later or after one more walk",
+    "17": "a walk for a request that hits adds a redundant fill: timing only: the same translations come out, later or after one more walk",
+    "19": "the SFENCE.VMA commit also redirects fetch, which cancels the same walk; the flush and the cancel never come apart",
+    "21": "the client asks only while translation is on, so the standalone interface this mutant changes is never used",
+    "22": "the client asks only while translation is on, so the standalone interface this mutant changes is never used"
+   }
+  },
+  {
+   "from": "p7c_unit_lsu.json",
+   "unit_only": {
+    "1": "killed by p7_lockstep_extra.json (an M-mode body, a Bare satp, no PMP, or PMP without interrupts: the profile that reaches it)",
+    "3": "killed by p7_lockstep_extra.json (an M-mode body, a Bare satp, no PMP, or PMP without interrupts: the profile that reaches it)",
+    "4": "the misaligned op completes in the cycle it reaches the head, before any walk can answer; the extra walk is cancelled by the trap's flush and a PTE read is invisible",
+    "10": "killed by p7_lockstep_extra.json (an M-mode body, a Bare satp, no PMP, or PMP without interrupts: the profile that reaches it)",
+    "12": "a flush cannot arrive while the head waits for its walk: flushes happen in the cycle after a retirement, when no op is at the head"
+   }
+  },
+  {
+   "from": "p7c_unit_commit.json",
+   "unit_only": {
+    "0": "an extra TLB flush is invisible: it costs a walk later and changes no architectural state (only a missing flush shows, and that mutant is killed)",
+    "1": "an extra TLB flush is invisible: it costs a walk later and changes no architectural state (only a missing flush shows, and that mutant is killed)",
+    "2": "an extra TLB flush is invisible: it costs a walk later and changes no architectural state (only a missing flush shows, and that mutant is killed)",
+    "3": "an extra TLB flush is invisible: it costs a walk later and changes no architectural state (only a missing flush shows, and that mutant is killed)",
+    "4": "an extra TLB flush is invisible: it costs a walk later and changes no architectural state (only a missing flush shows, and that mutant is killed)",
+    "5": "an extra TLB flush is invisible: it costs a walk later and changes no architectural state (only a missing flush shows, and that mutant is killed)",
+    "6": "an extra TLB flush is invisible: it costs a walk later and changes no architectural state (only a missing flush shows, and that mutant is killed)",
+    "9": "the generated Program Buffer snippets have no SFENCE.VMA; qv_commit_tb covers it"
+   }
+  },
+  {
+   "from": "p7d_unit_fetch.json",
+   "unit_only": {
+    "0": "killed by p7_lockstep_slow.json (the cache with 8 wait states: the caches answer with ack and err together, and a refill races a flush)",
+    "6": "timing only: the redirect target issues one cycle later",
+    "9": "the beat a held translation starts is for the right address and the icache flush it races is harmless; the race is not seen in generated programs on either memory configuration; qv_fetch_tb and fetch_xl_props cover it",
+    "10": "timing only: the fault answers when the hold drops",
+    "18": "an access fault that is not taken as an answer sends the request to the bus with the walk's page; the faulting address is outside the image, so the fetch ends in the same cause 1 through a bus error"
+   }
+  },
+  {
+   "from": "p7d_unit_align.json",
+   "unit_only": {
+    "2": "killed by p7_lockstep_extra.json (an M-mode body, a Bare satp, no PMP, or PMP without interrupts: the profile that reaches it)",
+    "3": "the frames of the two halves of a straddling fetch are checked in pockets that give the same verdict for a span across their common edge (a partial overlap is no match for either)",
+    "4": "killed by p7_lockstep_extra.json (an M-mode body, a Bare satp, no PMP, or PMP without interrupts: the profile that reaches it)",
+    "7": "the same frames, the same pockets as the mutant before it: a marker's low span gives the same verdict on either frame"
+   }
+  },
+  {
+   "from": "p7d_unit_decode.json",
+   "unit_only": {
+    "2": "killed by p7_lockstep_extra.json (an M-mode body: a locked pocket binds M and the jump into it is untranslated)",
+    "3": "killed by p7_lockstep_extra.json (an M-mode body, a Bare satp, no PMP, or PMP without interrupts: the profile that reaches it)",
+    "4": "the second span 4 bytes off stays in the same page and in the same pocket in every generated program; qv_decode_tb covers it",
+    "6": "killed by p7_lockstep_extra.json (an M-mode body, a Bare satp, no PMP, or PMP without interrupts: the profile that reaches it)",
+    "9": "needs a straddling fetch whose second page both page-faults and sits in a pocket that forbids X while the first page is fine: too rare in generated programs; qv_decode_tb covers it",
+    "12": "the same bypass line is killed in p6_lockstep.json (p6c_unit_decode); P7 only moved the span it applies to"
+   }
+  },
+  {
+   "from": "p7d_unit_commit.json",
+   "unit_only": {
+    "0": "a redirect has to wait only when it turns fetch translation on, since the request reads the rest of its context a cycle later: only an MRET goes from an untranslated context into a translated one (killed: index 2); qv_commit_tb covers the others",
+    "1": "a redirect has to wait only when it turns fetch translation on, since the request reads the rest of its context a cycle later: only an MRET goes from an untranslated context into a translated one (killed: index 2); qv_commit_tb covers the others",
+    "3": "a redirect has to wait only when it turns fetch translation on, since the request reads the rest of its context a cycle later: only an MRET goes from an untranslated context into a translated one (killed: index 2); qv_commit_tb covers the others",
+    "4": "a redirect has to wait only when it turns fetch translation on, since the request reads the rest of its context a cycle later: only an MRET goes from an untranslated context into a translated one (killed: index 2); qv_commit_tb covers the others",
+    "5": "performance only: an extra wait cycle after a redirect changes no architectural state",
+    "6": "performance only: an extra wait cycle after a redirect changes no architectural state",
+    "7": "performance only: an extra wait cycle after a redirect changes no architectural state"
+   }
+  }
+ ]
+}
