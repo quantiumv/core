@@ -18,6 +18,8 @@ design/pipe/qv_fetch.sv
 design/pipe/qv_align.sv
 design/pipe/qv_fifo.sv
 design/pipe/qv_pmp.sv
+design/pipe/qv_pte.sv
+design/pipe/qv_tlb.sv
 design/pipe/qv_decode.sv
 design/pipe/qv_issue.sv
 design/pipe/qv_rob.sv
