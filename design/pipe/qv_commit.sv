@@ -187,6 +187,10 @@ module qv_commit #(
 
     output logic                             o_redirect_valid,
     output logic [63:0]                      o_redirect_pc,
+    // This redirect changes what address translation of the fetch depends on -- the privilege (a trap, an xRET, an
+    // interrupt), satp and the TLBs (a serializing instruction) -- at the edge that ends this cycle, so fetch must
+    // not issue from the target in this very cycle
+    output logic                             o_redirect_ctx,
 
     output logic [63:0]                      o_rvfi_order,
     output logic [31:0]                      o_rvfi_insn,
@@ -317,6 +321,8 @@ module qv_commit #(
             tval = {32'b0, i_head_entry.raw};      // raw is already {16'b0, hw} for RVC
         else if (i_head_ctrl.xcpt && i_head_ctrl.cause == 4'd1)
             tval = i_head_entry.pc;
+        else if (i_head_ctrl.xcpt && i_head_ctrl.cause == 4'd12)
+            tval = i_head_ctrl.xcpt_hi ? i_head_entry.pc + 64'd8 : i_head_entry.pc;   // core.sv reports the second dword's address
         else if (i_head_ctrl.trig_exc)
             tval = i_head_entry.pc;                // errata E2: the trigger ranks with its cause, so its tval is the pc
         else if (mem_xcpt)
@@ -419,6 +425,7 @@ module qv_commit #(
                               || (commit && (trap_fx || mret_fx || sret_fx || i_head_entry.mispredict
                                              || i_head_ctrl.serialize));
     assign o_redirect_pc    = irq ? irq_vector : (halt_take || head_dbg_entry) ? arch_pc_q : i_dbg_resume ? i_dpc : actual_next_pc;
+    assign o_redirect_ctx   = irq || (commit && (trap_fx || mret_fx || sret_fx || i_head_ctrl.serialize));
 
     // architectural PC: the next instruction to retire
     always_ff @(posedge clk) begin

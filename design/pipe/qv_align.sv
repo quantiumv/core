@@ -18,11 +18,16 @@
  *     next dword (pend_q); the head dword is then always that next dword,
  *     because a redirect flushes this state along with the fetch buffer
  *
- * A dword that came back with a bus error yields one instruction marked
- * as an instruction access fault (cause 1) at the next pc -- the one
- * whose bytes start in, or cross into, that dword (xcpt_hi for the
- * latter) -- and is dropped. Nothing after it matters: that instruction
- * traps at commit and everything younger is flushed.
+ * A dword that came back with a fault (a bus error, or a translation fault
+ * fetch found: the cause comes with the dword) yields one instruction marked
+ * with that cause at the next pc -- the one whose bytes start in, or cross
+ * into, that dword (xcpt_hi for the latter) -- and is dropped. Nothing after
+ * it matters: that instruction traps at commit and everything younger is
+ * flushed.
+ *
+ * When fetch is translated every instruction also carries where it is: the
+ * physical page of the dword it starts in (pg_lo) and, if it crosses, of the
+ * next one (pg_hi); decode checks the PMP on those.
  *
  * Static prediction happens here too: JAL and C.J are predicted taken,
  * conditional branches (including C.BEQZ/C.BNEZ) taken when their offset
@@ -46,7 +51,10 @@ module qv_align (
     input  logic [63:0]       i_buf_pc,
     /* verilator lint_on UNUSEDSIGNAL */
     input  logic [63:0]       i_buf_data,
-    input  logic              i_buf_err,
+    input  logic              i_buf_err,                 // the dword is a fault marker, i_buf_cause its cause (1 or 12)
+    input  logic [3:0]        i_buf_cause = 4'd1,
+    input  logic              i_buf_xl    = 1'b0,        // fetch was translated: i_buf_pg is the dword's physical page
+    input  logic [43:0]       i_buf_pg    = 44'b0,
     output logic              o_buf_pop,
 
     output logic              o_push0_valid,
@@ -65,6 +73,8 @@ module qv_align (
     logic        pend_q;
     logic [15:0] pend_hw_q;
     logic [63:0] pend_pc_q;
+    logic        pend_xl_q;
+    logic [43:0] pend_pg_q;
 
     wire [63:0] base  = {i_buf_pc[63:3], 3'b000};
     wire [1:0]  start = mid_q ? off_q : i_buf_pc[2:1];
@@ -105,7 +115,8 @@ module qv_align (
         return {taken, pc + off};
     endfunction
 
-    function automatic fe_instr_t mk(input logic [63:0] pc, input logic [31:0] raw, input logic rvc);
+    function automatic fe_instr_t mk(input logic [63:0] pc, input logic [31:0] raw, input logic rvc,
+                                     input logic xl, input logic [43:0] pg_lo, input logic [43:0] pg_hi);
         logic [64:0] p;
         p             = predict(raw, rvc, pc);
         mk            = '0;
@@ -114,6 +125,9 @@ module qv_align (
         mk.rvc        = rvc;
         mk.pred_taken = p[64];
         mk.pred_tgt   = p[63:0];
+        mk.xl         = xl;
+        mk.pg_lo      = pg_lo;
+        mk.pg_hi      = pg_hi;
     endfunction
 
     logic [2:0]  cur;            // next halfword of the head dword, 4 = used up
@@ -135,22 +149,24 @@ module qv_align (
 
         if (go && i_buf_err) begin
             o_push0_valid = 1'b1;
-            o_push0_data  = mk(pend_q ? pend_pc_q : base + {61'b0, start, 1'b0}, 32'b0, 1'b0);
+            // (the page of a marker for the high dword is the pending low dword's: decode checks the PMP on it)
+            o_push0_data  = mk(pend_q ? pend_pc_q : base + {61'b0, start, 1'b0}, 32'b0, 1'b0,
+                               pend_q && pend_xl_q, pend_q ? pend_pg_q : 44'b0, 44'b0);
             o_push0_data.xcpt       = 1'b1;
-            o_push0_data.xcpt_cause = 4'd1;
+            o_push0_data.xcpt_cause = i_buf_cause;
             o_push0_data.xcpt_hi    = pend_q;
             cur = 3'd4;
         end else if (go) begin
             // slot 0: finish a crossing instruction, or start at cur
             if (pend_q) begin
                 o_push0_valid = 1'b1;
-                o_push0_data  = mk(pend_pc_q, {hw(i_buf_data, 2'd0), pend_hw_q}, 1'b0);
+                o_push0_data  = mk(pend_pc_q, {hw(i_buf_data, 2'd0), pend_hw_q}, 1'b0, pend_xl_q, pend_pg_q, i_buf_pg);
                 cur = 3'd1;
             end else begin
                 h = hw(i_buf_data, cur[1:0]);
                 if (h[1:0] != 2'b11) begin
                     o_push0_valid = 1'b1;
-                    o_push0_data  = mk(base + {61'b0, cur[1:0], 1'b0}, {16'b0, h}, 1'b1);
+                    o_push0_data  = mk(base + {61'b0, cur[1:0], 1'b0}, {16'b0, h}, 1'b1, i_buf_xl, i_buf_pg, i_buf_pg);
                     cur = cur + 3'd1;
                 end else if (cur == 3'd3) begin
                     stash    = 1'b1;
@@ -158,7 +174,8 @@ module qv_align (
                     cur      = 3'd4;
                 end else begin
                     o_push0_valid = 1'b1;
-                    o_push0_data  = mk(base + {61'b0, cur[1:0], 1'b0}, {hw(i_buf_data, cur[1:0] + 2'd1), h}, 1'b0);
+                    o_push0_data  = mk(base + {61'b0, cur[1:0], 1'b0}, {hw(i_buf_data, cur[1:0] + 2'd1), h}, 1'b0,
+                                       i_buf_xl, i_buf_pg, i_buf_pg);
                     cur = cur + 3'd2;
                 end
             end
@@ -171,7 +188,7 @@ module qv_align (
                 h = hw(i_buf_data, cur[1:0]);
                 if (h[1:0] != 2'b11) begin
                     o_push1_valid = 1'b1;
-                    o_push1_data  = mk(base + {61'b0, cur[1:0], 1'b0}, {16'b0, h}, 1'b1);
+                    o_push1_data  = mk(base + {61'b0, cur[1:0], 1'b0}, {16'b0, h}, 1'b1, i_buf_xl, i_buf_pg, i_buf_pg);
                     cur = cur + 3'd1;
                 end else if (cur == 3'd3) begin
                     stash    = 1'b1;
@@ -179,7 +196,8 @@ module qv_align (
                     cur      = 3'd4;
                 end else begin
                     o_push1_valid = 1'b1;
-                    o_push1_data  = mk(base + {61'b0, cur[1:0], 1'b0}, {hw(i_buf_data, cur[1:0] + 2'd1), h}, 1'b0);
+                    o_push1_data  = mk(base + {61'b0, cur[1:0], 1'b0}, {hw(i_buf_data, cur[1:0] + 2'd1), h}, 1'b0,
+                                       i_buf_xl, i_buf_pg, i_buf_pg);
                     cur = cur + 3'd2;
                 end
                 if (o_push1_valid && o_push1_data.pred_taken) begin
@@ -204,6 +222,8 @@ module qv_align (
             if (stash) begin
                 pend_hw_q <= stash_hw;
                 pend_pc_q <= base + 64'd6;
+                pend_xl_q <= i_buf_xl;
+                pend_pg_q <= i_buf_pg;
             end
         end
     end

@@ -96,6 +96,13 @@ package qv_pkg;
         logic        xcpt_hi;      // fault is in the second dword of a crossing instruction
         logic        pred_taken;
         logic [63:0] pred_tgt;
+        // Where the instruction really is, once fetch is translated (xl): the physical page (PA[55:12]) of the
+        // dword it starts in, and for a 32-bit instruction that crosses into the next dword, of that one too.
+        // Decode checks the PMP on these; the 64-bit pc stays the virtual address. xl = 0 (Bare, M mode, the
+        // Program Buffer): the pc is the physical address.
+        logic        xl;
+        logic [43:0] pg_lo;
+        logic [43:0] pg_hi;
     } fe_instr_t;
 
     // Decode -> issue.
@@ -134,6 +141,7 @@ package qv_pkg;
         logic [63:0] pred_tgt;
         logic        xcpt;
         logic [3:0]  xcpt_cause;
+        logic        xcpt_hi;      // a fetch fault in the second dword of a crossing instruction (tval of a page fault is pc + 8)
         logic        trig_debug;   // an action-1 execute trigger matched its pc: Debug Mode entry instead of executing
         logic        trig_exc;     // an action-0 one did (and no fetch/illegal fault came first): a breakpoint exception
     } uop_t;
@@ -193,6 +201,7 @@ package qv_pkg;
         logic        is_store_class; // store, SC or AMO: retiring clears it, faulting or not
         logic        xcpt;
         logic [3:0]  cause;
+        logic        xcpt_hi;      // see uop_t
         logic        trig_debug;   // see uop_t
         logic        trig_exc;
     } rob_ctrl_t;

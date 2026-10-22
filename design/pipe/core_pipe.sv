@@ -50,9 +50,10 @@
  * around regfile0 and csr_file0 as core.sv does it; EBREAK (dcsr.ebreak*)
  * and the two execute triggers, matched in decode and acted on at the ROB
  * head; the Program Buffer, whose words qv_dbg feeds into the instruction
- * queue one at a time (see there). Sv39: data accesses are translated (a TLB in
- * qv_xlate, the walker qv_ptw sharing the memory port with the LSU); instruction
- * fetches are not yet.
+ * queue one at a time (see there). Sv39: data accesses and instruction fetches
+ * are translated, each side with its own TLB (qv_xlate) and one walker (qv_ptw)
+ * that shares the memory port with the LSU; a fetch translates in a phase of its
+ * own request (qv_fetch) and carries the physical page to decode's PMP check.
  *
  * Redirects: commit's (a trap, xRET, serialize, or a retiring
  * mispredicted branch or jump) kill everything in flight -- the same
@@ -220,6 +221,9 @@ module core_pipe
     logic [1:0]  priv;                       // the privilege commit keeps
     logic        c_trap_to_s, c_sret_taken;
 
+    // Sv39 is on when satp says so (and the build has translation at all)
+    wire         satp_on = SV39_EN && (satp_w[63:60] == 4'd8);
+
     // ---------------- Debug Mode ----------------
     // commit decides when the hart halts, qv_dbg keeps the flags
     logic        dbg_entry, dbg_halt_entry, dbg_ebreak_entry, dbg_trigger_entry;
@@ -237,20 +241,34 @@ module core_pipe
     wire [63:0]  fetch_redirect_pc = redirect_valid ? redirect_pc : fe_redirect_pc;
 
     // ---------------- F: fetch ----------------
-    logic        fb_valid, fb_err, fb_pop;
+    logic        fb_valid, fb_err, fb_pop, fb_xl;
     logic [63:0] fb_pc, fb_data;
+    logic [3:0]  fb_cause;
+    logic [43:0] fb_pg;
     logic        fetch_hold, fetch_idle;
     logic        commit_fetch_hold;          // FENCE.I, from commit
     // fetch is held for a FENCE.I and for as long as the hart is halted (including the entry cycle itself)
     assign fetch_hold = commit_fetch_hold || dbg_in_debug || dbg_entry;
 
+    // Instruction fetch is translated below M (the raw privilege: MPRV never applies to fetch) when satp says
+    // Sv39, except in a Program Buffer run. Fetch samples this when it issues a request.
+    wire         fetch_xl_on = satp_on && !pb_active && (priv != 2'b11);
+    logic        f_xl_req, f_xl_cancel, f_xl_done, f_xl_pf, f_xl_af;
+    logic [63:0] f_xl_va;
+    logic [43:0] f_xl_ppn;
+    logic        fetch_redirect_ctx;         // below, once commit's outputs are declared
+
     qv_fetch #(.RESET_PC(RESET_PC)) fetch0 (
         .clk(clk), .rst(rst),
         .wb_fetch_addr_o(wb_fetch_addr_o), .wb_fetch_cyc_o(wb_fetch_cyc_o), .wb_fetch_stb_o(wb_fetch_stb_o),
         .wb_fetch_dat_i(wb_fetch_dat_i), .wb_fetch_ack_i(wb_fetch_ack_i), .wb_fetch_err_i(wb_fetch_err_i),
-        .i_redirect_valid(fetch_redirect), .i_redirect_pc(fetch_redirect_pc),
+        .i_redirect_valid(fetch_redirect), .i_redirect_pc(fetch_redirect_pc), .i_redirect_ctx(fetch_redirect_ctx),
         .i_hold(fetch_hold), .o_idle(fetch_idle),
+        .i_xl_on(fetch_xl_on),
+        .o_xl_req(f_xl_req), .o_xl_va(f_xl_va), .o_xl_cancel(f_xl_cancel),
+        .i_xl_done(f_xl_done), .i_xl_pf(f_xl_pf), .i_xl_af(f_xl_af), .i_xl_ppn(f_xl_ppn),
         .o_buf_valid(fb_valid), .o_buf_pc(fb_pc), .o_buf_data(fb_data), .o_buf_err(fb_err),
+        .o_buf_cause(fb_cause), .o_buf_xl(fb_xl), .o_buf_pg(fb_pg),
         .i_buf_pop(fb_pop)
     );
 
@@ -270,6 +288,7 @@ module core_pipe
     qv_align align0 (
         .clk(clk), .rst(rst), .i_flush(flush),
         .i_buf_valid(fb_valid), .i_buf_pc(fb_pc), .i_buf_data(fb_data), .i_buf_err(fb_err),
+        .i_buf_cause(fb_cause), .i_buf_xl(fb_xl), .i_buf_pg(fb_pg),
         .o_buf_pop(fb_pop),
         .o_push0_valid(a0_valid), .o_push0_data(a0_data),
         .o_push1_valid(a1_valid), .o_push1_data(a1_data),
@@ -425,7 +444,6 @@ module core_pipe
     logic [63:0] x_va;
     logic [1:0]  x_priv;
     logic [43:0] x_ppn;
-    wire         satp_on = SV39_EN && (satp_w[63:60] == 4'd8);
 
     // No bypass from the LSU's writeback: a dependent reads the ROB the next cycle, which
     // keeps wb_mem_dat_i out of issue's combinational paths.
@@ -453,13 +471,11 @@ module core_pipe
     generate
         if (SV39_EN) begin : g_sv39
             wire         w_d_req, w_d_cancel, w_d_done;
+            wire         w_f_req, w_f_cancel, w_f_done;
             wire         w_ok, w_pf, w_af, w_r, w_w, w_x, w_u, w_d;
             wire  [26:0] w_vpn;
             wire  [1:0]  w_level;
             wire  [43:0] w_ppn;
-            /* verilator lint_off UNUSEDSIGNAL */
-            wire         w_f_done;
-            /* verilator lint_on UNUSEDSIGNAL */
 
             qv_ptw ptw0 (
                 .clk(clk), .rst(rst),
@@ -471,9 +487,8 @@ module core_pipe
                 .i_d_req(w_d_req), .i_d_va(x_va), .i_d_wr(x_wr), .i_d_priv(x_priv),
                 .i_d_sum(mstatus_sum_w), .i_d_mxr(mstatus_mxr_w), .i_d_root(satp_w[43:0]),
                 .i_d_cancel(w_d_cancel), .o_d_done(w_d_done),
-                // the instruction side does not translate yet
-                .i_f_req(1'b0), .i_f_va(64'b0), .i_f_priv(2'b00), .i_f_root(44'b0), .i_f_cancel(1'b0),
-                .o_f_done(w_f_done),
+                .i_f_req(w_f_req), .i_f_va(f_xl_va), .i_f_priv(priv), .i_f_root(satp_w[43:0]),
+                .i_f_cancel(w_f_cancel), .o_f_done(w_f_done),
                 .o_res_ok(w_ok), .o_res_pf(w_pf), .o_res_af(w_af), .o_res_vpn(w_vpn), .o_res_level(w_level),
                 .o_res_ppn(w_ppn), .o_res_r(w_r), .o_res_w(w_w), .o_res_x(w_x), .o_res_u(w_u), .o_res_d(w_d)
             );
@@ -488,12 +503,28 @@ module core_pipe
                 .i_w_level(w_level), .i_w_ppn(w_ppn), .i_w_r(w_r), .i_w_w(w_w), .i_w_x(w_x), .i_w_u(w_u),
                 .i_w_d(w_d)
             );
+
+            // the instruction side: its own TLB, asked by fetch; no SUM or MXR for an execute
+            qv_xlate #(.TLB_ENTRIES(4)) xlate_f (
+                .clk(clk), .rst(rst),
+                .i_req(f_xl_req), .i_va(f_xl_va), .i_is_mem(1'b0), .i_wr(1'b0), .i_active(fetch_xl_on), .i_priv(priv),
+                .i_sum(1'b0), .i_mxr(1'b0), .i_cancel(f_xl_cancel), .i_flush_tlb(c_sfence),
+                .o_done(f_xl_done), .o_pf(f_xl_pf), .o_af(f_xl_af), .o_ppn(f_xl_ppn),
+                .o_w_req(w_f_req), .o_w_cancel(w_f_cancel),
+                .i_w_done(w_f_done), .i_w_ok(w_ok), .i_w_pf(w_pf), .i_w_af(w_af), .i_w_vpn(w_vpn),
+                .i_w_level(w_level), .i_w_ppn(w_ppn), .i_w_r(w_r), .i_w_w(w_w), .i_w_x(w_x), .i_w_u(w_u),
+                .i_w_d(w_d)
+            );
         end else begin : g_nosv39
-            // Bare only: the LSU never asks (satp_on is tied low), and no walker means no beat
+            // Bare only: neither side ever asks (satp_on is tied low), and no walker means no beat
             assign x_done   = 1'b1;
             assign x_pf     = 1'b0;
             assign x_af     = 1'b0;
             assign x_ppn    = x_va[55:12];
+            assign f_xl_done = 1'b1;
+            assign f_xl_pf   = 1'b0;
+            assign f_xl_af   = 1'b0;
+            assign f_xl_ppn  = f_xl_va[55:12];
             assign ptw_addr = 32'b0;
             assign ptw_cyc  = 1'b0;
             assign ptw_beat = 1'b0;
@@ -524,6 +555,14 @@ module core_pipe
     // declared ahead of csr_file0, which drives them
     logic [63:0] csr_rdata, mtvec_w, mepc_w;
 
+    // A redirect that changes the translation context (commit's o_redirect_ctx) makes fetch wait a cycle before
+    // it issues from the target -- but only where translation is or is about to be on: with satp Bare no
+    // privilege or TLB change matters to fetch (the PMP is checked in decode), and the one thing that can turn
+    // translation on is a write to satp.
+    logic        c_redirect_ctx;
+    assign fetch_redirect_ctx = redirect_valid && c_redirect_ctx && SV39_EN
+                                && (satp_on || (head_ctrl.cls == QV_FU_CSR && head_ctrl.csr_addr == 12'h180));
+
     qv_commit #(.RESET_PC(RESET_PC)) commit0 (
         .clk(clk), .rst(rst),
         .i_head_valid(head_valid), .i_head_entry(head_entry), .i_head_tag(head_tag),
@@ -547,7 +586,7 @@ module core_pipe
         .o_fetch_hold(commit_fetch_hold), .i_fetch_idle(fetch_idle), .o_icache_flush(icache_flush_o),
         .o_sfence(c_sfence),
         .o_commit_now(commit_now_w), .o_pc(arch_pc), .o_next_pc(retire_next_pc),
-        .o_redirect_valid(redirect_valid), .o_redirect_pc(redirect_pc),
+        .o_redirect_valid(redirect_valid), .o_redirect_pc(redirect_pc), .o_redirect_ctx(c_redirect_ctx),
         .o_rvfi_order(c_order), .o_rvfi_insn(c_insn), .o_rvfi_trap(c_rvfi_trap), .o_rvfi_intr(c_intr),
         .o_rvfi_rs1_addr(c_rs1_addr), .o_rvfi_rs2_addr(c_rs2_addr),
         .o_rvfi_rs1_rdata(c_rs1_rdata), .o_rvfi_rs2_rdata(c_rs2_rdata),
@@ -651,9 +690,6 @@ module core_pipe
     wire [2:0]  debug_cause_code     = dbg_cause;
     wire        divider_o_busy       = !div_free;
     /* verilator lint_on UNUSEDSIGNAL */
-
-    // Instruction fetches are not translated yet (P7d): a program that turns Sv39 on runs its code at
-    // physical addresses, which is right only where the code is identity mapped.
 
     // ---------------- ports ----------------
     assign o_debug_mode    = in_debug_mode;

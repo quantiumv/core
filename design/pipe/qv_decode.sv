@@ -39,9 +39,13 @@
  * dword the instruction starts in, as the span [pc, pc+7], and -- for a
  * 32-bit instruction at pc[2:1] == 2'b11, which crosses into the next
  * dword -- [pc+8, pc+15] too, at the raw privilege (MPRV never applies to
- * fetch). A denial is a fetch access fault (cause 1, mtval = pc), the same
+ * fetch). With translation on (fe_instr_t.xl) the spans are the physical
+ * addresses fetch found, {pg_lo, pc[11:0]} and {pg_hi, (pc+8)[11:0]}. A
+ * denial is a fetch access fault (cause 1, mtval = pc), the same
  * marker a bus error gets. Unlike core.sv the bus request has already been
- * made by then; a denied fetch is just never used.
+ * made by then; a denied fetch is just never used. The low dword goes
+ * first, as in core.sv: a fault marker for the high dword (a page fault)
+ * gives way to a denial of the low span.
  *
  * Execute triggers (the two mcontrol6 slots, core.sv's trig0/trig1) are
  * matched here, on the instruction's own pc and the current privilege, and
@@ -99,10 +103,7 @@ module qv_decode (
     /* verilator lint_on UNUSEDSIGNAL */
 
     input  logic              i_iq_valid,
-    // xcpt_hi matters only for page faults (Sv39)
-    /* verilator lint_off UNUSEDSIGNAL */
     input  qv_pkg::fe_instr_t i_iq_data,
-    /* verilator lint_on UNUSEDSIGNAL */
     output logic              o_iq_pop,
 
     output logic              o_valid,
@@ -130,23 +131,33 @@ module qv_decode (
     wire c_illegal = i_iq_data.rvc && c_expand_illegal;
 
     // ---------------- PMP on the fetch ----------------
+    // The spans are physical addresses. Fetch not translated (xl low): the pc is the address. Translated: the dword
+    // the instruction starts in is at {pg_lo, pc[11:0]}, the next one (for a 32-bit instruction that crosses into
+    // it) at {pg_hi, (pc + 8)[11:0]}, each as a window of 8 bytes from there, as core.sv has it.
     wire        fetch_hi_taken = !i_iq_data.rvc && (i_iq_data.pc[2:1] == 2'b11);
+    wire [11:0] pc_hi_off = i_iq_data.pc[11:0] + 12'd8;
+    wire [63:0] pa_lo = i_iq_data.xl ? {8'b0, i_iq_data.pg_lo, i_iq_data.pc[11:0]} : i_iq_data.pc;
+    wire [63:0] pa_hi = i_iq_data.xl ? {8'b0, i_iq_data.pg_hi, pc_hi_off}          : i_iq_data.pc + 64'd8;
     logic       exec_ok_lo, exec_ok_hi;
     /* verilator lint_off PINCONNECTEMPTY */
     qv_pmp pmp_lo (
         .i_pmpcfg0(i_pmpcfg0), .i_pmpaddr0(i_pmpaddr0), .i_pmpaddr1(i_pmpaddr1),
         .i_pmpaddr2(i_pmpaddr2), .i_pmpaddr3(i_pmpaddr3),
-        .i_addr(i_iq_data.pc), .i_end(i_iq_data.pc + 64'd7), .i_priv(i_priv),
+        .i_addr(pa_lo), .i_end(pa_lo + 64'd7), .i_priv(i_priv),
         .o_read_ok(), .o_write_ok(), .o_exec_ok(exec_ok_lo)
     );
     qv_pmp pmp_hi (
         .i_pmpcfg0(i_pmpcfg0), .i_pmpaddr0(i_pmpaddr0), .i_pmpaddr1(i_pmpaddr1),
         .i_pmpaddr2(i_pmpaddr2), .i_pmpaddr3(i_pmpaddr3),
-        .i_addr(i_iq_data.pc + 64'd8), .i_end(i_iq_data.pc + 64'd15), .i_priv(i_priv),
+        .i_addr(pa_hi), .i_end(pa_hi + 64'd7), .i_priv(i_priv),
         .o_read_ok(), .o_write_ok(), .o_exec_ok(exec_ok_hi)
     );
     /* verilator lint_on PINCONNECTEMPTY */
-    wire pmp_fault = !i_pb_active && (!exec_ok_lo || (fetch_hi_taken && !exec_ok_hi));
+    wire lo_denied = !i_pb_active && !exec_ok_lo;
+    wire pmp_fault = lo_denied || (!i_pb_active && fetch_hi_taken && !exec_ok_hi);
+    // core.sv fetches the low dword first and ends there when the PMP denies it: a fault found later, in the high
+    // dword (a page fault, say), never happens. The marker of such a fault gives way to the denial.
+    wire marker_lo_denied = i_iq_data.xcpt && i_iq_data.xcpt_hi && lo_denied;
 
     // a denied fetch decodes as the inert placeholder too: nothing downstream may act on its bits
     wire [31:0] instr = (i_iq_data.xcpt || pmp_fault || c_illegal) ? 32'h0000_0013
@@ -447,7 +458,8 @@ module qv_decode (
         uop_d.is_store   = is_store;
         uop_d.div_signed = div_signed;
         uop_d.div_quot   = div_quot;
-        if (i_iq_data.xcpt) begin
+        uop_d.xcpt_hi    = i_iq_data.xcpt_hi;
+        if (i_iq_data.xcpt && !marker_lo_denied) begin
             uop_d.xcpt       = 1'b1;
             uop_d.xcpt_cause = i_iq_data.xcpt_cause;
         end else if (pmp_fault) begin
