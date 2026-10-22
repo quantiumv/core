@@ -37,8 +37,8 @@
  * loads and stores (performed one at a time, at the ROB head), FENCE,
  * FENCE.I, LR/SC and the nine AMOs (.W and .D, also at the head, with the
  * bus locked across an AMO's read and write), the six Zicsr instructions,
- * ECALL, EBREAK, MRET, SRET, WFI (a no-op) and SFENCE.VMA (a serializing
- * no-op, until there are TLBs), with the three privilege levels, trap
+ * ECALL, EBREAK, MRET, SRET, WFI (a no-op) and SFENCE.VMA (it serializes and
+ * empties the TLBs), with the three privilege levels, trap
  * delegation and the privilege rules (CSR access, TSR, TVM), and RVC:
  * compressed instructions on any 2-byte boundary, including 32-bit ones
  * that straddle two fetched dwords. Everything else decodes as an
@@ -50,7 +50,9 @@
  * around regfile0 and csr_file0 as core.sv does it; EBREAK (dcsr.ebreak*)
  * and the two execute triggers, matched in decode and acted on at the ROB
  * head; the Program Buffer, whose words qv_dbg feeds into the instruction
- * queue one at a time (see there). Not yet: Sv39.
+ * queue one at a time (see there). Sv39: data accesses are translated (a TLB in
+ * qv_xlate, the walker qv_ptw sharing the memory port with the LSU); instruction
+ * fetches are not yet.
  *
  * Redirects: commit's (a trap, xRET, serialize, or a retiring
  * mispredicted branch or jump) kill everything in flight -- the same
@@ -74,6 +76,14 @@
 `define QV_PIPE_IQ_DEPTH  4
 `endif
 
+// QV_FORMAL_NO_SV39: no translation at all (no walker, no TLB): the Bare paths only. The riscv-formal sweep that
+// pins satp to Bare uses it, so its models do not grow by the TLBs and the walker.
+`ifdef QV_FORMAL_NO_SV39
+`define QV_PIPE_SV39_EN 1'b0
+`else
+`define QV_PIPE_SV39_EN 1'b1
+`endif
+
 // under QV_PIPE_AS_CORE the module name deliberately differs from the file's
 /* verilator lint_off DECLFILENAME */
 `ifdef QV_PIPE_AS_CORE
@@ -86,7 +96,8 @@ module core_pipe
     parameter bit SERIALIZE = `QV_PIPE_SERIALIZE,
     parameter bit BYPASS_EN = `QV_PIPE_BYPASS_EN,
     parameter int ROB_DEPTH = `QV_PIPE_ROB_DEPTH,   // power of 2, <= qv_pkg::QV_ROB_DEPTH
-    parameter int IQ_DEPTH  = `QV_PIPE_IQ_DEPTH     // power of 2, >= 2
+    parameter int IQ_DEPTH  = `QV_PIPE_IQ_DEPTH,    // power of 2, >= 2
+    parameter bit SV39_EN   = `QV_PIPE_SV39_EN      // address translation present
 ) (
     input logic clk,
     input logic rst,
@@ -342,6 +353,7 @@ module core_pipe
     // slow-unit outputs, declared ahead of the ROB and commit, which take them
     wb_t      lsu_wb, div_wb;
     lsu_res_t lsu_res;
+    logic     c_sfence;                    // commit: an SFENCE.VMA retires, empty the TLBs
 
     // ---------------- ROB ----------------
     logic                    head_valid, commit_pop;
@@ -384,7 +396,38 @@ module core_pipe
     /* verilator lint_off UNUSEDSIGNAL */
     logic lsu_head_started;
     /* verilator lint_on UNUSEDSIGNAL */
-    // No bypass from it: a dependent reads the ROB the next cycle, which
+
+    // The LSU and the page-table walker share the memory port. The walker owns it while a PTE read of its is
+    // in flight (ptw_beat); the LSU holds the walker off while it has an access started or ready to start
+    // (lsu_bus_busy), so the two never drive the port in the same cycle, and the port stays a single master
+    // for wb_arbiter2 and the caches (cyc and stb drop in the response cycle for both).
+    logic [31:0] lsu_addr;
+    logic [63:0] lsu_dat;
+    logic [7:0]  lsu_sel;
+    logic        lsu_we, lsu_cyc, lsu_stb, lsu_lock;
+    logic [31:0] ptw_addr;
+    logic        ptw_cyc, ptw_beat, lsu_bus_busy;
+    assign wb_mem_addr_o = ptw_beat ? ptw_addr : lsu_addr;
+    assign wb_mem_dat_o  = lsu_dat;
+    assign wb_mem_sel_o  = ptw_beat ? 8'hFF : lsu_sel;
+    assign wb_mem_we_o   = ptw_beat ? 1'b0 : lsu_we;
+    assign wb_mem_cyc_o  = ptw_beat ? ptw_cyc : lsu_cyc;
+    assign wb_mem_stb_o  = wb_mem_cyc_o;
+    assign wb_mem_lock_o = ptw_beat ? 1'b0 : lsu_lock;
+    /* verilator lint_off UNUSEDSIGNAL */
+    logic        lsu_stb_unused;
+    /* verilator lint_on UNUSEDSIGNAL */
+    assign lsu_stb_unused = lsu_stb;
+
+    // translation of the data accesses: the LSU's request, answered by its own qv_xlate (a TLB and the check
+    // of a hit), which asks the one walker on a miss
+    logic        x_req, x_wr, x_active, x_cancel, x_done, x_pf, x_af;
+    logic [63:0] x_va;
+    logic [1:0]  x_priv;
+    logic [43:0] x_ppn;
+    wire         satp_on = SV39_EN && (satp_w[63:60] == 4'd8);
+
+    // No bypass from the LSU's writeback: a dependent reads the ROB the next cycle, which
     // keeps wb_mem_dat_i out of issue's combinational paths.
     qv_lsu lsu0 (
         .clk(clk), .rst(rst), .i_flush(flush),
@@ -394,13 +437,68 @@ module core_pipe
         .i_priv(priv), .i_mprv(mstatus_mprv_w), .i_mpp(mstatus_mpp_w), .i_pmp_bypass(pb_active),
         .i_pmpcfg0(pmpcfg0_w), .i_pmpaddr0(pmpaddr0_w), .i_pmpaddr1(pmpaddr1_w),
         .i_pmpaddr2(pmpaddr2_w), .i_pmpaddr3(pmpaddr3_w),
-        .wb_mem_addr_o(wb_mem_addr_o), .wb_mem_dat_o(wb_mem_dat_o), .wb_mem_sel_o(wb_mem_sel_o),
-        .wb_mem_we_o(wb_mem_we_o), .wb_mem_cyc_o(wb_mem_cyc_o), .wb_mem_stb_o(wb_mem_stb_o),
-        .wb_mem_lock_o(wb_mem_lock_o),
+        .wb_mem_addr_o(lsu_addr), .wb_mem_dat_o(lsu_dat), .wb_mem_sel_o(lsu_sel),
+        .wb_mem_we_o(lsu_we), .wb_mem_cyc_o(lsu_cyc), .wb_mem_stb_o(lsu_stb),
+        .wb_mem_lock_o(lsu_lock),
         .wb_mem_dat_i(wb_mem_dat_i), .wb_mem_ack_i(wb_mem_ack_i), .wb_mem_err_i(wb_mem_err_i),
         .o_wb(lsu_wb), .o_res(lsu_res),
-        .o_head_started(lsu_head_started)
+        .o_head_started(lsu_head_started),
+        .i_satp_on(satp_on),
+        .o_xl_req(x_req), .o_xl_va(x_va), .o_xl_wr(x_wr), .o_xl_active(x_active), .o_xl_priv(x_priv),
+        .o_xl_cancel(x_cancel),
+        .i_xl_done(x_done), .i_xl_pf(x_pf), .i_xl_af(x_af), .i_xl_ppn(x_ppn),
+        .i_ptw_beat(ptw_beat), .o_bus_busy(lsu_bus_busy)
     );
+
+    generate
+        if (SV39_EN) begin : g_sv39
+            wire         w_d_req, w_d_cancel, w_d_done;
+            wire         w_ok, w_pf, w_af, w_r, w_w, w_x, w_u, w_d;
+            wire  [26:0] w_vpn;
+            wire  [1:0]  w_level;
+            wire  [43:0] w_ppn;
+            /* verilator lint_off UNUSEDSIGNAL */
+            wire         w_f_done;
+            /* verilator lint_on UNUSEDSIGNAL */
+
+            qv_ptw ptw0 (
+                .clk(clk), .rst(rst),
+                .o_bus_addr(ptw_addr), .o_bus_cyc(ptw_cyc),
+                .i_bus_dat(wb_mem_dat_i), .i_bus_ack(wb_mem_ack_i), .i_bus_err(wb_mem_err_i),
+                .i_lsu_busy(lsu_bus_busy), .o_beat(ptw_beat),
+                .i_pmpcfg0(pmpcfg0_w), .i_pmpaddr0(pmpaddr0_w), .i_pmpaddr1(pmpaddr1_w),
+                .i_pmpaddr2(pmpaddr2_w), .i_pmpaddr3(pmpaddr3_w),
+                .i_d_req(w_d_req), .i_d_va(x_va), .i_d_wr(x_wr), .i_d_priv(x_priv),
+                .i_d_sum(mstatus_sum_w), .i_d_mxr(mstatus_mxr_w), .i_d_root(satp_w[43:0]),
+                .i_d_cancel(w_d_cancel), .o_d_done(w_d_done),
+                // the instruction side does not translate yet
+                .i_f_req(1'b0), .i_f_va(64'b0), .i_f_priv(2'b00), .i_f_root(44'b0), .i_f_cancel(1'b0),
+                .o_f_done(w_f_done),
+                .o_res_ok(w_ok), .o_res_pf(w_pf), .o_res_af(w_af), .o_res_vpn(w_vpn), .o_res_level(w_level),
+                .o_res_ppn(w_ppn), .o_res_r(w_r), .o_res_w(w_w), .o_res_x(w_x), .o_res_u(w_u), .o_res_d(w_d)
+            );
+
+            qv_xlate #(.TLB_ENTRIES(4)) xlate_d (
+                .clk(clk), .rst(rst),
+                .i_req(x_req), .i_va(x_va), .i_is_mem(1'b1), .i_wr(x_wr), .i_active(x_active), .i_priv(x_priv),
+                .i_sum(mstatus_sum_w), .i_mxr(mstatus_mxr_w), .i_cancel(x_cancel), .i_flush_tlb(c_sfence),
+                .o_done(x_done), .o_pf(x_pf), .o_af(x_af), .o_ppn(x_ppn),
+                .o_w_req(w_d_req), .o_w_cancel(w_d_cancel),
+                .i_w_done(w_d_done), .i_w_ok(w_ok), .i_w_pf(w_pf), .i_w_af(w_af), .i_w_vpn(w_vpn),
+                .i_w_level(w_level), .i_w_ppn(w_ppn), .i_w_r(w_r), .i_w_w(w_w), .i_w_x(w_x), .i_w_u(w_u),
+                .i_w_d(w_d)
+            );
+        end else begin : g_nosv39
+            // Bare only: the LSU never asks (satp_on is tied low), and no walker means no beat
+            assign x_done   = 1'b1;
+            assign x_pf     = 1'b0;
+            assign x_af     = 1'b0;
+            assign x_ppn    = x_va[55:12];
+            assign ptw_addr = 32'b0;
+            assign ptw_cyc  = 1'b0;
+            assign ptw_beat = 1'b0;
+        end
+    endgenerate
 
     // ---------------- C: commit ----------------
     logic        rf_we;
@@ -447,6 +545,7 @@ module core_pipe
         .o_dbg_ebreak_entry(dbg_ebreak_entry), .o_dbg_trigger_entry(dbg_trigger_entry),
         .i_pb_active(pb_active), .o_pb_commit(pb_commit), .o_pb_done(pb_done), .o_pb_abort(pb_abort),
         .o_fetch_hold(commit_fetch_hold), .i_fetch_idle(fetch_idle), .o_icache_flush(icache_flush_o),
+        .o_sfence(c_sfence),
         .o_commit_now(commit_now_w), .o_pc(arch_pc), .o_next_pc(retire_next_pc),
         .o_redirect_valid(redirect_valid), .o_redirect_pc(redirect_pc),
         .o_rvfi_order(c_order), .o_rvfi_insn(c_insn), .o_rvfi_trap(c_rvfi_trap), .o_rvfi_intr(c_intr),
@@ -553,14 +652,8 @@ module core_pipe
     wire        divider_o_busy       = !div_free;
     /* verilator lint_on UNUSEDSIGNAL */
 
-    // Sv39 is a later stage: until it lands, a program that turns translation on would silently run
-    // untranslated. Simulation builds say so; the formal flows leave satp free, so they don't.
-`ifndef RISCV_FORMAL
-    always @(posedge clk) begin
-        if (!rst && satp_w[63:60] != 4'd0)
-            $error("core_pipe: satp.MODE is not Bare, but there is no address translation yet");
-    end
-`endif
+    // Instruction fetches are not translated yet (P7d): a program that turns Sv39 on runs its code at
+    // physical addresses, which is right only where the code is identity mapped.
 
     // ---------------- ports ----------------
     assign o_debug_mode    = in_debug_mode;
@@ -635,6 +728,9 @@ module core_pipe
     // Debug Mode without waiting for the LSU safe.)
     always @* assert (!((interrupt_taken || debug_halt_req_entry || debug_ebreak_entry || trigger_debug_entry)
                         && lsu_head_started));
+    // The LSU and the walker never drive the memory port together: the walker starts a beat only while the LSU
+    // has nothing started or ready to start, and the LSU waits out a beat in flight.
+    always @* assert (!(lsu_cyc && ptw_cyc));
     assign rvfi_any_debug_entry    = debug_ebreak_entry || debug_halt_req_entry || trigger_debug_entry
                                      || dm_access_active;
 `endif

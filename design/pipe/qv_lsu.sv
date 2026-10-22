@@ -68,6 +68,23 @@
  * o_head_started says the head's access is under way. An interrupt never
  * needs to wait for it: it is taken only in the cycle after a retirement,
  * when nothing can be on the bus (core_pipe asserts this).
+ *
+ * Sv39 (P7c): with satp.MODE = Sv39, a privilege below M (the effective one:
+ * MPRV applies) and no Program Buffer run, the head's address is translated
+ * after the checks that need no physical address and before the PMP:
+ *   misaligned          -> cause 4/6, no walk
+ *   a failing SC        -> rd = 1, no walk, no PMP check (in Bare it still meets the PMP first)
+ *   the translation     -> page fault: cause 13 for a load or LR, 15 for a store, SC or AMO (kind_wr);
+ *                          access fault (PTE read denied or failed): 5/7 like any access fault of the class
+ *   the PMP, on the physical address, at the effective privilege
+ * The request goes out through o_xl_* to a qv_xlate (a held request, answered combinationally from
+ * it), and the answer is registered (pa_q), so no TLB-to-PMP-to-bus path exists. An AMO is translated
+ * once and its write phase reuses the address. tval, vaddr and the reservation stay on the virtual
+ * address; the bus, the PMP and RVFI's memory address use the physical one. A flush while the
+ * translation is pending cancels it (cannot happen in the real core: flushes only come in the cycle
+ * after a retirement, when nothing waits, but the formal harness drives it freely).
+ * The walker shares the memory port: i_ptw_beat (a PTE read of its in flight) keeps the LSU off the
+ * bus, and o_bus_busy (an access started, or ready to start this cycle) keeps the walker off it.
  */
 module qv_lsu (
     input  logic                             clk,
@@ -115,7 +132,24 @@ module qv_lsu (
 
     output qv_pkg::wb_t                      o_wb,
     output qv_pkg::lsu_res_t                 o_res,
-    output logic                             o_head_started
+    output logic                             o_head_started,
+
+    // Sv39: satp.MODE is Sv39 (csr_file0's satp[63:60] == 8)
+    input  logic                             i_satp_on = 1'b0,
+    // the translation request (see the header); o_xl_active and o_xl_priv are the context it is judged in
+    output logic                             o_xl_req,
+    output logic [63:0]                      o_xl_va,
+    output logic                             o_xl_wr,
+    output logic                             o_xl_active,
+    output logic [1:0]                       o_xl_priv,
+    output logic                             o_xl_cancel,
+    input  logic                             i_xl_done = 1'b0,
+    input  logic                             i_xl_pf = 1'b0,
+    input  logic                             i_xl_af = 1'b0,
+    input  logic [43:0]                      i_xl_ppn = 44'b0,
+    // sharing the memory port with the walker
+    input  logic                             i_ptw_beat = 1'b0,
+    output logic                             o_bus_busy
 );
     import qv_pkg::*;
 
@@ -154,33 +188,57 @@ module qv_lsu (
     wire kind_wr   = atomic_q ? !lr_q : store_q;                  // writes it: stores, SC, AMOs
     wire fault_st  = store_q || atomic_q;                         // faults like a store: cause 6/7
 
-    // ---------------- PMP ----------------
-    // checked against the access itself, [addr, addr + size - 1], once it is the head; loads need R,
-    // everything that writes (stores, SC, and LR and AMOs too, as core.sv has it) needs W; a misaligned
-    // access traps first, and a PMP fault comes before the SC's reservation compare
+    // ---------------- at the head ----------------
+    wire at_head  = (state_q == S_WAIT_HEAD) && i_head_valid && (i_head_tag == tag_q) && !i_flush;
+    wire sc_fail  = sc_q && !(i_res_valid && i_res_addr == addr_q);      // the reservation is a virtual address
+
+    // ---------------- translation ----------------
+    // On for a privilege below M (the effective one: M runs at MPP while MPRV is set), a Program Buffer
+    // run excepted, when satp says Sv39. Constant while the op waits: every change of any of it
+    // flushes. A misaligned access and a failing SC (under translation) complete without it.
     wire [1:0]  eff_priv = (i_mprv && i_priv == 2'b11) ? i_mpp : i_priv;
-    wire [63:0] end_addr = addr_q + (64'd1 << size_q) - 64'd1;
+    wire        xl_on    = i_satp_on && !i_pmp_bypass && (eff_priv != 2'b11);
+    logic       xlated_q;                  // the translation is in: pa_q holds the physical address
+    logic [63:0] pa_q;
+    wire        pa_valid = !xl_on || xlated_q;
+    wire [63:0] pa       = xl_on ? pa_q : addr_q;
+
+    wire x_req   = at_head && xl_on && !misaligned_q && !sc_fail && !xlated_q;
+    wire x_fault = x_req && i_xl_done && (i_xl_pf || i_xl_af);
+    wire x_ok    = x_req && i_xl_done && !i_xl_pf && !i_xl_af;
+    assign o_xl_req    = x_req;
+    assign o_xl_va     = addr_q;
+    assign o_xl_wr     = kind_wr;           // a store, SC or AMO needs W and D; a load or LR does not
+    assign o_xl_active = xl_on;
+    assign o_xl_priv   = eff_priv;
+    assign o_xl_cancel = (state_q == S_WAIT_HEAD) && i_flush && xl_on && !xlated_q;
+
+    // ---------------- PMP ----------------
+    // checked against the access itself, [pa, pa + size - 1], once it is the head and (under
+    // translation) translated; loads need R, everything that writes (stores, SC, and LR and AMOs
+    // too, as core.sv has it) needs W; a misaligned access traps first, and a PMP fault comes before
+    // the SC's reservation compare -- but under translation a failing SC never meets the PMP
+    wire [63:0] end_addr = pa + (64'd1 << size_q) - 64'd1;
     logic       pmp_r_ok, pmp_w_ok;
     /* verilator lint_off PINCONNECTEMPTY */
     qv_pmp pmp0 (
         .i_pmpcfg0(i_pmpcfg0), .i_pmpaddr0(i_pmpaddr0), .i_pmpaddr1(i_pmpaddr1),
         .i_pmpaddr2(i_pmpaddr2), .i_pmpaddr3(i_pmpaddr3),
-        .i_addr(addr_q), .i_end(end_addr), .i_priv(eff_priv),
+        .i_addr(pa), .i_end(end_addr), .i_priv(eff_priv),
         .o_read_ok(pmp_r_ok), .o_write_ok(pmp_w_ok), .o_exec_ok()
     );
     /* verilator lint_on PINCONNECTEMPTY */
-    wire pmp_deny = !misaligned_q && !i_pmp_bypass && !(fault_st ? pmp_w_ok : pmp_r_ok);
+    wire pmp_deny = !misaligned_q && !i_pmp_bypass && pa_valid && !(xl_on && sc_fail)
+                    && !(fault_st ? pmp_w_ok : pmp_r_ok);
 
-    // ---------------- at the head ----------------
-    wire at_head  = (state_q == S_WAIT_HEAD) && i_head_valid && (i_head_tag == tag_q) && !i_flush;
-    wire sc_fail  = sc_q && !(i_res_valid && i_res_addr == addr_q);
-    wire start    = at_head && !misaligned_q && !pmp_deny && !sc_fail;
+    wire start_raw = at_head && !misaligned_q && !pmp_deny && !sc_fail && pa_valid;
+    wire start     = start_raw && !i_ptw_beat;
     wire resp     = wb_mem_ack_i || wb_mem_err_i;
     wire in_bus   = (state_q == S_BUS) || (state_q == S_DRAIN);
 
     assign wb_mem_cyc_o  = (start || in_bus) && !resp;
     assign wb_mem_stb_o  = wb_mem_cyc_o;
-    assign wb_mem_addr_o = {addr_q[31:3], 3'b000};
+    assign wb_mem_addr_o = {pa[31:3], 3'b000};
     assign wb_mem_sel_o  = sel_q;
     assign wb_mem_we_o   = store_q || phase_wr_q;
     assign wb_mem_lock_o = amo_q && (start || in_bus);
@@ -192,13 +250,14 @@ module qv_lsu (
 
     assign o_free         = (state_q == S_IDLE);
     assign o_head_started = start || in_bus;
+    assign o_bus_busy     = start_raw || in_bus;           // the walker waits while this is high
 
     // A response in the start cycle can't happen (every slave answers a
     // cycle later at the earliest), so bus completion is only from BUS.
     // An AMO's first (read) response doesn't complete it: the write follows.
     wire amo_read_ack = (state_q == S_BUS) && amo_q && !phase_wr_q && wb_mem_ack_i && !wb_mem_err_i && !i_flush;
     wire done_bus     = (state_q == S_BUS) && resp && !amo_read_ack;
-    wire done_nobus   = at_head && (misaligned_q || pmp_deny || sc_fail);   // trapped before the bus, or SC without its reservation
+    wire done_nobus   = at_head && (misaligned_q || pmp_deny || sc_fail || x_fault);   // trapped before the bus, or SC without its reservation
 
     // load data: shift the addressed bytes down, then extend
     wire [63:0] shifted = wb_mem_dat_i >> {addr_q[2:0], 3'b000};
@@ -233,7 +292,7 @@ module qv_lsu (
         return word ? {{32{r[31]}}, r[31:0]} : r;
     endfunction
 
-    wire sc_fail_done = done_nobus && !misaligned_q && !pmp_deny; // SC without its reservation: rd = 1
+    wire sc_fail_done = at_head && sc_fail && !misaligned_q && !pmp_deny; // SC without its reservation: rd = 1
     always_comb begin
         o_wb       = '0;
         o_wb.valid = done_bus || done_nobus;
@@ -248,6 +307,7 @@ module qv_lsu (
         if (rst) begin
             state_q    <= S_IDLE;
             phase_wr_q <= 1'b0;
+            xlated_q   <= 1'b0;
             o_res      <= '0;
         end else begin
             case (state_q)
@@ -264,11 +324,16 @@ module qv_lsu (
                     atomic_q     <= req_atomic;
                     aop_q        <= qv_amo_op_e'(i_req.op[3:0]);
                     phase_wr_q   <= 1'b0;
+                    xlated_q     <= 1'b0;
                 end
                 S_WAIT_HEAD: begin
                     if (i_flush)         state_q <= S_IDLE;
                     else if (start)      state_q <= S_BUS;
                     else if (done_nobus) state_q <= S_IDLE;
+                    else if (x_ok) begin                      // translated: the physical address, checked and used from the next cycle
+                        pa_q     <= {8'b0, i_xl_ppn, addr_q[11:0]};
+                        xlated_q <= 1'b1;
+                    end
                 end
                 S_BUS: begin
                     if (amo_read_ack) begin
@@ -289,11 +354,14 @@ module qv_lsu (
                 // an SC without its reservation did nothing: no fields at all
                 if (!sc_fail_done) begin
                     o_res.xcpt      <= done_nobus || wb_mem_err_i;
-                    // misaligned: 4/6; a PMP denial or a bus error: 5/7 (stores, SC, LR, AMOs: the odd ones)
-                    o_res.cause     <= (done_nobus && misaligned_q) ? (fault_st ? 4'd6 : 4'd4) : (fault_st ? 4'd7 : 4'd5);
+                    // misaligned: 4/6; a page fault from the translation: 13 (load, LR) or 15 (store, SC, AMO); a PMP
+                    // denial, a failed PTE read or a bus error: 5/7 (stores, SC, LR, AMOs: the odd ones)
+                    o_res.cause     <= (done_nobus && misaligned_q) ? (fault_st ? 4'd6 : 4'd4)
+                                     : (x_fault && i_xl_pf)         ? (kind_wr ? 4'd15 : 4'd13)
+                                     :                                (fault_st ? 4'd7 : 4'd5);
                     o_res.tval      <= addr_q;
                     o_res.vaddr     <= addr_q;
-                    o_res.mem_addr  <= {addr_q[63:3], 3'b000};
+                    o_res.mem_addr  <= {(pa_valid ? pa[63:3] : addr_q[63:3]), 3'b000};
                     o_res.mem_rmask <= kind_rd ? sel_q : 8'b0;
                     o_res.mem_wmask <= kind_wr ? sel_q : 8'b0;
                     o_res.mem_rdata <= (done_bus && amo_q && phase_wr_q) ? old_q

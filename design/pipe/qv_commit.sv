@@ -177,6 +177,9 @@ module qv_commit #(
     output logic                             o_fetch_hold,
     input  logic                             i_fetch_idle,
     output logic                             o_icache_flush,
+    // SFENCE.VMA: the TLBs are emptied at the edge that ends the retiring cycle (no wait, unlike FENCE.I: it is a
+    // serializing instruction, so its redirect refetches against the empty TLB). Not for one that traps (TVM)
+    output logic                             o_sfence,
 
     output logic                             o_commit_now,
     output logic [63:0]                      o_pc,
@@ -292,6 +295,7 @@ module qv_commit #(
     assign o_pb_commit = commit && i_pb_active;
     assign o_pb_done   = commit && pb_ebreak;
     assign o_pb_abort  = commit && i_pb_active && is_trap && !pb_ebreak;
+    assign o_sfence    = commit && is_sys && (i_head_ctrl.sys_op == QV_SYS_SFENCE_VMA) && !faulted;
 
     wire is_csr  = (i_head_ctrl.cls == QV_FU_CSR) && !i_head_ctrl.xcpt;
 
