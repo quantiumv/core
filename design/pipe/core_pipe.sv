@@ -760,16 +760,46 @@ module core_pipe
     assign rvfi_csr_satp_wdata     = satp_w;
     assign rvfi_any_trap_taken     = trap_taken || interrupt_taken;
 
-    // An interrupt or a halt is only ever taken with nothing started on the data bus: the cycle before
-    // retired something, so no memory op was in flight, and a head that would start in that cycle is held
+    // An interrupt or a halt is only ever taken with nothing started on the LSU's side of the data bus: the cycle
+    // before retired something, so no memory op was in flight, and a head that would start in that cycle is held
     // off by the flush. An EBREAK or trigger entry happens at a head that is not a memory op, and memory
     // ops only start at the head. (A started access cannot be abandoned, so this is what makes entering
-    // Debug Mode without waiting for the LSU safe.)
+    // Debug Mode without waiting for the LSU safe. The walker may have a PTE read of a cancelled fetch walk in
+    // flight; it is a read that completes and is dropped, and the LSU's next start waits for it.)
     always @* assert (!((interrupt_taken || debug_halt_req_entry || debug_ebreak_entry || trigger_debug_entry)
                         && lsu_head_started));
     // The LSU and the walker never drive the memory port together: the walker starts a beat only while the LSU
     // has nothing started or ready to start, and the LSU waits out a beat in flight.
     always @* assert (!(lsu_cyc && ptw_cyc));
+
+    // The translators are safe only while a client keeps to one rule: a request it holds does not change (what it
+    // asks for, the context it asks in) except in the cycle after a cancel, so that the answer of a walk that was
+    // cancelled can never reach another request. Fetch replaces a translating request only with a cancel (drop);
+    // the LSU's op leaves with a flush, which cancels, and the next op is accepted a cycle later.
+    reg        g_f_req = 1'b0, g_x_req = 1'b0, g_f_cancel = 1'b0, g_x_cancel = 1'b0, g_x_wr = 1'b0, g_sum = 1'b0, g_mxr = 1'b0;
+    reg [63:0] g_f_va = '0, g_x_va = '0, g_satp = '0;
+    reg [1:0]  g_f_priv = '0, g_x_priv = '0;
+    always @(posedge clk) begin
+        g_f_req    <= f_xl_req && !rst;
+        g_f_cancel <= f_xl_cancel;
+        g_f_va     <= f_xl_va;
+        g_f_priv   <= priv;
+        g_x_req    <= x_req && !rst;
+        g_x_cancel <= x_cancel;
+        g_x_va     <= x_va;
+        g_x_wr     <= x_wr;
+        g_x_priv   <= x_priv;
+        g_sum      <= mstatus_sum_w;
+        g_mxr      <= mstatus_mxr_w;
+        g_satp     <= satp_w;
+    end
+    always @* begin
+        if (!rst && g_f_req && f_xl_req && !g_f_cancel)
+            assert (f_xl_va == g_f_va && priv == g_f_priv && satp_w == g_satp);
+        if (!rst && g_x_req && x_req && !g_x_cancel)
+            assert (x_va == g_x_va && x_wr == g_x_wr && x_priv == g_x_priv && mstatus_sum_w == g_sum
+                    && mstatus_mxr_w == g_mxr && satp_w == g_satp);
+    end
     assign rvfi_any_debug_entry    = debug_ebreak_entry || debug_halt_req_entry || trigger_debug_entry
                                      || dm_access_active;
 `endif
