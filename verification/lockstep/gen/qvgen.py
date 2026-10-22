@@ -1205,6 +1205,7 @@ BUSLEAF_VA  = 0x01C0_0000        # L1[14]: a 2 MiB leaf onto FAR_BASE: PMP denia
 DEADGIGA_VA = 0xC000_0000        # L2[3]: a 1 GiB "leaf" with V clear -> page fault
 FARGIGA_VA  = 0x1_8000_0000      # L2[6]: a 1 GiB leaf onto a far PA (access fault); an M body, which does not
                                  # translate, reaches the bus-error region with it
+USERX_VA    = 0x0200_0000        # L1[16]: an executable user window onto PA 0: S mode never fetches from it, with SUM or not
 FAR_PA_BITS = [32, 36, 38, 40, 44, 48, 52, 55]    # the one bit a far physical address has set (bit 55 is the last of a PTE's PPN)
 # (virtual address, span the offset may cover) of every hole; the first group faults in the first 4 KB only
 HOLE_VAS    = [(BAD_ADDR_BASE, 0x800), (MISMEGA_VA, 0x1000), (MALF_VA, 0x1000), (RSVD_VA, 0x1000), (PTR0_VA, 0x1000),
@@ -1388,6 +1389,7 @@ def sv39_tables(p: Program, pages: dict, setno: int):
     else:
         alias_flags = sv_exec_flags(p, user or rng.random() < 0.1, 0.8)
     l1[(ALIAS_VA >> 21) & 0x1FF] = sv_leaf(0, alias_flags)                                          # executable window onto PA 0
+    l1[(USERX_VA >> 21) & 0x1FF] = sv_leaf(0, PTE_V | PTE_R | PTE_X | PTE_A | PTE_U)                # executable user window onto PA 0
     if p.irq:                                                       # the S handler's write of the MAGIC clear
         l1[(MAGIC_BASE >> 21) & 0x1FF] = sv_leaf(MAGIC_BASE & ~0x1FFFFF, PTE_V | PTE_R | PTE_W | PTE_A | PTE_D)
     return root, l1, l0, l0x
@@ -1597,7 +1599,8 @@ def emit_fetch_probe(p: Program):
     bad-address page (`jr x25`); a 32-bit `jr x25` that straddles two pages with flags of their own (so a fault can
     be in the second half, where the trap value is pc + 8); an address behind a far page table (the walk's own PTE
     read faults: an access fault, cause 1); or those two `jr x25` again through a window above the image (the PMP
-    has to look at the physical address, which the virtual one does not show). x25 holds the label after the
+    has to look at the physical address, which the virtual one does not show); or, the same, through a user
+    window (an S body can never fetch from it, whatever SUM says; a U body can). x25 holds the label after the
     jump: the instruction returns there if the fetch works, and a fetch fault resumes there."""
     nxt = Label("svprobe")
     if p.priv_ext and not p.body_u and p.rng.random() < 0.5:
@@ -1609,7 +1612,7 @@ def emit_fetch_probe(p: Program):
     # the far pointers: the walk of the fetch itself ends in a PTE read that the PMP denies or that gets a bus error
     targets = [POCKET_X, PROBE_X, FARPTR_VA + 0x100, BUSPTR_VA + 0x100]
     if p.priv_ext:                  # translated for sure: in an M body there is nothing behind the window
-        targets += [ALIAS_X, ALIAS_X, ALIAS2_X, ALIAS2_X]
+        targets += [ALIAS_X, ALIAS_X, ALIAS2_X, ALIAS2_X, USERX_VA + POCKET_X, USERX_VA + POCKET_X]
     p.li(6, p.rng.choice(targets))
     p.e("    jalr    x0, 0(x6)")
     p.e(f"{nxt}:")
