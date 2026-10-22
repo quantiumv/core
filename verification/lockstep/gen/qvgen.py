@@ -27,8 +27,22 @@ Memory map (1 MiB image, see verification/lockstep/gen/link.ld):
   0x00000-0x07FFF  .text.entry      -- preambles + the random main body
   0x08000-0x0FFFF  .text.handlers   -- M-mode/S-mode trap handlers
   0x10000-0x1FFFF  .data.sandbox    -- the load/store playground
-  0x20000-0x2FFFF  .data.pagetables -- Sv39 page tables (--sv39 only)
-  0x30000-0xFFFFF  .data.misc       -- tohost, trap counter, register dump
+  0x20000-0x2FFFF  .data.pagetables -- Sv39 page tables (--sv39 only): two sets of four tables
+  0x30000-0x8EFFF  .data.misc       -- tohost, trap counter, register dump
+  0x8F000          .data.ptpmp      -- --sv39: the L0 table a PMP pocket covers (a walk's PTE read can be denied)
+  0x90C00          .text.pocket     -- --pmp / --sv39: a `jr x25` in the bad-address page (a fetch probe's target)
+  0x91FF8          .text.probe      -- --sv39: a 32-bit `jr x25` at 0x91FFE, straddling two pages
+
+--sv39 (P7.0): the page tables are static data (set A is what satp points at, set B a variant the body can switch
+to, always followed by SFENCE.VMA). Per seed: random page flags (A and D often clear, U for a U body or now and then
+for an S body, execute-only, read-only, malformed), a data window through a 2 MiB or 1 GiB leaf (x27 moves into it),
+holes that page-fault (misaligned superpage, W without R, a reserved bit, a pointer at the last level, unmapped,
+non-canonical), the MAGIC page for --irq, and probes of every fault: the page-fault handlers fix A/D and retry (a
+fault that comes back is a real one and is skipped, or for a fetch fault resumes at x25). The body also toggles
+SUM/MXR, rewrites satp and thrashes the TLB. --no-sv39-fetch keeps every fetch fault-free. Two rules the stimulus
+keeps because the FSM and the pipe legitimately differ where they are broken (speculation contract of the plan's
+P7): R1 -- every PTE store and satp root switch is followed by an SFENCE.VMA before anything depends on it; R2 --
+every non-leaf PTE and every executable leaf points into RAM.
 
 Register allocation (never overlapping -- the trap handlers and the
 random body touch disjoint sets, so no save/restore dance is needed
@@ -133,7 +147,9 @@ class Program:
         self.handlers: list[str] = []
         self.misc_data: list[str] = []
         self.pagetable_data: list[str] = []
-        self.pocket_code: list[str] = []      # --pmp: what sits at POCKET_X
+        self.ptpmp_data: list[str] = []       # --sv39: the L0 table at PMPT_PA
+        self.pocket_code: list[str] = []      # --pmp, --sv39: what sits at POCKET_X
+        self.probe_code: list[str] = []       # --sv39: what sits at PROBE_X
         self.pockets: list[tuple[int, int]] = []   # --pmp: the byte ranges [lo, hi) of the sandbox pockets
         self.subroutines: list[str] = []  # appended to .text.entry at the end
         self.call_depth = 0
@@ -142,9 +158,10 @@ class Program:
         self.smc_done = False
         # privilege-switching content (see emit_priv_op): body in S or U, sret
         # transitions, TSR/TVM, probes of the S/M CSRs. Off under --sail-safe
-        # (Sail diff stays as audited) and --sv39 (the page-table handlers
-        # assume an S-mode body).
-        self.priv_ext = args.priv == "msu" and not args.sail_safe and not args.sv39
+        # (Sail diff stays as audited). Combines with --sv39: the page-fault
+        # handlers cope with a U body (they read user code under SUM) and the
+        # page flags follow the body's privilege.
+        self.priv_ext = args.priv == "msu" and not args.sail_safe
         self.body_u = False       # the body starts in U mode
         self.body_priv2 = False   # ... or in the reserved privilege 2'b10 (MPP is loaded raw)
         # --irq: the body runs with interrupts on, so an interrupt can strike between any two
@@ -152,8 +169,12 @@ class Program:
         # sret that uses it. Hence transparent trap handlers (mscratch/sscratch are their save-area
         # pointers, off limits to the random CSR pool), a PMP region so the S handler can write the
         # MAGIC clear, and idioms that keep the S-level interrupts out of their windows. Not with
-        # --sail-safe (no MMIO), nor with --sv39 (its own handlers and page tables).
-        self.irq = bool(args.irq) and not args.sail_safe and not args.sv39
+        # --sail-safe (no MMIO). With --sv39 the MAGIC page is mapped for the S handler.
+        self.irq = bool(args.irq) and not args.sail_safe
+        # --sv39: where the data window lives (x27) and the page flags the preamble chose, see plan_sv39
+        self.data_base = SANDBOX_BASE
+        self.sv_mode = "ident"
+        self.sv_swap = False      # set B of the page tables exists and the body may switch satp to it
         self.body_sie = False     # S-mode body: sstatus.SIE is set, so delegated interrupts are taken
         self.tsr = False          # mstatus.TSR is set: SRET always traps
 
@@ -520,7 +541,12 @@ def emit_priv_op(p: Program, recent: list[int]):
             p.e("    li      x6, 0x20")                           # sstatus.SPIE
             p.e("    csrs    sstatus, x6")
         p.e("    li      x6, 0x100")                              # sstatus.SPP
-        p.e(f"    {'csrs' if p.rng.random() < 0.7 else 'csrc'}    sstatus, x6")
+        spp_s = p.rng.random() < 0.7
+        if p.args.sv39:
+            # the code pages are executable by the body's privilege only (S needs U=0 pages, U needs U=1): a
+            # legal sret must not change it. (From a U body it traps and is skipped, whatever SPP says.)
+            spp_s = True
+        p.e(f"    {'csrs' if spp_s else 'csrc'}    sstatus, x6")
         p.e("    sret")
         p.e(f"{nxt}:")
         if p.irq and p.body_sie:
@@ -667,26 +693,38 @@ def emit_page_cross(p: Program):
 # run -- which holds by construction, since the handler is pure,
 # deterministic code with no randomness of its own.
 
-def _emit_pagetable_walk_and_fix(p: Program, va_reg: int, ret_insn: str, invalid_label):
+def _emit_pagetable_walk_and_fix(p: Program, va_reg: int, done_label, ordinary_label, fetch_label):
     """Generic depth-first walk from satp down to whichever level is
     already a leaf (R|W|X nonzero) -- correct for a plain 4KB mapping OR
     a superpage, since it simply stops descending the instant it finds
-    one. Sets A+D (0xC0) on that leaf and retries (mepc/sepc unchanged)
-    via `ret_insn` (mret or sret).
+    one. It does what a hardware walker with A/D update would have done
+    and retries: sets A on the leaf (and D as well for a store/AMO page
+    fault, cause 15), SFENCE.VMAs, and continues at `done_label` (the
+    handler's common return, which restores what the handler saved and
+    does the xRET with mepc/sepc unchanged, so the access runs again).
 
-    A REAL bug this fixes, found by direct simulation: a genuinely
-    INVALID entry (V=0 -- e.g. BAD_ADDR_BASE, which by design is never
-    given any mapping, see the module docstring) has R|W|X all clear
-    too, so it looked identical to "non-leaf, keep descending." The walk
-    then followed a bogus PPN=0 chain into low memory, eventually
-    misreading part of the running program itself as a "valid leaf" and
-    corrupting it with a stray A/D-bit store. Now a V=0 entry at any
-    level jumps to `invalid_label` (the caller's ordinary-fault path,
-    which skips the faulting instruction by length like any other
-    unrecoverable fault) instead of retrying something that can never
-    succeed."""
+    Every other outcome is a fault retrying cannot fix, and goes to
+    `fetch_label` for a fetch page fault (cause 12: there is no
+    instruction to skip, the handler resumes at x25) or to
+    `ordinary_label` (skip the faulting instruction by its length):
+      - an invalid entry (V=0) at any level. A REAL bug this once
+        fixed, found by direct simulation: V=0 has R|W|X all clear
+        too, so it looked identical to "non-leaf, keep descending", and
+        the walk followed a bogus PPN=0 chain into low memory,
+        misreading part of the running program as a leaf and
+        corrupting it with a stray A/D store;
+      - a pointer at the last level (nothing below it to walk into);
+      - a leaf that already has the bits the fix would set, so the
+        fault is a real permission, U/SUM/MXR, misalignment or
+        reserved-bit fault. Since the fix only ever ADDS A/D, a fault
+        that comes back after it ends here: the handler cannot loop.
+    The state of a PTE the handler modifies is the same on both cores
+    of a lockstep run, and every store to a PTE is followed by the
+    SFENCE.VMA (speculation contract R1)."""
     walk = Label("pfwalk")
     leaf = Label("pfleaf")
+    needa = Label("pfneeda")
+    fall = Label("pffall")
     p.handlers += [
         "    csrr    x7, satp",
         "    slli    x7, x7, 20",
@@ -699,18 +737,31 @@ def _emit_pagetable_walk_and_fix(p: Program, va_reg: int, ret_insn: str, invalid
         "    add     x9, x7, x8",
         "    ld      x10, 0(x9)",
         "    andi    x11, x10, 0x1",   # V
-        f"    beqz    x11, {invalid_label}",
+        f"    beqz    x11, {fall}",
         "    andi    x11, x10, 0xE",   # R|W|X
         f"    bnez    x11, {leaf}",
+        "    li      x11, 12",         # a pointer at level 0 has nothing below it
+        f"    beq     x12, x11, {fall}",
         "    srli    x7, x10, 10",
         "    slli    x7, x7, 12",
         "    addi    x12, x12, -9",
         f"    j       {walk}",
         f"{leaf}:",
-        "    ori     x10, x10, 0xC0",  # A=1,D=1
+        "    li      x11, 0x40",       # A
+        "    li      x8, 15",
+        f"    bne     x5, x8, {needa}",
+        "    li      x11, 0xC0",       # A and D for a store/AMO
+        f"{needa}:",
+        "    and     x8, x10, x11",
+        f"    beq     x8, x11, {fall}",
+        "    or      x10, x10, x11",
         "    sd      x10, 0(x9)",
         "    sfence.vma",
-        f"    {ret_insn}",
+        f"    j       {done_label}",
+        f"{fall}:",
+        "    li      x8, 12",
+        f"    beq     x5, x8, {fetch_label}",
+        f"    j       {ordinary_label}",
     ]
 
 
@@ -830,8 +881,7 @@ def emit_handlers(p: Program):
     if a.sv39:
         p.handlers.append(f"{m_page}:")
         p.handlers.append("    csrr    x6, mtval")
-        _emit_pagetable_walk_and_fix(p, 6, "mret", m_ordinary)
-        p.handlers.append(f"    j       {m_ret}")
+        _emit_pagetable_walk_and_fix(p, 6, m_ret, m_ordinary, m_fetch)
     p.handlers += [
         f"{m_ordinary}:",
         "    la      x6, trap_count",
@@ -929,8 +979,20 @@ def emit_handlers(p: Program):
         if a.sv39:
             p.handlers.append(f"{s_page}:")
             p.handlers.append("    csrr    x6, stval")
-            _emit_pagetable_walk_and_fix(p, 6, "sret", s_ordinary)
-            p.handlers.append(f"    j       {s_ret}")
+            _emit_pagetable_walk_and_fix(p, 6, s_ret, s_ordinary, s_fetch)
+        # the first halfword of the faulting instruction, to size it. With Sv39 the code may be user code
+        # (a U body): the read is a translated S-mode load, so SUM is set around it and put back
+        s_lhu = ["    csrr    x6, sepc", "    lhu     x7, 0(x6)"]
+        if a.sv39:
+            sum_kept = Label("sumkept")
+            s_lhu = ["    csrr    x6, sepc",
+                     "    li      x8, 0x40000",                 # sstatus.SUM
+                     "    csrrs   x9, sstatus, x8",
+                     "    lhu     x7, 0(x6)",
+                     "    and     x9, x9, x8",
+                     f"    bnez    x9, {sum_kept}",              # it was set already: leave it
+                     "    csrc    sstatus, x8",
+                     f"{sum_kept}:"]
         p.handlers += [
             f"{s_ordinary}:",
             "    la      x6, trap_count",
@@ -945,8 +1007,7 @@ def emit_handlers(p: Program):
             f"    beq     x7, x8, {s_len4}",
             f"    j       {s_len2}",
             f"{s_lenmem}:",
-            "    csrr    x6, sepc",
-            "    lhu     x7, 0(x6)",
+            *s_lhu,
             "    andi    x7, x7, 3",
             "    li      x8, 3",
             f"    beq     x7, x8, {s_len4}",
@@ -1019,6 +1080,10 @@ def emit_pmp(p: Program):
         return pocket_cfg(_PMP_A_NAPOT), napot_pmpaddr(base, size)
 
     def bad_page_pocket():
+        if p.args.sv39:
+            # 128 KiB: the bad-address page, the probe pages and the page of the PMPT_VA table. With reads forbidden
+            # the PTE read of a walk through that table is denied (an access fault), not just the access itself
+            return (pocket_cfg(_PMP_A_NAPOT), napot_pmpaddr(0x80000, 0x20000))
         return (pocket_cfg(_PMP_A_NAPOT), napot_pmpaddr(BAD_ADDR_BASE, 0x1000))
 
     entries = [None, None, None]
@@ -1060,148 +1125,339 @@ def emit_pmp_jump(p: Program):
     p.e("    la      x25, recovery_point")
 
 
+# =======================================================================
+# Sv39 (--sv39): the page tables, the data window, the probes
+# =======================================================================
+#
+# The tables are static data at fixed physical addresses: the link script puts .data.pagetables at
+# PAGETABLE_BASE and every table is exactly 4 KB. Set A is what satp points at when the body starts;
+# set B is the same map with a few deliberate differences, which the body may switch to (satp write +
+# SFENCE.VMA, speculation contract R1). A page-table walk reads RAM only (contract R2): every pointer
+# PTE below points at one of these eight tables, and the only executable leaves map the code, the
+# probe pages (all RAM).
+
+PTE_V, PTE_R, PTE_W, PTE_X, PTE_U, PTE_A, PTE_D = 0x01, 0x02, 0x04, 0x08, 0x10, 0x40, 0x80
+PTE_RSVD = 1 << 58               # a reserved bit (60:54): the PTE is malformed
+
+SV_SET_A, SV_SET_B = 0, 1
+SV_TABLE_NAMES = ["l2_table", "l1_table", "l0_table", "l0x_table",
+                  "l2b_table", "l1b_table", "l0b_table", "l0xb_table"]
+
+
+def sv_set_base(setno: int) -> int:
+    return PAGETABLE_BASE + 0x4000 * setno
+
+
+def sv_satp(setno: int) -> int:
+    return (8 << 60) | (sv_set_base(setno) >> 12)
+
+
+# the virtual layout. The first 2 MiB (L2[0], L1[0]) is mapped with 4 KB leaves; the other 2 MiB slots
+# of the first gigabyte, and two further gigabytes, hold the data windows and the holes
+MEGA_VA     = 0x0040_0000        # L1[2]: a 2 MiB window onto PA 0 (the data window of a "mega" seed)
+MISMEGA_VA  = 0x0060_0000        # L1[3]: a 2 MiB leaf that is not 2 MiB aligned -> page fault
+MALF_VA     = 0x0080_0000        # L1[4]: a leaf with W and no R -> page fault
+RSVD_VA     = 0x00A0_0000        # L1[5]: a leaf with a reserved bit -> page fault
+PTR0_VA     = 0x00C0_0000        # L1[6]: a pointer to a table whose entry 0 is a pointer -> page fault
+UNMAP_VA    = 0x0100_0000        # L1[8]: not mapped
+PMPT_VA     = 0x00E0_0000        # L1[7]: a pointer to the L0 table in the page at PMPT_PA, whose PTEs map eight
+                                 # sandbox pages. With --pmp the bad-address pocket covers that page, and when the
+                                 # pocket forbids reads the walk's PTE read is denied: an access fault (5/7), not a page fault
+PMPT_PA     = 0x0008_F000
+GIGA_VA     = 0x4000_0000        # L2[1]: a 1 GiB window onto PA 0 (the data window of a "giga" seed)
+MISGIGA_VA  = 0x8000_0000        # L2[2]: a 1 GiB leaf that is not 1 GiB aligned -> page fault
+HOLE_VAS    = [BAD_ADDR_BASE, MISMEGA_VA, MALF_VA, RSVD_VA, PTR0_VA, UNMAP_VA, MISGIGA_VA, FAR_BASE, PMPT_VA, PMPT_VA]
+NONCANON_VAS = [0x0000_0080_0000_0000, 0x0000_0040_0000_0000, 0x0100_0000_0000_0000,
+                0x8000_0000_0000_0000, 0xFFFF_FFBF_FFFF_F000, 0x0000_00FF_FFFF_F000]
+PROBE_LO_VPN, PROBE_HI_VPN = 0x91, 0x92
+PROBE_X = (PROBE_LO_VPN << 12) + 0xFFE      # a 32-bit `jr x25` straddling the 0x92000 page boundary
+
+
+def sv_leaf(pa: int, flags: int) -> int:
+    return ((pa >> 12) << 10) | flags
+
+
+def sv_ptr(pa: int) -> int:
+    return ((pa >> 12) << 10) | PTE_V
+
+
+def sv_data_flags(p: Program, user: bool) -> int:
+    """Random flags for a page of data: usually plain read/write, now and then read-only, execute-only
+    (a load needs MXR), malformed (W without R) or invalid. A and D are often clear: the page-fault
+    handler sets them (and R1 makes sure it follows with an SFENCE.VMA). 0 means not mapped."""
+    rng = p.rng
+    perm = rng.choices([PTE_R | PTE_W, PTE_R, PTE_X, PTE_R | PTE_X, PTE_R | PTE_W | PTE_X, PTE_W, 0],
+                       weights=[60, 10, 6, 4, 6, 3, 2])[0]
+    if perm == 0:
+        return 0
+    f = PTE_V | perm
+    if rng.random() < 0.85:
+        f |= PTE_A
+    if rng.random() < 0.5:
+        f |= PTE_D
+    if user:
+        f |= PTE_U
+    return f
+
+
+def sv_exec_flags(p: Program, user: bool, ok_bias: float) -> int:
+    """Random flags for a page a fetch probe jumps into: executable and fine (probability ok_bias), or
+    one of the ways a fetch fails (invalid, not executable, A clear, wrong U for the privilege)."""
+    rng = p.rng
+    if rng.random() < ok_bias:
+        return PTE_V | PTE_R | PTE_X | PTE_A | (PTE_U if user else 0)
+    kind = rng.choice(["invalid", "noexec", "noA", "wrongU", "rwx"])
+    if kind == "invalid":
+        return 0
+    if kind == "noexec":
+        return PTE_V | PTE_R | PTE_W | PTE_A | PTE_D | (PTE_U if user else 0)
+    if kind == "noA":
+        return PTE_V | PTE_R | PTE_X | (PTE_U if user else 0)
+    if kind == "wrongU":
+        return PTE_V | PTE_R | PTE_X | PTE_A | (0 if user else PTE_U)
+    return PTE_V | PTE_R | PTE_W | PTE_X | PTE_A | PTE_D | (PTE_U if user else 0)
+
+
+def plan_sv39(p: Program):
+    """The decisions that have to be known before the preamble loads x27: where the data window is."""
+    rng = p.rng
+    p.sv_mode = "ident"
+    if p.priv_ext:
+        p.sv_mode = rng.choice(["ident", "ident", "ident", "ident", "mega", "giga"])
+    p.data_base = {"ident": SANDBOX_BASE, "mega": MEGA_VA + SANDBOX_BASE,
+                   "giga": GIGA_VA + SANDBOX_BASE}[p.sv_mode]
+    p.sv_swap = p.priv_ext and rng.random() < 0.6
+
+
+def sv39_pages(p: Program) -> dict:
+    """The 4 KB pages of the first 2 MiB: vpn0 -> (pa, flags); flags 0 = not mapped."""
+    rng = p.rng
+    a = p.args
+    user = p.body_u
+    pages = {}
+    for v in range(0, 16):                 # code (.text.entry, then the handlers); stays readable for the handlers
+        f = PTE_V | PTE_R | PTE_W | PTE_X | PTE_A
+        if rng.random() < 0.3:
+            f |= PTE_D
+        if v < 8 and user:
+            f |= PTE_U
+        if a.sv39_fetch and 1 <= v < 8 and rng.random() < 0.25:
+            f &= ~PTE_A                    # the first fetch from it page-faults; the handler sets A
+        pages[v] = (v << 12, f)
+    for v in range(16, 24):                # the sandbox
+        pages[v] = (v << 12, sv_data_flags(p, user or rng.random() < 0.2))
+    for v in range(24, 32):
+        pages[v] = (v << 12, PTE_V | PTE_R | PTE_W | PTE_A | PTE_D)
+    for v in range(32, 49):                # the tables, the epilogue's data (trap_count, tohost, saves): pre-dirtied, never U
+        pages[v] = (v << 12, PTE_V | PTE_R | PTE_W | PTE_A | PTE_D)
+    if p.sv_mode == "ident":               # one real remap, so translation is not just an identity
+        pages[17] = (MISC_BASE + 0x1000, sv_data_flags(p, user or rng.random() < 0.2))
+    # the bad-address page (also where a PMP pocket's `jr x25` lives) and the two pages of a straddling probe
+    bad = sv_exec_flags(p, user or rng.random() < 0.15, 0.5) if rng.random() < 0.6 else sv_data_flags(p, user)
+    pages[BAD_ADDR_BASE >> 12] = (BAD_ADDR_BASE, bad)
+    pages[PROBE_LO_VPN] = (PROBE_LO_VPN << 12, sv_exec_flags(p, user or rng.random() < 0.1, 0.8))
+    pages[PROBE_HI_VPN] = (PROBE_HI_VPN << 12, sv_exec_flags(p, user or rng.random() < 0.1, 0.5))
+    return pages
+
+
+def sv39_pages_b(p: Program, pages_a: dict) -> dict:
+    """Set B: set A with one to three sandbox pages changed (another physical page, other flags). The code,
+    the handlers, the tables and the epilogue's data are the same in both, so a switch is safe anywhere."""
+    rng = p.rng
+    pages = dict(pages_a)
+    for v in rng.sample(range(16, 24), rng.randint(1, 3)):
+        user = bool(pages_a[v][1] & PTE_U) or p.body_u
+        pa = 0x40000 + ((v - 16) << 12) if rng.random() < 0.6 else (v << 12)
+        pages[v] = (pa, sv_data_flags(p, user))
+    return pages
+
+
+def sv39_tables(p: Program, pages: dict, setno: int):
+    """-> the four tables of one set as dicts (index -> PTE): root, L1, L0, and the L0 table behind PTR0_VA."""
+    rng = p.rng
+    base = sv_set_base(setno)
+    root_pa, l1_pa, l0_pa, l0x_pa = base, base + 0x1000, base + 0x2000, base + 0x3000
+    user = p.body_u
+    root, l1, l0, l0x = {}, {}, {}, {}
+    root[0] = sv_ptr(l1_pa)
+    l1[0] = sv_ptr(l0_pa)
+    for v, (pa, f) in pages.items():
+        if f:
+            l0[v] = sv_leaf(pa, f)
+    # the windows: leaves above the 4 KB level, onto physical 0
+    def window_flags():
+        f = PTE_V | PTE_R | PTE_W
+        if rng.random() < 0.85:
+            f |= PTE_A
+        if rng.random() < 0.5:
+            f |= PTE_D
+        return f | (PTE_U if user else 0)
+    if p.sv_mode == "mega":
+        l1[(MEGA_VA >> 21) & 0x1FF] = sv_leaf(0, window_flags())
+    if p.sv_mode == "giga":
+        root[(GIGA_VA >> 30) & 0x1FF] = sv_leaf(0, window_flags())
+    # holes: every access to them page-faults
+    l1[(MISMEGA_VA >> 21) & 0x1FF] = sv_leaf(0x1000, PTE_V | PTE_R | PTE_W | PTE_A | PTE_D)       # misaligned superpage
+    l1[(MALF_VA >> 21) & 0x1FF] = sv_leaf(0x200000, PTE_V | PTE_W | PTE_A | PTE_D)                  # W without R
+    l1[(RSVD_VA >> 21) & 0x1FF] = sv_leaf(0x400000, PTE_V | PTE_R | PTE_W | PTE_A | PTE_D) | PTE_RSVD
+    l1[(PTR0_VA >> 21) & 0x1FF] = sv_ptr(l0x_pa)
+    l0x[0] = sv_ptr(l0_pa)                                                                          # a pointer at the last level
+    l1[(PMPT_VA >> 21) & 0x1FF] = sv_ptr(PMPT_PA)                                                   # the L0 table behind the PMP pocket
+    root[(MISGIGA_VA >> 30) & 0x1FF] = sv_leaf(0x1000, PTE_V | PTE_R | PTE_W | PTE_A | PTE_D)       # misaligned gigapage
+    if p.irq:                                                       # the S handler's write of the MAGIC clear
+        l1[(MAGIC_BASE >> 21) & 0x1FF] = sv_leaf(MAGIC_BASE & ~0x1FFFFF, PTE_V | PTE_R | PTE_W | PTE_A | PTE_D)
+    return root, l1, l0, l0x
+
+
+def sv_emit_table(p: Program, label: str, entries: dict):
+    p.pagetable_data.append(f"{label}:")
+    pos = 0
+    for idx in sorted(entries):
+        if idx > pos:
+            p.pagetable_data.append(f"    .zero   {8 * (idx - pos)}")
+        p.pagetable_data.append(f"    .dword  {entries[idx]:#x}")
+        pos = idx + 1
+    if pos < 512:
+        p.pagetable_data.append(f"    .zero   {8 * (512 - pos)}")
+
+
 def emit_sv39(p: Program):
-    """Identity-maps every page the generated program can ever legally
-    touch -- [0, MISC_END), which covers .text.entry, .text.handlers,
-    the whole sandbox, the page tables' own physical location, and the
-    small trap_count/tohost/regdump footprint in .data.misc -- plus ONE
-    deliberate non-identity remap, so the address-translation machinery
-    is actually exercised, not just formally "on". Everything OUTSIDE
-    this range (notably BAD_ADDR_BASE) is deliberately left unmapped, a
-    genuine fault the trap handler must recover from without retrying.
-
-    A REAL bug this fixes, found by direct simulation (an infinite
-    fetch-fault loop -- seeds 10-14 of an sv39+pmp+smc+msu sweep all
-    hung): earlier versions mapped only [0,0x10000) plus a single
-    sandbox page, on the theory that "page fault" always means "valid
-    mapping, A/D just needs fixing up" (see _emit_pagetable_walk_and_fix).
-    But under Sv39, EVERY S/U-mode load/store is translated, including
-    ones this generator's own handler code makes for its own bookkeeping
-    (e.g. s_ordinary/m_ordinary bumping trap_count) and the walker's own
-    PTE reads/writes (computed as physical addresses, but still sent
-    through translation like anything else) -- so any of those landing
-    on a genuinely-unmapped page hit the exact same "fix and retry"
-    logic, which can't fix an absent mapping and just refaults forever.
-    Mapping the whole footprint up front is simpler and more robust than
-    chasing each individually-reachable address one at a time."""
-    p.e("    # -- Sv39: identity-map code, remap data --")
-    p.pagetable_data += ["l2_table:", "    .zero   4096",
-                          "l1_table:", "    .zero   4096",
-                          "l0_table:", "    .zero   4096"]
-
-    def pte(reg_tmp, phys_label_or_imm, flags, l0_index):
-        if isinstance(phys_label_or_imm, str):
-            p.e(f"    la      x{reg_tmp}, {phys_label_or_imm}")
-        else:
-            p.li(reg_tmp, phys_label_or_imm)
-        p.e(f"    srli    x{reg_tmp}, x{reg_tmp}, 12")
-        p.e(f"    slli    x{reg_tmp}, x{reg_tmp}, 10")
-        p.e(f"    ori     x{reg_tmp}, x{reg_tmp}, {flags}")
-        p.e(f"    la      x7, l0_table")
-        p.e(f"    addi    x7, x7, {l0_index * 8}")
-        p.e(f"    sd      x{reg_tmp}, 0(x7)")
-
-    # L2[VPN2] -> l1_table, L1[VPN1] -> l0_table. VPN2=VPN1=0 for every
-    # address this generator EVER maps or deliberately leaves unmapped
-    # (everything lives below 0x200000, and even BAD_ADDR_BASE=0x90000
-    # is well under the 1GB/2MB reach of L2 index 0 / L1 index 0) -- so
-    # both pointer PTEs belong at index 0 (byte offset 0) in their
-    # respective tables.
-    #
-    # A REAL bug this fixes, found by direct simulation (the same
-    # infinite fetch-fault loop as the mapping-coverage fixes above,
-    # surviving even after every reachable VA was correctly identity-
-    # mapped): these were previously written to l2_table index 1 and
-    # l1_table index 2 -- indices that NOTHING ever looks up, since the
-    # walker computes L2/L1 indices from the VPN2/VPN1 bits of the
-    # actual faulting address, which are always 0 here. Every walk was
-    # therefore reading l2_table[0] (still all-zero) as if it were the
-    # pointer to l1_table, and treating that zero entry exactly like any
-    # other genuinely-invalid PTE -- indistinguishable, at the point of
-    # the V-bit check, from a real unmapped access.
-    p.e("    la      x6, l1_table")
-    p.e("    srli    x6, x6, 12")
-    p.e("    slli    x6, x6, 10")
-    p.e("    ori     x6, x6, 1")
-    p.e("    la      x7, l2_table")
-    p.e("    sd      x6, 0(x7)")
-
-    p.e("    la      x6, l0_table")
-    p.e("    srli    x6, x6, 12")
-    p.e("    slli    x6, x6, 10")
-    p.e("    ori     x6, x6, 1")
-    p.e("    la      x7, l1_table")
-    p.e("    sd      x6, 0(x7)")
-
-    # Identity leaves for every 4KB page in [0, MISC_END) -- vpn0 =
-    # 0..48. [0,0x10000) (code) gets X; everything else (sandbox, the
-    # gap, the page tables, the gap, the used sliver of .data.misc) gets
-    # R+W only, since nothing ever fetches there. D=0 everywhere except
-    # the page tables' own 3 pages (see below), so a store still needs
-    # the walker's A/D fixup for everything else.
-    MISC_END = MISC_BASE + 0x1000  # covers trap_count/tohost/regdump
-    assert PAGETABLE_BASE + 0x3000 <= MISC_END
-    pt_lo, pt_hi = PAGETABLE_BASE // 0x1000, PAGETABLE_BASE // 0x1000 + 3
-    trap_count_vpn0 = MISC_BASE // 0x1000
-    # D=1 (not just A=1) for every page the TRAP HANDLER ITSELF might
-    # write while handling some OTHER, unrelated fault: the page tables'
-    # own 3 pages (the walker's PTE write-back always lands there -- see
-    # below) and trap_count's page (s_ordinary/m_ordinary bump it on
-    # every entry). Left D=0 everywhere else, so an ordinary store still
-    # needs the walker's A/D fixup, which is the behavior this generator
-    # means to exercise.
-    predirty = {v for v in range(pt_lo, pt_hi)} | {trap_count_vpn0}
-    for vpn0 in range(MISC_END // 0x1000):
-        if vpn0 < 16:
-            flags = 0x4F  # V,R,W,X,A (code: X for fetch, W for --smc)
-        elif vpn0 in predirty:
-            flags = 0xC7  # V,R,W,A,D
-        else:
-            flags = 0x47  # V,R,W,A (ordinary data)
-        pte(6, vpn0 * 0x1000, flags, vpn0)
-
-    # A REAL bug the page-table pre-dirtying above fixes, found by
-    # direct simulation (an infinite fetch-fault loop surviving even the
-    # L2/L1 index fix): the walker's own PTE write-back (`leaf:` in
-    # _emit_pagetable_walk_and_fix) always lands inside l0_table's own
-    # page (every leaf PTE this generator ever creates lives in that one
-    # 4KB table). If THAT page also had D=0, fixing up any OTHER page's
-    # D bit would require a store into l0_table, which itself faults for
-    # the exact same reason and needs fixing up first -- and fixing IT
-    # requires a store into the SAME page (l0_table's entry for its own
-    # vpn0 lives inside itself), which needs D=1 to succeed, which is
-    # exactly what the store was trying to set. Genuinely unfixable by
-    # retrying, since the walker never reaches its own `sfence.vma` to
-    # make the fix visible.
-    #
-    # A SECOND, more subtle real bug the trap_count pre-dirtying fixes,
-    # ALSO found by direct simulation (a later seed still hung after the
-    # first fix): even a FIXABLE nested fault is dangerous here, not just
-    # an unfixable one. With trap_count left D=0, s_ordinary's own bump
-    # of it can fault WHILE s_ordinary is still in the middle of handling
-    # some unrelated outer fault. That nested fault's OWN handling ends
-    # in the walker's bare `sret` (to retry the trap_count store) --  but
-    # `sret` unconditionally clears sstatus.SPP after consuming it. When
-    # control later reaches the OUTER fault's own `sret` (to truly return
-    # to the random body), SPP has already been cleared to U by the INNER
-    # sret, so the outer sret drops to U-mode instead of S-mode -- and
-    # every subsequent fetch then faults on every mapping's unset U bit,
-    # forever. Pre-dirtying trap_count's page prevents the nested fault
-    # (and its consumed sret) from ever happening in the first place.
-
-    # Non-identity leaf: remap ONE sandbox page to a genuinely different
-    # PA (overriding the identity leaf just installed above for this one
-    # vpn0), proving translation isn't just an identity passthrough:
-    # vpn0=17 (VA 0x11000) -> PA MISC_BASE+0x1000 (data, R+W, not identity).
-    pte(6, MISC_BASE + 0x1000, 0xC7, 17)  # R=1,W=1,X=0,A=1,D=1
-
-    p.e("    la      x6, l2_table")
-    p.e("    srli    x6, x6, 12")
-    p.e("    li      x7, 8")
-    p.e("    slli    x7, x7, 60")
-    p.e("    or      x6, x6, x7")
+    """Builds both table sets (static data, see the block comment above), then switches translation on in
+    M mode: satp to set A and an SFENCE.VMA. The body runs translated from its first instruction (in S or U
+    mode under --priv msu). Everything the generated program legitimately touches is mapped, and the faulting
+    accesses (the holes, unlucky page flags) are recovered from by the handlers."""
+    pages_a = sv39_pages(p)
+    pages_b = sv39_pages_b(p, pages_a) if p.sv_swap else pages_a
+    for setno, pages in ((SV_SET_A, pages_a), (SV_SET_B, pages_b)):
+        for name, tab in zip(SV_TABLE_NAMES[4 * setno:4 * setno + 4], sv39_tables(p, pages, setno)):
+            sv_emit_table(p, name, tab)
+    # the L0 table the PMP pocket covers: eight sandbox pages, read/write, A and D set (a page fault here could make
+    # the S handler write a PTE the pocket does not let it write), user only for a U body
+    f = PTE_V | PTE_R | PTE_W | PTE_A | PTE_D | (PTE_U if p.body_u else 0)
+    p.ptpmp_data += ["ptpmp_table:"] + [f"    .dword  {sv_leaf(SANDBOX_BASE + (i << 12), f):#x}" for i in range(8)]
+    p.ptpmp_data += ["    .zero   " + str(8 * (512 - 8))]
+    p.e("    # -- Sv39: the map is static data; satp to table set A --")
+    p.li(6, sv_satp(SV_SET_A))
     p.e("    csrw    satp, x6")
     p.e("    sfence.vma")
+
+
+# -- body operations that exercise translation (--sv39) ------------------------------------------------------
+# They use x6 (and the usual FREE_POOL registers) and leave nothing in flight: a trap in the middle of one
+# clobbers only handler scratch, and every access that can fault is the last thing the idiom does with its
+# address register.
+
+def emit_hole_access(p: Program, recent: list[int]):
+    """A load, store, LR or AMO at an address that page-faults (a hole in the map, or a page whose flags forbid
+    it), or at the bad-address page and FAR_BASE, which fault too under Sv39."""
+    rng = p.rng
+    va = rng.choice(HOLE_VAS)
+    if va == PMPT_VA:
+        va += rng.randrange(8) << 12                    # one of the eight pages the PMP-pocketed table maps
+    va += rng.randrange(0, 0x800 if va == BAD_ADDR_BASE else 0x1000, 8)      # below the pocket at POCKET_X
+    p.li(6, va)
+    r = rng.random()
+    if r < 0.15:
+        rd, rs = p.reg_biased(recent), p.reg_biased(recent)
+        w = rng.choice(["w", "d"])
+        if rng.random() < 0.5:
+            p.e(f"    lr.{w}    x{rd}, (x6)")
+        else:
+            p.e(f"    {rng.choice(_AMO_RMW)}.{w} x{rd}, x{rs}, (x6)")
+        recent.append(rd)
+    elif r < 0.6:
+        mnem, _ = rng.choice(_LOADS)
+        rd = p.reg_biased(recent)
+        p.e(f"    {mnem:<7} x{rd}, 0(x6)")
+        recent.append(rd)
+    else:
+        mnem, _ = rng.choice(_STORES)
+        p.e(f"    {mnem:<7} x{p.reg_biased(recent)}, 0(x6)")
+    del recent[:-8]
+
+
+def emit_noncanonical(p: Program, recent: list[int]):
+    """An access to a virtual address whose upper bits are not a sign extension of bit 38: a page fault whatever
+    the map says (but the walk still reads the root PTE first, so a PTE-read fault would win)."""
+    rng = p.rng
+    p.li(6, rng.choice(NONCANON_VAS) + rng.randrange(0, 0x1000, 8) * (rng.random() < 0.5))
+    if rng.random() < 0.5:
+        mnem, _ = rng.choice(_LOADS)
+        rd = p.reg_biased(recent)
+        p.e(f"    {mnem:<7} x{rd}, 0(x6)")
+        recent.append(rd)
+    else:
+        mnem, _ = rng.choice(_STORES)
+        p.e(f"    {mnem:<7} x{p.reg_biased(recent)}, 0(x6)")
+    del recent[:-8]
+
+
+def emit_tlb_thrash(p: Program, recent: list[int]):
+    """More distinct sandbox pages than a TLB has entries, in one burst: capacity misses and refills."""
+    rng = p.rng
+    for k in rng.sample(range(8), rng.randint(5, 8)):
+        p.li(6, k * 0x1000 + rng.randrange(0, 0x800, 8))
+        p.e("    add     x6, x6, x27")
+        mnem, _ = rng.choice(_LOADS)
+        rd = p.reg_biased(recent)
+        p.e(f"    {mnem:<7} x{rd}, 0(x6)")
+        recent.append(rd)
+    del recent[:-8]
+
+
+def emit_sum_mxr(p: Program):
+    """Toggle sstatus.SUM and/or sstatus.MXR (an S-mode body only): whether a user page or an execute-only page
+    can be loaded changes with them."""
+    rng = p.rng
+    p.li(6, rng.choice([1 << 18, 1 << 19, (1 << 18) | (1 << 19)]))
+    p.e(f"    {rng.choice(['csrs', 'csrc'])}    sstatus, x6")
+
+
+def emit_satp_op(p: Program):
+    """satp: a write of the value it already holds (flushes nothing, changes nothing), a switch to the other
+    table set followed by the SFENCE.VMA that speculation contract R1 requires, or the SFENCE.VMA alone."""
+    rng = p.rng
+    r = rng.random()
+    if r < 0.35:
+        p.e("    csrr    x6, satp")
+        p.e("    csrw    satp, x6")
+    elif p.sv_swap and r < 0.85:
+        p.li(6, sv_satp(rng.choice([SV_SET_A, SV_SET_B])))
+        p.e("    csrw    satp, x6")
+        p.e("    sfence.vma")
+    else:
+        p.e("    sfence.vma")
+
+
+def emit_fetch_probe(p: Program):
+    """A jump to a page whose flags decide whether a fetch from it works: the pocket in the bad-address page
+    (`jr x25`), or a 32-bit `jr x25` that straddles two pages with flags of their own (so a fault can be in the
+    second half, where the trap value is pc + 8). x25 holds the label after the jump: the instruction returns
+    there if the fetch works, and a fetch fault resumes there."""
+    nxt = Label("svprobe")
+    p.e(f"    la      x25, {nxt}")
+    p.li(6, p.rng.choice([POCKET_X, PROBE_X]))
+    p.e("    jalr    x0, 0(x6)")
+    p.e(f"{nxt}:")
+    p.e("    la      x25, recovery_point")
+
+
+def emit_sv39_op(p: Program, recent: list[int]):
+    rng = p.rng
+    r = rng.random()
+    can_csr = p.priv_ext and not p.body_u            # an S (or privilege 2) body can touch sstatus and satp
+    if r < 0.32:
+        emit_hole_access(p, recent)
+    elif r < 0.47 and can_csr:
+        emit_sum_mxr(p)
+    elif r < 0.60 and can_csr:
+        emit_satp_op(p)
+    elif r < 0.75:
+        emit_tlb_thrash(p, recent)
+    elif r < 0.90 and p.args.sv39_fetch:
+        emit_fetch_probe(p)
+    else:
+        emit_noncanonical(p, recent)
 
 
 def emit_trap_delegation(p: Program):
@@ -1314,9 +1570,13 @@ def emit_entry_preamble(p: Program):
             p.e(f"    addi    x6, x6, {p.rng.choice([1, 2, 3])}")
         p.e("    csrw    stvec, x6")
         emit_trap_delegation(p)
+        if a.sv39 and p.priv_ext:
+            p.body_u = not p.body_priv2 and p.rng.random() < 0.4      # the page flags follow the body's privilege
     p.e("    la      x25, recovery_point")
     p.li(26, BAD_ADDR_BASE)
-    p.li(27, SANDBOX_BASE)
+    if a.sv39:
+        plan_sv39(p)
+    p.li(27, p.data_base)
     if a.priv == "msu" and not a.pmp:
         emit_msu_minimal_pmp(p)
     if p.irq:
@@ -1332,8 +1592,10 @@ def emit_entry_preamble(p: Program):
         # label either way -- `la` + mepc works identically for a VA or
         # a PA, since under --sv39 the code region is identity-mapped).
         if p.priv_ext:
-            p.body_u = not p.body_priv2 and p.rng.random() < 0.4
-            tvm = p.rng.random() < 0.3
+            if not a.sv39:
+                p.body_u = not p.body_priv2 and p.rng.random() < 0.4
+            # not under Sv39: TVM would trap the page-fault handler's own satp read and SFENCE.VMA
+            tvm = p.rng.random() < 0.3 and not a.sv39
             mpp = 2 if p.body_priv2 else (0 if p.body_u else 1)
             mst = (mpp << 11) | ((1 << 22) if p.tsr else 0) | ((1 << 20) if tvm else 0)
             p.li(6, mst)
@@ -1373,6 +1635,9 @@ def emit_main_body(p: Program):
     have_c = "c" in a.isa
 
     def one_instr():
+        if a.sv39 and p.rng.random() < 0.06:
+            emit_sv39_op(p, recent)
+            return
         r = p.rng.random()
         if r < 0.35:
             emit_alu(p, recent)
@@ -1463,8 +1728,13 @@ def build_program(args) -> Program:
     emit_handlers(p)
     p.entry.extend(p.subroutines)
     p.misc_data += ["trap_count:", "    .zero   8", "tohost:", "    .zero   8"]
-    if p.args.pmp:
+    if p.args.pmp or (p.args.sv39 and p.args.sv39_fetch):
         p.pocket_code = ["    jr      x25"]
+    if p.args.sv39 and p.args.sv39_fetch:
+        # a 32-bit `jr x25` at PROBE_X = 0x91FFE, straddling the 0x92000 page boundary; the three halfwords
+        # in front only pad the section to a dword boundary (the image loader wants dword-aligned segments)
+        p.probe_code = ["    .half   0x0001", "    .half   0x0001", "    .half   0x0001",
+                        "    .option push", "    .option norvc", "    jalr    x0, 0(x25)", "    .option pop"]
     if p.irq:
         p.misc_data += ["    .balign 8", "msave:", "    .zero   32", "ssave:", "    .zero   32"]
     return p
@@ -1487,12 +1757,19 @@ def render(p: Program) -> str:
     if p.pocket_code:
         lines += ["", "    .section .text.pocket"]
         lines += p.pocket_code
+    if p.probe_code:
+        lines += ["", "    .section .text.probe"]
+        lines += p.probe_code
+    if p.ptpmp_data:
+        lines += ["", "    .section .data.ptpmp"]
+        lines += p.ptpmp_data
     lines += ["", "    .section .data.misc"]
     lines += p.misc_data
     return "\n".join(lines) + "\n"
 
 
-def toolchain_build(asm_path: Path, out_base: Path, isa: str, has_pagetables: bool, has_pocket: bool = False):
+def toolchain_build(asm_path: Path, out_base: Path, isa: str, has_pagetables: bool, has_pocket: bool = False,
+                    has_probe: bool = False, has_ptpmp: bool = False):
     # -j (only-section) with a section name absent from the ELF is a
     # real objcopy error ("invalid operation"), not a silent no-op --
     # .data.pagetables only exists when --sv39 emitted it (render()
@@ -1512,6 +1789,10 @@ def toolchain_build(asm_path: Path, out_base: Path, isa: str, has_pagetables: bo
         sections += ["-j", ".data.pagetables"]
     if has_pocket:
         sections += ["-j", ".text.pocket"]
+    if has_probe:
+        sections += ["-j", ".text.probe"]
+    if has_ptpmp:
+        sections += ["-j", ".data.ptpmp"]
     subprocess.run(["riscv64-unknown-elf-objcopy", "-O", "verilog",
                      *sections, "--verilog-data-width=8",
                      str(elf), str(hexf)], check=True)
@@ -1524,14 +1805,19 @@ def main():
     ap.add_argument("--isa", choices=["i", "im", "imc", "imac"], default="imac")
     ap.add_argument("--priv", choices=["m", "msu"], default="m")
     ap.add_argument("--pmp", action="store_true")
-    ap.add_argument("--sv39", action="store_true")
+    ap.add_argument("--sv39", action="store_true",
+                    help="translate: static page tables (4 KB leaves, superpage data windows, holes that page-fault), "
+                         "random page flags, a page-fault handler that fixes A/D, probes of every kind of fault")
+    ap.add_argument("--sv39-fetch", action=argparse.BooleanOptionalAction, default=True, dest="sv39_fetch",
+                    help="with --sv39: also provoke instruction page faults (code pages with A clear, jumps to "
+                         "pages that cannot be fetched from, a 32-bit instruction whose second page faults). "
+                         "--no-sv39-fetch keeps every fetch fault-free, for a core that does not translate fetches")
     ap.add_argument("--irq", action="store_true",
                      help="run the body with interrupts enabled, for the lockstep "
                           "harness's own interrupt injection (--irq-mode): source "
                           "enables, random mideleg, transparent trap handlers that "
                           "save and restore x5-x8, a PMP region over the MAGIC "
-                          "register for S mode. Ignored under --sail-safe; "
-                          "not combinable with --sv39 yet")
+                          "register for S mode. Ignored under --sail-safe")
     ap.add_argument("--smc", action="store_true")
     ap.add_argument("--dbg", action="store_true",
                     help="keep x22/x23 out of the random pool, for the lockstep harness's scripted "
@@ -1567,9 +1853,6 @@ def main():
         args.pmp = False
         args.sv39 = False
         args.irq = False
-    if args.irq and args.sv39:
-        ap.error("--irq cannot be combined with --sv39 yet")
-
     if args.dbg:
         del FREE_POOL[-2:]      # x22, x23 (in place: every user of the pool sees it)
     if args.ebreak_rate is None:
@@ -1586,7 +1869,8 @@ def main():
     print(f"wrote {asm_path}")
 
     if args.build:
-        elf, hexf = toolchain_build(asm_path, args.output, args.isa, bool(p.pagetable_data), bool(p.pocket_code))
+        elf, hexf = toolchain_build(asm_path, args.output, args.isa, bool(p.pagetable_data), bool(p.pocket_code),
+                                    bool(p.probe_code), bool(p.ptpmp_data))
         print(f"built {elf}, {hexf}")
 
 

@@ -29,6 +29,13 @@ SECTIONS
     /* --pmp: a `jr x25` inside the bad-address page (qvgen.py POCKET_X), the target of its fetch-fault idiom */
     .text.pocket 0x90C00 : { *(.text.pocket) }
 
+    /* --sv39: a 32-bit `jr x25` at 0x91FFE (qvgen.py PROBE_X), straddling the 0x92000 page boundary: three
+       padding halfwords, so that the section starts on a dword boundary, then the instruction */
+    .text.probe 0x91FF8 : { *(.text.probe) }
+
+    /* --sv39: the L0 table behind the PMP pocket (qvgen.py PMPT_PA) */
+    .data.ptpmp 0x8F000 : { *(.data.ptpmp) }
+
     .data.pagetables 0x20000 : { *(.data.pagetables) }
 
     .data.misc 0x30000 : { *(.data.misc) *(.data) *(.data.*) *(.rodata) *(.rodata.*) *(.bss) *(.bss.*) *(COMMON) }
