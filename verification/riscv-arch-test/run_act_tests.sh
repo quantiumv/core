@@ -16,8 +16,8 @@
 # CONFIG_FILES/WORKDIR above. ACT_ONLY=<regex> runs only the ELFs whose
 # path matches. Results go to act_results.log for fsm,
 # act_results_<core>.log otherwise (ACT_RESULTS=<path> overrides, to keep the
-# tracked log untouched). core_pipe runs every ELF the FSM does today: it has
-# no Sv39 or debug yet, and the generated tests don't need either.
+# tracked log untouched). core_pipe runs every ELF the FSM does today. (None of the
+# generated tests turns Sv39 on, so ACT is only a Bare-mode regression check for it.)
 set -u
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

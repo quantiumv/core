@@ -40,11 +40,11 @@
 # generated with qvgen --dbg, which keeps x22/x23 for the script.
 #
 # --dut pipe puts design/pipe/core_pipe.sv on side B (pipe-vs-ref; side
-# A stays ref_core). Selfproof and corrupt only, and the random corpus
-# switches to what core_pipe implements (--isa imac --priv msu
-# --smc: the body runs in S or U and switches between them, with TSR/TVM and
-# privilege probes; no PMP or Sv39 yet). QV_RANDOM_PROFILE overrides the
-# profile for experiments (e.g. the M-mode body, --priv m). --pipe-dir points
+# A stays ref_core). Selfproof and corrupt only. The default random profile
+# is the same for both (--isa imac --priv msu --sv39 --smc: the body runs in S
+# or U and switches between them, with TSR/TVM and privilege probes, under
+# Sv39 page tables); QV_RANDOM_PROFILE overrides it for experiments (e.g. the
+# M-mode body, --priv m; --pmp, --irq, --no-sv39-fetch). --pipe-dir points
 # the build at a modified copy of design/pipe/ (pipe mutants).
 set -u
 
@@ -328,9 +328,8 @@ build_fw_entries() {
     done < "$REPO_ROOT/verification/lockstep/fw.list"
 }
 
-# what each side-B core implements
+# what each side-B core implements: both now run Sv39 (the pipe translates data accesses and instruction fetches)
 RANDOM_PROFILE="--isa imac --priv msu --sv39 --smc"
-[ "$DUT" == "pipe" ] && RANDOM_PROFILE="--isa imac --priv msu --smc"
 RANDOM_PROFILE="${QV_RANDOM_PROFILE:-$RANDOM_PROFILE}"   # experiments: override the profile
 [ "$DBG_MODE" != "0" ] && RANDOM_PROFILE="$RANDOM_PROFILE --dbg"   # x22/x23 are the debug script's
 
