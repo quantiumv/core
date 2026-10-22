@@ -1108,6 +1108,12 @@ def emit_pmp(p: Program):
         entries[0] = sandbox_pocket() if rng.random() < 0.85 else (0, 0)
         entries[1] = bad_page_pocket()
         entries[2] = sandbox_pocket() if rng.random() < 0.5 else (0, 0)
+        if p.args.sv39 and not p.irq and rng.random() < 0.5:
+            # the high probe page gets a pocket of its own ahead of the 128 KiB one (--irq needs the entry for the MAGIC
+            # dword): the two pages of the straddling instruction, and the span of a fetch that starts in the first, can
+            # then differ in X
+            entries[2] = entries[1]
+            entries[1] = (pocket_cfg(_PMP_A_NAPOT), napot_pmpaddr(PROBE_HI_VPN << 12, 0x1000))
         if p.args.sv39 and rng.random() < 0.35:
             # an NA4 word over the first half of one PTE of the PMPT_VA table, ahead of the region that covers the
             # whole table: a PTE read is eight bytes, so it only partly overlaps the word and is no match for it,
@@ -1206,6 +1212,10 @@ NONCANON_UPPER = [0x0000_0080_0000_0000, 0x0000_0100_0000_0000, 0x0001_0000_0000
 NONCANON_VAS = [0x0000_0040_0000_0000, 0xFFFF_FFBF_FFFF_F000, 0x0000_00FF_FFFF_F000, 0xFFFF_FFC0_0000_0000]
 PROBE_LO_VPN, PROBE_HI_VPN = 0x91, 0x92
 PROBE_X = (PROBE_LO_VPN << 12) + 0xFFE      # a 32-bit `jr x25` straddling the 0x92000 page boundary
+ALIAS_VPN = 0x93                            # a second virtual page onto the bad-address page: the PMP pocket's `jr x25` runs
+ALIAS_X = (ALIAS_VPN << 12) + (POCKET_X & 0xFFF)     # from a virtual address the pocket does not cover, at a physical one it does
+ALIAS2_LO_VPN, ALIAS2_HI_VPN = 0x95, 0x96   # the straddling `jr x25` again, through two virtual pages whose frames are the probe pages
+ALIAS2_X = (ALIAS2_LO_VPN << 12) + 0xFFE
 
 
 def sv_rsvd_bit(p: Program) -> int:
@@ -1305,6 +1315,9 @@ def sv39_pages(p: Program) -> dict:
     pa_hi = FAR_BASE if rng.random() < 0.25 else PROBE_HI_VPN << 12
     pages[PROBE_LO_VPN] = (pa_lo, sv_exec_flags(p, user or rng.random() < 0.1, 0.8))
     pages[PROBE_HI_VPN] = (pa_hi, sv_exec_flags(p, user or rng.random() < 0.1, 0.5))
+    pages[ALIAS_VPN] = (BAD_ADDR_BASE, sv_exec_flags(p, user or rng.random() < 0.15, 0.7))
+    pages[ALIAS2_LO_VPN] = (PROBE_LO_VPN << 12, sv_exec_flags(p, user or rng.random() < 0.1, 0.8))
+    pages[ALIAS2_HI_VPN] = (PROBE_HI_VPN << 12, sv_exec_flags(p, user or rng.random() < 0.1, 0.7))
     return pages
 
 
@@ -1549,22 +1562,33 @@ def emit_satp_op(p: Program):
     table set followed by the SFENCE.VMA that speculation contract R1 requires, or the SFENCE.VMA alone."""
     rng = p.rng
     r = rng.random()
+
+    def sfence():
+        p.e("    sfence.vma")
+        if rng.random() < 0.3:
+            # the fetch after the SFENCE.VMA finds the instruction TLB empty and translates; FENCE.I then holds fetch
+            # while that translation is pending
+            p.e("    fence.i")
+
     if r < 0.35:
         p.e("    csrr    x6, satp")
         p.e("    csrw    satp, x6")
     elif p.sv_swap and r < 0.85:
         p.li(6, sv_satp(rng.choice([SV_SET_A, SV_SET_B])))
         p.e("    csrw    satp, x6")
-        p.e("    sfence.vma")
+        sfence()
     else:
-        p.e("    sfence.vma")
+        sfence()
 
 
 def emit_fetch_probe(p: Program):
     """A jump to a page whose flags decide whether a fetch from it works: the pocket in the bad-address page
-    (`jr x25`), or a 32-bit `jr x25` that straddles two pages with flags of their own (so a fault can be in the
-    second half, where the trap value is pc + 8). x25 holds the label after the jump: the instruction returns
-    there if the fetch works, and a fetch fault resumes there."""
+    (`jr x25`), a 32-bit `jr x25` that straddles two pages with flags of their own (so a fault can be in the
+    second half, where the trap value is pc + 8), or an address behind a far page table (the walk's own PTE read
+    faults: an access fault, cause 1), or the pocket's `jr x25` and the straddling one through other virtual pages
+    (so the PMP is checked on a physical address that the virtual one does not show, and a crossing instruction
+    has two physical frames of its own). x25 holds the label after the jump:
+    the instruction returns there if the fetch works, and a fetch fault resumes there."""
     nxt = Label("svprobe")
     if p.priv_ext and not p.body_u and p.rng.random() < 0.5:
         # SUM lets S read and write user pages, never fetch from one: with it set, a probe page that is a user page
@@ -1572,7 +1596,11 @@ def emit_fetch_probe(p: Program):
         p.li(6, 1 << 18)
         p.e("    csrs    sstatus, x6")
     p.e(f"    la      x25, {nxt}")
-    p.li(6, p.rng.choice([POCKET_X, PROBE_X]))
+    # the last two: the walk of the fetch itself ends in a PTE read that the PMP denies or that gets a bus error
+    targets = [POCKET_X, PROBE_X, FARPTR_VA + 0x100, BUSPTR_VA + 0x100]
+    if p.priv_ext:                  # translated for sure: the alias is a virtual page with nothing behind it in an M body
+        targets += [ALIAS_X, ALIAS_X, ALIAS2_X, ALIAS2_X]
+    p.li(6, p.rng.choice(targets))
     p.e("    jalr    x0, 0(x6)")
     p.e(f"{nxt}:")
     p.e("    la      x25, recovery_point")
