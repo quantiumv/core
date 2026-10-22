@@ -107,7 +107,7 @@ Usage: run_lockstep.sh --mode selfproof|mutant|corrupt [options]
   --sim iverilog|verilator  the simulator the harness is built for (default iverilog)
   --dut ref|pipe       side B's core (default ref; pipe = core_pipe, not with --mode mutant)
   --pipe-dir DIR       design/pipe/ replacement for --dut pipe (default design/pipe)
-  --mutant N           QV_MUTANT_B value, 1-10 (--mode mutant only)
+  --mutant N           QV_MUTANT_B value, 1-13 (--mode mutant only)
   --memcfg-b sram|cache  side B's memory config (default sram -- also applies
                         under --mode mutant, e.g. --mutant 9 needs cache)
   --delay-max N        max bus-delay wait states (default 0 = disabled)
@@ -181,8 +181,8 @@ case "$MODE" in
     selfproof|mutant|corrupt) ;;
     *) echo "Unknown --mode: $MODE (expected selfproof, mutant or corrupt)" >&2; exit 1 ;;
 esac
-if [ "$MODE" == "mutant" ] && { [ "$MUTANT" -lt 1 ] || [ "$MUTANT" -gt 10 ]; }; then
-    echo "ERROR: --mode mutant needs --mutant N with N in 1..10" >&2; exit 1
+if [ "$MODE" == "mutant" ] && { [ "$MUTANT" -lt 1 ] || [ "$MUTANT" -gt 13 ]; }; then
+    echo "ERROR: --mode mutant needs --mutant N with N in 1..13" >&2; exit 1
 fi
 case "$DUT" in
     ref) ;;

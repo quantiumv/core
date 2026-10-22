@@ -2630,9 +2630,12 @@ module ref_core
     wire ptw_perm_violation = ptw_pte_leaf
         && (ptw_is_mem ? (mem_op_needs_write ? !ptw_pte_w : !ptw_read_ok) : !ptw_pte_x);
     wire ptw_ad_fault = ptw_pte_leaf && (!ptw_pte_a || (ptw_is_mem && mem_op_needs_write && !ptw_pte_d));
+    // QV_MUTANT==11 (P7 lockstep kill-matrix mutant): a TLB hit skips the
+    // permission / U / A / D re-check (a walk still does it).
     assign ptw_pte_fault = ptw_va_noncanonical || ptw_pte_malformed || ptw_superpage_misaligned
                         || ptw_no_more_levels
-                        || (ptw_pte_leaf && (ptw_u_violation || ptw_perm_violation || ptw_ad_fault));
+                        || (ptw_pte_leaf && !(QV_MUTANT == 11 && tlb_hit_active)
+                            && (ptw_u_violation || ptw_perm_violation || ptw_ad_fault));
 
     /*
      * Superpage reconstruction (algorithm step 10), re-derived by hand
@@ -2840,8 +2843,11 @@ module ref_core
                     PTW_REASON_LO:  fetch_lo_fault_q[fetch_slot] <= 1'b0;
                     PTW_REASON_HI:  fetch_hi_fault_q[fetch_slot] <= 1'b0;
                     default: begin   // PTW_REASON_MEM
-                        mem_fault_q[cur_slot]        <= 1'b0;
-                        mem_access_fault_q[cur_slot] <= 1'b1;
+                        // QV_MUTANT==13 (P7 lockstep kill-matrix mutant): a
+                        // PMP-denied PTE read is reported as a page fault
+                        // (cause 13/15) instead of an access fault (5/7).
+                        mem_fault_q[cur_slot]        <= (QV_MUTANT == 13);
+                        mem_access_fault_q[cur_slot] <= !(QV_MUTANT == 13);
                     end
                 endcase
             end else if (state == S_PTW && wb_mem_done) begin
@@ -3024,7 +3030,9 @@ module ref_core
             // a debug trigger on its own PC still unconditionally wiped
             // the entire TLB, even though the instruction architecturally
             // never executed -- a precise-exception violation.
-            if (commit_now && is_sfence_vma && !instr_faulted) begin
+            // QV_MUTANT==12 (P7 lockstep kill-matrix mutant): SFENCE.VMA
+            // does not flush the TLB.
+            if (commit_now && is_sfence_vma && !instr_faulted && !(QV_MUTANT == 12)) begin
                 tlb0_valid_q <= 1'b0;
                 tlb1_valid_q <= 1'b0;
                 tlb2_valid_q <= 1'b0;

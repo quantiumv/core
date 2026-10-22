@@ -189,6 +189,9 @@ never the register indices mutant 1 needs).
 | 8 | C.ADDI16SP's `i_instr16[5]`/`i_instr16[2]` bit groups swapped | ref_c_expand.sv, `c_addi16sp` |
 | 9 | FENCE.I never flushes the icache | ref_core.sv, `icache_flush_o` |
 | 10 | Data-side page-fault mtval/stval off by 8 | ref_core.sv, `trap_val`'s `mem_fault_q` arm |
+| 11 | A TLB hit skips the permission / U / A / D re-check (P7) | ref_core.sv, `ptw_pte_fault` |
+| 12 | SFENCE.VMA does not flush the TLB (P7) | ref_core.sv, the SFENCE.VMA flush |
+| 13 | A PMP-denied PTE read (data walk) is a page fault, not an access fault (P7) | ref_core.sv, the `ptw_pmp_fault` capture for the mem reason |
 
 Confirmed caught (a REF-vs-REF run reports `LOCKSTEP_RESULT: FAIL`) for
 1-4 and 6-8 and 10, each via a corpus entry chosen to actually exercise
