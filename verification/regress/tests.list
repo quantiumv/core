@@ -126,6 +126,8 @@ pipe_fetch_tb|design/pipe/qv_fetch_tb.sv||design|pipe|pass|
 pipe_align_fifo_tb|design/pipe/qv_align_fifo_tb.sv||design|pipe|pass|600
 pipe_decode_tb|design/pipe/qv_decode_tb.sv||design|pipe|pass|
 pipe_pmp_tb|design/pipe/qv_pmp_tb.sv||design|pipe|pass||
+pipe_pte_tb|design/pipe/qv_pte_tb.sv||design|pipe|pass|
+pipe_tlb_tb|design/pipe/qv_tlb_tb.sv||design|pipe|pass|
 pipe_exu_bru_tb|design/pipe/qv_exu_bru_tb.sv||design|pipe|pass|
 pipe_exu_div_tb|design/pipe/qv_exu_div_tb.sv||design|pipe|pass|
 pipe_commit_tb|design/pipe/qv_commit_tb.sv||design|pipe|pass|

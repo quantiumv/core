@@ -1,0 +1,160 @@
+{
+ "dut": "design/pipe/qv_tlb.sv",
+ "tb": "design/pipe/qv_tlb_tb.sv",
+ "files": [
+  "design/pipe/qv_tlb.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench"
+ ],
+ "cwd": "design",
+ "timeout": 900,
+ "mutants": [
+  {
+   "name": "the highest index wins a multiple hit",
+   "old": "for (int i = ENTRIES - 1; i >= 0; i--) begin      // the lowest index is assigned last, so it wins",
+   "new": "for (int i = 0; i < ENTRIES; i++) begin"
+  },
+  {
+   "name": "the victim does not advance",
+   "old": "victim_q           <= victim_next;",
+   "new": "victim_q           <= victim_q;"
+  },
+  {
+   "name": "the victim advances by two",
+   "old": "wire [VW-1:0] victim_next = (victim_q == VW'(ENTRIES - 1)) ? '0 : victim_q + 1'b1;",
+   "new": "wire [VW-1:0] victim_next = (victim_q == VW'(ENTRIES - 1)) ? '0 : victim_q + 2'b10;"
+  },
+  {
+   "name": "the victim wraps one late",
+   "old": "(victim_q == VW'(ENTRIES - 1)) ? '0",
+   "new": "(victim_q == VW'(ENTRIES)) ? '0"
+  },
+  {
+   "name": "a flush does not invalidate",
+   "old": "end else if (i_flush) begin\n            valid_q  <= '0;",
+   "new": "end else if (i_flush) begin\n            valid_q  <= valid_q;"
+  },
+  {
+   "name": "a flush resets the victim pointer",
+   "old": "end else if (i_flush) begin\n            valid_q  <= '0;",
+   "new": "end else if (i_flush) begin\n            victim_q <= '0;\n            valid_q  <= '0;"
+  },
+  {
+   "name": "a fill beats a flush in the same cycle",
+   "old": "end else if (i_flush) begin",
+   "new": "end else if (i_flush && !i_fill) begin"
+  },
+  {
+   "name": "reset does not clear the valid bits",
+   "old": "valid_q  <= '0;\n            victim_q <= '0;",
+   "new": "victim_q <= '0;"
+  },
+  {
+   "name": "a gigapage is compared down to a bit short of vpn2",
+   "old": "wire m_giga = (vpn_q[g][26:18] == i_vpn[26:18]);",
+   "new": "wire m_giga = (vpn_q[g][26:19] == i_vpn[26:19]);"
+  },
+  {
+   "name": "a gigapage is compared with vpn1 as well",
+   "old": "wire m_giga = (vpn_q[g][26:18] == i_vpn[26:18]);",
+   "new": "wire m_giga = (vpn_q[g][26:9] == i_vpn[26:9]);"
+  },
+  {
+   "name": "a megapage ignores a bit of vpn1",
+   "old": "wire m_mega = (vpn_q[g][26:9]  == i_vpn[26:9]);",
+   "new": "wire m_mega = (vpn_q[g][26:10] == i_vpn[26:10]);"
+  },
+  {
+   "name": "a megapage is compared with vpn0 as well",
+   "old": "wire m_mega = (vpn_q[g][26:9]  == i_vpn[26:9]);",
+   "new": "wire m_mega = (vpn_q[g] == i_vpn);"
+  },
+  {
+   "name": "a megapage is compared on vpn2 only",
+   "old": "wire m_mega = (vpn_q[g][26:9]  == i_vpn[26:9]);",
+   "new": "wire m_mega = (vpn_q[g][26:18] == i_vpn[26:18]);"
+  },
+  {
+   "name": "a 4 KB page ignores vpn0",
+   "old": "wire m_page = (vpn_q[g]        == i_vpn);",
+   "new": "wire m_page = (vpn_q[g][26:9]  == i_vpn[26:9]);"
+  },
+  {
+   "name": "a 4 KB page ignores a bit of vpn0",
+   "old": "wire m_page = (vpn_q[g]        == i_vpn);",
+   "new": "wire m_page = (vpn_q[g][26:1]  == i_vpn[26:1]);"
+  },
+  {
+   "name": "level 1 is taken for level 2",
+   "old": "((level_q[g] == 2'd2) ? m_giga : (level_q[g] == 2'd1) ? m_mega : m_page)",
+   "new": "((level_q[g] != 2'd0) ? m_giga : m_page)"
+  },
+  {
+   "name": "level 2 is taken for level 1",
+   "old": "((level_q[g] == 2'd2) ? m_giga : (level_q[g] == 2'd1) ? m_mega : m_page)",
+   "new": "((level_q[g] != 2'd0) ? m_mega : m_page)"
+  },
+  {
+   "name": "an invalid entry can hit",
+   "old": "assign hit_v[g] = valid_q[g] && (",
+   "new": "assign hit_v[g] = 1'b1 && ("
+  },
+  {
+   "name": "the fill stores the wrong level",
+   "old": "level_q[victim_q]  <= i_fill_level;",
+   "new": "level_q[victim_q]  <= 2'd0;"
+  },
+  {
+   "name": "the fill truncates the ppn",
+   "old": "ppn_q[victim_q]    <= i_fill_ppn;",
+   "new": "ppn_q[victim_q]    <= {18'b0, i_fill_ppn[25:0]};"
+  },
+  {
+   "name": "the fill stores the tag of the wrong entry",
+   "old": "vpn_q[victim_q]    <= i_fill_vpn;",
+   "new": "vpn_q[victim_q]    <= i_vpn;"
+  },
+  {
+   "name": "the fill swaps w and x",
+   "old": "w_q[victim_q]      <= i_fill_w;",
+   "new": "w_q[victim_q]      <= i_fill_x;"
+  },
+  {
+   "name": "the fill drops d",
+   "old": "d_q[victim_q]      <= i_fill_d;",
+   "new": "d_q[victim_q]      <= 1'b0;"
+  },
+  {
+   "name": "the fill sets u from r",
+   "old": "u_q[victim_q]      <= i_fill_u;",
+   "new": "u_q[victim_q]      <= i_fill_r;"
+  },
+  {
+   "name": "the fill drops r",
+   "old": "r_q[victim_q]      <= i_fill_r;",
+   "new": "r_q[victim_q]      <= 1'b1;"
+  },
+  {
+   "name": "the lookup reports entry 0's flags",
+   "old": "o_r = r_q[i]; o_w = w_q[i];",
+   "new": "o_r = r_q[0]; o_w = w_q[i];"
+  },
+  {
+   "name": "the lookup reports the wrong level",
+   "old": "o_level = level_q[i];",
+   "new": "o_level = level_q[0];"
+  },
+  {
+   "name": "the lookup reports the wrong ppn",
+   "old": "o_ppn   = ppn_q[i];",
+   "new": "o_ppn   = ppn_q[0];"
+  }
+ ]
+}
