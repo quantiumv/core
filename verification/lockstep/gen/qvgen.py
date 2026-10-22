@@ -1304,8 +1304,12 @@ def sv39_pages(p: Program) -> dict:
             f |= PTE_D
         if v < 8 and user:
             f |= PTE_U
-        if a.sv39_fetch and 1 <= v < 8 and rng.random() < 0.25:
-            f &= ~PTE_A                    # the first fetch from it page-faults; the handler sets A
+        if a.sv39_fetch and 1 <= v < 8 and rng.random() < 0.25 and not p.sv_swap:
+            # the first fetch from it page-faults; the handler sets A. Not when the body switches satp: the handler sets
+            # A in the table set that is current, so the two sets would disagree about a code page, and an interrupt
+            # between the satp write and its SFENCE.VMA (R1 has no way to keep one out) lets a core that re-walks the
+            # page fault where one with a stale entry does not (found by the first run of the exit gate, 1 in 2000)
+            f &= ~PTE_A
         pages[v] = (v << 12, f)
     for v in range(16, 24):                # the sandbox
         pages[v] = (v << 12, sv_data_flags(p, user or rng.random() < 0.2))
