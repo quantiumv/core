@@ -159,6 +159,7 @@ class Program:
         self.probe_code: list[str] = []       # --sv39: what sits at PROBE_X
         self.pockets: list[tuple[int, int]] = []   # --pmp: the byte ranges [lo, hi) of the sandbox pockets
         self.ptpmp_k = None                   # --pmp --sv39: the PTE of the PMPT_VA table that a PMP word cuts in half
+        self.reloc = False                    # --sv39: the S or U body runs through the window above the image (VA != PA)
         self.subroutines: list[str] = []  # appended to .text.entry at the end
         self.call_depth = 0
         self.open_labels: list[Label] = []  # forward branches waiting to land
@@ -909,9 +910,14 @@ def emit_handlers(p: Program):
         # mepc directly; sound because the Sv39 preamble (when active)
         # identity-maps the whole code region, so mepc (VA, if trapped
         # from S) and its physical content agree here regardless of
-        # which privilege trapped.
+        # which privilege trapped. A body that runs through the window
+        # above the image has a virtual mepc that M mode cannot read as
+        # a physical address: the load is made with MPRV, at the
+        # privilege that trapped (MPP), translated.
         "    csrr    x6, mepc",
+        *(["    li      x8, 0x20000", "    csrs    mstatus, x8"] if p.reloc else []),
         "    lhu     x7, 0(x6)",
+        *(["    csrc    mstatus, x8"] if p.reloc else []),
         "    andi    x7, x7, 3",
         "    li      x8, 3",
         f"    beq     x7, x8, {m_len4}",
@@ -1279,6 +1285,10 @@ def plan_sv39(p: Program):
     p.data_base = {"ident": SANDBOX_BASE, "mega": MEGA_VA + SANDBOX_BASE,
                    "giga": GIGA_VA + SANDBOX_BASE}[p.sv_mode]
     p.sv_swap = p.priv_ext and rng.random() < 0.6
+    # the body itself at a virtual address that is not its physical one, through a 2 MiB leaf: every fetch is a
+    # superpage hit, the pc is not the address the PMP sees, and a redirect that turns translation on (the MRET into
+    # the body) has to translate its first fetch. The handlers stay where they are (the M handler cannot translate)
+    p.reloc = p.priv_ext and not p.body_priv2 and p.args.sv39_fetch and rng.random() < 0.3
 
 
 def sv39_pages(p: Program) -> dict:
@@ -1373,7 +1383,11 @@ def sv39_tables(p: Program, pages: dict, setno: int):
     l1[(FARPTR_VA >> 21) & 0x1FF] = sv_ptr(far() + l0_pa)                                           # a table far out
     l1[(BUSPTR_VA >> 21) & 0x1FF] = sv_ptr(FAR_BASE)                                                # a table in the bus-error region
     l1[(RSVDPTR_VA >> 21) & 0x1FF] = sv_ptr(l0_pa) | (1 << sv_rsvd_bit(p))                          # a malformed pointer to a good table
-    l1[(ALIAS_VA >> 21) & 0x1FF] = sv_leaf(0, sv_exec_flags(p, user or rng.random() < 0.1, 0.8))     # executable window onto PA 0
+    if p.reloc:       # the body runs in it: everything allowed, and no fault to leave it for
+        alias_flags = PTE_V | PTE_R | PTE_W | PTE_X | PTE_A | PTE_D | (PTE_U if user else 0)
+    else:
+        alias_flags = sv_exec_flags(p, user or rng.random() < 0.1, 0.8)
+    l1[(ALIAS_VA >> 21) & 0x1FF] = sv_leaf(0, alias_flags)                                          # executable window onto PA 0
     if p.irq:                                                       # the S handler's write of the MAGIC clear
         l1[(MAGIC_BASE >> 21) & 0x1FF] = sv_leaf(MAGIC_BASE & ~0x1FFFFF, PTE_V | PTE_R | PTE_W | PTE_A | PTE_D)
     return root, l1, l0, l0x
@@ -1775,9 +1789,14 @@ def emit_entry_preamble(p: Program):
             p.e("    slli    x6, x6, 11")
             p.e("    csrw    mstatus, x6")   # MPP = S
         p.e("    la      x6, s_mode_entry")
+        if p.reloc:
+            p.li(7, ALIAS_VA)
+            p.e("    add     x6, x6, x7")         # the same address in the window above the image
         p.e("    csrw    mepc, x6")
         p.e("    mret")
         p.e("s_mode_entry:")
+        if p.reloc:
+            p.e("    la      x25, recovery_point")        # pc-relative: the one in the window
         if p.irq and not p.body_u:
             p.body_sie = p.rng.random() < 0.85
             if p.body_sie:
