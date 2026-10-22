@@ -20,18 +20,18 @@
  "mutants": [
   {
    "name": "a Program Buffer run is PMP-checked",
-   "old": "    wire pmp_deny = !misaligned_q && !i_pmp_bypass && !(fault_st ? pmp_w_ok : pmp_r_ok);",
-   "new": "    wire pmp_deny = !misaligned_q && !(fault_st ? pmp_w_ok : pmp_r_ok);"
+   "old": "wire pmp_deny = !misaligned_q && !i_pmp_bypass && pa_valid && !(xl_on && sc_fail)",
+   "new": "wire pmp_deny = !misaligned_q && pa_valid && !(xl_on && sc_fail)"
   },
   {
    "name": "the bypass only exempts loads",
-   "old": "    wire pmp_deny = !misaligned_q && !i_pmp_bypass && !(fault_st ? pmp_w_ok : pmp_r_ok);",
-   "new": "    wire pmp_deny = !misaligned_q && !(i_pmp_bypass && !fault_st) && !(fault_st ? pmp_w_ok : pmp_r_ok);"
+   "old": "wire pmp_deny = !misaligned_q && !i_pmp_bypass && pa_valid && !(xl_on && sc_fail)",
+   "new": "wire pmp_deny = !misaligned_q && !(i_pmp_bypass && !fault_st) && pa_valid && !(xl_on && sc_fail)"
   },
   {
    "name": "the bypass only exempts stores",
-   "old": "    wire pmp_deny = !misaligned_q && !i_pmp_bypass && !(fault_st ? pmp_w_ok : pmp_r_ok);",
-   "new": "    wire pmp_deny = !misaligned_q && !(i_pmp_bypass && fault_st) && !(fault_st ? pmp_w_ok : pmp_r_ok);"
+   "old": "wire pmp_deny = !misaligned_q && !i_pmp_bypass && pa_valid && !(xl_on && sc_fail)",
+   "new": "wire pmp_deny = !misaligned_q && !(i_pmp_bypass && fault_st) && pa_valid && !(xl_on && sc_fail)"
   }
  ]
 }

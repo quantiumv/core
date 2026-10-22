@@ -1,0 +1,204 @@
+{
+ "dut": "design/pipe/qv_lsu.sv",
+ "tb": "design/pipe/qv_lsu_xl_tb.sv",
+ "files": [
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_pmp.sv",
+  "design/pipe/qv_pte.sv",
+  "design/pipe/qv_tlb.sv",
+  "design/pipe/qv_ptw.sv",
+  "design/pipe/qv_xlate.sv",
+  "design/pipe/qv_lsu.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench"
+ ],
+ "cwd": "design",
+ "timeout": 1800,
+ "mutants": [
+  {
+   "name": "translation is on in M mode",
+   "old": "wire        xl_on    = i_satp_on && !i_pmp_bypass && (eff_priv != 2'b11);",
+   "new": "wire        xl_on    = i_satp_on && !i_pmp_bypass;"
+  },
+  {
+   "name": "translation ignores MPRV (the plain privilege decides)",
+   "old": "wire        xl_on    = i_satp_on && !i_pmp_bypass && (eff_priv != 2'b11);",
+   "new": "wire        xl_on    = i_satp_on && !i_pmp_bypass && (i_priv != 2'b11);"
+  },
+  {
+   "name": "translation is on in a Program Buffer run",
+   "old": "wire        xl_on    = i_satp_on && !i_pmp_bypass && (eff_priv != 2'b11);",
+   "new": "wire        xl_on    = i_satp_on && (eff_priv != 2'b11);"
+  },
+  {
+   "name": "satp is ignored",
+   "old": "wire        xl_on    = i_satp_on && !i_pmp_bypass && (eff_priv != 2'b11);",
+   "new": "wire        xl_on    = !i_pmp_bypass && (eff_priv != 2'b11);"
+  },
+  {
+   "name": "a misaligned access is walked before it traps",
+   "old": "wire x_req   = at_head && xl_on && !misaligned_q && !sc_fail && !xlated_q;",
+   "new": "wire x_req   = at_head && xl_on && !sc_fail && !xlated_q;"
+  },
+  {
+   "name": "a failing SC is walked",
+   "old": "wire x_req   = at_head && xl_on && !misaligned_q && !sc_fail && !xlated_q;",
+   "new": "wire x_req   = at_head && xl_on && !misaligned_q && !xlated_q;"
+  },
+  {
+   "name": "the translation is asked again after it was answered (unobservable: the held request hits the entry the walk has just filled and the answer is the same)",
+   "old": "wire x_req   = at_head && xl_on && !misaligned_q && !sc_fail && !xlated_q;",
+   "new": "wire x_req   = at_head && xl_on && !misaligned_q && !sc_fail;",
+   "equivalent": true
+  },
+  {
+   "name": "a store, SC or AMO is translated as a load",
+   "old": "assign o_xl_wr     = kind_wr;",
+   "new": "assign o_xl_wr     = 1'b0;"
+  },
+  {
+   "name": "a load is translated as a store",
+   "old": "assign o_xl_wr     = kind_wr;",
+   "new": "assign o_xl_wr     = 1'b1;"
+  },
+  {
+   "name": "LR is translated as a store (needs W and D)",
+   "old": "assign o_xl_wr     = kind_wr;",
+   "new": "assign o_xl_wr     = kind_wr || lr_q;"
+  },
+  {
+   "name": "the walker is asked with the plain privilege, not the effective one",
+   "old": "assign o_xl_priv   = eff_priv;",
+   "new": "assign o_xl_priv   = i_priv;"
+  },
+  {
+   "name": "the walker is asked for the physical address",
+   "old": "assign o_xl_va     = addr_q;",
+   "new": "assign o_xl_va     = pa;"
+  },
+  {
+   "name": "a flush does not cancel the pending translation",
+   "old": "assign o_xl_cancel = (state_q == S_WAIT_HEAD) && i_flush && xl_on && !xlated_q;",
+   "new": "assign o_xl_cancel = 1'b0;"
+  },
+  {
+   "name": "the PMP sees the virtual address",
+   "old": ".i_addr(pa), .i_end(end_addr), .i_priv(eff_priv),",
+   "new": ".i_addr(addr_q), .i_end(end_addr), .i_priv(eff_priv),"
+  },
+  {
+   "name": "the PMP span starts at the physical address but ends at the virtual one",
+   "old": "wire [63:0] end_addr = pa + (64'd1 << size_q) - 64'd1;",
+   "new": "wire [63:0] end_addr = addr_q + (64'd1 << size_q) - 64'd1;"
+  },
+  {
+   "name": "the PMP runs before the translation (on the virtual address)",
+   "old": "wire pmp_deny = !misaligned_q && !i_pmp_bypass && pa_valid && !(xl_on && sc_fail)",
+   "new": "wire pmp_deny = !misaligned_q && !i_pmp_bypass && !(xl_on && sc_fail)"
+  },
+  {
+   "name": "a failing SC meets the PMP under translation (redundant by construction: a failing SC is never translated, so pa_valid is already low)",
+   "old": "wire pmp_deny = !misaligned_q && !i_pmp_bypass && pa_valid && !(xl_on && sc_fail)",
+   "new": "wire pmp_deny = !misaligned_q && !i_pmp_bypass && pa_valid",
+   "equivalent": true
+  },
+  {
+   "name": "the bus gets the virtual address",
+   "old": "assign wb_mem_addr_o = {pa[31:3], 3'b000};",
+   "new": "assign wb_mem_addr_o = {addr_q[31:3], 3'b000};"
+  },
+  {
+   "name": "the RVFI memory address is the virtual one",
+   "old": "o_res.mem_addr  <= {(pa_valid ? pa[63:3] : addr_q[63:3]), 3'b000};",
+   "new": "o_res.mem_addr  <= {addr_q[63:3], 3'b000};"
+  },
+  {
+   "name": "tval is the physical address",
+   "old": "o_res.tval      <= addr_q;",
+   "new": "o_res.tval      <= pa;"
+  },
+  {
+   "name": "the page-fault cause ignores the store class (always 13)",
+   "old": "(x_fault && i_xl_pf)         ? (kind_wr ? 4'd15 : 4'd13)",
+   "new": "(x_fault && i_xl_pf)         ? 4'd13"
+  },
+  {
+   "name": "the page-fault cause ignores the access (always 15)",
+   "old": "(x_fault && i_xl_pf)         ? (kind_wr ? 4'd15 : 4'd13)",
+   "new": "(x_fault && i_xl_pf)         ? 4'd15"
+  },
+  {
+   "name": "LR page faults with cause 15",
+   "old": "(x_fault && i_xl_pf)         ? (kind_wr ? 4'd15 : 4'd13)",
+   "new": "(x_fault && i_xl_pf)         ? (fault_st ? 4'd15 : 4'd13)"
+  },
+  {
+   "name": "a walk's access fault is a page fault",
+   "old": "wire x_fault = x_req && i_xl_done && (i_xl_pf || i_xl_af);",
+   "new": "wire x_fault = x_req && i_xl_done && i_xl_pf;"
+  },
+  {
+   "name": "a walk's page fault is ignored",
+   "old": "wire x_fault = x_req && i_xl_done && (i_xl_pf || i_xl_af);",
+   "new": "wire x_fault = x_req && i_xl_done && i_xl_af;"
+  },
+  {
+   "name": "an access fault of a walk is reported as a load fault for LR",
+   "old": ":                                (fault_st ? 4'd7 : 4'd5);",
+   "new": ":                                (kind_wr ? 4'd7 : 4'd5);"
+  },
+  {
+   "name": "a translated address is used without waiting for the answer",
+   "old": "wire        pa_valid = !xl_on || xlated_q;",
+   "new": "wire        pa_valid = 1'b1;"
+  },
+  {
+   "name": "the answer is not registered with the page offset",
+   "old": "pa_q     <= {8'b0, i_xl_ppn, addr_q[11:0]};",
+   "new": "pa_q     <= {8'b0, i_xl_ppn, 12'b0};"
+  },
+  {
+   "name": "the answer loses a page-number bit",
+   "old": "pa_q     <= {8'b0, i_xl_ppn, addr_q[11:0]};",
+   "new": "pa_q     <= {8'b0, 1'b0, i_xl_ppn[42:0], addr_q[11:0]};"
+  },
+  {
+   "name": "the translated flag is not cleared for a new op",
+   "old": "                    phase_wr_q   <= 1'b0;\n                    xlated_q     <= 1'b0;",
+   "new": "                    phase_wr_q   <= 1'b0;"
+  },
+  {
+   "name": "an access starts while the walker has a beat in flight",
+   "old": "wire start     = start_raw && !i_ptw_beat;",
+   "new": "wire start     = start_raw;"
+  },
+  {
+   "name": "the walker is not told the access is ready to start (unobservable: start and start_raw differ only while a walker beat is in flight, and the walker looks at the flag only in W_GO)",
+   "old": "assign o_bus_busy     = start_raw || in_bus;",
+   "new": "assign o_bus_busy     = start || in_bus;",
+   "equivalent": true
+  },
+  {
+   "name": "the walker is not told an access is in flight",
+   "old": "assign o_bus_busy     = start_raw || in_bus;",
+   "new": "assign o_bus_busy     = start_raw;"
+  },
+  {
+   "name": "the reservation is compared with the physical address",
+   "old": "wire sc_fail  = sc_q && !(i_res_valid && i_res_addr == addr_q);      // the reservation is a virtual address",
+   "new": "wire sc_fail  = sc_q && !(i_res_valid && i_res_addr == pa);      // the reservation is a virtual address"
+  },
+  {
+   "name": "the SC's rd = 1 completion needs the PMP first",
+   "old": "wire sc_fail_done = at_head && sc_fail && !misaligned_q && !pmp_deny;",
+   "new": "wire sc_fail_done = at_head && sc_fail && !misaligned_q && !pmp_deny && !x_fault && pa_valid;"
+  }
+ ]
+}

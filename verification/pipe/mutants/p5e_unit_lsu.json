@@ -20,33 +20,33 @@
  "mutants": [
   {
    "name": "every access is checked for write",
-   "old": "wire pmp_deny = !misaligned_q && !(fault_st ? pmp_w_ok : pmp_r_ok);",
-   "new": "wire pmp_deny = !misaligned_q && !pmp_w_ok;"
+   "old": "&& !(fault_st ? pmp_w_ok : pmp_r_ok);",
+   "new": "&& !pmp_w_ok;"
   },
   {
    "name": "every access is checked for read",
-   "old": "wire pmp_deny = !misaligned_q && !(fault_st ? pmp_w_ok : pmp_r_ok);",
-   "new": "wire pmp_deny = !misaligned_q && !pmp_r_ok;"
+   "old": "&& !(fault_st ? pmp_w_ok : pmp_r_ok);",
+   "new": "&& !pmp_r_ok;"
   },
   {
    "name": "LR and AMOs are checked for read",
-   "old": "wire pmp_deny = !misaligned_q && !(fault_st ? pmp_w_ok : pmp_r_ok);",
-   "new": "wire pmp_deny = !misaligned_q && !(store_q ? pmp_w_ok : pmp_r_ok);"
+   "old": "&& !(fault_st ? pmp_w_ok : pmp_r_ok);",
+   "new": "&& !(store_q ? pmp_w_ok : pmp_r_ok);"
   },
   {
    "name": "the span is one byte",
-   "old": "wire [63:0] end_addr = addr_q + (64'd1 << size_q) - 64'd1;",
-   "new": "wire [63:0] end_addr = addr_q;"
+   "old": "wire [63:0] end_addr = pa + (64'd1 << size_q) - 64'd1;",
+   "new": "wire [63:0] end_addr = pa;"
   },
   {
    "name": "the span is always 8 bytes",
-   "old": "wire [63:0] end_addr = addr_q + (64'd1 << size_q) - 64'd1;",
-   "new": "wire [63:0] end_addr = addr_q + 64'd7;"
+   "old": "wire [63:0] end_addr = pa + (64'd1 << size_q) - 64'd1;",
+   "new": "wire [63:0] end_addr = pa + 64'd7;"
   },
   {
    "name": "the span is the aligned dword",
-   "old": "wire [63:0] end_addr = addr_q + (64'd1 << size_q) - 64'd1;",
-   "new": "wire [63:0] end_addr = {addr_q[63:3], 3'b111};"
+   "old": "wire [63:0] end_addr = pa + (64'd1 << size_q) - 64'd1;",
+   "new": "wire [63:0] end_addr = {pa[63:3], 3'b111};"
   },
   {
    "name": "MPRV ignored",
@@ -65,38 +65,38 @@
   },
   {
    "name": "always checked as M",
-   "old": ".i_addr(addr_q), .i_end(end_addr), .i_priv(eff_priv),",
-   "new": ".i_addr(addr_q), .i_end(end_addr), .i_priv(2'b11),"
+   "old": ".i_addr(pa), .i_end(end_addr), .i_priv(eff_priv),",
+   "new": ".i_addr(pa), .i_end(end_addr), .i_priv(2'b11),"
   },
   {
    "name": "a denial reports the misaligned causes",
-   "old": "o_res.cause     <= (done_nobus && misaligned_q) ? (fault_st ? 4'd6 : 4'd4) : (fault_st ? 4'd7 : 4'd5);",
-   "new": "o_res.cause     <= done_nobus ? (fault_st ? 4'd6 : 4'd4) : (fault_st ? 4'd7 : 4'd5);"
+   "old": "o_res.cause     <= (done_nobus && misaligned_q) ? (fault_st ? 4'd6 : 4'd4)",
+   "new": "o_res.cause     <= done_nobus ? (fault_st ? 4'd6 : 4'd4)"
   },
   {
    "name": "a bus error reports the misaligned causes",
-   "old": "o_res.cause     <= (done_nobus && misaligned_q) ? (fault_st ? 4'd6 : 4'd4) : (fault_st ? 4'd7 : 4'd5);",
-   "new": "o_res.cause     <= (done_nobus && misaligned_q) || wb_mem_err_i ? (fault_st ? 4'd6 : 4'd4) : (fault_st ? 4'd7 : 4'd5);"
+   "old": "o_res.cause     <= (done_nobus && misaligned_q) ? (fault_st ? 4'd6 : 4'd4)",
+   "new": "o_res.cause     <= ((done_nobus && misaligned_q) || wb_mem_err_i) ? (fault_st ? 4'd6 : 4'd4)"
   },
   {
    "name": "the PMP outranks misaligned",
-   "old": "o_res.cause     <= (done_nobus && misaligned_q) ? (fault_st ? 4'd6 : 4'd4) : (fault_st ? 4'd7 : 4'd5);",
-   "new": "o_res.cause     <= (done_nobus && misaligned_q && !(fault_st ? !pmp_w_ok : !pmp_r_ok)) ? (fault_st ? 4'd6 : 4'd4) : (fault_st ? 4'd7 : 4'd5);"
+   "old": "o_res.cause     <= (done_nobus && misaligned_q) ? (fault_st ? 4'd6 : 4'd4)",
+   "new": "o_res.cause     <= (done_nobus && misaligned_q && !(fault_st ? !pmp_w_ok : !pmp_r_ok)) ? (fault_st ? 4'd6 : 4'd4)"
   },
   {
    "name": "the SC reservation is judged before the PMP",
-   "old": "wire sc_fail_done = done_nobus && !misaligned_q && !pmp_deny;",
-   "new": "wire sc_fail_done = done_nobus && !misaligned_q;"
+   "old": "wire sc_fail_done = at_head && sc_fail && !misaligned_q && !pmp_deny;",
+   "new": "wire sc_fail_done = at_head && sc_fail && !misaligned_q;"
   },
   {
    "name": "a denied access still starts on the bus",
-   "old": "wire start    = at_head && !misaligned_q && !pmp_deny && !sc_fail;",
-   "new": "wire start    = at_head && !misaligned_q && !sc_fail;"
+   "old": "wire start_raw = at_head && !misaligned_q && !pmp_deny && !sc_fail && pa_valid;",
+   "new": "wire start_raw = at_head && !misaligned_q && !sc_fail && pa_valid;"
   },
   {
    "name": "a denial does not complete the op",
-   "old": "wire done_nobus   = at_head && (misaligned_q || pmp_deny || sc_fail);",
-   "new": "wire done_nobus   = at_head && (misaligned_q || sc_fail);"
+   "old": "wire done_nobus   = at_head && (misaligned_q || pmp_deny || sc_fail || x_fault);",
+   "new": "wire done_nobus   = at_head && (misaligned_q || sc_fail || x_fault);"
   },
   {
    "name": "a denial reports the dword-aligned address as tval",
@@ -110,18 +110,18 @@
   },
   {
    "name": "the check uses the dword-aligned address",
-   "old": ".i_addr(addr_q), .i_end(end_addr), .i_priv(eff_priv),",
-   "new": ".i_addr({addr_q[63:3], 3'b000}), .i_end(end_addr), .i_priv(eff_priv),"
+   "old": ".i_addr(pa), .i_end(end_addr), .i_priv(eff_priv),",
+   "new": ".i_addr({pa[63:3], 3'b000}), .i_end(end_addr), .i_priv(eff_priv),"
   },
   {
    "name": "the PMP check is skipped for stores",
-   "old": "wire pmp_deny = !misaligned_q && !(fault_st ? pmp_w_ok : pmp_r_ok);",
-   "new": "wire pmp_deny = !misaligned_q && !(fault_st ? 1'b1 : pmp_r_ok);"
+   "old": "&& !(fault_st ? pmp_w_ok : pmp_r_ok);",
+   "new": "&& !(fault_st ? 1'b1 : pmp_r_ok);"
   },
   {
    "name": "the PMP check is skipped for loads",
-   "old": "wire pmp_deny = !misaligned_q && !(fault_st ? pmp_w_ok : pmp_r_ok);",
-   "new": "wire pmp_deny = !misaligned_q && !(fault_st ? pmp_w_ok : 1'b1);"
+   "old": "&& !(fault_st ? pmp_w_ok : pmp_r_ok);",
+   "new": "&& !(fault_st ? pmp_w_ok : 1'b1);"
   }
  ]
 }

@@ -98,6 +98,7 @@ module qv_commit_tb;
     logic                    dbg_entry, dbg_halt_entry, dbg_ebreak_entry, dbg_trigger_entry;
     logic                    pb_act = 1'b0, pb_commit, pb_done, pb_abort;
     logic [2:0]              dbg_cause;
+    logic                    sfence;
 
     qv_commit #(.RESET_PC(64'h1000)) dut (
         .clk(clk), .rst(rst),
@@ -113,6 +114,7 @@ module qv_commit_tb;
         .i_dpc(dpc), .i_dcsr(dcsr), .o_dbg_entry(dbg_entry), .o_dbg_cause(dbg_cause), .o_dbg_halt_entry(dbg_halt_entry),
         .o_dbg_ebreak_entry(dbg_ebreak_entry), .o_dbg_trigger_entry(dbg_trigger_entry),
         .i_pb_active(pb_act), .o_pb_commit(pb_commit), .o_pb_done(pb_done), .o_pb_abort(pb_abort),
+        .o_sfence(sfence),
         .o_regfile_we(rf_we), .o_regfile_sel(rf_sel), .o_regfile_data(rf_data),
         .o_commit_valid(c_valid), .o_commit_rd(c_rd), .o_commit_rd_wen(c_rd_wen), .o_commit_tag(c_tag),
         .o_csr_addr(csr_addr), .i_csr_rdata(csr_rdata), .o_csr_we(csr_we), .o_csr_wdata(csr_wdata),
@@ -799,6 +801,7 @@ module qv_commit_tb;
         c.cls = QV_FU_SYS; c.sys_op = QV_SYS_MRET;
         #1;
         check("mret from S is just executed (decode guards legality)", b(mret_taken), 64'd1);
+        check("mret: no TLB flush", b(sfence), 64'd0);
         retire();
         check("mret with MPP = M", {62'b0, priv}, 64'd3);
 
@@ -836,6 +839,49 @@ module qv_commit_tb;
         check("wfi/alu/sfence.vma: priv unchanged", {62'b0, priv}, 64'd3);
         mpp = 2'b11; spp = 1'b0; medeleg = '0;
 
+        // ---- SFENCE.VMA flushes the TLBs (o_sfence) in its commit cycle, and only when it retires ----
+        set_entry(64'h4450, 32'h1200_0073, 0, 1'b0, 64'd0);
+        c.cls = QV_FU_SYS; c.sys_op = QV_SYS_SFENCE_VMA; c.serialize = 1'b1; e.complete = 1'b0;
+        #1;
+        check("sfence.vma, head incomplete: no flush", b(sfence), 64'd0);
+        e.complete = 1'b1;
+        #1;
+        check("sfence.vma: flush in the commit cycle", b(sfence), 64'd1);
+        check("sfence.vma: that is the commit cycle", b(commit_now), 64'd1);
+        retire();
+        #1;
+        check("no head: no flush", b(sfence), 64'd0);
+        set_entry(64'h4454, 32'h1050_0073, 0, 1'b0, 64'd0);       // wfi
+        c.cls = QV_FU_SYS; c.sys_op = QV_SYS_WFI;
+        #1;
+        check("wfi: no flush", b(sfence), 64'd0);
+        retire();
+        set_entry(64'h4458, 32'h13, 5, 1'b1, 64'd1);              // an ALU op
+        #1;
+        check("alu: no flush", b(sfence), 64'd0);
+        retire();
+        // one that traps (TVM in S: decode marks it illegal) is no flush
+        set_entry(64'h445C, 32'h1200_0073, 0, 1'b0, 64'd0);
+        c.cls = QV_FU_SYS; c.sys_op = QV_SYS_SFENCE_VMA; c.serialize = 1'b1; c.xcpt = 1'b1; c.cause = 4'd2;
+        #1;
+        check("trapped sfence.vma: it traps", b(trap_taken), 64'd1);
+        check("trapped sfence.vma: no flush", b(sfence), 64'd0);
+        retire();
+        // ... and neither is one behind an action-0 trigger match (a breakpoint exception, whatever the class says)
+        set_entry(64'h4460, 32'h1200_0073, 0, 1'b0, 64'd0);
+        c.cls = QV_FU_SYS; c.sys_op = QV_SYS_SFENCE_VMA; c.serialize = 1'b1; c.trig_exc = 1'b1;
+        #1;
+        check("sfence.vma under an exception trigger: it traps", b(trap_taken), 64'd1);
+        check("sfence.vma under an exception trigger: no flush", b(sfence), 64'd0);
+        retire();
+        // one the debugger takes over (action-1 trigger on it) is no flush either
+        set_entry(arch_pc, 32'h1200_0073, 0, 1'b0, 64'd0);
+        c.cls = QV_FU_SYS; c.sys_op = QV_SYS_SFENCE_VMA; c.serialize = 1'b1; c.trig_debug = 1'b1;
+        #1;
+        check("sfence.vma under a debug trigger: entry", b(dbg_entry), 64'd1);
+        check("sfence.vma under a debug trigger: no flush", b(sfence), 64'd0);
+        retire();
+
         // ---- FENCE.I: fetch held until idle, then flush + serializing refetch ----
         check("no fence.i head: no hold", b(fetch_hold), 64'd0);
         fetch_idle = 1'b0;
@@ -858,6 +904,7 @@ module qv_commit_tb;
         fetch_idle = 1'b1;
         expect_plain("fence.i, fetch idle", 1'b1);
         check("fence.i: flush pulse", b(icache_flush), 64'd1);
+        check("fence.i: the TLBs are not flushed (that is SFENCE.VMA)", b(sfence), 64'd0);
         check("fence.i: fetch still held in its commit cycle", b(fetch_hold), 64'd1);
         check("fence.i: no rd write", b(rf_we), 64'd0);
         check("fence.i: rvfi rd 0", {59'b0, r_rd_addr}, 64'd0);
@@ -904,6 +951,15 @@ module qv_commit_tb;
         retire();
         // still pending and enabled: taken again at the next sample point
         expect_irq("MTI again after one handler retirement", 4'd7, 1'b0, {mtvec[63:2], 2'b00});
+        // an interrupt taken at the sample point replaces an SFENCE.VMA head: nothing is flushed
+        set_entry(arch_pc, 32'h13, 3, 1'b1, 64'd5);
+        retire();
+        set_entry(arch_pc, 32'h1200_0073, 0, 1'b0, 64'd0);
+        c.cls = QV_FU_SYS; c.sys_op = QV_SYS_SFENCE_VMA; c.serialize = 1'b1;
+        #1;
+        check("MTI at an SFENCE.VMA head: taken", b(irq_taken), 64'd1);
+        check("MTI at an SFENCE.VMA head: no flush", b(sfence), 64'd0);
+        retire();
         mip = '0;
 
         // not enabled: MIE clear in M, the source's own enable clear, other mip bits
@@ -1441,10 +1497,24 @@ module qv_commit_tb;
             check("pb alu: writes rd", b(rf_we), 64'd1);
             check("pb alu: no trap", b(trap_taken), 64'd0);
             check("pb alu: no redirect", b(redirect), 64'd0);
+            check("pb alu: no TLB flush", b(sfence), 64'd0);
             retire();
             check("pb alu: the pc drifts", arch_pc, pc0 + 64'd4);
             check("pb alu: order advanced", r_order, ord0 + 64'd1);
         end
+        // an SFENCE.VMA in the run still flushes the TLBs (a run skips translation, not the flush); one that traps is an abort
+        set_entry(arch_pc, 32'h1200_0073, 0, 1'b0, 64'd0);
+        c.cls = QV_FU_SYS; c.sys_op = QV_SYS_SFENCE_VMA; c.serialize = 1'b1;
+        #1;
+        check("pb sfence.vma: flushes", b(sfence), 64'd1);
+        check("pb sfence.vma: a retirement", b(commit_now), 64'd1);
+        retire();
+        set_entry(arch_pc, 32'h1200_0073, 0, 1'b0, 64'd0);
+        c.cls = QV_FU_SYS; c.sys_op = QV_SYS_SFENCE_VMA; c.serialize = 1'b1; c.xcpt = 1'b1; c.cause = 4'd2;
+        #1;
+        check("pb trapped sfence.vma: no flush", b(sfence), 64'd0);
+        check("pb trapped sfence.vma: an abort", b(pb_abort), 64'd1);
+        retire();
         // a head that isn't complete is no retirement
         set_entry(arch_pc, 32'h13, 5, 1'b1, 64'd9);
         e.complete = 1'b0;

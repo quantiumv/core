@@ -150,8 +150,8 @@
   },
   {
    "name": "SC failure still writes",
-   "old": "wire start    = at_head && !misaligned_q && !pmp_deny && !sc_fail;",
-   "new": "wire start    = at_head && !misaligned_q && !pmp_deny;"
+   "old": "wire start_raw = at_head && !misaligned_q && !pmp_deny && !sc_fail && pa_valid;",
+   "new": "wire start_raw = at_head && !misaligned_q && !pmp_deny && pa_valid;"
   },
   {
    "name": "AMO write phase is a read",
@@ -205,8 +205,8 @@
   },
   {
    "name": "misaligned atomic reaches the bus",
-   "old": "wire start    = at_head && !misaligned_q && !pmp_deny && !sc_fail;",
-   "new": "wire start    = at_head && (!misaligned_q || atomic_q) && !pmp_deny && !sc_fail;"
+   "old": "wire start_raw = at_head && !misaligned_q && !pmp_deny && !sc_fail && pa_valid;",
+   "new": "wire start_raw = at_head && (!misaligned_q || atomic_q) && !pmp_deny && !sc_fail && pa_valid;"
   },
   {
    "name": "LR value not sign-extended",
