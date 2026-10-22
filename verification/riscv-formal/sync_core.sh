@@ -9,6 +9,12 @@
 #   pipe      -> $RVFORMAL/cores/quantiumv_pipe  (design/pipe/core_pipe.sv)
 #   pipe-full -> $RVFORMAL/cores/quantiumv_pipe_full: the same without
 #                QV_FORMAL_SMALL (full-size ROB and IQ), for spot checks
+#   pipe-sv39 -> $RVFORMAL/cores/quantiumv_pipe_sv39: with address translation
+#                (the other pipe models are built with QV_FORMAL_NO_SV39: no
+#                walker, no TLBs, satp pinned Bare by the checks' assumptions),
+#                one entry in each TLB; run only the checks that are cheap with
+#                satp free (see quantiumv_pipe/README.md), liveness and hang
+#                excluded: a walk takes longer than their window
 #   pipe-amo  -> $RVFORMAL/cores/quantiumv_pipe_amo: isa rv64ia, for the 18
 #                AMO checks (needs the patch and isa_rv64ia.txt from
 #                quantiumv/README.md in the riscv-formal checkout)
@@ -25,13 +31,14 @@ case "${1:-}" in
         NAME=quantiumv
         FILES="design/alu.sv design/decoder.sv design/register_file.sv design/csr_file.sv
                design/divider.sv design/c_expand.sv design/core.sv" ;;
-    pipe|pipe-full|pipe-amo)
+    pipe|pipe-full|pipe-amo|pipe-sv39)
         NAME=quantiumv_pipe
         [ "$1" == "pipe-full" ] && SUFFIX=_full
+        [ "$1" == "pipe-sv39" ] && SUFFIX=_sv39
         [ "$1" == "pipe-amo" ] && NAME=quantiumv_pipe_amo
         FILES=$(grep -E '^design/(pipe/|decoder\.sv|alu\.sv|c_expand\.sv|csr_file\.sv|register_file\.sv|divider\.sv)' \
                     verification/regress/pipe_design_files.list) ;;
-    *) echo "usage: sync_core.sh fsm|pipe|pipe-full|pipe-amo" >&2; exit 2 ;;
+    *) echo "usage: sync_core.sh fsm|pipe|pipe-full|pipe-amo|pipe-sv39" >&2; exit 2 ;;
 esac
 
 DST="$RVFORMAL/cores/$NAME$SUFFIX"
@@ -43,7 +50,8 @@ done
 cp -r "$REPO/design/defaults" "$DST/design/"
 cp "$REPO/verification/riscv-formal/quantiumv/wrapper.sv" "$DST/"
 cp "$REPO/verification/riscv-formal/$NAME/checks.cfg" "$DST/"
-[ -z "$SUFFIX" ] || sed -i 's/ -D QV_FORMAL_SMALL//' "$DST/checks.cfg"
+[ "$1" != "pipe-full" ] || sed -i 's/ -D QV_FORMAL_SMALL//' "$DST/checks.cfg"
+[ "$1" != "pipe-sv39" ] || sed -i 's/ -D QV_FORMAL_NO_SV39//' "$DST/checks.cfg"
 if [ "$1" != "fsm" ]; then
     # the cfg's read_slang line takes the file list from here, not a copy of its own
     RTL=""

@@ -1,5 +1,5 @@
 #!/bin/bash
-# sweep_status.sh fsm|pipe|pipe-full|pipe-amo [--only REGEX] [--summary] [--detail]
+# sweep_status.sh fsm|pipe|pipe-full|pipe-amo|pipe-sv39 [--only REGEX] [--summary] [--detail]
 #
 # The status table run_sweep.sh prints at its end, without running anything: one line per generated check
 # (PASS, FAIL, TIMEOUT, ERROR, incomplete = still running or never finished, not run) and the PASS count.
@@ -15,7 +15,8 @@ case "${1:-}" in
     pipe) NAME=quantiumv_pipe ;;
     pipe-full) NAME=quantiumv_pipe_full ;;
     pipe-amo) NAME=quantiumv_pipe_amo ;;
-    *) echo "usage: sweep_status.sh fsm|pipe|pipe-full|pipe-amo [--only REGEX] [--summary] [--detail]" >&2; exit 2 ;;
+    pipe-sv39) NAME=quantiumv_pipe_sv39 ;;
+    *) echo "usage: sweep_status.sh fsm|pipe|pipe-full|pipe-amo|pipe-sv39 [--only REGEX] [--summary] [--detail]" >&2; exit 2 ;;
 esac
 shift
 while [ $# -gt 0 ]; do
