@@ -5,9 +5,9 @@
 
 `include "riscv_encode.sv"
 
-// "The hart is halted and not running a Program Buffer": the FSM core says it with its state register,
-// core_pipe (-DQV_PIPE_AS_CORE) has no such state and says it with its two debug flags.
-`ifdef QV_PIPE_AS_CORE
+// "The hart is halted and not running a Program Buffer": the FSM core (the reference, -DQV_REF_AS_CORE) says it
+// with its state register, the pipelined core has no such state and says it with its two debug flags.
+`ifndef QV_REF_AS_CORE
 `define QV_TRIG_HALTED(c) (c.o_debug_mode === 1'b1 && c.debug_progbuf_active === 1'b0)
 `else
 `define QV_TRIG_HALTED(c) (c.state === c.S_DEBUG_HALTED)

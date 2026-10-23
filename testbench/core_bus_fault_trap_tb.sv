@@ -75,7 +75,7 @@ module core_bus_fault_trap_tb;
      * anywhere in the whole run is equally damning.
      */
     logic amo_write_entered;
-`ifdef QV_PIPE_AS_CORE
+`ifndef QV_REF_AS_CORE
     // core_pipe has no S_AMO_WRITE: an AMO's write is a locked bus write
     initial amo_write_entered = 1'b0;
     always @(posedge clk)
@@ -285,7 +285,7 @@ module core_bus_fault_trap_tb;
         @(posedge clk); #1;
         rst = 0;
 
-`ifdef QV_PIPE_AS_CORE
+`ifndef QV_REF_AS_CORE
         // ~330 cycles on core_pipe: every CSR access serializes
         wait_halted_or_timeout(`TIMEOUT_CYCLES_LARGE, "EBREAK trap never fired");
 `else

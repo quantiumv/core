@@ -58,7 +58,7 @@ module core_bus_fault_cache_tb;
      * ever legitimately reaches S_AMO_WRITE either.
      */
     logic amo_write_entered;
-`ifdef QV_PIPE_AS_CORE
+`ifndef QV_REF_AS_CORE
     // core_pipe has no S_AMO_WRITE: an AMO's write is a locked bus write
     initial amo_write_entered = 1'b0;
     always @(posedge clk)

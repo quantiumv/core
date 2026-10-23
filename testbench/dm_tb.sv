@@ -1602,7 +1602,7 @@ module dm_tb;
         disable fork;
         #1;
 
-`ifdef QV_PIPE_AS_CORE
+`ifndef QV_REF_AS_CORE
         // core_pipe has no fetch_fault_q/cur_slot. The same fact, halted right behind the faulting fetch's
         // trap: mcause is the instruction access fault (1) and the halt left the trap vector (mtvec = 0) in dpc.
         check("dut_progbuf_fetchfault: genuinely halted at the fault (mcause == 1, dpc == the trap vector)",

@@ -63,7 +63,7 @@ module core_a_ext_cache_tb;
      */
     int read_phase_beats = 0;
     logic mem_cyc_q = 0;
-`ifdef QV_PIPE_AS_CORE
+`ifndef QV_REF_AS_CORE
     wire core_in_mem = dut.core0.wb_mem_cyc_o;      // core_pipe has no S_MEM: a data access is on its bus
 `else
     wire core_in_mem = dut.core0.state == 2'd2 /* S_MEM */;

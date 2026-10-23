@@ -70,7 +70,7 @@ module core_c_ext_cache_tb;
      * S_FETCH_HI at all on this fast path (see design/core.sv's own
      * fstate declaration comment).
      */
-`ifdef QV_PIPE_AS_CORE
+`ifndef QV_REF_AS_CORE
     // core_pipe has no fstate: qv_align assembles a crossing instruction from two fetched dwords, and the
     // instruction's own result (x12 below) is what shows that the high half was fetched.
 `else
@@ -173,7 +173,7 @@ module core_c_ext_cache_tb;
         check("C.SW/C.LW round trip (x15)", dut.core0.regfile0.gp_registers[15], 64'd78);
         check("C.BEQZ not taken -- fell through (x16)", dut.core0.regfile0.gp_registers[16], 64'd1);
         check("EBREAK trap fired (c.ebreak)", {63'b0, halted}, 64'd1);
-`ifdef QV_PIPE_AS_CORE
+`ifndef QV_REF_AS_CORE
         // (no fstate to look at: the x12 check above covers the crossing instruction)
 `else
         check("S_FETCH_HI genuinely visited for the crossing instruction",

@@ -60,6 +60,8 @@ CORE_DEFINE=""
 case "$CORE" in
     fsm)
         DESIGN_LIST="$REPO_ROOT/verification/regress/design_files.list"
+        # design/core.sv never reads it: it makes the testbenches take their FSM-only halves
+        CORE_DEFINE="-DQV_REF_AS_CORE"
         ;;
     ref)
         DESIGN_LIST="$REPO_ROOT/verification/regress/ref_design_files.list"

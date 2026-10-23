@@ -122,7 +122,7 @@ module core_priv_tb;
      * {S_FETCH, S_EXEC, S_MEM} = {0, 1, 2}, hence the literal 2'd1 below
      * (matching core_zicsr_tb.sv's own precedent).
      */
-`ifdef QV_PIPE_AS_CORE
+`ifndef QV_REF_AS_CORE
     // core_pipe has no state register: the monitors sample in the cycle the
     // instruction retires, which is what "S_EXEC at this pc" means for the
     // single-cycle instructions they watch
@@ -297,7 +297,7 @@ module core_priv_tb;
         @(posedge clk); #1;
         rst = 0;
 
-`ifdef QV_PIPE_AS_CORE
+`ifndef QV_REF_AS_CORE
         // every CSR access serializes the pipeline, so this takes longer on core_pipe
         wait_halted_or_timeout(`TIMEOUT_CYCLES_LARGE, "EBREAK trap never fired");
 `else

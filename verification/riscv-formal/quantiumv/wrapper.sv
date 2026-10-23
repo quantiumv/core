@@ -130,7 +130,7 @@ module rvfi_wrapper (
     // windows, so with divides in the stream the properties would fail by
     // design. (The FSM's liveness window is long enough to include them, so
     // that one doesn't define this.)
-`ifdef QV_PIPE_AS_CORE
+`ifndef QV_REF_AS_CORE
     always @* assume (!uut.div_req.valid);
 `else
     always @* assume (!uut.is_div_family);

@@ -429,7 +429,7 @@ module core_sv39_fetch_tb;
                 // Backdoor SFENCE.VMA-equivalent: force every TLB entry
                 // invalid for one cycle, then release -- same reason a
                 // real SFENCE.VMA instruction can't be used here either.
-`ifdef QV_PIPE_AS_CORE
+`ifndef QV_REF_AS_CORE
                 // core_pipe: the commit stage's SFENCE.VMA strobe empties both TLBs at the next edge
                 force dut_l.core0.c_sfence = 1'b1;
                 @(posedge clk); #1;                    // (released after the edge that samples it)

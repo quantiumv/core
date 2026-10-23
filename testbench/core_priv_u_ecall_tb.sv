@@ -147,7 +147,7 @@ module core_priv_u_ecall_tb;
      * {S_FETCH, S_EXEC, S_MEM} = {0, 1, 2}, hence the literal 2'd1 below
      * (matching core_priv_tb.sv/core_zicsr_tb.sv's own precedent).
      */
-`ifdef QV_PIPE_AS_CORE
+`ifndef QV_REF_AS_CORE
     // core_pipe has no state register: the monitors sample in the cycle the
     // instruction retires, which is what "S_EXEC at this pc" means for the
     // single-cycle instructions they watch

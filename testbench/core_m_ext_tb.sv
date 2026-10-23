@@ -68,7 +68,7 @@ module core_m_ext_tb;
     int div_exec_cycle_count = 0;
     int div_exec_cycle_count_final = 0;
     logic div_pc_seen = 1'b0;
-`ifdef QV_PIPE_AS_CORE
+`ifndef QV_REF_AS_CORE
     // core_pipe has no state register: the divide "holds" while it is the
     // ROB head waiting for its result (div_stall), at the divide's own pc
     wire div_holding = dut.core0.pc == DIV_PC && dut.core0.div_stall;

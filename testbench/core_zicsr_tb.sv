@@ -113,7 +113,7 @@ module core_zicsr_tb;
      * declared order in core.sv is {S_FETCH, S_EXEC, S_MEM} = {0, 1, 2}
      * for its 2-bit enum, hence the literal 2'd1 below.
      */
-`ifdef QV_PIPE_AS_CORE
+`ifndef QV_REF_AS_CORE
     // core_pipe has no state register: the monitors sample in the cycle the
     // instruction retires, which is what "S_EXEC at this pc" means for the
     // single-cycle instructions they watch
