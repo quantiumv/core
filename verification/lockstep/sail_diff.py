@@ -42,9 +42,6 @@ TESTBENCH_DIR = REPO_ROOT / "testbench"
 SAIL_CONFIG = LOCKSTEP_DIR / "sail_config_override.json"
 SAIL_BIN = Path.home() / "sail-install" / "bin" / "sail_riscv_sim"
 
-sys.path.insert(0, str(GEN_DIR))
-import qvgen  # noqa: E402  (path set up above)
-
 # ---------------------------------------------------------------------
 # Sail cause-name -> RISC-V standard numeric cause code. Sail's
 # --trace-exception output names causes (e.g. "m-call",
@@ -84,22 +81,21 @@ FETCH_CAUSES = {0, 1, 12}
 
 
 def toolchain_build_sail_safe(seed: int, args, out_base: Path):
-    """Generate + assemble one --sail-safe program via qvgen.py, reusing
-    its own Program/build_program/render/toolchain_build -- no subprocess,
-    no re-parsing its CLI, just the same functions its own __main__ uses."""
-    ns = argparse.Namespace(
-        isa=args.isa, priv=args.priv, pmp=False, sv39=False, irq=False,
-        smc=False, len=args.len, seed=seed, dep_bias=0.3,
-        illegal_rate=args.illegal_rate, ecall_rate=0.01,
-        misalign_rate=args.misalign_rate, badaddr_rate=0.0,
-        max_call_depth=3, max_loop_nesting=2, sail_safe=True,
-        output=out_base, build=True,
+    """Generate + assemble one --sail-safe program with qvgen.py's own
+    command line, so every option it has grown since this was written (and
+    will grow) keeps its default here: an argparse.Namespace built by hand
+    here broke on the first one (--no-div, P4b)."""
+    r = subprocess.run(
+        [sys.executable, str(GEN_DIR / "qvgen.py"), "--isa", args.isa, "--priv", args.priv, "--sail-safe",
+         "--len", str(args.len), "--seed", str(seed), "--illegal-rate", str(args.illegal_rate),
+         "--misalign-rate", str(args.misalign_rate), "--badaddr-rate", "0",
+         "-o", str(out_base), "--build"],
+        capture_output=True, text=True,
     )
-    p = qvgen.build_program(ns)
-    text = qvgen.render(p)
-    asm_path = out_base.with_suffix(".s")
-    asm_path.write_text(text)
-    elf, hexf = qvgen.toolchain_build(asm_path, out_base, ns.isa, bool(p.pagetable_data))
+    if r.returncode != 0:
+        raise RuntimeError(f"seed={seed}: qvgen.py failed:\n{(r.stdout + r.stderr).strip()[-2000:]}")
+    elf = out_base.with_suffix(".elf")
+    hexf = out_base.with_suffix(".hex")
     tohost = subprocess.run(
         ["riscv64-unknown-elf-nm", str(elf)], check=True,
         capture_output=True, text=True,
@@ -151,7 +147,7 @@ _RVFI_RE = re.compile(
 def run_our_core(vvp_path: Path, hexf: Path, tohost_hex: str, timeout_cycles: int):
     proc = subprocess.run(
         ["vvp", str(vvp_path), f"+HEXFILE={hexf}", f"+TOHOST_ADDR={tohost_hex}",
-         f"+TIMEOUT={timeout_cycles}"],
+         f"+TIMEOUT={timeout_cycles}", "+DRAIN=8"],
         cwd=DESIGN_DIR, check=True, capture_output=True, text=True,
     )
     records = []
@@ -182,6 +178,14 @@ def run_our_core(vvp_path: Path, hexf: Path, tohost_hex: str, timeout_cycles: in
                 "mem_rmask": mem_rmask,
                 "mem_wmask": mem_wmask,
             })
+    # The pipelined core writes the bus a cycle before the store retires, so the tracer keeps printing for
+    # +DRAIN cycles after tohost goes nonzero (the store's own record would be lost otherwise). Sail stops
+    # at that store: drop whatever retired after it.
+    tohost = int(tohost_hex, 16) & ~7
+    for i, r in enumerate(records):
+        if r["mem_wmask"] and not r["trap"] and (r["mem_addr"] & ~7) == tohost:
+            records = records[:i + 1]
+            break
     done = "RVFI_DONE" in proc.stdout
     return records, done
 

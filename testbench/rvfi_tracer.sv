@@ -7,9 +7,10 @@
 // effect on the non-formal build).
 //
 // Plusargs: +HEXFILE=<path> +TOHOST_ADDR=<hex, no 0x> +TIMEOUT=<cycles>
-// (same convention as act_runner_tb.sv). Prints one "rvfi ..." line per
-// retirement to stdout, then "RVFI_DONE tohost=<val>" once the tohost
-// word goes nonzero (or "RVFI_TIMEOUT" if it never does).
+// (same convention as act_runner_tb.sv), and optionally +DRAIN=<cycles>. Prints
+// one "rvfi ..." line per retirement to stdout, then "RVFI_DONE tohost=<val>"
+// once the tohost word goes nonzero (+DRAIN cycles later; default 0), or
+// "RVFI_TIMEOUT" if it never does.
 module rvfi_tracer;
     localparam int NUM_WORDS = 131072; // 1 MiB, matching qvgen.py's image
     logic clk = 0;
@@ -124,10 +125,16 @@ module rvfi_tracer;
         logic [31:0] tohost_addr;
         int max_cycles;
         int n;
+        int drain;
+        int stop_n;
         logic [63:0] tohost_val;
         if (!$value$plusargs("HEXFILE=%s", hex_path)) hex_path = "";
         if (!$value$plusargs("TOHOST_ADDR=%h", tohost_addr)) tohost_addr = 32'b0;
         if (!$value$plusargs("TIMEOUT=%d", max_cycles)) max_cycles = 200000;
+        // +DRAIN=<n>: keep printing retirements for n more cycles after tohost goes nonzero. A core that writes the
+        // bus before the store retires (the pipelined one) retires the tohost store a cycle after the write lands.
+        if (!$value$plusargs("DRAIN=%d", drain)) drain = 0;
+        stop_n = -1;
         #1;
         $readmemh(hex_path, sram0.memory);
         @(posedge clk); #1;
@@ -169,7 +176,8 @@ module rvfi_tracer;
                     rvfi_mem_wmask, rvfi_mem_rdata, rvfi_mem_wdata);
             end
             tohost_val = sram0.memory[tohost_addr[31:3]];
-            if (tohost_val != 64'b0) begin
+            if (tohost_val != 64'b0 && stop_n < 0) stop_n = n + drain;
+            if (stop_n >= 0 && n >= stop_n) begin
                 $display("RVFI_DONE tohost=%h", tohost_val);
                 $finish;
             end
