@@ -555,6 +555,12 @@ def emit_priv_op(p: Program, recent: list[int]):
             # the code pages are executable by the body's privilege only (S needs U=0 pages, U needs U=1): a
             # legal sret must not change it. (From a U body it traps and is skipped, whatever SPP says.)
             spp_s = True
+            if p.args.sv39_fetch:
+                # csrs and sret in one aligned 8-byte block, so on one page. A fetch fault on the sret (its page has
+                # A clear) overwrites sepc, and the handler's own sret clears SPP: the retried sret would drop to U at
+                # its own pc, where the page is not executable, and fault there for good (found by the P8 soak: an
+                # sret on the first word of a page)
+                p.e("    .balign 8")
         p.e(f"    {'csrs' if spp_s else 'csrc'}    sstatus, x6")
         p.e("    sret")
         p.e(f"{nxt}:")
