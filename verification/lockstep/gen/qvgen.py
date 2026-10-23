@@ -1511,7 +1511,9 @@ def emit_noncanonical(p: Program, recent: list[int]):
     else:
         va = rng.choice(NONCANON_VAS) + rng.randrange(0, 0x1000, 8) * (rng.random() < 0.5)
     p.li(6, va)
-    if rng.random() < 0.5:
+    # an M body does not translate: the address goes to the bus with its upper bits dropped, so a store through the
+    # alias of a low address writes the real one (the aliases of PA 0 are the program's own code)
+    if rng.random() < 0.5 or not p.priv_ext:
         mnem, _ = rng.choice(_LOADS)
         rd = p.reg_biased(recent)
         p.e(f"    {mnem:<7} x{rd}, 0(x6)")
