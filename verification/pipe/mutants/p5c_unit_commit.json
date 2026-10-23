@@ -34,13 +34,13 @@
   },
   {
    "name": "M-mode traps can be delegated",
-   "old": "wire trap_to_s = is_trap && (priv_q != QV_PRIV_M) && i_medeleg[{2'b00, cause}];",
-   "new": "wire trap_to_s = is_trap && i_medeleg[{2'b00, cause}];"
+   "old": "wire trap_to_s = trap_fx && (priv_q != QV_PRIV_M) && i_medeleg[{2'b00, cause}];",
+   "new": "wire trap_to_s = trap_fx && i_medeleg[{2'b00, cause}];"
   },
   {
    "name": "every trap from below M goes to S",
-   "old": "wire trap_to_s = is_trap && (priv_q != QV_PRIV_M) && i_medeleg[{2'b00, cause}];",
-   "new": "wire trap_to_s = is_trap && (priv_q != QV_PRIV_M);"
+   "old": "wire trap_to_s = trap_fx && (priv_q != QV_PRIV_M) && i_medeleg[{2'b00, cause}];",
+   "new": "wire trap_to_s = trap_fx && (priv_q != QV_PRIV_M);"
   },
   {
    "name": "medeleg indexed by the wrong cause",
@@ -49,8 +49,8 @@
   },
   {
    "name": "delegated traps still vector through mtvec",
-   "old": "if (is_trap)      actual_next_pc = trap_to_s ? {i_stvec[63:2], 2'b00} : {i_mtvec[63:2], 2'b00};",
-   "new": "if (is_trap)      actual_next_pc = {i_mtvec[63:2], 2'b00};"
+   "old": "if (trap_fx)      actual_next_pc = trap_to_s ? {i_stvec[63:2], 2'b00} : {i_mtvec[63:2], 2'b00};",
+   "new": "if (trap_fx)      actual_next_pc = {i_mtvec[63:2], 2'b00};"
   },
   {
    "name": "stvec's MODE bits kept",
@@ -59,54 +59,54 @@
   },
   {
    "name": "SRET returns to mepc",
-   "old": "else if (is_sret) actual_next_pc = i_sepc;",
-   "new": "else if (is_sret) actual_next_pc = i_mepc;"
+   "old": "else if (sret_fx) actual_next_pc = i_sepc;",
+   "new": "else if (sret_fx) actual_next_pc = i_mepc;"
   },
   {
    "name": "SRET does not redirect",
-   "old": "assign o_redirect_valid = irq || (commit && (is_trap || is_mret || is_sret || i_head_entry.mispredict",
-   "new": "assign o_redirect_valid = irq || (commit && (is_trap || is_mret || i_head_entry.mispredict"
+   "old": "(commit && (trap_fx || mret_fx || sret_fx || i_head_entry.mispredict",
+   "new": "(commit && (trap_fx || mret_fx || i_head_entry.mispredict"
   },
   {
    "name": "MRET legalizes MPP = 2",
-   "old": "else if (is_mret) priv_q <= i_mstatus_mpp;",
-   "new": "else if (is_mret) priv_q <= (i_mstatus_mpp == 2'b10) ? QV_PRIV_M : i_mstatus_mpp;"
+   "old": "else if (mret_fx) priv_q <= i_mstatus_mpp;",
+   "new": "else if (mret_fx) priv_q <= (i_mstatus_mpp == 2'b10) ? QV_PRIV_M : i_mstatus_mpp;"
   },
   {
    "name": "MRET loads S whatever MPP says",
-   "old": "else if (is_mret) priv_q <= i_mstatus_mpp;",
-   "new": "else if (is_mret) priv_q <= QV_PRIV_S;"
+   "old": "else if (mret_fx) priv_q <= i_mstatus_mpp;",
+   "new": "else if (mret_fx) priv_q <= QV_PRIV_S;"
   },
   {
    "name": "SRET inverts SPP",
-   "old": "else if (is_sret) priv_q <= i_mstatus_spp ? QV_PRIV_S : QV_PRIV_U;",
-   "new": "else if (is_sret) priv_q <= i_mstatus_spp ? QV_PRIV_U : QV_PRIV_S;"
+   "old": "else if (sret_fx) priv_q <= i_mstatus_spp ? QV_PRIV_S : QV_PRIV_U;",
+   "new": "else if (sret_fx) priv_q <= i_mstatus_spp ? QV_PRIV_U : QV_PRIV_S;"
   },
   {
    "name": "SRET always returns to U",
-   "old": "else if (is_sret) priv_q <= i_mstatus_spp ? QV_PRIV_S : QV_PRIV_U;",
-   "new": "else if (is_sret) priv_q <= QV_PRIV_U;"
+   "old": "else if (sret_fx) priv_q <= i_mstatus_spp ? QV_PRIV_S : QV_PRIV_U;",
+   "new": "else if (sret_fx) priv_q <= QV_PRIV_U;"
   },
   {
    "name": "a delegated trap still lands in M",
-   "old": "if (is_trap)      priv_q <= trap_to_s ? QV_PRIV_S : QV_PRIV_M;",
-   "new": "if (is_trap)      priv_q <= QV_PRIV_M;"
+   "old": "if (trap_fx)      priv_q <= trap_to_s ? QV_PRIV_S : QV_PRIV_M;",
+   "new": "if (trap_fx)      priv_q <= QV_PRIV_M;"
   },
   {
    "name": "an xRET beats a trap on the same entry",
-   "old": "if (is_trap)      priv_q <= trap_to_s ? QV_PRIV_S : QV_PRIV_M;\n            else if (is_mret) priv_q <= i_mstatus_mpp;",
-   "new": "if (is_mret)      priv_q <= i_mstatus_mpp;\n            else if (is_trap) priv_q <= trap_to_s ? QV_PRIV_S : QV_PRIV_M;",
+   "old": "if (trap_fx)      priv_q <= trap_to_s ? QV_PRIV_S : QV_PRIV_M;\n            else if (mret_fx) priv_q <= i_mstatus_mpp;",
+   "new": "if (mret_fx)      priv_q <= i_mstatus_mpp;\n            else if (trap_fx) priv_q <= trap_to_s ? QV_PRIV_S : QV_PRIV_M;",
    "equivalent": true,
    "why": "an entry marked as faulting is never an xRET (is_sys excludes ctrl.xcpt), so the two cannot meet in commit"
   },
   {
    "name": "privilege changes on an incomplete head",
-   "old": "end else if (commit) begin\n            if (is_trap)      priv_q",
-   "new": "end else if (i_head_valid) begin\n            if (is_trap)      priv_q"
+   "old": "end else if (commit) begin\n            if (trap_fx)      priv_q",
+   "new": "end else if (i_head_valid) begin\n            if (trap_fx)      priv_q"
   },
   {
    "name": "sret_taken never raised",
-   "old": "assign o_sret_taken    = commit && is_sret;",
+   "old": "assign o_sret_taken    = commit && sret_fx;",
    "new": "assign o_sret_taken    = 1'b0;"
   },
   {
