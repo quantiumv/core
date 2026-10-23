@@ -151,3 +151,15 @@ all (the longest single check, `reg`, took 80 minutes of CPU; the P6 sweep took 
   module proof, simulation and lockstep cover them.
 - **Module proofs** (`verification/formal/pipe/run.sh --mutants`): `qv_fetch`, `qv_lsu`, `qv_dbg` and `qv_ptw` prove,
   bmc and cover all PASS, and all 29 known-bad versions are caught (6 of them walker mutants).
+
+### After the P8 switchover
+
+The module is `core` in `design/pipe/core.sv` since P8, and the RTL is the one above: preprocessed with comments
+stripped, the two trees differ only in blank lines and a lint pragma around the module name. The configs lost
+`-D QV_PIPE_AS_CORE`, and the wrapper's divide assumption now selects on `QV_REF_AS_CORE`. That branch compiles only
+under `[defines liveness]` and `[defines hang]`, so those two were re-run first, from freshly generated checks, and
+the cheapest check of every other model after them: `pipe` `liveness` and `hang`, `pipe-full` `causal`, `pipe-sv39`
+`causal` and `pipe-amo` `insn_amoand_d` all PASS. The reference config (`sync_core.sh ref`: `ref_*.sv` and
+`ref_macros.svh`, `-D QV_REF_AS_CORE`) elaborates and proves `causal`, `insn_add` and `pc_fwd`, and its `hang` passes on
+boolector in 2:43 of CPU time as before (on bitwuzla it runs out of memory at step 40 and the sweep reports ERROR). The
+module proofs were run again (12 proofs PASS, all 29 known-bad versions caught).

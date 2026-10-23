@@ -112,6 +112,21 @@ Two faults in the generator and none in the RTL. Each showed as a gate result an
   and ran to the cycle limit, with both cores agreeing on all 865,808 retirements. An M body's non-canonical accesses are
   loads only now (`5964d87`).
 
+### What the P8 exit gate found
+
+One more fault in the generator and none in the RTL. The gate ran the switched core against `ref_core` on fresh seeds
+(`--seed 2`, programs 20001 to 22500, the full Sv39 profile with interrupts and the debug script) on the four memory
+configurations: 10,000 runs, of which 9,996 end at `tohost` with 487 million retirements compared (15 million of them
+interrupt entries). The other four are one program, `random_20446`, in every configuration. It never ends, and the cores
+agree on every retirement of it (8.5 million in a 40-million-cycle run).
+
+The body's `sret` idiom sets `sepc` to the next instruction and `SPP` to S, then executes `sret`. Here the `sret` was the first
+word of a page whose A bit was clear. The fetch fault overwrote `sepc`, the page-fault handler's own `sret` cleared `SPP`, and
+the retried `sret` dropped to U at its own pc, where the page cannot be executed: a fetch fault again, ended by a resume at
+`x25` in U mode, for good. `csrs` and `sret` now share an aligned 8-byte block when fetch faults are on (`edf53d3`), so they
+are on one page; the same program ends after 40,427 retirements. A fresh batch from the fixed generator (`--seed 3`, programs
+30001 to 30500, four configurations, 2,000 runs, 100 million retirements) passes in full.
+
 ## Where the core differs from ref_core.sv
 
 Architectural behavior is the same: the lockstep gate compares every retirement, a CSR snapshot, the bus
