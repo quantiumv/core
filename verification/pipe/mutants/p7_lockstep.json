@@ -29,6 +29,7 @@
     "1": "equivalent: W without R is malformed, which faults whether the entry is read as a leaf or as a pointer",
     "18": "core_pipe gives the instruction-side translator SUM = 0, so a fetch never sees the bit this mutant looks at",
     "23": "no translation runs at M privilege (fetch translates below M, data below M by its effective privilege), so the PTE check never sees it",
+    "29": "no generated page is execute-only: the code pages are readable (the handlers read the code, the M handler through MPRV) and a fetch-probe page that works is R and X, so a fetch that also needs R shows nowhere; qv_pte_tb's randomized comparison with core.sv's expressions covers it",
     "34": "the walker presents a fetch with write clear, so the fetch-and-write combination the mutant changes never occurs"
    }
   },
@@ -60,6 +61,7 @@
     "12": "killed by p7_lockstep_extra.json (an M-mode body, a Bare satp, no PMP, or PMP without interrupts: the profile that reaches it)",
     "16": "a cancelled walk goes on as an orphan whose done pulse reaches no waiting request in generated programs (the trap that follows the cancel takes longer than the walk), and a fill needs a request held at that moment; ptw_props proves the rule",
     "18": "a cancelled walk goes on as an orphan whose done pulse reaches no waiting request in generated programs (the trap that follows the cancel takes longer than the walk), and a fill needs a request held at that moment; ptw_props proves the rule",
+    "19": "survives the 64 programs of this campaign; the exit gate's 2000 kill it (random_11082, the 1082nd, run with counts 64, 400, 2000): a cancelled walk that is not marked stale shows only if a request for another address is held when its beat completes; ptw_props proves the rule",
     "29": "the held request is judged again on the TLB hit with its access kind, which finds the same fault",
     "31": "the fault is reported in the same cycle either way; what the walker does below a faulting pointer afterwards is an orphan walk whose done pulse reaches no waiting request (the trap takes longer than the walk)"
    }

@@ -61,25 +61,30 @@ input, the decoder or commit makes the difference unobservable, the RVFI fields 
 get right). Run all four specs for the full record.
 
 `p7_lockstep.json` holds every mutant of the ten P7 unit specs (`qv_pte`, `qv_tlb`, `qv_ptw`, `qv_xlate`, and the translation
-rows of `qv_lsu`, `qv_commit`, `qv_fetch`, `qv_align`, `qv_decode`): 250. The generated programs kill 182: 169 in the main
+rows of `qv_lsu`, `qv_commit`, `qv_fetch`, `qv_align`, `qv_decode`): 250. On the final stimulus (a full run with
+`--skip-annotated`, after the last generator fix, `5964d87`) the generated programs kill 180 within 64 programs: 167 in the main
 profile, 13 more in `p7_lockstep_extra.json` and `p7_lockstep_slow.json` (listed there, and as `unit_only` with the spec that
 kills them in the main one). A mutant counts as killed when the run fails, hangs, or stops on an assertion: the
 `RISCV_FORMAL` block of core_pipe is compiled into the lockstep build, so the invariants that a held translation request does
 not change, and that the walker and the LSU never drive the memory port together, stop the run (the lockstep reports an error
-with no result line). The other 68 survive: 11 are marked `"equivalent"` in their unit spec, and 57 carry a `unit_only` reason.
-Every unit-spec mutant is also killed by its unit testbench. The reasons fall in four groups:
+with no result line). The other 70 survive the 64 programs: 11 are marked `"equivalent"` in their unit spec, and 59 carry a
+`unit_only` reason. Every unit-spec mutant is also killed by its unit testbench. The reasons fall in four groups:
 - *only the number of walks or flushes changes* (31): an extra TLB flush (7), the order the TLB replaces entries in, an
   over-strict tag compare, a second entry for one address, the TLB's state before reset in a two-state simulation, a fill that
   races a flush, a tag taken from the live address (11 in all), what `qv_xlate` does when asked while translation is off or the
   TLB hits or a fault is held (6), which of two simultaneous walker requests goes first (2), a slot reused or a fault answered a
   cycle later (2), a redirect that waits one cycle more (3);
-- *an orphan walk or a coincidence with no request waiting* (10): what the walker does after a cancel or below a faulting
-  pointer, a fill for a request that was just cancelled, a held fetch whose translation starts a beat for the right address, a
-  misaligned op that is walked before it traps (its trap comes first), a flush while the head waits for its walk;
-- *not reachable through core_pipe's wiring or design* (6): the instruction-side translator is given SUM = 0, no translation
+- *an orphan walk or a coincidence with no request waiting* (11): what the walker does after a cancel or below a faulting
+  pointer (a cancel that does not mark the walk stale needs a request for another address held when the beat completes: the
+  exit gate's 2000 programs kill it, the 1082nd, the 64 of this campaign do not), a fill for a request that was just cancelled,
+  a held fetch whose translation starts a beat for the right address, a misaligned op that is walked before it traps (its trap
+  comes first), a flush while the head waits for its walk;
+- *not reachable through core_pipe's wiring or design* (7): the instruction-side translator is given SUM = 0, no translation
   runs at M privilege, a fetch never asks for write, an entry with W and no R is malformed whether it is read as a leaf or as a
   pointer, a store walked as a load is judged again on the TLB hit, an access fault that is not taken as an answer ends in the
-  same cause 1 through a bus error;
+  same cause 1 through a bus error, a fetch that also needs R (no generated page is execute-only: the code pages are readable
+  because the handlers read the code, and a fetch-probe page that works is R and X; `qv_pte_tb` compares with `core.sv`'s
+  expressions on random inputs);
 - *needs a rarer combination, or is covered elsewhere* (10): a redirect has to wait only when it turns fetch translation on (the
   MRET into the body is killed; an interrupt, a trap, an SRET and a serializing instruction never go from untranslated to
   translated), a straddling fetch whose two frames sit in pockets with the same verdict, a high-page fault in a pocket that
@@ -90,7 +95,22 @@ What made the difference was stimulus (`qvgen --sv39`): bits of a PTE and of a p
 bit, a pointer to a far table or to the bus-error region), aliases of mapped pages with wrong upper bits, misaligned hole
 accesses, SUM/MXR flip pairs, an NA4 PMP word through one PTE, fetch probes through far tables and through windows above the
 image, and S and U bodies that run through a 2 MiB window at a virtual address that is not their physical one. The first pass
-(the stimulus before these) killed 149; the survivors were re-run on the final stimulus (20 more) and in the two extra specs (13).
+(the stimulus before these) killed 149; the survivors were re-run on later versions of the stimulus (20 more) and in the two
+extra specs (13). The numbers above are from one more full run on the final stimulus, made after the exit gate had asked for
+two generator fixes (see the next section): two mutants killed before are not killed in 64 programs any more.
+
+### What the P7 exit gate found
+
+Two faults in the generator and none in the RTL. Each showed as a gate result and was traced on the built binary
+(`+RVFI_TRACE`):
+- A body that switches `satp` between two table sets (every write is followed by an SFENCE.VMA, rule R1) can take an
+  interrupt or a halt between the `csrw satp` and its SFENCE.VMA. The page-fault handler had set A in the table set that was
+  current, so the two sets disagreed about a code page: the FSM walks again and faults, the pipe still holds the entry it
+  had, and both are legal. `qvgen` no longer clears A on the code pages of such a body (`ac71e17`).
+- An M-mode body does not translate, so a store through the alias of a low address (`emit_noncanonical`: wrong upper bits,
+  low bits 0x500) wrote the real address and zeroed the program's own code. The program then counted a loop down from -1
+  and ran to the cycle limit, with both cores agreeing on all 865,808 retirements. An M body's non-canonical accesses are
+  loads only now (`5964d87`).
 
 ## Where core_pipe differs from core.sv
 
@@ -117,7 +137,9 @@ mtvals per instruction):
 - The pipe walks speculatively: a fetch past a taken branch, or on a wrong path, translates and fills the
   instruction TLB; the FSM never does. A dword past a branch can become a fault marker that never reaches the head
   and so never traps. Generated programs keep to two rules, so both cores agree: every PTE store, satp write or root
-  swap is followed by an SFENCE.VMA before anything depends on it (R1), and no non-leaf PTE and no executable leaf
+  swap is followed by an SFENCE.VMA before anything depends on it (R1; an interrupt or a halt between the `csrw satp`
+  and its SFENCE.VMA runs code that depends on it: the FSM re-walks a page whose A bit differs between the two table
+  sets, the pipe still holds the old entry, and both are legal), and no non-leaf PTE and no executable leaf
   leads to a device (R2: the tables and the code are in RAM; the deliberate far pointers and leaves go to an
   address above 2^32 that the PMP always denies, or to the bus-error region). There is no hardware limit or
   attribute check on a PTE read (the FSM has none; a speculative walk through a junk pointer could read a device
