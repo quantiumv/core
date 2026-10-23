@@ -9,7 +9,7 @@
  *
  * Operands follow decoder.sv's layout: a = rs1 (or the J offset for JAL,
  * unused), b = rs2 for branches or the I offset for JALR, imm = the B or
- * J offset. Targets match core.sv's next_pc: pc + offset for branches and
+ * J offset. Targets match ref_core.sv's next_pc: pc + offset for branches and
  * JAL, (rs1 + offset) with bit 0 cleared for JALR. The writeback value is
  * the link (pc + instruction length); branches don't write rd, so it's
  * ignored for them.

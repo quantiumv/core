@@ -8,8 +8,8 @@
 # doesn't change per kernel, only +HEXFILE/+PERF_RESULT_ADDR do), runs
 # every kernel against both, and writes baseline_<core>.csv (config
 # "sram": the plain SRAM harness; "cache": the real SoC with caches).
-# --core fsm (default) is design/core.sv, --core pipe design/pipe/
-# core_pipe.sv.
+# --core pipe (default) is the pipelined core (design/pipe/core.sv),
+# --core ref the frozen multi-cycle reference (verification/reference/).
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -17,7 +17,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$REPO_ROOT" || exit 1
 
 OUTDIR="$SCRIPT_DIR/.results"
-CORE=fsm
+CORE=pipe
 WALL_TIMEOUT=120
 MAX_CYCLES=2000000
 FORCE=0
@@ -26,7 +26,7 @@ usage() {
     cat <<EOF
 Usage: run_perf.sh [options]
 
-  --core fsm|pipe     which core (default fsm)
+  --core pipe|ref     which core (default pipe)
   --outdir DIR        results directory (default verification/perf/.results)
   --force             rebuild kernels/testbenches even if cached
   --timeout N          per-run cycle budget passed as +TIMEOUT (default 2000000)
@@ -64,10 +64,11 @@ if [ $? -ne 0 ]; then
 fi
 
 # ---------------- build the two testbench configurations ----------------
+CORE_INC=""
 case "$CORE" in
-    fsm)  DESIGN_LIST=design_files.list;      CORE_DEFINE="" ;;
-    pipe) DESIGN_LIST=pipe_design_files.list; CORE_DEFINE="-DQV_PIPE_AS_CORE" ;;
-    *) echo "Unknown --core: $CORE (expected fsm or pipe)" >&2; exit 1 ;;
+    pipe) DESIGN_LIST=design_files.list;     CORE_DEFINE="" ;;
+    ref)  DESIGN_LIST=ref_design_files.list; CORE_DEFINE="-DQV_REF_AS_CORE"; CORE_INC="-I verification/reference" ;;
+    *) echo "Unknown --core: $CORE (expected pipe or ref; the FSM core is ref)" >&2; exit 1 ;;
 esac
 DESIGN_FILES=$(grep -vE '^\s*(#|$)' "verification/regress/$DESIGN_LIST" | tr '\n' ' ')
 HARNESS_FILES="testbench/core_wb4_sram_harness.sv"
@@ -79,7 +80,7 @@ build_tb() {
         return
     fi
     echo "=== building $vvp ==="
-    iverilog -g2012 $CORE_DEFINE -I design -I design/defaults -I testbench -I verification/perf \
+    iverilog -g2012 $CORE_DEFINE -I design -I design/defaults -I testbench -I verification/perf $CORE_INC \
         -Pperf_tb.CACHE_CFG=$cfg \
         -o "$vvp" \
         $DESIGN_FILES $HARNESS_FILES $PERF_FILES > "$log" 2>&1

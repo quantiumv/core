@@ -7,23 +7,22 @@
 # REPO_ROOT, one summary line, exit code from the final boolean check).
 #
 # Usage (from WSL): verification/openocd/run_m10_smoke_test.sh
-#   CORE=fsm|ref|pipe verification/openocd/run_m10_smoke_test.sh
-# CORE (default fsm) picks the core under test: the file list and the rename
+#   CORE=pipe|ref verification/openocd/run_m10_smoke_test.sh
+# CORE (default pipe) picks the core under test: the file list and the rename
 # define come from the same verification/regress/*design_files.list as
-# run_regress.sh, so soc.sv's `core core0` is the FSM core, ref_core
-# (-DQV_REF_AS_CORE) or core_pipe (-DQV_PIPE_AS_CORE). Each core builds in
+# run_regress.sh, so soc.sv's `core core0` is the pipelined core or ref_core
+# (the frozen multi-cycle reference, -DQV_REF_AS_CORE). Each core builds in
 # its own directory and listens on its own port, so they can run side by side.
 set -u
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 OOD_DIR="$REPO_ROOT/verification/openocd"
 FW_DIR="$REPO_ROOT/firmware"
-CORE="${CORE:-fsm}"
+CORE="${CORE:-pipe}"
 case "$CORE" in
-    fsm)  DESIGN_LIST="$REPO_ROOT/verification/regress/design_files.list";      CORE_DEFINE="";                  PORT=9824; OUT_DIR="/tmp/m10_smoke_out" ;;
     ref)  DESIGN_LIST="$REPO_ROOT/verification/regress/ref_design_files.list";   CORE_DEFINE="-DQV_REF_AS_CORE";   PORT=9825; OUT_DIR="/tmp/m10_smoke_out_ref" ;;
-    pipe) DESIGN_LIST="$REPO_ROOT/verification/regress/pipe_design_files.list";  CORE_DEFINE="-DQV_PIPE_AS_CORE";  PORT=9826; OUT_DIR="/tmp/m10_smoke_out_pipe" ;;
-    *) echo "Unknown CORE: $CORE (expected fsm, ref or pipe)" >&2; exit 1 ;;
+    pipe) DESIGN_LIST="$REPO_ROOT/verification/regress/design_files.list";       CORE_DEFINE="";                  PORT=9826; OUT_DIR="/tmp/m10_smoke_out_pipe" ;;
+    *) echo "Unknown CORE: $CORE (expected pipe or ref; the FSM core is ref)" >&2; exit 1 ;;
 esac
 
 DESIGN_FILES=()

@@ -1,15 +1,15 @@
 /*
  * lockstep_side.sv -- one full side of the lockstep comparison: a core
  * instance (ref_core, optionally mutated via QV_MUTANT, or with
- * CORE_PIPE=1 design/pipe/core_pipe.sv) plus its own bus fabric, memory,
- * delay injection, MMIO and interrupt injection.
+ * CORE_PIPE=1 the pipelined core, design/pipe/core.sv, module `core`) plus
+ * its own bus fabric, memory, delay injection, MMIO and interrupt injection.
  *
  * Both cores have the same port list and the same internal net names
  * for everything read below, so the two generate branches share one
  * label (g_core) and one instance name (core0), and the references below
- * work for either. core_pipe keeps its native name here: it reuses
- * design/'s leaf modules, ref_core its ref_* copies, so both can sit in
- * one compilation unit.
+ * work for either. ref_core keeps its native name here (no
+ * -DQV_REF_AS_CORE): the pipelined core reuses design/'s leaf modules,
+ * ref_core its ref_* copies, so both can sit in one compilation unit.
  *
  * This is the only module in verification/lockstep/ that reaches into
  * g_core.core0's internals by hierarchical reference (always legal: a module
@@ -32,7 +32,7 @@
 
 module lockstep_side #(
     parameter int QV_MUTANT        = 0,    // structural: selects a generate-gated RTL mutant (ref_core)
-    parameter bit CORE_PIPE        = 1'b0, // structural: core_pipe instead of ref_core
+    parameter bit CORE_PIPE        = 1'b0, // structural: the pipelined core instead of ref_core
     parameter bit MEMCFG_CACHE     = 1'b0, // structural: selects the memory topology
     parameter int DELAY_MAX        = 0     // structural: 0 disables both delay-shim FSMs
 ) (
@@ -189,16 +189,16 @@ module lockstep_side #(
     /* verilator lint_off PINCONNECTEMPTY */
     generate
         if (CORE_PIPE) begin : g_core
-            core_pipe core0 (`LS_CORE_PORTS);
+            core core0 (`LS_CORE_PORTS);
 `ifdef LS_HAVE_PIPE
-            // core_pipe takes an interrupt, a halt or an EBREAK/trigger entry without waiting for the LSU, which is
+            // the pipelined core takes an interrupt, a halt or an EBREAK/trigger entry without waiting for the LSU, which is
             // only safe because nothing can be on the data bus then (it asserts that too, but an assertion only
-            // prints): make it fatal here. (Only when core_pipe is in the build: Verilator checks the names even
+            // prints): make it fatal here. (Only when the pipelined core is in the build: Verilator checks the names even
             // in a branch that is not taken.)
             always @(posedge clk) begin
                 if (!rst && (core0.interrupt_taken || core0.debug_halt_req_entry || core0.debug_ebreak_entry
                              || core0.trigger_debug_entry) && core0.lsu_head_started) begin
-                    $display("LOCKSTEP_RESULT: FAIL (core_pipe entered an interrupt or Debug Mode with a data access started)");
+                    $display("LOCKSTEP_RESULT: FAIL (the pipelined core entered an interrupt or Debug Mode with a data access started)");
                     $finish;
                 end
             end
@@ -233,7 +233,7 @@ module lockstep_side #(
     );
 
     // The levels drop on this side's own RETIRED store to MAGIC_CLR, seen through RVFI, never on the
-    // bus write: core_pipe writes the bus a cycle before the store retires and ref_core in the same
+    // bus write: the pipelined core writes the bus a cycle before the store retires and ref_core in the same
     // cycle, so a bus-keyed drop lands on different sides of a sample point on the two sides. Keyed
     // on retirement the stimulus is a pure function of the retirement stream, as lockstep_irq.sv
     // promises. (The MMIO device's own strobe, magic_clr_we, is no longer used.)

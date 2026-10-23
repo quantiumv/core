@@ -1,5 +1,5 @@
 #!/bin/bash
-# sweep_status.sh fsm|pipe|pipe-full|pipe-amo|pipe-sv39 [--only REGEX] [--summary] [--detail]
+# sweep_status.sh ref|pipe|pipe-full|pipe-amo|pipe-sv39 [--only REGEX] [--summary] [--detail]
 #
 # The status table run_sweep.sh prints at its end, without running anything: one line per generated check
 # (PASS, FAIL, TIMEOUT, ERROR, incomplete = still running or never finished, not run) and the PASS count.
@@ -11,12 +11,12 @@ set -u
 RVFORMAL=${RVFORMAL:-$HOME/riscv-formal}
 ONLY="."; SUMMARY=0; DETAIL=0
 case "${1:-}" in
-    fsm)  NAME=quantiumv ;;
+    ref)  NAME=quantiumv ;;
     pipe) NAME=quantiumv_pipe ;;
     pipe-full) NAME=quantiumv_pipe_full ;;
     pipe-amo) NAME=quantiumv_pipe_amo ;;
     pipe-sv39) NAME=quantiumv_pipe_sv39 ;;
-    *) echo "usage: sweep_status.sh fsm|pipe|pipe-full|pipe-amo|pipe-sv39 [--only REGEX] [--summary] [--detail]" >&2; exit 2 ;;
+    *) echo "usage: sweep_status.sh ref|pipe|pipe-full|pipe-amo|pipe-sv39 [--only REGEX] [--summary] [--detail]" >&2; exit 2 ;;
 esac
 shift
 while [ $# -gt 0 ]; do

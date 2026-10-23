@@ -885,7 +885,7 @@ module qv_decode_tb;
         check("xl marker: a page fault in the high dword: cause 12", {60'b0, uop.xcpt_cause}, 64'd12);
         check("xl marker: ... marked as the high dword's", {63'b0, uop.xcpt_hi}, 64'd1);
         check("xl marker: ... a fault", {63'b0, uop.xcpt}, 64'd1);
-        // ... but core.sv looks at the low dword first: if the PMP denies it, the fetch ends there with an access fault
+        // ... but ref_core.sv looks at the low dword first: if the PMP denies it, the fetch ends there with an access fault
         feed_pg_lo = 44'h80;
         feed(32'h0, 1'b1, 4'd12);
         check("xl marker: the low span denied: an access fault (cause 1) instead of the page fault", {60'b0, uop.xcpt_cause}, 64'd1);

@@ -64,12 +64,12 @@
   },
   {
    "name": "a page fault in the second dword reports the pc",
-   "old": "tval = i_head_ctrl.xcpt_hi ? i_head_entry.pc + 64'd8 : i_head_entry.pc;   // core.sv reports the second dword's address",
+   "old": "tval = i_head_ctrl.xcpt_hi ? i_head_entry.pc + 64'd8 : i_head_entry.pc;   // ref_core.sv reports the second dword's address",
    "new": "tval = i_head_entry.pc;"
   },
   {
    "name": "a page fault in the first dword reports pc + 8",
-   "old": "tval = i_head_ctrl.xcpt_hi ? i_head_entry.pc + 64'd8 : i_head_entry.pc;   // core.sv reports the second dword's address",
+   "old": "tval = i_head_ctrl.xcpt_hi ? i_head_entry.pc + 64'd8 : i_head_entry.pc;   // ref_core.sv reports the second dword's address",
    "new": "tval = i_head_entry.pc + 64'd8;"
   },
   {

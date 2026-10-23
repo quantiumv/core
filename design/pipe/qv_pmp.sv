@@ -5,7 +5,7 @@
  * execute it may do. Purely combinational, one instance per access
  * stream (fetch low span, fetch high span, data).
  *
- * A literal copy of core.sv's expressions, quirks included, so the two
+ * A literal copy of ref_core.sv's expressions, quirks included, so the two
  * cores agree access for access:
  *   - four regions (pmpcfg0 bytes: L[7], A[4:3], X[2], W[1], R[0]),
  *     OFF / TOR / NA4 / NAPOT; TOR region 0 starts at address 0

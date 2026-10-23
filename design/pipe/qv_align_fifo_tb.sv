@@ -2,7 +2,7 @@
 
 /*
  * qv_align_fifo_tb -- standalone test for design/pipe/qv_align.sv and
- * design/pipe/qv_fifo.sv, wired the way core_pipe uses them (fetch
+ * design/pipe/qv_fifo.sv, wired the way the core uses them (fetch
  * buffer -> align -> IQ).
  *
  * The source behaves like qv_fetch: it plays dwords out of a memory image

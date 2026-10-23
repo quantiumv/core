@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 /*
- * qv_ptw -- the Sv39 page-table walker of core_pipe: one walker, two clients
+ * qv_ptw -- the Sv39 page-table walker of the core: one walker, two clients
  * (D, the data side, and F, the instruction side), one bus master port.
  *
  * A client holds its request (i_x_req with the VA and the context it is
@@ -12,9 +12,9 @@
  *
  * A walk is up to three PTE reads, level 2, 1, 0. For each: the address is
  * table base + vpn * 8; the PMP checks the read at S privilege (read only,
- * no M exemption, no match = deny: core.sv's rule for a page-table access)
+ * no M exemption, no match = deny: ref_core.sv's rule for a page-table access)
  * and a denied read never reaches the bus; the read is a dword beat on the
- * bus port (we = 0, sel = FF, lock = 0 are the user's to tie, as core.sv
+ * bus port (we = 0, sel = FF, lock = 0 are the user's to tie, as ref_core.sv
  * does). The response is registered and judged a cycle later by qv_pte, so
  * the bus data stays out of long paths. A bus error beats the PTE contents.
  * The walk ends with exactly one done pulse for the client:

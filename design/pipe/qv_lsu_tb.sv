@@ -799,7 +799,7 @@ module qv_lsu_tb;
             run_pmp($sformatf("S load sz%0d in W region", sz),  0, 2'(sz), a_wo, 1'b1);
             run_pmp($sformatf("S store sz%0d in W region", sz), 1, 2'(sz), a_wo, 1'b0);
         end
-        // LR, SC and the AMOs write as far as the PMP is concerned (core.sv), so the R-only region denies them
+        // LR, SC and the AMOs write as far as the PMP is concerned (ref_core.sv), so the R-only region denies them
         run_pmp("S LR.D in R region",  2, 2'd3, 64'h40, 1'b1);
         run_pmp("S LR.W in RW region", 2, 2'd2, 64'h144, 1'b0);
         run_pmp("S LR.D in W region",  2, 2'd3, 64'h210, 1'b0);

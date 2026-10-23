@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 
 /*
- * qv_dbg -- Debug Mode state for core_pipe (P6).
+ * qv_dbg -- Debug Mode state for the core (P6).
  *
- * Owns the three flags core.sv keeps for the Debug Module and nothing
+ * Owns the three flags ref_core.sv keeps for the Debug Module and nothing
  * else; the decisions (when a halt, step, EBREAK or trigger actually
  * enters Debug Mode) are commit's, because they have to be taken at a
  * retirement boundary or at the ROB head:
@@ -22,7 +22,7 @@
  *
  * Resume (a one-cycle pulse from the Debug Module) is accepted only while
  * halted and not running a Program Buffer; at any other time it is ignored,
- * as core.sv ignores it outside S_DEBUG_HALTED.
+ * as ref_core.sv ignores it outside S_DEBUG_HALTED.
  *
  * Program Buffer: a start pulse while halted begins a run. The words are
  * injected into the instruction queue one at a time -- the next only once

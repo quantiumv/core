@@ -71,13 +71,13 @@
   },
   {
    "name": "SC's reservation compare reads a stale address",
-   "file": "core_pipe.sv",
+   "file": "core.sv",
    "old": ".i_res_valid(res_valid), .i_res_addr(res_addr),",
    "new": ".i_res_valid(res_valid), .i_res_addr(64'b0),"
   },
   {
    "name": "SC always sees a reservation",
-   "file": "core_pipe.sv",
+   "file": "core.sv",
    "old": ".i_res_valid(res_valid), .i_res_addr(res_addr),",
    "new": ".i_res_valid(1'b1), .i_res_addr(res_addr),"
   },

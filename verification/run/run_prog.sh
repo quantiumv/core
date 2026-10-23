@@ -3,22 +3,22 @@
 # (design/soc.sv) in simulation. Behind `make run`; run under WSL bash,
 # any cwd.
 #
-#   run_prog.sh [--core fsm|ref|pipe] [--trace] [--cycles N] [--out DIR] SRC...
+#   run_prog.sh [--core pipe|ref] [--trace] [--cycles N] [--out DIR] SRC...
 #
 # SRC: one or more .c/.s/.S files, linked after firmware/crt0.s (sets sp,
 # zeroes .bss, calls main, then EBREAK ends the run) with
 # verification/run/link.ld. No libc; verification/run/qv_io.h prints
 # through the UART. libgcc is linked for the builtins the compiler calls.
 #
-# --core   fsm: design/core.sv (default); ref: the frozen reference;
-#          pipe: design/pipe/core_pipe.sv
+# --core   pipe: the pipelined core, design/pipe/core.sv (default);
+#          ref: the frozen multi-cycle reference
 # --trace  also write OUT/trace.log, one line per retired instruction
 # --cycles simulation budget (default 10000000)
 set -u
 cd "$(dirname "$0")/../.." || exit 1
 REPO=$(pwd)
 
-CORE=fsm; TRACE=0; CYCLES=10000000; OUT=""; SRCS=()
+CORE=pipe; TRACE=0; CYCLES=10000000; OUT=""; SRCS=()
 while [ $# -gt 0 ]; do
     case "$1" in
         --core)   CORE=$2; shift 2 ;;
@@ -30,13 +30,12 @@ while [ $# -gt 0 ]; do
         *)  SRCS+=("$(realpath "$1")"); shift ;;
     esac
 done
-[ ${#SRCS[@]} -gt 0 ] || { echo "usage: run_prog.sh [--core fsm|ref|pipe] [--trace] [--cycles N] SRC..." >&2; exit 2; }
+[ ${#SRCS[@]} -gt 0 ] || { echo "usage: run_prog.sh [--core pipe|ref] [--trace] [--cycles N] SRC..." >&2; exit 2; }
 
 case "$CORE" in
-    fsm)  LIST=design_files.list;      DEF="";                 MARCH=rv64imac_zicsr_zifencei ;;
+    pipe) LIST=design_files.list;      DEF="";                 MARCH=rv64imac_zicsr_zifencei ;;
     ref)  LIST=ref_design_files.list;  DEF="-DQV_REF_AS_CORE";  MARCH=rv64imac_zicsr_zifencei ;;
-    pipe) LIST=pipe_design_files.list; DEF="-DQV_PIPE_AS_CORE"; MARCH=rv64imac_zicsr_zifencei ;;
-    *) echo "unknown core: $CORE (expected fsm, ref or pipe)" >&2; exit 2 ;;
+    *) echo "unknown core: $CORE (expected pipe or ref; the FSM core is ref)" >&2; exit 2 ;;
 esac
 [ -n "$OUT" ] || OUT="/tmp/qv_run_${CORE}"
 mkdir -p "$OUT"

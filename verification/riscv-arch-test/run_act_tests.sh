@@ -10,23 +10,24 @@
 # Sm/S -- the framework's own Makefile default excludes both).
 #
 # Usage (from WSL): verification/riscv-arch-test/run_act_tests.sh [elf_dir]
-# CORE=fsm|ref|pipe (default fsm) selects design/core.sv's own 6 leaf
-# modules, the frozen verification/reference/ref_core.sv + its ref_*
-# leaves (P3.3), or design/pipe/core_pipe.sv -- same env-var convention as
-# CONFIG_FILES/WORKDIR above. ACT_ONLY=<regex> runs only the ELFs whose
-# path matches. Results go to act_results.log for fsm,
+# CORE=pipe|ref (default pipe) selects the core under test: the pipelined
+# core (design/pipe/core.sv and the design/ leaves it uses, in
+# design_files.list order) or the frozen multi-cycle reference
+# (verification/reference/ref_core.sv + its ref_* leaves, P3.3) -- same
+# env-var convention as CONFIG_FILES/WORKDIR above. ACT_ONLY=<regex> runs
+# only the ELFs whose path matches. Results go to act_results.log for pipe,
 # act_results_<core>.log otherwise (ACT_RESULTS=<path> overrides, to keep the
-# tracked log untouched). core_pipe runs every ELF the FSM does today. (None of the
-# generated tests turns Sv39 on, so ACT is only a Bare-mode regression check for it.)
+# tracked log untouched). Both cores pass the same ELFs. (None of the
+# generated tests turns Sv39 on, so ACT is only a Bare-mode regression check.)
 set -u
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ELF_DIR="${1:-$REPO_ROOT/verification/riscv-arch-test/work/quantiumv-rv64im/elfs}"
 HEX_DIR="/tmp/act_hex_$$"
 VVP_BIN="/tmp/act_runner_tb_$$.vvp"
-CORE="${CORE:-fsm}"
+CORE="${CORE:-pipe}"
 RESULTS_LOG="$REPO_ROOT/verification/riscv-arch-test/act_results.log"
-[ "$CORE" == "fsm" ] || RESULTS_LOG="$REPO_ROOT/verification/riscv-arch-test/act_results_${CORE}.log"
+[ "$CORE" == "pipe" ] || RESULTS_LOG="$REPO_ROOT/verification/riscv-arch-test/act_results_${CORE}.log"
 RESULTS_LOG="${ACT_RESULTS:-$RESULTS_LOG}"   # experiments: keep the tracked log untouched
 ACT_ONLY="${ACT_ONLY:-}"
 
@@ -39,12 +40,6 @@ mkdir -p "$HEX_DIR"
 trap 'rm -rf "$HEX_DIR" "$VVP_BIN"' EXIT
 
 case "$CORE" in
-    fsm)
-        CORE_FILES=("$REPO_ROOT/design/alu.sv" "$REPO_ROOT/design/decoder.sv" "$REPO_ROOT/design/register_file.sv" \
-            "$REPO_ROOT/design/csr_file.sv" "$REPO_ROOT/design/divider.sv" "$REPO_ROOT/design/c_expand.sv" \
-            "$REPO_ROOT/design/core.sv")
-        CORE_DEFINE=()
-        ;;
     ref)
         CORE_FILES=("$REPO_ROOT/verification/reference/ref_alu.sv" "$REPO_ROOT/verification/reference/ref_decoder.sv" \
             "$REPO_ROOT/verification/reference/ref_register_file.sv" "$REPO_ROOT/verification/reference/ref_csr_file.sv" \
@@ -53,13 +48,13 @@ case "$CORE" in
         CORE_DEFINE=(-DQV_REF_AS_CORE)
         ;;
     pipe)
-        # core_pipe and the design/ leaves it reuses, in pipe_design_files.list order
+        # the pipelined core and the design/ leaves it uses, in design_files.list order
         mapfile -t CORE_FILES < <(grep -E '^design/(pipe/|decoder\.sv|alu\.sv|c_expand\.sv|csr_file\.sv|register_file\.sv|divider\.sv)' \
-            "$REPO_ROOT/verification/regress/pipe_design_files.list" | sed "s#^#$REPO_ROOT/#")
-        CORE_DEFINE=(-DQV_PIPE_AS_CORE)
+            "$REPO_ROOT/verification/regress/design_files.list" | sed "s#^#$REPO_ROOT/#")
+        CORE_DEFINE=()
         ;;
     *)
-        echo "Unknown CORE: $CORE (expected fsm, ref or pipe)" >&2
+        echo "Unknown CORE: $CORE (expected pipe or ref; the FSM core is ref)" >&2
         exit 1
         ;;
 esac

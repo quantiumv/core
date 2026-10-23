@@ -17,7 +17,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$REPO_ROOT" || exit 1
 
-CORE=fsm
+CORE=pipe
 ONLY=""
 JOBS="$(nproc 2>/dev/null || echo 4)"
 FORCE=0
@@ -27,12 +27,13 @@ DEFAULT_TIMEOUT=${QV_REGRESS_TIMEOUT:-180}   # seconds per test; raise it on a l
 
 usage() {
     cat <<'EOF'
-Usage: run_regress.sh [--core fsm|ref|pipe] [--only REGEX] [-j N]
+Usage: run_regress.sh [--core pipe|ref] [--only REGEX] [-j N]
                        [--force] [--list] [--outdir DIR]
 
-  --core fsm|ref|pipe  Which core build to test (default: fsm). "ref"
-                        is verification/reference/ref_core.sv (frozen
-                        P3.3); "pipe" is design/pipe/core_pipe.sv.
+  --core pipe|ref       Which core build to test (default: pipe, the
+                        pipelined core in design/pipe/). "ref" is the
+                        frozen multi-cycle core, verification/reference/
+                        ref_core.sv (P3.3).
   --only REGEX         Only run tags matching this extended regex.
   -j N                  Parallel job count (default: nproc).
   --force               Re-run every selected test, ignoring cached
@@ -58,21 +59,15 @@ done
 
 CORE_DEFINE=""
 case "$CORE" in
-    fsm)
-        DESIGN_LIST="$REPO_ROOT/verification/regress/design_files.list"
-        # design/core.sv never reads it: it makes the testbenches take their FSM-only halves
-        CORE_DEFINE="-DQV_REF_AS_CORE"
-        ;;
     ref)
         DESIGN_LIST="$REPO_ROOT/verification/regress/ref_design_files.list"
         CORE_DEFINE="-DQV_REF_AS_CORE"
         ;;
     pipe)
-        DESIGN_LIST="$REPO_ROOT/verification/regress/pipe_design_files.list"
-        CORE_DEFINE="-DQV_PIPE_AS_CORE"
+        DESIGN_LIST="$REPO_ROOT/verification/regress/design_files.list"
         ;;
     *)
-        echo "Unknown --core: $CORE (expected fsm, ref or pipe)" >&2
+        echo "Unknown --core: $CORE (expected pipe or ref; the FSM core is ref)" >&2
         exit 1
         ;;
 esac
@@ -182,17 +177,15 @@ while IFS='|' read -r tag tbfile extra runcwd cores expect timeout_s flags; do
     if [ -n "$ONLY" ] && ! [[ "$tag" =~ $ONLY ]]; then
         continue
     fi
-    # cores column: comma-separated subset of fsm,ref,pipe this test is
+    # cores column: comma-separated subset of ref,pipe this test is
     # meaningful for (tests.list's own header comment). A test not
-    # listing $CORE is skipped entirely for this run -- e.g. the 6
-    # leaf-module unit tests (design_alu_tb and siblings) instantiate
-    # their module by its fixed FSM name (`alu`, `csr_file`, ...), which
-    # has no ref-side equivalent (ref_alu.sv's module is unconditionally
-    # named `ref_alu`, never aliased to `alu` the way ref_core.sv aliases
-    # to `core`) -- a real gap found by direct comparison: this column
-    # existed before P3.3 but was never actually enforced, so `--core
-    # ref` silently tried to compile every fsm-only test too and failed
-    # 8 of them.
+    # listing $CORE is skipped entirely for this run -- e.g. the leaf-module
+    # unit tests (design_alu_tb and siblings) instantiate their module by
+    # its fixed name (`alu`, `csr_file`, ...), which has no ref-side
+    # equivalent (ref_alu.sv's module is unconditionally named `ref_alu`,
+    # never aliased to `alu` the way ref_core.sv aliases to `core`), so
+    # they run on pipe only. (A row that names neither core is skipped
+    # silently too: check the counts, tests.list's header says which.)
     if ! echo ",$cores," | grep -q ",$CORE,"; then
         continue
     fi

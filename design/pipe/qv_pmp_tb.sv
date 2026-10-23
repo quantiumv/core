@@ -3,7 +3,7 @@
 /*
  * qv_pmp_tb -- standalone test for design/pipe/qv_pmp.sv.
  *
- * Two parts. Directed cases pin the rules core.sv has, the odd ones
+ * Two parts. Directed cases pin the rules ref_core.sv has, the odd ones
  * included: a span that only partly overlaps a region is no match, TOR
  * region 0 starts at 0, an 8-byte fetch span can never fit NA4, the
  * lowest matching region wins even when a later one would allow, an
@@ -97,7 +97,7 @@ module qv_pmp_tb;
         if (!valid)                  res = 1'b0;
         else if (a == A_NA4)         res = (a0[55:2] == lo[55:2]) && (a1[55:2] == lo[55:2]);      // bits [55:2] only
         // TOR compares the two ends separately and region 0 has no lower bound, so a span that
-        // wraps around 2^64 can "match" -- core.sv's comparisons, kept as they are
+        // wraps around 2^64 can "match" -- ref_core.sv's comparisons, kept as they are
         else if (a == A_TOR)         res = (i == 0) ? (a1 <= hi) : ((a0 >= lo) && (a1 <= hi));
         else                         res = (a0 >= lo) && (a1 <= hi) && (a0 <= hi) && (a1 >= lo);  // NAPOT: above bit 55 is never inside
     endtask

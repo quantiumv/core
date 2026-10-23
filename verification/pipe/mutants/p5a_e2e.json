@@ -53,7 +53,7 @@
   },
   {
    "name": "divider result never reaches the ROB",
-   "file": "core_pipe.sv",
+   "file": "core.sv",
    "old": ".i_wb3(div_wb)",
    "new": ".i_wb3('0)"
   },

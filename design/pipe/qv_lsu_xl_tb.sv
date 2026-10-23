@@ -3,7 +3,7 @@
 /*
  * qv_lsu_xl_tb -- the LSU's translation, end to end: qv_lsu with a qv_xlate (its
  * TLB) and the page-table walker qv_ptw, sharing one memory port the way
- * core_pipe does, over the page-table environment of testbench/qv_pt_env.svh.
+ * the core does, over the page-table environment of testbench/qv_pt_env.svh.
  * (qv_lsu_tb covers the LSU without translation.)
  *
  * Directed, each op judged against a model of what it must do:

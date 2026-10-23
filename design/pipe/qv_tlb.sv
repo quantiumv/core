@@ -3,7 +3,7 @@
 /*
  * qv_tlb -- a small fully associative Sv39 TLB, superpage aware.
  *
- * core.sv's rules, kept so the two cores fill and evict alike where it
+ * ref_core.sv's rules, kept so the two cores fill and evict alike where it
  * matters (the pipe has one of these for fetch and one for data, the FSM a
  * single unified one, so which entry is evicted differs on a program that
  * touches more pages than fit -- invisible to a program that follows the

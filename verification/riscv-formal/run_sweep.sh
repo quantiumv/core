@@ -1,5 +1,5 @@
 #!/bin/bash
-# run_sweep.sh fsm|pipe|pipe-full|pipe-amo|pipe-sv39 [-j N] [--only REGEX] [--timeout SECONDS] [--rerun]
+# run_sweep.sh ref|pipe|pipe-full|pipe-amo|pipe-sv39 [-j N] [--only REGEX] [--timeout SECONDS] [--rerun]
 #
 # Runs a core's generated riscv-formal checks (see sync_core.sh), N at a
 # time with a 4 s stagger between launches (simultaneous launches killed
@@ -10,12 +10,12 @@ set -u
 RVFORMAL=${RVFORMAL:-$HOME/riscv-formal}
 JOBS=4; ONLY="."; TIMEOUT=7000; RERUN=0
 case "${1:-}" in
-    fsm)  NAME=quantiumv ;;
+    ref)  NAME=quantiumv ;;
     pipe) NAME=quantiumv_pipe ;;
     pipe-full) NAME=quantiumv_pipe_full ;;
     pipe-amo) NAME=quantiumv_pipe_amo ;;
     pipe-sv39) NAME=quantiumv_pipe_sv39 ;;
-    *) echo "usage: run_sweep.sh fsm|pipe|pipe-full|pipe-amo|pipe-sv39 [-j N] [--only REGEX] [--timeout S] [--rerun]" >&2; exit 2 ;;
+    *) echo "usage: run_sweep.sh ref|pipe|pipe-full|pipe-amo|pipe-sv39 [-j N] [--only REGEX] [--timeout S] [--rerun]" >&2; exit 2 ;;
 esac
 shift
 while [ $# -gt 0 ]; do

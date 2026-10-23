@@ -29,7 +29,7 @@
   },
   {
    "name": "ECALL at privilege 2 reports 11",
-   "old": "else                                           cause = 4'd0;        // privilege 2'b10: core.sv falls through to 0",
+   "old": "else                                           cause = 4'd0;        // privilege 2'b10: ref_core.sv falls through to 0",
    "new": "else                                           cause = 4'd11;"
   },
   {

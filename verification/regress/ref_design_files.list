@@ -1,9 +1,9 @@
 # Frozen reference core (verification/reference/ref_core.sv) file list,
 # in required compile order (ref_decoder before ref_core, mirroring
-# design_files.list's own fsm ordering). One path per line, relative to
+# the decoder-first ordering of design_files.list). One path per line, relative to
 # the repo root. Blank lines and #-comments ignored.
 #
-# The 6 leaf modules the fsm core owns (decoder/alu/c_expand/csr_file/
+# The 6 leaf modules the main build shares with it (decoder/alu/c_expand/csr_file/
 # divider/register_file) are swapped for their ref_* counterparts under
 # verification/reference/; everything else (buses, caches, debug module,
 # peripherals, soc.sv itself) is SHARED, unmodified, identical to

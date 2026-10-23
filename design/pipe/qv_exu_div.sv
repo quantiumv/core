@@ -14,7 +14,7 @@
  * from overlapping them.
  *
  * The result leaves on a one-cycle writeback pulse in the divider's own
- * done cycle. Operand extension and result extension follow core.sv: the
+ * done cycle. Operand extension and result extension follow ref_core.sv: the
  * W forms divide the sign- (DIVW/REMW) or zero-extended (DIVUW/REMUW) low
  * halves of the operands and sign-extend the low half of the result.
  *

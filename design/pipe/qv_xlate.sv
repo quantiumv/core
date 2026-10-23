@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 /*
- * qv_xlate -- address translation for one client of core_pipe (the data side
+ * qv_xlate -- address translation for one client of the core (the data side
  * or the instruction side): a TLB, the check of a hit, and the handshake
  * with the shared walker qv_ptw.
  *

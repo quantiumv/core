@@ -15,7 +15,7 @@
  * op -- a store, an SC either way, an AMO -- whether or not it faulted,
  * and left alone by everything else, traps and returns included.
  *
- * Privilege: it starts in M and changes only as core.sv's current_priv does
+ * Privilege: it starts in M and changes only as ref_core.sv's current_priv does
  * -- a trap goes to S when the instruction ran below M and medeleg has its
  * cause's bit (to M otherwise, and always from M), MRET loads MPP raw (2'b10
  * included, where ECALL gets cause 0), SRET loads SPP (S or U) -- with the
@@ -361,7 +361,7 @@ module qv_commit_tb;
         retire();
     endtask
 
-    // an EBREAK at the head: the ebreak bit for each privilege, as core.sv's ebreak_to_debug
+    // an EBREAK at the head: the ebreak bit for each privilege, as ref_core.sv's ebreak_to_debug
     task automatic ebreak_head();
         set_entry(arch_pc, 32'h0010_0073, 0, 1'b0, 64'd0);
         c.cls = QV_FU_SYS; c.sys_op = QV_SYS_EBREAK;
@@ -1162,7 +1162,7 @@ module qv_commit_tb;
         expect_halt("request right after a retirement", 3'd3);
         dbg_halt = 1'b0;
 
-        // a halt request beats a pending, enabled interrupt (core.sv's pair)
+        // a halt request beats a pending, enabled interrupt (ref_core.sv's pair)
         mie = 64'h80; mip = 64'h80; mstatus_mie = 1'b1;
         plain_retire();
         dbg_halt = 1'b1;

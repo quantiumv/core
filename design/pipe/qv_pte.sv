@@ -8,9 +8,9 @@
  * 1 and 0). A TLB lookup feeds it a PTE synthesized from the cached entry
  * (V and A set, the cached r/w/x/u/d and ppn), so a hit re-runs the same
  * checks against the live privilege, SUM, MXR, access kind and virtual
- * address and no formula exists twice -- the way core.sv shares one block.
+ * address and no formula exists twice -- the way ref_core.sv shares one block.
  *
- * A literal copy of core.sv's expressions (2557-2641), quirks included:
+ * A literal copy of ref_core.sv's expressions (2557-2641), quirks included:
  *   - a leaf is R or X (a PTE with W and not R is malformed, so it faults
  *     before it can matter)
  *   - malformed: V clear, W without R, a reserved bit (60:54), PBMT (62:61)

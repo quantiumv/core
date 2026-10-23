@@ -1,16 +1,17 @@
 #!/bin/bash
 # run_rvfi_diff.sh -- P4a bring-up gate: run testbench/rvfi_tracer.sv
-# against design/core.sv and against design/pipe/core_pipe.sv (built as
-# `core` via -DQV_PIPE_AS_CORE) on gen_alu.py programs, and compare the
-# two retirement streams with cmp_rvfi.py.
+# against the frozen reference core (verification/reference/ref_core.sv,
+# built as `core` via -DQV_REF_AS_CORE) and against the pipelined core
+# (design/pipe/core.sv) on gen_alu.py programs, and compare the two
+# retirement streams with cmp_rvfi.py.
 #
-# Stands in for the lockstep harness until core_pipe can run its corpus
-# (that needs memory and CSRs). Run from WSL, any cwd.
+# A quick smoke gate next to the lockstep harness (no bus delay, no
+# interrupts, one program at a time). Run from WSL, any cwd.
 #
 #   run_rvfi_diff.sh [--seeds N] [--first S] [--len L]
 #                    [--serialize 0|1] [--bypass 0|1] [--no-div] [--no-amo] [--pipe-dir DIR]
 #
-# --pipe-dir builds core_pipe from a copy of design/pipe/ (for mutants);
+# --pipe-dir builds the pipelined core from a copy of design/pipe/ (for mutants);
 # --outdir keeps concurrent runs apart.
 #
 # Prints one PASS/FAIL line per seed, then RVFI_DIFF_SUMMARY. Logs for
@@ -45,11 +46,14 @@ TAG="s${SER}b${BYP}"
 REF_VVP="$OUT/ref.vvp"
 DUT_VVP="$OUT/pipe_$TAG.vvp"
 
-REF_FILES="decoder.sv alu.sv c_expand.sv core.sv csr_file.sv divider.sv register_file.sv wb4_sram.sv wb_arbiter2.sv"
-# core_pipe's own files come from the shared list (so a new module is added
+# the reference: its seven files (ref_macros.svh is found through the include path), absolute paths, since the build runs from design/
+REF_DIR=$REPO/verification/reference
+REF_FILES="$REF_DIR/ref_alu.sv $REF_DIR/ref_decoder.sv $REF_DIR/ref_register_file.sv $REF_DIR/ref_csr_file.sv \
+$REF_DIR/ref_divider.sv $REF_DIR/ref_c_expand.sv $REF_DIR/ref_core.sv $REPO/design/wb4_sram.sv $REPO/design/wb_arbiter2.sv"
+# the pipelined core's own files come from the shared list (so a new module is added
 # in one place); absolute paths, since the build runs from design/
 PIPE_FILES="$(grep -E '^design/(pipe/|decoder\.sv|alu\.sv|c_expand\.sv|csr_file\.sv|register_file\.sv|divider\.sv)' \
-                  verification/regress/pipe_design_files.list \
+                  verification/regress/design_files.list \
                   | sed -e "s#^design/pipe/#$PIPE_DIR/#" -e "s#^design/#$REPO/design/#" | tr '\n' ' ') \
             $REPO/design/wb4_sram.sv $REPO/design/wb_arbiter2.sv"
 
@@ -61,9 +65,9 @@ build() {
     fi
 }
 # shellcheck disable=SC2086
-build "$REF_VVP" $REF_FILES
+build "$REF_VVP" -DQV_REF_AS_CORE -I "$REF_DIR" $REF_FILES
 # shellcheck disable=SC2086
-build "$DUT_VVP" -DQV_PIPE_AS_CORE -DQV_PIPE_SERIALIZE=$SER -DQV_PIPE_BYPASS_EN=$BYP $PIPE_FILES
+build "$DUT_VVP" -DQV_PIPE_SERIALIZE=$SER -DQV_PIPE_BYPASS_EN=$BYP $PIPE_FILES
 
 pass=0; fail=0
 for ((s = FIRST; s < FIRST + SEEDS; s++)); do

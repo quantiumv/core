@@ -3,7 +3,7 @@
 /*
  * qv_pte_tb -- standalone test for design/pipe/qv_pte.sv.
  *
- * Directed cases pin every rule core.sv has, the odd ones included: a
+ * Directed cases pin every rule ref_core.sv has, the odd ones included: a
  * pointer with a reserved bit is malformed too, a pointer at level 0
  * faults, a non-canonical address faults on whatever PTE it meets, a user
  * page is for U (and for S only with SUM, and only for data), privilege

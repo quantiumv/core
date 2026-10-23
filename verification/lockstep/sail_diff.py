@@ -6,14 +6,15 @@ plan at C:\\Users\\Potato\\.claude\\plans\\
 research-the-c-extension-reflective-candle.md).
 
 Runs verification/lockstep/gen/qvgen.py --sail-safe output on BOTH this
-repo's own core (design/core.sv, via testbench/rvfi_tracer.sv) and the
+repo's own core (design/pipe/core.sv, via testbench/rvfi_tracer.sv) and the
 reference Sail RISC-V model (sail_riscv_sim), then diffs the two
 retirement-by-retirement. --sail-safe means pure M/S ALU/mem/control-
 flow content -- no PMP, no Sv39, no MMIO -- so both sides see identical,
 unambiguous architectural state to compare (see qvgen.py's own
 --sail-safe docstring).
 
-Every difference is either a REFERENCE BUG (fix design/core.sv) or a
+Every difference is either a core bug (fix design/pipe/, and verification/
+reference/ref_core.sv too if the reference has it) or a
 LEGAL CHOICE Sail's config doesn't yet encode (extend
 sail_config_override.json and/or this script's own classification, with
 a comment explaining the choice) -- this script only ever reports a
@@ -112,8 +113,19 @@ def toolchain_build_sail_safe(seed: int, args, out_base: Path):
 # ---------------------------------------------------------------------
 # Our own core, via rvfi_tracer.sv
 # ---------------------------------------------------------------------
-CORE_FILES = ["decoder.sv", "alu.sv", "c_expand.sv", "core.sv", "csr_file.sv",
-              "divider.sv", "register_file.sv", "wb4_sram.sv", "wb_arbiter2.sv"]
+def _core_files():
+    """The core's own files (the pipelined core and the design/ leaves it uses) from design_files.list, relative to
+    design/ (the build runs there), plus the SRAM and the arbiter the tracer's harness needs."""
+    keep = re.compile(r"^design/(pipe/|decoder\.sv|alu\.sv|c_expand\.sv|csr_file\.sv|register_file\.sv|divider\.sv)")
+    files = []
+    for line in (REPO_ROOT / "verification" / "regress" / "design_files.list").read_text().splitlines():
+        line = line.split("#", 1)[0].strip()
+        if keep.match(line):
+            files.append(line[len("design/"):])
+    return files + ["wb4_sram.sv", "wb_arbiter2.sv"]
+
+
+CORE_FILES = _core_files()
 
 
 def build_rvfi_tracer(vvp_path: Path):

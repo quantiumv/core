@@ -16,7 +16,7 @@
  * the immediate 0, which is architecturally the same thing and means x0
  * never needs a producer-table lookup.
  *
- * Classification mirrors core.sv case by case: alu_op from its
+ * Classification mirrors ref_core.sv case by case: alu_op from its
  * alu_op_sel block (branches, JAL and JALR go to the BRU instead, with
  * imm3 = the B or J offset), rd_wen from its reg_write_control exclusion list
  * (the full list, so adding an instruction later is a new arm, not a new
@@ -30,24 +30,24 @@
  * illegal instruction's mtval) keeps the original {16'b0, halfword}.
  *
  * decoder.sv must come before this file in the compile order: the
- * INSTR_CODE macro is defined there, the same requirement core.sv has.
+ * INSTR_CODE macro is defined there, the same requirement ref_core.sv has.
  *
  * The privilege rules (CSR privilege, MRET/SRET, TSR, TVM) read the
  * current privilege and mstatus bits as inputs; see the port comment.
  *
- * PMP is checked here, per instruction, as core.sv checks a fetch: the
+ * PMP is checked here, per instruction, as ref_core.sv checks a fetch: the
  * dword the instruction starts in, as the span [pc, pc+7], and -- for a
  * 32-bit instruction at pc[2:1] == 2'b11, which crosses into the next
  * dword -- [pc+8, pc+15] too, at the raw privilege (MPRV never applies to
  * fetch). With translation on (fe_instr_t.xl) the spans are the physical
  * addresses fetch found, {pg_lo, pc[11:0]} and {pg_hi, (pc+8)[11:0]}. A
  * denial is a fetch access fault (cause 1, mtval = pc), the same
- * marker a bus error gets. Unlike core.sv the bus request has already been
+ * marker a bus error gets. Unlike ref_core.sv the bus request has already been
  * made by then; a denied fetch is just never used. The low dword goes
- * first, as in core.sv: a fault marker for the high dword (a page fault)
+ * first, as in ref_core.sv: a fault marker for the high dword (a page fault)
  * gives way to a denial of the low span.
  *
- * Execute triggers (the two mcontrol6 slots, core.sv's trig0/trig1) are
+ * Execute triggers (the two mcontrol6 slots, ref_core.sv's trig0/trig1) are
  * matched here, on the instruction's own pc and the current privilege, and
  * never in Debug Mode: an action-1 match marks the uop trig_debug (Debug Mode
  * entry at the head, before the instruction has any effect, even over a fetch
@@ -58,7 +58,7 @@
  * head: no memory access, divide, CSR write or system action, and no
  * producer-table entry for a result that never comes. Only that: its
  * operands and the flags that make commit clear the LR/SC reservation are
- * left alone (core.sv clears it when a store, SC or AMO traps on an action-0
+ * left alone (ref_core.sv clears it when a store, SC or AMO traps on an action-0
  * trigger, and the trapping instruction still reports its real operands).
  * An EBREAK keeps its identity: with dcsr.ebreak* set it enters Debug Mode
  * ahead of the trigger.
@@ -118,7 +118,7 @@ module qv_decode (
     logic [(`B_IMM_SIZE - 1):0]       imm_3_or_dest_addr;   // rd, or a branch's B offset
 
     // RVC expands to its 32-bit equivalent. A faulted fetch or a reserved
-    // compressed encoding decodes as core.sv's inert placeholder (addi
+    // compressed encoding decodes as ref_core.sv's inert placeholder (addi
     // x0, x0, 0) instead, so nothing downstream acts on the bits; the
     // trap itself is the xcpt marking below.
     logic [31:0] expanded;
@@ -133,7 +133,7 @@ module qv_decode (
     // ---------------- PMP on the fetch ----------------
     // The spans are physical addresses. Fetch not translated (xl low): the pc is the address. Translated: the dword
     // the instruction starts in is at {pg_lo, pc[11:0]}, the next one (for a 32-bit instruction that crosses into
-    // it) at {pg_hi, (pc + 8)[11:0]}, each as a window of 8 bytes from there, as core.sv has it.
+    // it) at {pg_hi, (pc + 8)[11:0]}, each as a window of 8 bytes from there, as ref_core.sv has it.
     wire        fetch_hi_taken = !i_iq_data.rvc && (i_iq_data.pc[2:1] == 2'b11);
     wire [11:0] pc_hi_off = i_iq_data.pc[11:0] + 12'd8;
     wire [63:0] pa_lo = i_iq_data.xl ? {8'b0, i_iq_data.pg_lo, i_iq_data.pc[11:0]} : i_iq_data.pc;
@@ -155,7 +155,7 @@ module qv_decode (
     /* verilator lint_on PINCONNECTEMPTY */
     wire lo_denied = !i_pb_active && !exec_ok_lo;
     wire pmp_fault = lo_denied || (!i_pb_active && fetch_hi_taken && !exec_ok_hi);
-    // core.sv fetches the low dword first and ends there when the PMP denies it: a fault found later, in the high
+    // ref_core.sv fetches the low dword first and ends there when the PMP denies it: a fault found later, in the high
     // dword (a page fault, say), never happens. The marker of such a fault gives way to the denial.
     wire marker_lo_denied = i_iq_data.xcpt && i_iq_data.xcpt_hi && lo_denied;
 
@@ -269,7 +269,7 @@ module qv_decode (
         endcase
     end: sys_op_sel
 
-    // loads/stores (core.sv's mem_control); FENCE retires as a no-op
+    // loads/stores (ref_core.sv's mem_control); FENCE retires as a no-op
     // through the ALU, since memory ops already complete in order
     logic       is_load, is_store, mem_signed;
     logic [1:0] mem_size;
@@ -293,7 +293,7 @@ module qv_decode (
             default: ;
         endcase
     end: mem_control
-    // A extension (core.sv's mem_control): LR/SC and the nine AMOs, .W and .D.
+    // A extension (ref_core.sv's mem_control): LR/SC and the nine AMOs, .W and .D.
     // The address is rs1 alone; the LSU runs them at the ROB head.
     logic       is_atomic, atomic_word;
     qv_amo_op_e amo_op;
@@ -332,7 +332,7 @@ module qv_decode (
     wire is_fence = (code == `INSTR_CODE(FENCE));
 
     // ---------------- execute triggers ----------------
-    // priv_en is bit 6 (M), 4 (S) or 3 (anything else, privilege 2'b10 included), as in core.sv
+    // priv_en is bit 6 (M), 4 (S) or 3 (anything else, privilege 2'b10 included), as in ref_core.sv
     wire t0_priv_en = (i_priv == QV_PRIV_M) ? i_tdata1_0[6] : (i_priv == QV_PRIV_S) ? i_tdata1_0[4] : i_tdata1_0[3];
     wire t1_priv_en = (i_priv == QV_PRIV_M) ? i_tdata1_1[6] : (i_priv == QV_PRIV_S) ? i_tdata1_1[4] : i_tdata1_1[3];
     wire t0_match   = i_tdata1_0[2] && t0_priv_en && (i_iq_data.pc == i_tdata2_0);
@@ -341,7 +341,7 @@ module qv_decode (
     wire trig_exc_c   = !i_in_debug && !trig_debug_c
                         && ((t0_match && i_tdata1_0[15:12] == 4'd0) || (t1_match && i_tdata1_1[15:12] == 4'd0));
 
-    // DIV/DIVU/REM/REMU and the W forms (core.sv's is_div_family): a
+    // DIV/DIVU/REM/REMU and the W forms (ref_core.sv's is_div_family): a
     // multi-cycle unit of its own, qv_exu_div
     logic is_div, div_signed, div_quot, div_word;
     always_comb begin: div_control
@@ -365,7 +365,7 @@ module qv_decode (
     wire implemented = is_alu || is_bru || is_csr || is_sys || is_mem || is_fence || is_div;
 
     // The CSR address arrives on imm_2. Write suppression and illegality
-    // mirror core.sv's csr_write_suppress / is_illegal_instr for M-mode:
+    // mirror ref_core.sv's csr_write_suppress / is_illegal_instr for M-mode:
     // RS/RC suppress on the rs1 FIELD being x0, the I forms on uimm == 0;
     // a non-suppressed write to a read-only CSR (addr[11:10] == 11) and
     // any access to the debug (0x7B0-0x7B3) or trigger (0x7A0-0x7A4)
@@ -378,7 +378,7 @@ module qv_decode (
     wire csr_illegal = is_csr && ((!csr_wsup && csr_addr[11:10] == 2'b11)
                                   || (csr_debug_addr && !i_in_debug));
 
-    // Privilege rules, literally core.sv's (its comments say why each is so):
+    // Privilege rules, literally ref_core.sv's (its comments say why each is so):
     // a CSR above the current privilege (addr[9:8] is the lowest privilege
     // that may touch it); MRET outside M; SRET in U, or in S with TSR; an S-mode
     // satp access or SFENCE.VMA under TVM. WFI traps nowhere (no TW) and
@@ -408,7 +408,7 @@ module qv_decode (
     end: reg_write_control
 
     // ADDW/SUBW/ADDIW/MULW reuse the 64-bit op and get truncated after;
-    // the *W shifts have their own 32-bit ALU ops (core.sv's is_word_arith).
+    // the *W shifts have their own 32-bit ALU ops (ref_core.sv's is_word_arith).
     // The W divides also work on 32-bit operands and a sign-extended result,
     // and the LSU takes .W atomics' width from this flag.
     wire is_word = (code == `INSTR_CODE(ADDW)) || (code == `INSTR_CODE(SUBW))

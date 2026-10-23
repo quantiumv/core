@@ -3,14 +3,18 @@
 `include "defaults/defaults.sv"
 
 /*
- * core_pipe -- the pipelined core (pipelining plan, P4 onward).
+ * core -- the pipelined core (pipelining plan, P4 onward; it replaced the
+ * multi-cycle FSM core at P8). That FSM lives on, frozen, as
+ * verification/reference/ref_core.sv, the retirement-by-retirement
+ * reference this core is checked against; "ref_core.sv" in the comments
+ * of this directory means it.
  *
- * Port list is core.sv's exactly, including ANSI defaults and the
- * RISCV_FORMAL-only RVFI block, so it drops in anywhere `core` is
- * instantiated by name: compile with -DQV_PIPE_AS_CORE and this module
- * is named `core`, the same scheme ref_core.sv uses with QV_REF_AS_CORE.
- * Unlike ref_core.sv it reuses the same physical leaf modules core.sv
- * does (decoder/alu/register_file/csr_file), so no macro renaming is
+ * The port list is the FSM core's exactly, including ANSI defaults and the
+ * RISCV_FORMAL-only RVFI block, so `core` is instantiated by name
+ * everywhere (soc.sv, the harnesses, the formal wrapper). ref_core.sv is
+ * named `core` too under -DQV_REF_AS_CORE, which is how the same suite
+ * runs against it. Unlike ref_core.sv this core uses design/'s own leaf
+ * modules (decoder/alu/register_file/csr_file), so no macro renaming is
  * needed.
  *
  *   F  qv_fetch    pc generation, Wishbone fetch master, fetch buffer
@@ -25,7 +29,7 @@
  *
  * regfile0 and csr_file0 live here at top level (regfile0 is written
  * only at commit, so it always holds architectural state), so their
- * hierarchical paths match core.sv's. The compatibility signals tests
+ * hierarchical paths match ref_core.sv's. The compatibility signals tests
  * reach hierarchically (dut.commit_now, dut.core0.trap_taken, ...) are
  * declared here at top-level scope too, including ones testbench/
  * rvfi_tracer.sv references unconditionally (route_to_s, trap_val).
@@ -42,12 +46,12 @@
  * delegation and the privilege rules (CSR access, TSR, TVM), and RVC:
  * compressed instructions on any 2-byte boundary, including 32-bit ones
  * that straddle two fetched dwords. Everything else decodes as an
- * illegal-instruction trap. Interrupts (MEI, MTI, SEI) are taken as core.sv
+ * illegal-instruction trap. Interrupts (MEI, MTI, SEI) are taken as ref_core.sv
  * takes them, only in the cycle after a retirement, and the PMP is
  * checked on the fetch (in decode) and on the data accesses (in the LSU).
  * Debug: halt requests, resume and single steps, taken at the same sample
  * point as interrupts, and the Debug Module's Access Register path, muxed
- * around regfile0 and csr_file0 as core.sv does it; EBREAK (dcsr.ebreak*)
+ * around regfile0 and csr_file0 as ref_core.sv does it; EBREAK (dcsr.ebreak*)
  * and the two execute triggers, matched in decode and acted on at the ROB
  * head; the Program Buffer, whose words qv_dbg feeds into the instruction
  * queue one at a time (see there). Sv39: data accesses and instruction fetches
@@ -87,14 +91,7 @@
 `define QV_PIPE_SV39_EN 1'b1
 `endif
 
-// under QV_PIPE_AS_CORE the module name deliberately differs from the file's
-/* verilator lint_off DECLFILENAME */
-`ifdef QV_PIPE_AS_CORE
 module core
-`else
-module core_pipe
-`endif
-/* verilator lint_on DECLFILENAME */
 #(
     parameter bit SERIALIZE = `QV_PIPE_SERIALIZE,
     parameter bit BYPASS_EN = `QV_PIPE_BYPASS_EN,
@@ -208,7 +205,7 @@ module core_pipe
 );
     import qv_pkg::*;
 
-    localparam logic [63:0] RESET_PC = 64'h0;   // core.sv's own reset pc
+    localparam logic [63:0] RESET_PC = 64'h0;   // ref_core.sv's own reset pc
 
     // ---------------- csr_file0's exports ----------------
     // declared up here: decode, commit and the fetch path all read some of them
@@ -611,7 +608,7 @@ module core_pipe
     );
 
     // ---------------- architectural state ----------------
-    // The Debug Module's GPR access shares read port B and the write port outright, as in core.sv: while the
+    // The Debug Module's GPR access shares read port B and the write port outright, as in ref_core.sv: while the
     // hart is halted (dm_access_active) nothing issues and nothing retires, so the two users are never live in
     // the same cycle. o_dm_gpr_rdata is the very same wire rs2_data, trusted by the Debug Module only then.
     register_file regfile0 (
@@ -659,7 +656,7 @@ module core_pipe
     );
 
     // ---------------- compatibility layer ----------------
-    // Names match core.sv's own internal signals, for tests that reach
+    // Names match ref_core.sv's own internal signals, for tests that reach
     // them hierarchically. Live ones first, then the not-yet-implemented
     // ones at their "never happens" value.
     /* verilator lint_off UNUSEDSIGNAL */

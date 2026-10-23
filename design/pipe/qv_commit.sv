@@ -23,7 +23,7 @@
  *   FENCE.I once fetch has nothing outstanding (fetch is held meanwhile):
  *           icache flush, then a serializing refetch
  *   other   result to rd; redirect on a mispredict or serialize
- * mtval follows core.sv's trap_val: the instruction bits for an illegal
+ * mtval follows ref_core.sv's trap_val: the instruction bits for an illegal
  * instruction, the pc for a fetch fault, the access address for a
  * misaligned or faulting load/store, 0 otherwise. A trapped
  * instruction isn't a retirement as far as minstret goes.
@@ -31,7 +31,7 @@
  * Every redirect kills everything younger: the same pulse flushes all
  * stages.
  *
- * RVFI follows core.sv's own conventions field for field: rd_addr is 0
+ * RVFI follows ref_core.sv's own conventions field for field: rd_addr is 0
  * unless the instruction writes rd, rd_wdata is 0 unless it writes a
  * nonzero rd, pc_wdata is the real next pc (trap vector, mepc, or the
  * entry's own), intr flags a retirement whose pc doesn't follow the
@@ -41,7 +41,7 @@
  * regfile0's read ports aren't free to re-read them here; memory fields
  * come from the LSU's result for a memory op and are 0 otherwise.
  *
- * Interrupts are sampled exactly as core.sv does: only in the cycle after
+ * Interrupts are sampled exactly as ref_core.sv does: only in the cycle after
  * a retirement (commit_q), from the live mip/mie/mideleg/mstatus/privilege
  * values of that cycle, and one that is sampled takes the place of whatever
  * would retire in the same cycle (nothing commits, everything younger is
@@ -78,7 +78,7 @@
  * minstret), MRET and SRET have no effect, and instructions retired
  * while dcsr.stopcount is set are not counted.
  *
- * It also keeps the privilege level (updated exactly as core.sv's
+ * It also keeps the privilege level (updated exactly as ref_core.sv's
  * current_priv is: trap, MRET, SRET; MPP is loaded raw, so privilege 2'b10
  * can occur and then behaves as written) and the LR/SC reservation (see
  * below), since only a retirement may change either.
@@ -123,7 +123,7 @@ module qv_commit #(
     output logic [63:0]                      o_trap_cause,
     output logic [63:0]                      o_trap_val,
     output logic                             o_mret_taken,
-    // MODE bits [1:0] ignored: direct mode only, as in core.sv
+    // MODE bits [1:0] ignored: direct mode only, as in ref_core.sv
     /* verilator lint_off UNUSEDSIGNAL */
     input  logic [63:0]                      i_mtvec,
     /* verilator lint_on UNUSEDSIGNAL */
@@ -217,7 +217,7 @@ module qv_commit #(
     logic [1:0] priv_q;
     assign o_priv = priv_q;
 
-    // core.sv's enables, expression for expression: a delegated interrupt
+    // ref_core.sv's enables, expression for expression: a delegated interrupt
     // is enabled in U, in S when SIE is set and never in M; an M one is
     // enabled below M and in M when MIE is set
     wire mei_pending = i_mie[11] & i_mip[11];
@@ -245,7 +245,7 @@ module qv_commit #(
 
     // The sample point for interrupts, halt requests and single steps: the cycle after a retirement,
     // outside Debug Mode. A halt request or an armed step is taken in preference to an interrupt
-    // (core.sv's debug_halt_req_entry / interrupt_taken pair), and to the head's commit.
+    // (ref_core.sv's debug_halt_req_entry / interrupt_taken pair), and to the head's commit.
     logic commit_q;
     wire  sample_pt  = commit_q && !i_dbg_in_debug;
     wire  halt_take  = sample_pt && (i_dbg_halt_req || i_dbg_stepping);
@@ -255,7 +255,7 @@ module qv_commit #(
 
     // ---------------- classify the head ----------------
     // a marked fault overrides whatever the entry would otherwise do, as
-    // core.sv's instr_faulted gating does
+    // ref_core.sv's instr_faulted gating does
     wire is_sys  = (i_head_ctrl.cls == QV_FU_SYS) && !i_head_ctrl.xcpt;
     wire is_fence_i = is_sys && (i_head_ctrl.sys_op == QV_SYS_FENCE_I);
 
@@ -263,7 +263,7 @@ module qv_commit #(
     // flush cycle would revalidate its line (icache.sv), and anything
     // fetched before the flush is refetched by the serializing redirect
     // the head's own routes into Debug Mode (an interrupt or a halt sampled in the same cycle goes first). The
-    // dcsr bit follows the privilege exactly as core.sv's ebreak_to_debug does: M, S, else (U and 2'b10) U.
+    // dcsr bit follows the privilege exactly as ref_core.sv's ebreak_to_debug does: M, S, else (U and 2'b10) U.
     wire head_ready    = i_head_valid && i_head_entry.complete;
     wire ebreak_bit    = (priv_q == QV_PRIV_M) ? i_dcsr[15] : (priv_q == QV_PRIV_S) ? i_dcsr[13] : i_dcsr[12];
     wire ebreak_entry  = head_ready && is_sys && (i_head_ctrl.sys_op == QV_SYS_EBREAK) && ebreak_bit
@@ -312,7 +312,7 @@ module qv_commit #(
         else if (priv_q == QV_PRIV_U)                  cause = 4'd8;        // ECALL from U
         else if (priv_q == QV_PRIV_S)                  cause = 4'd9;        // ... S
         else if (priv_q == QV_PRIV_M)                  cause = 4'd11;       // ... M
-        else                                           cause = 4'd0;        // privilege 2'b10: core.sv falls through to 0
+        else                                           cause = 4'd0;        // privilege 2'b10: ref_core.sv falls through to 0
     end
 
     logic [63:0] tval;
@@ -322,7 +322,7 @@ module qv_commit #(
         else if (i_head_ctrl.xcpt && i_head_ctrl.cause == 4'd1)
             tval = i_head_entry.pc;
         else if (i_head_ctrl.xcpt && i_head_ctrl.cause == 4'd12)
-            tval = i_head_ctrl.xcpt_hi ? i_head_entry.pc + 64'd8 : i_head_entry.pc;   // core.sv reports the second dword's address
+            tval = i_head_ctrl.xcpt_hi ? i_head_entry.pc + 64'd8 : i_head_entry.pc;   // ref_core.sv reports the second dword's address
         else if (i_head_ctrl.trig_exc)
             tval = i_head_entry.pc;                // errata E2: the trigger ranks with its cause, so its tval is the pc
         else if (mem_xcpt)
@@ -365,7 +365,7 @@ module qv_commit #(
     // ---------------- LR/SC reservation ----------------
     // Set by a clean LR, to the address it loaded. Cleared by retiring any
     // store-class op -- a store, an SC (whether or not it succeeded) or an
-    // AMO -- faulting or not, at any address; core.sv's rule exactly. Traps
+    // AMO -- faulting or not, at any address; ref_core.sv's rule exactly. Traps
     // and interrupts leave it alone. The LSU reads it when an SC reaches the
     // head: everything older has retired by then, so it can't change under it.
     logic        res_valid_q;
@@ -404,7 +404,7 @@ module qv_commit #(
         else              actual_next_pc = i_head_entry.next_pc;
     end
 
-    // privilege after this retirement; trap wins over xRET, as in core.sv
+    // privilege after this retirement; trap wins over xRET, as in ref_core.sv
     always_ff @(posedge clk) begin
         if (rst) begin
             priv_q <= QV_PRIV_M;
@@ -461,7 +461,7 @@ module qv_commit #(
     assign o_rvfi_rd_wdata  = (writes_rd && i_head_entry.rd != 5'b0) ? rd_value : 64'b0;
     assign o_rvfi_pc_rdata  = i_head_entry.pc;
     assign o_rvfi_pc_wdata  = actual_next_pc;
-    // a trapping access still reports its would-be fields, as core.sv does
+    // a trapping access still reports its would-be fields, as ref_core.sv does
     assign o_rvfi_mem_addr  = is_lsu ? i_lsu_res.mem_addr  : 64'b0;
     assign o_rvfi_mem_rmask = is_lsu ? i_lsu_res.mem_rmask : 8'b0;
     assign o_rvfi_mem_wmask = is_lsu ? i_lsu_res.mem_wmask : 8'b0;

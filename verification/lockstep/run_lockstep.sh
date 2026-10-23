@@ -39,7 +39,7 @@
 # every observation logged and compared), see --dbg-features for the phasing. The random corpus is then
 # generated with qvgen --dbg, which keeps x22/x23 for the script.
 #
-# --dut pipe puts design/pipe/core_pipe.sv on side B (pipe-vs-ref; side
+# --dut pipe puts the pipelined core (design/pipe/core.sv) on side B (pipe-vs-ref; side
 # A stays ref_core). Selfproof and corrupt only. The default random profile
 # is the same for both (--isa imac --priv msu --sv39 --smc: the body runs in S
 # or U and switches between them, with TSR/TVM and privilege probes, under
@@ -105,7 +105,7 @@ Usage: run_lockstep.sh --mode selfproof|mutant|corrupt [options]
 
   --mode MODE          selfproof (default), mutant, or corrupt
   --sim iverilog|verilator  the simulator the harness is built for (default iverilog)
-  --dut ref|pipe       side B's core (default ref; pipe = core_pipe, not with --mode mutant)
+  --dut ref|pipe       side B's core (default ref; pipe = the pipelined core, not with --mode mutant)
   --pipe-dir DIR       design/pipe/ replacement for --dut pipe (default design/pipe)
   --mutant N           QV_MUTANT_B value, 1-13 (--mode mutant only)
   --memcfg-b sram|cache  side B's memory config (default sram -- also applies
@@ -186,7 +186,7 @@ if [ "$MODE" == "mutant" ] && { [ "$MUTANT" -lt 1 ] || [ "$MUTANT" -gt 13 ]; }; 
 fi
 case "$DUT" in
     ref) ;;
-    pipe) [ "$MODE" == "mutant" ] && { echo "ERROR: --mode mutant mutates ref_core; use --pipe-dir for core_pipe" >&2; exit 1; } ;;
+    pipe) [ "$MODE" == "mutant" ] && { echo "ERROR: --mode mutant mutates ref_core; use --pipe-dir for the pipelined core" >&2; exit 1; } ;;
     *) echo "Unknown --dut: $DUT (expected ref or pipe)" >&2; exit 1 ;;
 esac
 
@@ -203,14 +203,14 @@ LOCKSTEP_FILES="verification/lockstep/lockstep_wb_delay.sv verification/lockstep
 verification/lockstep/lockstep_mem.sv verification/lockstep/lockstep_irq.sv \
 verification/lockstep/lockstep_dbg.sv verification/lockstep/lockstep_side.sv verification/lockstep/lockstep_rec.sv \
 verification/lockstep/lockstep_cmp.sv verification/lockstep/lockstep_tb.sv"
-# core_pipe and the design/ leaf modules it reuses, in pipe_design_files.list
+# the pipelined core and the design/ leaf modules it uses, in design_files.list
 # order (decoder.sv first: qv_decode.sv uses its INSTR_CODE macro)
 PIPE_FILES=""
 B_PIPE=0
 if [ "$DUT" == "pipe" ]; then
     B_PIPE=1
     PIPE_FILES=$(grep -E '^design/(pipe/|decoder\.sv|alu\.sv|c_expand\.sv|csr_file\.sv|register_file\.sv|divider\.sv)' \
-                     verification/regress/pipe_design_files.list | sed "s#^design/pipe/#$PIPE_DIR/#" | tr '\n' ' ')
+                     verification/regress/design_files.list | sed "s#^design/pipe/#$PIPE_DIR/#" | tr '\n' ' ')
 fi
 
 MEMCFG_B_CACHE=0

@@ -22,14 +22,14 @@
  * free from the next cycle -- freeing it any later would let it re-issue
  * the access while the uop sits completed at the head. err is checked
  * before ack (the caches raise both): cause 5/7. tval is the exact access
- * address. cyc/stb drop combinationally in the ack/err cycle, as core.sv
+ * address. cyc/stb drop combinationally in the ack/err cycle, as ref_core.sv
  * does, so a slave that re-samples requests in its response cycle never
  * sees a second one.
  *
  * Everything commit needs beyond the value -- the exception and the RVFI
  * memory fields -- is held in o_res until the next memory op completes;
  * only the head ever sits between completion and commit. Formats follow
- * core.sv: bus addr {a[31:3],000} (bits 63:32 dropped), sel = size mask
+ * ref_core.sv: bus addr {a[31:3],000} (bits 63:32 dropped), sel = size mask
  * << a[2:0], store data b << a[2:0]*8 unmasked, load data shifted down
  * then sign/zero-extended; RVFI addr {a[63:3],000}, masks = sel, rdata the
  * raw bus word, wdata the shifted b.
@@ -40,7 +40,7 @@
  * op[4] = 1: an atomic, op[3:0] a qv_amo_op_e, is_word for .W (else .D),
  * a = rs1 = the address, b = rs2. Atomics are always sign-extended.
  *
- * Atomics follow core.sv exactly, including its choices:
+ * Atomics follow ref_core.sv exactly, including its choices:
  *   - LR is a load, SC a store, the AMOs a read then a write; but all of
  *     them are in the store class for faults: misaligned is cause 6 and a
  *     bus error cause 7, whatever the phase (so LR faults like a store).
@@ -59,7 +59,7 @@
  *   - an AMO's RVFI memory fields: both masks set, rdata the extracted old
  *     value, wdata the new value in its lane. A failed SC reports none.
  *
- * PMP (qv_pmp, a literal copy of core.sv's check): the access itself,
+ * PMP (qv_pmp, a literal copy of ref_core.sv's check): the access itself,
  * [addr, addr + size - 1], is checked at the effective privilege -- M runs
  * at MPP while mstatus.MPRV is set -- once it is the head. Loads need R;
  * stores, SC, LR and AMOs need W. Priority: misaligned, then the PMP, then
@@ -67,7 +67,7 @@
  *
  * o_head_started says the head's access is under way. An interrupt never
  * needs to wait for it: it is taken only in the cycle after a retirement,
- * when nothing can be on the bus (core_pipe asserts this).
+ * when nothing can be on the bus (the core asserts this).
  *
  * Sv39 (P7c): with satp.MODE = Sv39, a privilege below M (the effective one:
  * MPRV applies) and no Program Buffer run, the head's address is translated
@@ -216,7 +216,7 @@ module qv_lsu (
     // ---------------- PMP ----------------
     // checked against the access itself, [pa, pa + size - 1], once it is the head and (under
     // translation) translated; loads need R, everything that writes (stores, SC, and LR and AMOs
-    // too, as core.sv has it) needs W; a misaligned access traps first, and a PMP fault comes before
+    // too, as ref_core.sv has it) needs W; a misaligned access traps first, and a PMP fault comes before
     // the SC's reservation compare -- but under translation a failing SC never meets the PMP
     wire [63:0] end_addr = pa + (64'd1 << size_q) - 64'd1;
     logic       pmp_r_ok, pmp_w_ok;
@@ -271,7 +271,7 @@ module qv_lsu (
         endcase
     end
 
-    // old OP rs2, as the ALU does it in core.sv: SWAP passes rs2, the .W
+    // old OP rs2, as the ALU does it in ref_core.sv: SWAP passes rs2, the .W
     // forms use the sign-extended low halves and extend the result back
     function automatic logic [63:0] amo_result(input qv_amo_op_e op, input logic word,
                                                input logic [63:0] old, input logic [63:0] rs2);

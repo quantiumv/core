@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 
 /*
- * qv_fetch -- PC generation and the Wishbone fetch master for core_pipe.
+ * qv_fetch -- PC generation and the Wishbone fetch master for the core.
  *
- * One request outstanding at a time. Bus handshake matches core.sv's own
+ * One request outstanding at a time. Bus handshake matches ref_core.sv's own
  * fetch port exactly: cyc/stb/addr are driven combinationally while a
  * request is outstanding and drop in the same cycle ack or err arrives,
  * so wb4_sram.sv (which re-acks every cycle cyc&&stb stays high) never

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 /*
- * qv_pkg -- shared types for the pipelined core (design/pipe/core_pipe.sv).
+ * qv_pkg -- shared types for the pipelined core (design/pipe/core.sv).
  *
  * Field names follow the pipelining plan's full uop_t/rob_entry_t/
  * fu_req_t/wb_t definitions wherever a field has meaning for the
@@ -50,7 +50,7 @@ package qv_pkg;
     } qv_sys_op_e;
 
     // Privilege levels (mstatus.MPP, current_priv). Plain bits rather than an
-    // enum: like core.sv, MRET loads MPP raw, so 2'b10 can occur and every
+    // enum: like ref_core.sv, MRET loads MPP raw, so 2'b10 can occur and every
     // privilege compare has to behave as written for it too.
     localparam logic [1:0] QV_PRIV_U = 2'b00;
     localparam logic [1:0] QV_PRIV_S = 2'b01;
@@ -114,7 +114,7 @@ package qv_pkg;
         qv_fu_e      fu;
         logic [4:0]  alu_op;       // `ALU_OPSIZE
         qv_bru_op_e  bru_op;
-        logic        is_word;      // truncate the result to 32 bits and sign-extend (core.sv's is_word_arith)
+        logic        is_word;      // truncate the result to 32 bits and sign-extend (ref_core.sv's is_word_arith)
         logic [4:0]  rs1;
         logic        rs1_used;
         logic [4:0]  rs2;
@@ -174,7 +174,7 @@ package qv_pkg;
 
     // A memory op's outcome, held by the LSU from its completion until it
     // commits (only the ROB head ever sits in between): its exception, if
-    // any, and the RVFI memory fields, following core.sv's conventions
+    // any, and the RVFI memory fields, following ref_core.sv's conventions
     // (dword-aligned addr, shifted masks, raw bus rdata, shifted wdata).
     typedef struct packed {
         logic        xcpt;

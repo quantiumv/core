@@ -8,33 +8,28 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$REPO_ROOT" || exit 1
 
-CORE=fsm
+CORE=pipe
 while [ $# -gt 0 ]; do
     case "$1" in
         --core) CORE="$2"; shift 2 ;;
-        -h|--help) echo "Usage: lint.sh [--core fsm|ref|pipe]"; exit 0 ;;
+        -h|--help) echo "Usage: lint.sh [--core pipe|ref]"; exit 0 ;;
         *) echo "Unknown argument: $1" >&2; exit 1 ;;
     esac
 done
 
 CORE_DEFINE=""
 case "$CORE" in
-    fsm)
-        DESIGN_LIST="verification/regress/design_files.list"
-        TOP=soc
-        ;;
     ref)
         DESIGN_LIST="verification/regress/ref_design_files.list"
         TOP=soc
         CORE_DEFINE="-DQV_REF_AS_CORE"
         ;;
     pipe)
-        DESIGN_LIST="verification/regress/pipe_design_files.list"
+        DESIGN_LIST="verification/regress/design_files.list"
         TOP=soc
-        CORE_DEFINE="-DQV_PIPE_AS_CORE"
         ;;
     *)
-        echo "Unknown --core: $CORE" >&2; exit 1 ;;
+        echo "Unknown --core: $CORE (expected pipe or ref; the FSM core is ref)" >&2; exit 1 ;;
 esac
 
 DESIGN_FILES=""

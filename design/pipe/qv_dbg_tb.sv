@@ -2,7 +2,7 @@
 
 /*
  * qv_dbg_tb -- standalone test for design/pipe/qv_dbg.sv: the Debug Mode
- * flags. Checks the state machine against core.sv's own rules:
+ * flags. Checks the state machine against ref_core.sv's own rules:
  *   - in_debug is set by an entry and cleared by a resume the hart accepts;
  *     a resume at any other time is ignored (it must not touch stepping)
  *   - stepping is loaded from dcsr.step at every accepted resume (so it is
