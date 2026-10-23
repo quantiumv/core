@@ -114,7 +114,7 @@ module core_zicsr_tb;
      * for its 2-bit enum, hence the literal 2'd1 below.
      */
 `ifndef QV_REF_AS_CORE
-    // core_pipe has no state register: the monitors sample in the cycle the
+    // the pipelined core has no state register: the monitors sample in the cycle the
     // instruction retires, which is what "S_EXEC at this pc" means for the
     // single-cycle instructions they watch
     wire [1:0] exec_state = dut.core0.commit_now ? 2'd1 : 2'd0;

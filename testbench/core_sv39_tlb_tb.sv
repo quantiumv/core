@@ -133,7 +133,7 @@ module core_sv39_tlb_tb;
     logic ptw_prev_a = 1'b0;
     int ptw_count_a = 0;
 `ifndef QV_REF_AS_CORE
-    // core_pipe has one walker: a walk is a request it accepts, from either client
+    // the pipelined core has one walker: a walk is a request it accepts, from either client
     always @(negedge clk)
         if (dut_a.core0.g_sv39.ptw0.accept_d || dut_a.core0.g_sv39.ptw0.accept_f) ptw_count_a <= ptw_count_a + 1;
 `else
@@ -160,7 +160,7 @@ module core_sv39_tlb_tb;
     logic ptw_prev_b = 1'b0;
     int ptw_count_b = 0;
 `ifndef QV_REF_AS_CORE
-    // core_pipe has one walker: a walk is a request it accepts, from either client
+    // the pipelined core has one walker: a walk is a request it accepts, from either client
     always @(negedge clk)
         if (dut_b.core0.g_sv39.ptw0.accept_d || dut_b.core0.g_sv39.ptw0.accept_f) ptw_count_b <= ptw_count_b + 1;
 `else
@@ -197,7 +197,7 @@ module core_sv39_tlb_tb;
     logic ptw_prev_c = 1'b0;
     int ptw_count_c = 0;
 `ifndef QV_REF_AS_CORE
-    // core_pipe has one walker: a walk is a request it accepts, from either client
+    // the pipelined core has one walker: a walk is a request it accepts, from either client
     always @(negedge clk)
         if (dut_c.core0.g_sv39.ptw0.accept_d || dut_c.core0.g_sv39.ptw0.accept_f) ptw_count_c <= ptw_count_c + 1;
 `else
@@ -225,7 +225,7 @@ module core_sv39_tlb_tb;
     logic ptw_prev_d = 1'b0;
     int ptw_count_d = 0;
 `ifndef QV_REF_AS_CORE
-    // core_pipe has one walker: a walk is a request it accepts, from either client
+    // the pipelined core has one walker: a walk is a request it accepts, from either client
     always @(negedge clk)
         if (dut_d.core0.g_sv39.ptw0.accept_d || dut_d.core0.g_sv39.ptw0.accept_f) ptw_count_d <= ptw_count_d + 1;
 `else
@@ -255,7 +255,7 @@ module core_sv39_tlb_tb;
     logic ptw_prev_e = 1'b0;
     int ptw_count_e = 0;
 `ifndef QV_REF_AS_CORE
-    // core_pipe has one walker: a walk is a request it accepts, from either client
+    // the pipelined core has one walker: a walk is a request it accepts, from either client
     always @(negedge clk)
         if (dut_e.core0.g_sv39.ptw0.accept_d || dut_e.core0.g_sv39.ptw0.accept_f) ptw_count_e <= ptw_count_e + 1;
 `else
@@ -289,7 +289,7 @@ module core_sv39_tlb_tb;
     logic ptw_prev_f = 1'b0;
     int ptw_count_f = 0;
 `ifndef QV_REF_AS_CORE
-    // core_pipe has one walker: a walk is a request it accepts, from either client
+    // the pipelined core has one walker: a walk is a request it accepts, from either client
     always @(negedge clk)
         if (dut_f.core0.g_sv39.ptw0.accept_d || dut_f.core0.g_sv39.ptw0.accept_f) ptw_count_f <= ptw_count_f + 1;
 `else

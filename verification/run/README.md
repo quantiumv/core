@@ -14,7 +14,7 @@ make run PROG="main.c util.c start.S" CORE=pipe TRACE=1 CYCLES=50000000
 | Option | Meaning |
 |---|---|
 | `PROG` | One or more `.c`/`.s`/`.S` files. They are linked after `firmware/crt0.s`, which sets `sp`, zeroes `.bss`, calls `main`, then executes `ebreak`. |
-| `CORE` | `fsm` (default) is `design/core.sv`. `ref` is the frozen reference core. `pipe` is `design/pipe/core_pipe.sv`. |
+| `CORE` | `pipe` (default) is the core, `design/pipe/core.sv`. `ref` is the frozen multi-cycle reference core. |
 | `TRACE=1` | Also writes `trace.log`, with one line per retired instruction (pc, instruction, rd, memory access). Traces from two cores can be diffed with `verification/pipe/cmp_rvfi.py`. |
 | `CYCLES` | Simulation budget. The default is 10,000,000. |
 
@@ -40,9 +40,7 @@ The core starts at pc 0 in M-mode, with no trap handler installed.
 | CLINT | `0x0401_0000` |
 | PLIC | `0x0440_0000` |
 
-Supported ISA, per core:
-- `fsm` and `ref`: RV64IMAC + Zicsr + Zifencei, M/S/U modes, Sv39 and PMP.
-- `pipe`: RV64IMAC, Zicsr and Zifencei, M/S/U modes, Sv39, PMP and debug.
+Both cores: RV64IMAC, Zicsr and Zifencei, M/S/U modes, Sv39, PMP and debug.
 
 ## Limits
 

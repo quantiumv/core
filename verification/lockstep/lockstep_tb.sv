@@ -10,7 +10,7 @@
  * ref_core #(0) instance with an independently perturbed bus-delay seed
  * and optionally the cache memory configuration (the REF-vs-REF self-
  * proof), or a ref_core #(QV_MUTANT_B) instance for the mutant kill
- * matrix, or (B_PIPE=1) design/pipe/core_pipe.sv for pipe-vs-ref.
+ * matrix, or (B_PIPE=1) the pipelined core (design/pipe/core.sv) for pipe-vs-ref.
  *
  * QV_MUTANT_B/MEMCFG_B_CACHE/DELAY_MAX/B_PIPE select RTL structure (a
  * generate-gated mutant, a memory topology, whether the delay-shim FSMs

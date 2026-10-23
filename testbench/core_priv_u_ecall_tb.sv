@@ -148,7 +148,7 @@ module core_priv_u_ecall_tb;
      * (matching core_priv_tb.sv/core_zicsr_tb.sv's own precedent).
      */
 `ifndef QV_REF_AS_CORE
-    // core_pipe has no state register: the monitors sample in the cycle the
+    // the pipelined core has no state register: the monitors sample in the cycle the
     // instruction retires, which is what "S_EXEC at this pc" means for the
     // single-cycle instructions they watch
     wire [1:0] exec_state = dut.core0.commit_now ? 2'd1 : 2'd0;

@@ -129,7 +129,7 @@ module core_sv39_realfw_tb;
     int ptw_count_fetch = 0;
     int ptw_count_mem   = 0;
 `ifndef QV_REF_AS_CORE
-    // core_pipe has one walker with a data and a fetch client: a walk is a request it accepts
+    // the pipelined core has one walker with a data and a fetch client: a walk is a request it accepts
     always @(negedge clk) begin
         if (dut.g_sv39.ptw0.accept_d) ptw_count_mem   <= ptw_count_mem + 1;
         if (dut.g_sv39.ptw0.accept_f) ptw_count_fetch <= ptw_count_fetch + 1;

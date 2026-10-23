@@ -17,7 +17,7 @@
  * late_i delays every level change by one more cycle, so a new level is
  * first visible two cycles after the retirement that raised it instead
  * of one. A core that samples interrupts only in the cycle right after a
- * retirement (the rule both ref_core and core_pipe follow) then misses it
+ * retirement (the rule both ref_core and the pipelined core follow) then misses it
  * there and takes it after the NEXT retirement; one that samples a cycle
  * late (QV_MUTANT==5) takes it a retirement earlier, so the retirement
  * streams differ. Without late_i both kinds take it at the same boundary.

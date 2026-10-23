@@ -123,7 +123,7 @@ module core_priv_tb;
      * (matching core_zicsr_tb.sv's own precedent).
      */
 `ifndef QV_REF_AS_CORE
-    // core_pipe has no state register: the monitors sample in the cycle the
+    // the pipelined core has no state register: the monitors sample in the cycle the
     // instruction retires, which is what "S_EXEC at this pc" means for the
     // single-cycle instructions they watch
     wire [1:0] exec_state = dut.core0.commit_now ? 2'd1 : 2'd0;
@@ -298,7 +298,7 @@ module core_priv_tb;
         rst = 0;
 
 `ifndef QV_REF_AS_CORE
-        // every CSR access serializes the pipeline, so this takes longer on core_pipe
+        // every CSR access serializes the pipeline, so this takes longer on the pipelined core
         wait_halted_or_timeout(`TIMEOUT_CYCLES_LARGE, "EBREAK trap never fired");
 `else
         wait_halted_or_timeout(`TIMEOUT_CYCLES_SMALL, "EBREAK trap never fired");

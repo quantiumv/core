@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """gen_alu.py -- seeded random RV64IM + Zicsr programs with control flow, memory and traps.
 
-Bring-up corpus for design/pipe/core_pipe.sv: the integer class (RV64I
+Bring-up corpus for design/pipe/core.sv: the integer class (RV64I
 register/immediate ops including the *W forms, LUI, AUIPC, MUL/MULH/
 MULHSU/MULHU/MULW, DIV/DIVU/REM/REMU and the W forms), conditional
 branches, JAL, JALR, loads, stores, FENCE, FENCE.I, Zicsr, M-mode traps and RVC.
@@ -50,7 +50,7 @@ stay 4 bytes long for the handler's mepc + 4 (EBREAK is emitted as
 .4byte so gas can't pick C.EBREAK; a reserved compressed encoding is
 paired with a C.NOP).
 
-The program ends at the end_of_test symbol; core_pipe has no way to
+The program ends at the end_of_test symbol; the pipelined core has no way to
 stop, so run_rvfi_diff.sh compares retirements up to the first one at
 that pc.
 

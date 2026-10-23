@@ -1,7 +1,7 @@
 /*
- * make run PROG=verification/run/examples/sum.c [CORE=pipe]
+ * make run PROG=verification/run/examples/sum.c [CORE=pipe|ref]
  *
- * Uses *, / and % (libgcc does them on core_pipe), a global array in
+ * Uses *, / and % (the core's multiplier and divider), a global array in
  * .bss and an initialized one in .data, and returns a checksum: the run
  * ends with "exit code 99" when everything matches.
  */

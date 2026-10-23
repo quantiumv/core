@@ -2,8 +2,8 @@
 # Verifies every ref_*.sv/ref_macros.svh file under verification/reference/
 # still matches the checksums recorded at the P3.3 freeze -- catches an
 # accidental edit to the frozen reference core. A DELIBERATE fix (a real
-# reference bug, confirmed and fixed in both design/core.sv and this
-# directory -- see README.md's own "Errata" rule) must regenerate
+# reference bug, confirmed and fixed in ref_core.sv -- see this
+# directory's README.md "Errata" rule) must regenerate
 # MANIFEST.sha256 afterward and add an entry to README.md's errata log;
 # this script has no way to tell "deliberate errata" from "accidental
 # edit" itself, so that's a human (or review) step, not something this

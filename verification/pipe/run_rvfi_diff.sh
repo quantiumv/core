@@ -79,7 +79,7 @@ for ((s = FIRST; s < FIRST + SEEDS; s++)); do
         --verilog-data-width=8 "$base.elf" "$base.hex" || exit 1
 
     # 0x80000 is never written, so the tracer runs to its cycle limit.
-    # Both cores average a few cycles per instruction (core_pipe more on
+    # Both cores average a few cycles per instruction (the pipelined core more on
     # taken branches) plus ~70 per divide; a limit that turns out too tight
     # shows up as an "unfinished" FAIL, never a silent pass.
     timeout=$((dyn * 12 + divs * 90 + 1000))

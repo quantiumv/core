@@ -87,7 +87,7 @@ module core_c_ext_tb;
      * wait, which the plain registered fstate already does correctly.
      */
 `ifndef QV_REF_AS_CORE
-    // core_pipe has no fstate: qv_align assembles a crossing instruction from two fetched dwords, and the
+    // the pipelined core has no fstate: qv_align assembles a crossing instruction from two fetched dwords, and the
     // instruction's own result (x12 below) is what shows that the high half was fetched.
 `else
     localparam logic [63:0] CROSSING_INSTR_PC = 64'h16;

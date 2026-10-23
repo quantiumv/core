@@ -1,9 +1,9 @@
-# core_pipe checks against core.sv
+# The core checked against ref_core.sv
 
-`run_rvfi_diff.sh` runs random programs on `design/core.sv` and on
-`design/pipe/core_pipe.sv` (built as `core`), and compares the two
-retirement streams record by record. `gen_alu.py` makes the programs;
-`cmp_rvfi.py` does the comparison.
+`run_rvfi_diff.sh` runs random programs on `verification/reference/ref_core.sv`
+(the frozen multi-cycle core, built as `core` with `-DQV_REF_AS_CORE`) and on
+`design/pipe/core.sv`, and compares the two retirement streams record by
+record. `gen_alu.py` makes the programs; `cmp_rvfi.py` does the comparison.
 
 ```sh
 verification/pipe/run_rvfi_diff.sh --seeds 50 [--first S] [--len L] \
@@ -65,7 +65,7 @@ rows of `qv_lsu`, `qv_commit`, `qv_fetch`, `qv_align`, `qv_decode`): 250. On the
 `--skip-annotated`, after the last generator fix, `5964d87`) the generated programs kill 180 within 64 programs: 167 in the main
 profile, 13 more in `p7_lockstep_extra.json` and `p7_lockstep_slow.json` (listed there, and as `unit_only` with the spec that
 kills them in the main one). A mutant counts as killed when the run fails, hangs, or stops on an assertion: the
-`RISCV_FORMAL` block of core_pipe is compiled into the lockstep build, so the invariants that a held translation request does
+`RISCV_FORMAL` block of the core is compiled into the lockstep build, so the invariants that a held translation request does
 not change, and that the walker and the LSU never drive the memory port together, stop the run (the lockstep reports an error
 with no result line). The other 70 survive the 64 programs: 11 are marked `"equivalent"` in their unit spec, and 59 carry a
 `unit_only` reason. Every unit-spec mutant is also killed by its unit testbench. The reasons fall in four groups:
@@ -79,11 +79,11 @@ with no result line). The other 70 survive the 64 programs: 11 are marked `"equi
   exit gate's 2000 programs kill it, the 1082nd, the 64 of this campaign do not), a fill for a request that was just cancelled,
   a held fetch whose translation starts a beat for the right address, a misaligned op that is walked before it traps (its trap
   comes first), a flush while the head waits for its walk;
-- *not reachable through core_pipe's wiring or design* (7): the instruction-side translator is given SUM = 0, no translation
+- *not reachable through the core's wiring or design* (7): the instruction-side translator is given SUM = 0, no translation
   runs at M privilege, a fetch never asks for write, an entry with W and no R is malformed whether it is read as a leaf or as a
   pointer, a store walked as a load is judged again on the TLB hit, an access fault that is not taken as an answer ends in the
   same cause 1 through a bus error, a fetch that also needs R (no generated page is execute-only: the code pages are readable
-  because the handlers read the code, and a fetch-probe page that works is R and X; `qv_pte_tb` compares with `core.sv`'s
+  because the handlers read the code, and a fetch-probe page that works is R and X; `qv_pte_tb` compares with `ref_core.sv`'s
   expressions on random inputs);
 - *needs a rarer combination, or is covered elsewhere* (10): a redirect has to wait only when it turns fetch translation on (the
   MRET into the body is killed; an interrupt, a trap, an SRET and a serializing instruction never go from untranslated to
@@ -112,10 +112,12 @@ Two faults in the generator and none in the RTL. Each showed as a gate result an
   and ran to the cycle limit, with both cores agreeing on all 865,808 retirements. An M body's non-canonical accesses are
   loads only now (`5964d87`).
 
-## Where core_pipe differs from core.sv
+## Where the core differs from ref_core.sv
 
 Architectural behavior is the same: the lockstep gate compares every retirement, a CSR snapshot, the bus
 write log and, with `--dbg-mode 1`, the debug-script event log. These differences are known and acceptable.
+Below, "the FSM" is `ref_core.sv`, the multi-cycle core that `design/core.sv` used to be, and "the pipe" is
+the core, `design/pipe/core.sv`.
 
 Not architectural:
 - The pipe prefetches; the FSM does not. Without a FENCE.I, what each fetches from freshly written code is
@@ -152,7 +154,7 @@ mtvals per instruction):
   abandoned (a cancelled walk's beat completes and its result is dropped), and a data walk can wait for a whole
   instruction-side walk. PTE reads are PMP-checked at S privilege, read only, and a denial or a bus error is an
   access fault of the original access's class.
-- A page fault in the second dword of a 32-bit instruction that crosses reports pc + 8, as core.sv does; a low-dword
+- A page fault in the second dword of a 32-bit instruction that crosses reports pc + 8, as ref_core.sv does; a low-dword
   PMP denial ends the fetch before the high dword is looked at, so it wins over a high-dword page fault.
 
 RVFI fields the FSM reports stale, which the comparator masks or the stimulus avoids:

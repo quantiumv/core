@@ -1,5 +1,12 @@
 # riscv-formal integration (started 2026-08-11; full 91-check `isa=rv64ic` suite 91/91 PASS as of 2026-09-17, including all CSR trace-port checks — see "Full 91-check sweep" below for the current, authoritative status; M-extension deferred by explicit owner direction, see "Next steps")
 
+> **After P8 this directory is the reference configuration.** It proves the frozen FSM,
+> `verification/reference/ref_core.sv` (`sync_core.sh ref`; the module is built as `core` with `-D QV_REF_AS_CORE`),
+> and its `wrapper.sv`, AMO patch and `isa_rv64ia.txt` are shared with the pipelined core's configs
+> (`../quantiumv_pipe/`, which holds the core's results). The log below was written while the FSM was
+> `design/core.sv`: where it says `core.sv`, read `ref_core.sv` (see `verification/reference/README.md` on line
+> citations).
+
 Formal verification via [riscv-formal](https://github.com/YosysHQ/riscv-formal)
 (Yosys + SymbiYosys + a SAT/BMC solver), proving ISA correctness exhaustively
 against the spec rather than sampling it via directed/random simulation. This

@@ -1,5 +1,5 @@
 #!/bin/bash
-# run.sh [--mutants] -- module-level SymbiYosys proofs for core_pipe units.
+# run.sh [--mutants] -- module-level SymbiYosys proofs for units of the pipelined core.
 # Run under WSL (sby, yosys-slang, boolector; see the riscv-formal README).
 #
 #   fetch.sby, lsu.sby, dbg.sby, ptw.sby: prove (k-induction), bmc and cover tasks must all

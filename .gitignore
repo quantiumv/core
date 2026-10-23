@@ -75,7 +75,7 @@ verification/lockstep/.results/
 
 # run_perf.sh's own build/run output (compiled .vvp binaries, build
 # logs) -- regenerated on every run, never meant to be tracked.
-# baseline_fsm.csv is NOT here -- that's the actual P3.5 deliverable.
+# baseline_ref.csv and baseline_pipe.csv are NOT here -- those are the actual P3.5 deliverable.
 verification/perf/.results/
 *.lst
 

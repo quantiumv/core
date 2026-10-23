@@ -125,7 +125,7 @@ module rvfi_wrapper (
         assume (!i_debug_resume_req);
     end
 `ifdef QV_FORMAL_NO_DIV
-    // core_pipe's liveness and hang configs, and the FSM's hang config: no
+    // the pipelined core's liveness and hang configs, and the FSM's hang config: no
     // divide reaches the divider. It takes ~66 cycles, longer than these
     // windows, so with divides in the stream the properties would fail by
     // design. (The FSM's liveness window is long enough to include them, so

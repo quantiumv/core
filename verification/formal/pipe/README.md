@@ -1,4 +1,4 @@
-# Module proofs for core_pipe
+# Module proofs for the pipelined core
 
 SymbiYosys proofs of single `design/pipe/` units. They complement
 riscv-formal (`../../riscv-formal/`), which checks the whole core against

@@ -2,8 +2,8 @@
 # Verifies design/defaults/*.sv is append-only relative to the P3.3
 # freeze snapshot (verification/reference/defaults_snapshot/) -- these
 # files are SHARED (included by reference, not copied) by both
-# design/core.sv+decoder.sv and ref_core.sv+ref_decoder.sv (see
-# ref_macros.svh's own header comment), so an existing line changing or
+# the main build (decoder.sv, the pipelined core) and the reference
+# (ref_decoder.sv, ref_core.sv; see ref_macros.svh's own header comment), so an existing line changing or
 # disappearing out from under them would silently change ref_core.sv's
 # behavior without ref_core.sv itself ever being touched -- exactly what
 # the freeze is supposed to prevent. New content may be added anywhere

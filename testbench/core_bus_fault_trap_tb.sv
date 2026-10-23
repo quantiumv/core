@@ -76,7 +76,7 @@ module core_bus_fault_trap_tb;
      */
     logic amo_write_entered;
 `ifndef QV_REF_AS_CORE
-    // core_pipe has no S_AMO_WRITE: an AMO's write is a locked bus write
+    // the pipelined core has no S_AMO_WRITE: an AMO's write is a locked bus write
     initial amo_write_entered = 1'b0;
     always @(posedge clk)
         if (dut.core0.wb_mem_cyc_o && dut.core0.wb_mem_we_o && dut.core0.wb_mem_lock_o) amo_write_entered <= 1'b1;
@@ -286,7 +286,7 @@ module core_bus_fault_trap_tb;
         rst = 0;
 
 `ifndef QV_REF_AS_CORE
-        // ~330 cycles on core_pipe: every CSR access serializes
+        // ~330 cycles on the pipelined core: every CSR access serializes
         wait_halted_or_timeout(`TIMEOUT_CYCLES_LARGE, "EBREAK trap never fired");
 `else
         wait_halted_or_timeout(`TIMEOUT_CYCLES_SMALL, "EBREAK trap never fired");

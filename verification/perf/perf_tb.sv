@@ -6,7 +6,7 @@
  *
  * CACHE_CFG=0 (default): the SRAM-only harness (testbench/
  *   core_wb4_sram_harness.sv) -- no caches, no UART/CLINT/PLIC. This is
- *   the "FSM baseline" run_perf.sh writes to baseline_fsm.csv.
+ *   the baseline run_perf.sh writes to baseline_<core>.csv.
  * CACHE_CFG=1: design/soc.sv, the real SoC with I$/D$ -- the identical
  *   kernel image works unmodified, since both configurations' RAM
  *   starts at the same address 0x0 (see link.ld's own header).

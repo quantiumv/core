@@ -87,7 +87,7 @@ module core_a_ext_tb;
     localparam logic [63:0] AMOSWAP_W_PC = 64'h8C;
     int amo_write_cycle_count = 0;
 `ifndef QV_REF_AS_CORE
-    // core_pipe has no S_AMO_WRITE: the same fact is the locked write on the bus
+    // the pipelined core has no S_AMO_WRITE: the same fact is the locked write on the bus
     wire amo_write_now = dut.core0.pc == AMOSWAP_W_PC && dut.core0.wb_mem_cyc_o
                       && dut.core0.wb_mem_we_o && dut.core0.wb_mem_lock_o;
 `else

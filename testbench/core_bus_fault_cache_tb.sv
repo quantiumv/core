@@ -59,7 +59,7 @@ module core_bus_fault_cache_tb;
      */
     logic amo_write_entered;
 `ifndef QV_REF_AS_CORE
-    // core_pipe has no S_AMO_WRITE: an AMO's write is a locked bus write
+    // the pipelined core has no S_AMO_WRITE: an AMO's write is a locked bus write
     initial amo_write_entered = 1'b0;
     always @(posedge clk)
         if (dut.core0.wb_mem_cyc_o && dut.core0.wb_mem_we_o && dut.core0.wb_mem_lock_o) amo_write_entered <= 1'b1;

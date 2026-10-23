@@ -8,14 +8,14 @@ retirement with pc_rdata == END_PC; everything before that must match on
 every field the tracer prints, and both logs must reach END_PC (a side
 that never gets there hung, stalled, or ran off somewhere else).
 mem_rdata is ignored when mem_rmask is 0 and mem_wdata when mem_wmask is
-0: core.sv drives both unconditionally from the bus, so outside a real
+0: ref_core.sv drives both unconditionally from the bus, so outside a real
 access they carry whatever the bus last held. mem_rdata is ignored on
 trapping records too: a misaligned access never reaches the bus, and a
 bus error's data is whatever the slave last drove, which depends on
 each core's own fetch/load interleaving. insn is ignored on a
-fetch-fault trap (cause 1): core.sv reports whatever its line register
+fetch-fault trap (cause 1): ref_core.sv reports whatever its line register
 last held there. A trapping atomic's address, masks and write data are
-ignored too: core.sv reports those of the last AMO that completed.
+ignored too: ref_core.sv reports those of the last AMO that completed.
 Otherwise addresses and masks stay strict on every record. Last line is
 "RVFI_DIFF: PASS ..." or "RVFI_DIFF: FAIL ...".
 """
@@ -44,7 +44,7 @@ def load(path, end_pc):
             trap = rec["trap"] == "1"
             insn = int(rec["insn"], 16)
             if trap and insn & 0x7F == 0x2F:
-                # a trapping atomic: core.sv reports the fields of the last AMO that
+                # a trapping atomic: ref_core.sv reports the fields of the last AMO that
                 # ran (X if none has yet)
                 for k in ("mem_addr", "mem_rmask", "mem_wmask", "mem_rdata", "mem_wdata"):
                     rec[k] = "-"

@@ -430,7 +430,7 @@ module core_sv39_fetch_tb;
                 // invalid for one cycle, then release -- same reason a
                 // real SFENCE.VMA instruction can't be used here either.
 `ifndef QV_REF_AS_CORE
-                // core_pipe: the commit stage's SFENCE.VMA strobe empties both TLBs at the next edge
+                // the pipelined core: the commit stage's SFENCE.VMA strobe empties both TLBs at the next edge
                 force dut_l.core0.c_sfence = 1'b1;
                 @(posedge clk); #1;                    // (released after the edge that samples it)
                 release dut_l.core0.c_sfence;

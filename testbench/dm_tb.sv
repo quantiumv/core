@@ -1603,7 +1603,7 @@ module dm_tb;
         #1;
 
 `ifndef QV_REF_AS_CORE
-        // core_pipe has no fetch_fault_q/cur_slot. The same fact, halted right behind the faulting fetch's
+        // the pipelined core has no fetch_fault_q/cur_slot. The same fact, halted right behind the faulting fetch's
         // trap: mcause is the instruction access fault (1) and the halt left the trap vector (mtvec = 0) in dpc.
         check("dut_progbuf_fetchfault: genuinely halted at the fault (mcause == 1, dpc == the trap vector)",
             {63'b0, dut_progbuf_fetchfault.core0.csr_file0.mcause_q == 64'd1 && dut_progbuf_fetchfault.core0.dpc_w == 64'd0}, 64'd1);

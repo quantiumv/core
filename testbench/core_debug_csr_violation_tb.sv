@@ -156,7 +156,7 @@ module core_debug_csr_violation_tb;
         rst = 0;
 
 `ifndef QV_REF_AS_CORE
-        // every CSR access serializes the pipeline, so this takes longer on core_pipe
+        // every CSR access serializes the pipeline, so this takes longer on the pipelined core
         wait_halted_or_timeout(`TIMEOUT_CYCLES_LARGE, "EBREAK trap never fired");
 `else
         wait_halted_or_timeout(`TIMEOUT_CYCLES_SMALL, "EBREAK trap never fired");

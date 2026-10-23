@@ -14,8 +14,9 @@
 #   rewrite a kernel's own copy/compare loop into a call to libc memcpy/
 #   memcmp/etc. that doesn't exist under -nostdlib.
 # -mno-div + libgcc: division goes through libgcc's software routines, so
-#   every kernel also runs on core_pipe, which has no divider yet. Only
-#   setup loops divide (listchase, qsort); the timed regions never do.
+#   the numbers stay comparable with the first baseline (taken before the
+#   core had a divider). Only setup loops divide (listchase, qsort); the
+#   timed regions never do.
 CFLAGS  = -march=rv64imac_zicsr -mabi=lp64 -mno-relax -mno-div -ffreestanding -nostdlib -fno-builtin -O2 -Wall
 ASFLAGS = -march=rv64imac_zicsr -mabi=lp64 -mno-relax
 

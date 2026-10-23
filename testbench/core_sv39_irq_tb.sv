@@ -546,7 +546,7 @@ module core_sv39_irq_tb;
         // do, done directly since no instruction can execute while halted.
         dut_d2.sram0.memory[1536 + 3] = 64'h0000_0000_0000_1CCF;
 `ifndef QV_REF_AS_CORE
-        // core_pipe: the commit stage's SFENCE.VMA strobe empties both TLBs at the next edge
+        // the pipelined core: the commit stage's SFENCE.VMA strobe empties both TLBs at the next edge
         force dut_d2.core0.c_sfence = 1'b1;
         @(posedge clk); #1;
         release dut_d2.core0.c_sfence;

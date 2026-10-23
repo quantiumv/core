@@ -20,7 +20,7 @@ piece) runs --sail-safe output against sail_riscv_sim for a ground-truth
 differential check, resolving the fetch-tval/LR-cause/trigger-priority
 bugs (B10/B15/B16) deliberately deferred out of the P3.1 fix batch; (2)
 the P3.4 lockstep harness runs the full (non-sail-safe) corpus against
-core_pipe vs. ref_core. Both share this one generator -- the corpus is
+the pipelined core vs. ref_core. Both share this one generator -- the corpus is
 identical, only the comparison target differs.
 
 Memory map (1 MiB image, see verification/lockstep/gen/link.ld):
@@ -464,7 +464,7 @@ def emit_amo(p: Program, recent: list[int]):
             # ground truth to diff against -- this core's own "ANY
             # store/SC/AMO clears it, anywhere" choice is instead
             # covered by the P3.4 lockstep harness (ref_core vs
-            # core_pipe, both required to agree with EACH OTHER on
+            # the pipelined core, both required to agree with EACH OTHER on
             # this core's own documented behavior).
             junk_val = p.reg_biased(recent)
             p.e(f"    sd      x{junk_val}, 0(x{addr_r})")

@@ -1,10 +1,12 @@
 # The frozen reference core (P3.3)
 
 This directory holds `ref_core.sv` and its six leaf-module dependencies:
-a frozen copy of `design/core.sv` as it stood at the pipelining track's
-P3.3 milestone, used as the golden retirement-by-retirement reference
-the P3.4 lockstep harness checks a new pipelined core (`core_pipe`,
-`design/pipe/`) against. See the plan at
+a frozen copy of the multi-cycle FSM core, which was `design/core.sv`
+until the pipelining track's P8 switchover deleted that file and made the
+pipelined core (`design/pipe/core.sv`) the module `core`. It is the golden
+retirement-by-retirement reference the lockstep harness checks the core
+against, and `-DQV_REF_AS_CORE` builds it as `core`, so the whole test
+suite can also run against it (`make regress CORE=ref`). See the plan at
 `C:\Users\Potato\.claude\plans\research-the-c-extension-reflective-candle.md`
 for the full pipelining track context.
 
@@ -16,7 +18,8 @@ sail_diff.py, the P3.2 Sail differential audit") -- the state of
 modulo the mechanical changes below. `design/core.sv` itself was last
 substantively changed by `4972f90` ("Fix 11 pre-existing FSM bugs found
 auditing it for the freeze"), P3.1's own bug-fix pass that this freeze
-is built on top of.
+is built on top of. (`design/core.sv` is gone since P8;
+`git show b52e9a3:design/core.sv` still shows it.)
 
 ## What changed, mechanically, relative to `design/*.sv`
 
@@ -38,10 +41,9 @@ with exactly these substitutions:
     testbench, `soc.sv`, `act_runner_tb.sv` and the formal `wrapper.sv`
     instantiate a module literally named `core`, so the whole existing
     verification suite runs against this file unedited, the same way it
-    runs against `design/core.sv` today. `QV_MUTANT` is an unused hook
-    for now -- P3.4's own mutant-kill-matrix testing (`ref_core #(k)`
-    vs `#(0)`) will gate specific injected bugs on its value as those
-    mutants get written.
+    ran against `design/core.sv` before P8. `QV_MUTANT` selects the
+    kill-matrix mutants (`ref_core #(k)` vs `#(0)`, see "Running mutants"
+    below); 0 is the frozen behavior.
   - Leaf-module instance TYPES renamed to their `ref_*` counterparts
     below; INSTANCE NAMES are unchanged (`decoder0`, `regfile0`,
     `csr_file0`, `alu0`, `divider0`, `c_expand0`), so every hierarchical
@@ -74,16 +76,17 @@ behavior without `ref_core.sv` itself ever being touched.
 ## Why `` `INSTR_CODE ``/`` `IS_INSTR `` needed renaming and nothing else did
 
 `` `define `` is compilation-unit-global in SystemVerilog, not scoped to
-a module or file. `design/core.sv`+`decoder.sv` and this directory's
-`ref_core.sv`+`ref_decoder.sv` are compiled together, in one run, by
-every regression/lockstep/formal harness that exercises both --
-redefining the SAME macro name in both would either silently override
-the FSM's own definition (if this directory's copy loads second) or
-vice versa, and most toolchains at minimum warn on any redefinition
-regardless of whether the two bodies happen to match. `IS_INSTR` and
-`INSTR_CODE` are the only two macros either file defines that are
-FUNCTION-LIKE with real logic in their body and are used across file
-boundaries (`decoder.sv` defines them, `core.sv` calls them) -- every
+a module or file. `design/decoder.sv` (whose macros the pipelined core's
+`qv_decode.sv` calls) and this directory's `ref_core.sv`+`ref_decoder.sv`
+are compiled together, in one run, by every lockstep and RVFI-diff
+harness that exercises both -- redefining the SAME macro name in both
+would either silently override `design/decoder.sv`'s own definition (if
+this directory's copy loads second) or vice versa, and most toolchains at
+minimum warn on any redefinition regardless of whether the two bodies
+happen to match. `IS_INSTR` and `INSTR_CODE` are the only two macros
+either file defines that are FUNCTION-LIKE with real logic in their body
+and are used across file boundaries (`decoder.sv` defines them, its
+callers use them -- `core.sv`, the FSM, when this was written) -- every
 other macro `decoder.sv` defines (`OUTPUT_R_TYPE_INSTR` and its
 siblings) is used only within `decoder.sv` itself, confirmed by grep,
 so they needed no treatment. The bit-pattern-only constants
@@ -99,12 +102,13 @@ they're defined exactly once regardless of how many cores include them.
   nothing here has changed since. A mismatch means an accidental edit
   (revert it), a deliberate errata fix, or a P3.4 mutant addition (see
   "Running mutants" below) that forgot to regenerate the manifest
-  (regenerate it -- see below). The manifest was last regenerated after
-  adding mutants 1-10 to `ref_core.sv`/`ref_c_expand.sv`; that's a real,
-  intentional diff from the original freeze snapshot, not an accidental
-  edit -- confirmed `QV_MUTANT=0` (every existing caller) behaves
-  identically before and after via the unchanged full regression suite
-  (72/72) and the unchanged default-config lockstep smoke test.
+  (regenerate it -- see below). The manifest has been regenerated for
+  every deliberate change since the freeze: mutants 1-10
+  (`ref_core.sv`, `ref_c_expand.sv`), errata E1 and E2, mutants 11-13.
+  Each is a real, intentional diff from the original freeze snapshot, not
+  an accidental edit -- `QV_MUTANT=0` (every existing caller) behaves
+  identically before and after, shown by the unchanged regression and
+  lockstep results.
 - **`defaults_snapshot/`** + **`check_defaults.sh`**: a copy of
   `design/defaults/*.sv` as of the freeze. Run
   `wsl bash -lc "verification/reference/check_defaults.sh"` to confirm
@@ -113,17 +117,25 @@ they're defined exactly once regardless of how many cores include them.
 
 ## Errata rule
 
-A reference bug found after this freeze (e.g. via the P3.4 lockstep
-harness disagreeing with `core_pipe`, or a later Sail audit run) gets
-fixed in **both** `design/core.sv` (until P8's switchover retires it)
-**and** `ref_core.sv` here, as a single, clearly-labeled errata commit
--- never `ref_core.sv` alone, or the two cores silently diverge and
-`design/core.sv`'s own regression suite stops being meaningful ground
-truth for the fix; never `design/core.sv` alone, or the lockstep
-harness starts comparing `core_pipe` against a reference that's
-already known to be wrong. After such a fix, regenerate
-`MANIFEST.sha256` (`sha256sum ref_*.sv ref_macros.svh > MANIFEST.sha256`
-run from this directory) and add an entry below.
+A reference bug found after this freeze (e.g. via the lockstep harness
+disagreeing with the core, or a later Sail audit run) gets fixed in
+`ref_core.sv` here, as a single, clearly-labeled errata commit -- and,
+when the pipelined core (`design/pipe/`) has the same defect, in the core
+too, in that commit or a labeled companion, so the lockstep harness is
+never knowingly comparing against a reference that is wrong. After such a
+fix, regenerate `MANIFEST.sha256` (`sha256sum ref_*.sv ref_macros.svh >
+MANIFEST.sha256` run from this directory) and add an entry below.
+
+Before the P8 switchover `design/core.sv` was the production core, and
+every errata fix went into it and `ref_core.sv` together (E1 and E2
+below). It no longer exists; `ref_core.sv` is the only copy of that FSM.
+
+Line citations. Comments and READMEs elsewhere cite `core.sv:NNNN`. Those
+are lines of the FSM as it stood when the comment was written, the text
+that is `ref_core.sv` now, with its lines shifted by the module header, the
+macro rename and the mutant hooks: find the logic by name rather than by
+line number. The pipelined core's own file is `design/pipe/core.sv`, and
+it is cited with its directory.
 
 **Errata log:**
 
@@ -193,16 +205,10 @@ never the register indices mutant 1 needs).
 | 12 | SFENCE.VMA does not flush the TLB (P7) | ref_core.sv, the SFENCE.VMA flush |
 | 13 | A PMP-denied PTE read (data walk) is a page fault, not an access fault (P7) | ref_core.sv, the `ptw_pmp_fault` capture for the mem reason |
 
-Confirmed caught (a REF-vs-REF run reports `LOCKSTEP_RESULT: FAIL`) for
-1-4 and 6-8 and 10, each via a corpus entry chosen to actually exercise
-that specific condition -- see `run_lockstep.sh --mode mutant --mutant
-k`. Mutants 5 and 9 are implemented and regression-clean (the full
-72/72 suite in `verification/regress/` passes unchanged at
-`QV_MUTANT=0`) but not yet proven caught by an actual run: mutant 9
-(FENCE.I's flush) has no observable effect at all without an icache
-present, and `verification/lockstep/lockstep_mem.sv`'s own cache
-memory configuration has a separate, unresolved issue (see its KNOWN
-GAP comment); mutant 5 (interrupt timing) needs a real interrupt to
-actually be TAKEN, which hits a separate stall documented in
-`lockstep_tb.sv`'s own KNOWN GAP comment (reproduce with
-`verification/lockstep/repro_irq_stall.s`).
+All 13 are caught (a REF-vs-REF run reports `LOCKSTEP_RESULT: FAIL`):
+`verification/lockstep/run_kill_matrix.sh` runs each against `#(0)`
+through `run_lockstep.sh --mode mutant --mutant k`, with the corpus entry
+and options its condition needs (5, the interrupt timing, needs the irq
+corpus with injected interrupts; 9, FENCE.I's flush, the self-modifying
+code corpus on the cache memory configuration; 13, the PTE-read PMP
+denial, the random corpus with `--pmp`). 13/13 at the P7 exit.

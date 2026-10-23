@@ -3,8 +3,8 @@
  * NS16550A UART (design/uart16550.sv). No libc: no printf, no malloc.
  *
  * In simulation every byte written to THR appears on the console as it
- * is written. qv_putdec divides by repeated subtraction, so it also runs
- * on core_pipe, which has no divider yet.
+ * is written. qv_putdec divides by repeated subtraction, so it needs no
+ * divider (nor libgcc) to print.
  */
 #ifndef QV_IO_H
 #define QV_IO_H
