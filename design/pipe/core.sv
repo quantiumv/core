@@ -72,14 +72,27 @@
 `ifndef QV_PIPE_BYPASS_EN
 `define QV_PIPE_BYPASS_EN 1'b1
 `endif
+// Streaming fetch (P9a): back-to-back fetch requests, a four-entry fetch buffer, an eight-entry instruction queue
+// that the aligner feeds when it has room for one. QV_PIPE_FETCH_STREAM 0 is the timing without it.
+`ifndef QV_PIPE_FETCH_STREAM
+`define QV_PIPE_FETCH_STREAM 1'b1
+`endif
+// Where the fetch port shares a bus with the memory port through an arbiter (the SRAM harnesses), the stream
+// must pause for a cycle now and then so the other master is granted: FETCH_YIELD, set by the instantiating
+// harness (the SoC's fetch has the instruction cache to itself).
+`ifndef QV_PIPE_FETCH_YIELD
+`define QV_PIPE_FETCH_YIELD 1'b0
+`endif
 // QV_FORMAL_SMALL: a smaller ROB, IQ and TLBs, to keep riscv-formal's models small
 `ifdef QV_FORMAL_SMALL
 `define QV_PIPE_ROB_DEPTH 4
 `define QV_PIPE_IQ_DEPTH  2
+`define QV_PIPE_FB_DEPTH  2
 `define QV_PIPE_TLB_ENTRIES 1
 `else
 `define QV_PIPE_ROB_DEPTH qv_pkg::QV_ROB_DEPTH
-`define QV_PIPE_IQ_DEPTH  4
+`define QV_PIPE_IQ_DEPTH  ((`QV_PIPE_FETCH_STREAM) ? 8 : 4)
+`define QV_PIPE_FB_DEPTH  ((`QV_PIPE_FETCH_STREAM) ? 4 : 2)
 `define QV_PIPE_TLB_ENTRIES 4
 `endif
 
@@ -114,6 +127,9 @@ module core
     parameter bit BYPASS_EN = `QV_PIPE_BYPASS_EN,
     parameter int ROB_DEPTH = `QV_PIPE_ROB_DEPTH,   // power of 2, <= qv_pkg::QV_ROB_DEPTH
     parameter int IQ_DEPTH  = `QV_PIPE_IQ_DEPTH,    // power of 2, >= 2
+    parameter int FB_DEPTH  = `QV_PIPE_FB_DEPTH,    // fetch buffer entries
+    parameter bit FETCH_STREAM = `QV_PIPE_FETCH_STREAM,   // back-to-back fetch requests
+    parameter bit FETCH_YIELD  = `QV_PIPE_FETCH_YIELD,    // fetch gives way to the memory port's masters (shared bus)
     parameter bit SV39_EN   = `QV_PIPE_SV39_EN,     // address translation present
     parameter int TLB_ENTRIES = `QV_PIPE_TLB_ENTRIES, // entries in each of the two TLBs
     parameter int SB_DEPTH  = `QV_PIPE_SB_DEPTH,     // store buffer entries, 0: none
@@ -277,13 +293,14 @@ module core
     logic [63:0] f_xl_va;
     logic [43:0] f_xl_ppn;
     logic        fetch_redirect_ctx;         // below, once commit's outputs are declared
+    logic        fetch_yield;                // below, once the memory port's masters are declared
 
-    qv_fetch #(.RESET_PC(RESET_PC)) fetch0 (
+    qv_fetch #(.RESET_PC(RESET_PC), .FB_DEPTH(FB_DEPTH), .STREAM(FETCH_STREAM)) fetch0 (
         .clk(clk), .rst(rst),
         .wb_fetch_addr_o(wb_fetch_addr_o), .wb_fetch_cyc_o(wb_fetch_cyc_o), .wb_fetch_stb_o(wb_fetch_stb_o),
         .wb_fetch_dat_i(wb_fetch_dat_i), .wb_fetch_ack_i(wb_fetch_ack_i), .wb_fetch_err_i(wb_fetch_err_i),
         .i_redirect_valid(fetch_redirect), .i_redirect_pc(fetch_redirect_pc), .i_redirect_ctx(fetch_redirect_ctx),
-        .i_hold(fetch_hold), .o_idle(fetch_idle),
+        .i_hold(fetch_hold), .o_idle(fetch_idle), .i_yield(fetch_yield),
         .i_xl_on(fetch_xl_on),
         .o_xl_req(f_xl_req), .o_xl_va(f_xl_va), .o_xl_cancel(f_xl_cancel),
         .i_xl_done(f_xl_done), .i_xl_pf(f_xl_pf), .i_xl_af(f_xl_af), .i_xl_ppn(f_xl_ppn),
@@ -295,7 +312,7 @@ module core
     // ---------------- A: align -> instruction queue ----------------
     localparam int FE_W = $bits(fe_instr_t);
 
-    logic         p0_valid, p1_valid, iq_push_ready;
+    logic         p0_valid, p1_valid, iq_push_ready, iq_push_ready1;
     fe_instr_t    p0_data, p1_data;
     logic         a0_valid, a1_valid;
     fe_instr_t    a0_data, a1_data;
@@ -305,14 +322,14 @@ module core
     fe_instr_t    iq_head;
     assign iq_head = iq_bits;
 
-    qv_align align0 (
+    qv_align #(.ONE_OK(FETCH_STREAM)) align0 (
         .clk(clk), .rst(rst), .i_flush(flush),
         .i_buf_valid(fb_valid), .i_buf_pc(fb_pc), .i_buf_data(fb_data), .i_buf_err(fb_err),
         .i_buf_cause(fb_cause), .i_buf_xl(fb_xl), .i_buf_pg(fb_pg),
         .o_buf_pop(fb_pop),
         .o_push0_valid(a0_valid), .o_push0_data(a0_data),
         .o_push1_valid(a1_valid), .o_push1_data(a1_data),
-        .i_push_ready(iq_push_ready),
+        .i_push_ready(iq_push_ready), .i_push_ready1(iq_push_ready1),
         .o_redirect_valid(fe_redirect_valid), .o_redirect_pc(fe_redirect_pc)
     );
 
@@ -332,7 +349,7 @@ module core
         .clk(clk), .rst(rst), .i_flush(flush),
         .i_push0_valid(p0_valid), .i_push0_data(p0_data),
         .i_push1_valid(p1_valid), .i_push1_data(p1_data),
-        .o_push_ready(iq_push_ready),
+        .o_push_ready(iq_push_ready), .o_push_ready1(iq_push_ready1),
         .o_head_valid(iq_valid), .o_head_data(iq_bits),
         .i_pop(iq_pop)
     );
@@ -453,6 +470,9 @@ module core
     logic [7:0]  sb_sel;
     logic        sb_cyc, sb_beat, sb_go, sb_go_idle, sb_ready, sb_empty, sb_match, lsu_load_near, lsu_in_bus, c_sb_push;
     logic [31:3] sb_match_addr;
+    logic        ptw_wants;                  // a translation request is waiting for the walker (and so for the memory port)
+    // fetch pauses its stream for a cycle when another master of the shared bus wants it
+    assign fetch_yield = FETCH_YIELD && (lsu_bus_busy || sb_beat || sb_go_idle || ptw_wants);
     assign wb_mem_addr_o = sb_beat ? sb_addr : ptw_beat ? ptw_addr : lsu_addr;
     assign wb_mem_dat_o  = sb_beat ? sb_dat : lsu_dat;
     assign wb_mem_sel_o  = sb_beat ? sb_sel : ptw_beat ? 8'hFF : lsu_sel;
@@ -529,6 +549,7 @@ module core
         if (SV39_EN) begin : g_sv39
             wire         w_d_req, w_d_cancel, w_d_done;
             wire         w_f_req, w_f_cancel, w_f_done;
+            assign ptw_wants = w_d_req || w_f_req;
             wire         w_ok, w_pf, w_af, w_r, w_w, w_x, w_u, w_d;
             wire  [26:0] w_vpn;
             wire  [1:0]  w_level;
@@ -585,6 +606,7 @@ module core
             assign ptw_addr = 32'b0;
             assign ptw_cyc  = 1'b0;
             assign ptw_beat = 1'b0;
+            assign ptw_wants = 1'b0;
         end
     endgenerate
 

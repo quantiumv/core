@@ -194,8 +194,10 @@ module lockstep_side #(
     /* verilator lint_off PINCONNECTEMPTY */
     generate
         if (CORE_PIPE) begin : g_core
-            // RAM is the 1 MiB flat image: its stores are posted by the store buffer
-            core #(.PMA_RAM_SIZE(64'(`QV_LOCKSTEP_RAM_WORDS) * 64'd8)) core0 (`LS_CORE_PORTS);
+            // RAM is the 1 MiB flat image: its stores are posted by the store buffer. On the flat SRAM fetch and the
+            // memory port share one slave through an arbiter, so the fetch stream gives way to the memory port; with the
+            // caches fetch has the instruction cache to itself.
+            core #(.PMA_RAM_SIZE(64'(`QV_LOCKSTEP_RAM_WORDS) * 64'd8), .FETCH_YIELD(!MEMCFG_CACHE)) core0 (`LS_CORE_PORTS);
 `ifdef LS_HAVE_PIPE
             // the pipelined core takes an interrupt, a halt or an EBREAK/trigger entry without waiting for the LSU, which is
             // only safe because nothing can be on the data bus then (it asserts that too, but an assertion only

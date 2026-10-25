@@ -51,10 +51,23 @@
  * on (privilege, satp, the TLB contents): the redirect target is recorded
  * but not issued that cycle, so a request is never translated against the
  * old context.
+ *
+ * STREAM: back-to-back requests. In the cycle a request is answered, with room for its successor and
+ * nothing redirecting, holding or (i_yield) asking for the bus, the next sequential request is presented
+ * in that same cycle: cyc stays up and the address switches to the next dword, so a slave that answers the
+ * cycle after a request (wb4_sram, the caches on a hit) delivers one dword per cycle instead of one per two.
+ * Still one request unanswered at a time, so the stale bit stays exact: the request just presented becomes
+ * the request register at the edge. A redirect never changes what is presented in the cycle it arrives
+ * (its target goes out from the request register in the cycle after, as without STREAM), and translated
+ * fetch (i_xl_on) does not stream: every dword keeps its translation phase. Where an arbiter shares the bus
+ * with another master, i_yield makes the stream pause for a cycle (cyc low in the answer's cycle) so that
+ * master can be granted. An arbiter that drops a request presented in an answer's cycle (DROP_REQ_ON_RESP)
+ * costs nothing but the gain: the request is held until it is answered.
  */
 module qv_fetch #(
     parameter logic [63:0] RESET_PC = 64'h0,
-    parameter int          FB_DEPTH = 2
+    parameter int          FB_DEPTH = 2,
+    parameter bit          STREAM   = 1'b0
 ) (
     input  logic        clk,
     input  logic        rst,
@@ -74,6 +87,8 @@ module qv_fetch #(
     // outstanding) the icache can be flushed with no fill in flight
     input  logic        i_hold,
     output logic        o_idle,
+    // another master wants the bus this cycle: do not stream into the answer's cycle
+    input  logic        i_yield = 1'b0,
 
     // translation (qv_xlate): the request is held until i_xl_done or o_xl_cancel
     input  logic        i_xl_on    = 1'b0,
@@ -117,11 +132,6 @@ module qv_fetch #(
     // a redirect ends a request that holds nothing on the bus at once
     wire drop     = i_redirect_valid && req_valid_q && (req_xl_q || req_flt_q);
 
-    assign wb_fetch_cyc_o  = bus && !(wb_fetch_ack_i || wb_fetch_err_i);
-    assign wb_fetch_stb_o  = wb_fetch_cyc_o;
-    // the bus carries PA[31:0]: the physical page's low 20 bits, then the offset within the page
-    assign wb_fetch_addr_o = req_isxl_q ? {req_pa_q[19:0], req_pc_q[11:3], 3'b000} : {req_pc_q[31:3], 3'b000};
-
     assign o_xl_req    = req_valid_q && req_xl_q;
     assign o_xl_va     = req_pc_q;
     assign o_xl_cancel = drop;
@@ -153,6 +163,17 @@ module qv_fetch #(
                      && !(i_redirect_valid && i_redirect_ctx);
 
     assign o_idle = !bus;
+
+    // the next request goes out in this very cycle (STREAM): see the header. It is the registered one's successor,
+    // so it needs no translation, no redirect and no hold, and room in the buffer for its answer.
+    wire stream_go = STREAM && can_issue && bus_resp && !i_redirect_valid && !i_xl_on && !i_yield;
+
+    assign wb_fetch_cyc_o  = bus && (!(wb_fetch_ack_i || wb_fetch_err_i) || stream_go);
+    assign wb_fetch_stb_o  = wb_fetch_cyc_o;
+    // the bus carries PA[31:0]: the physical page's low 20 bits, then the offset within the page
+    assign wb_fetch_addr_o = stream_go  ? {fpc_q[31:3], 3'b000}
+                           : req_isxl_q ? {req_pa_q[19:0], req_pc_q[11:3], 3'b000}
+                                        : {req_pc_q[31:3], 3'b000};
 
     wire [63:0] issue_pc    = i_redirect_valid ? i_redirect_pc : fpc_q;
 

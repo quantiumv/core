@@ -11,8 +11,8 @@
  * packed structs.
  *
  * Contract: push1 only with push0, and only while o_push_ready (room for
- * two). A pop while empty is ignored. DEPTH must be a power of two
- * (pointers wrap naturally).
+ * two); push0 alone needs o_push_ready1 (room for one). A pop while empty is
+ * ignored. DEPTH must be a power of two (pointers wrap naturally).
  */
 module qv_fifo #(
     parameter int WIDTH = 8,
@@ -27,6 +27,7 @@ module qv_fifo #(
     input  logic             i_push1_valid,
     input  logic [WIDTH-1:0] i_push1_data,
     output logic             o_push_ready,
+    output logic             o_push_ready1,
 
     output logic             o_head_valid,
     output logic [WIDTH-1:0] o_head_data,
@@ -43,6 +44,7 @@ module qv_fifo #(
     wire [CNT_W-1:0] n_push = CNT_W'(i_push0_valid) + CNT_W'(i_push1_valid);
 
     assign o_push_ready = (count_q <= CNT_W'(DEPTH - 2));
+    assign o_push_ready1 = (count_q <= CNT_W'(DEPTH - 1));
     assign o_head_valid = (count_q != '0);
     assign o_head_data  = mem[rd_q];
 

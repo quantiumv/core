@@ -52,12 +52,13 @@ module core_wb4_sram_harness #(
     logic        wbm_we, wbm_cyc, wbm_stb, wbm_ack, wbm_err;
     logic        wbm_lock;
 
-    // The store buffer posts stores into this SRAM: the core is told its physical window, [0, NUM_WORDS * 8). (The
-    // reference build has no such parameter: its `core` is ref_core.)
+    // The store buffer posts stores into this SRAM: the core is told its physical window, [0, NUM_WORDS * 8). Fetch and
+    // the memory port share it through an arbiter, so the fetch stream gives way (FETCH_YIELD). (The reference build
+    // has no such parameters: its `core` is ref_core.)
 `ifdef QV_REF_AS_CORE
 `define QV_HARNESS_CORE_PARAMS
 `else
-`define QV_HARNESS_CORE_PARAMS #(.PMA_RAM_SIZE(64'(NUM_WORDS) * 64'd8))
+`define QV_HARNESS_CORE_PARAMS #(.PMA_RAM_SIZE(64'(NUM_WORDS) * 64'd8), .FETCH_YIELD(1'b1))
 `endif
     core `QV_HARNESS_CORE_PARAMS core0 (
         .clk(clk), .rst(rst),

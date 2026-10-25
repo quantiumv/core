@@ -38,9 +38,14 @@
  * predicted (its target is a register). The BRU checks every prediction
  * and commit corrects a wrong one.
  *
- * Instructions are emitted only when the IQ has room for two.
+ * Instructions are emitted only when the IQ has room for two -- or, with ONE_OK, room for one: then the
+ * first instruction of the cycle goes alone and the rest of the dword is taken the next cycle (the aligner
+ * already drains a dword over several cycles, so this adds no state). Without it a queue that holds all but
+ * two of its entries stalls the aligner for the cycles it is one short.
  */
-module qv_align (
+module qv_align #(
+    parameter bit ONE_OK = 1'b0
+) (
     input  logic              clk,
     input  logic              rst,
     input  logic              i_flush,
@@ -62,6 +67,7 @@ module qv_align (
     output logic              o_push1_valid,
     output qv_pkg::fe_instr_t o_push1_data,
     input  logic              i_push_ready,
+    input  logic              i_push_ready1 = 1'b0,        // room for one (used with ONE_OK)
 
     output logic              o_redirect_valid,
     output logic [63:0]       o_redirect_pc
@@ -78,7 +84,8 @@ module qv_align (
 
     wire [63:0] base  = {i_buf_pc[63:3], 3'b000};
     wire [1:0]  start = mid_q ? off_q : i_buf_pc[2:1];
-    wire        go    = i_buf_valid && i_push_ready && !i_flush;
+    wire        room1 = i_push_ready || (ONE_OK && i_push_ready1);
+    wire        go    = i_buf_valid && room1 && !i_flush;
 
     function automatic logic [15:0] hw(input logic [63:0] d, input logic [1:0] i);
         case (i)
@@ -184,7 +191,7 @@ module qv_align (
                 o_redirect_pc    = o_push0_data.pred_tgt;
             end
             // slot 1: one more, if this dword has any left
-            if (o_push0_valid && !o_redirect_valid && cur != 3'd4) begin
+            if (o_push0_valid && !o_redirect_valid && cur != 3'd4 && i_push_ready) begin
                 h = hw(i_buf_data, cur[1:0]);
                 if (h[1:0] != 2'b11) begin
                     o_push1_valid = 1'b1;
