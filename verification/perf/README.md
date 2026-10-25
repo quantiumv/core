@@ -20,29 +20,70 @@ never do.
 (and `make clean` in this directory for the kernels): re-run from clean after any
 RTL change.
 
-## Results (2026-10-05)
+## Results (P9, 2026-10)
 
 CPI (cycles per retired instruction):
 
-| Kernel | reference, sram | core, sram | reference, cache | core, cache |
-|---|---|---|---|---|
-| memcpy | 3.78 | 2.42 | 4.29 | 2.36 |
-| crc32 | 3.03 | 1.26 | 3.04 | 1.25 |
-| qsort | 3.56 | 2.50 | 3.74 | 2.47 |
-| matmul | 3.63 | 1.95 | 3.69 | 1.79 |
-| sieve | 3.97 | 2.48 | 4.45 | 2.01 |
-| listchase | 3.80 | 2.01 | 3.91 | 1.92 |
-| mixedint | 4.00 | 2.25 | 4.34 | 2.14 |
+| Kernel | reference, sram | core, sram | reference, cache | core, cache | core before P9, cache |
+|---|---|---|---|---|---|
+| memcpy | 3.77 | 1.85 | 4.28 | 1.76 | 2.36 |
+| crc32 | 3.03 | 1.13 | 3.03 | 1.12 | 1.25 |
+| qsort | 3.55 | 1.91 | 3.73 | 1.86 | 2.46 |
+| matmul | 3.62 | 1.66 | 3.69 | 1.63 | 1.78 |
+| sieve | 3.97 | 1.51 | 4.45 | 1.28 | 2.00 |
+| listchase | 3.80 | 1.80 | 3.90 | 1.91 | 1.91 |
+| mixedint | 3.99 | 1.78 | 4.33 | 1.58 | 2.14 |
 
-The core (since P4) is 1.4–2.4× faster than the reference on every kernel. Loads and
-stores still execute one at a time at the ROB head, and branches resolve
-at commit; those are the P9 performance steps.
+The core is 2 to 3.5 times faster than the reference on every kernel, and P9 took the geometric mean of the
+cycles down by 20 % on the SoC (21 % on the flat SRAM). Single issue puts the floor at CPI 1.0; crc32 is
+within 12 % of it.
 
-The core's numbers are unchanged through P5, P6, P7 and the P8 switchover
-(`baseline_pipe.csv` reproduces exactly from a clean run, and `baseline_ref.csv`
-is the old `baseline_fsm.csv`): with satp Bare, translation costs nothing,
-and a redirect that changes the translation context waits one fetch cycle only
-while satp is on or being written.
+What each P9 step bought, in cycles of each kernel's timed region (each row on top of the one above; the
+change is against that row; `check_cpi.py` compares two CSVs):
+
+**cache (the SoC)**
+
+| step | memcpy | crc32 | qsort | matmul | sieve | listchase | mixedint |
+|---|---|---|---|---|---|---|---|
+| before P9 | 1555 | 11091 | 11385 | 7661 | 11823 | 4909 | 9415 |
+| + store buffer | 1174 (-24.5%) | 11088 (-0.0%) | 10659 (-6.4%) | 7464 (-2.6%) | 11779 (-0.4%) | 4909 (+0.0%) | 7253 (-23.0%) |
+| + streaming fetch | 1160 (-1.2%) | 9933 (-10.4%) | 10058 (-5.6%) | 6996 (-6.3%) | 8928 (-24.2%) | 4901 (-0.2%) | 7068 (-2.6%) |
+| + branch target buffer | 1160 (+0.0%) | 9933 (+0.0%) | 9585 (-4.7%) | 6990 (-0.1%) | 7551 (-15.4%) | 4901 (+0.0%) | 6952 (-1.6%) |
+| + return-address stack | 1160 (+0.0%) | 9933 (+0.0%) | 9293 (-3.0%) | 6990 (+0.0%) | 7551 (+0.0%) | 4901 (+0.0%) | 6952 (+0.0%) |
+| + branch history table | 1160 (+0.0%) | 9933 (+0.0%) | 8583 (-7.6%) | 6990 (+0.0%) | 7554 (+0.0%) | 4901 (+0.0%) | 6952 (+0.0%) |
+
+**sram** (core on flat SRAM, fetch and data sharing one bus)
+
+| step | memcpy | crc32 | qsort | matmul | sieve | listchase | mixedint |
+|---|---|---|---|---|---|---|---|
+| before P9 | 1593 | 11170 | 11540 | 8359 | 14627 | 5148 | 9877 |
+| + store buffer | 1593 (+0.0%) | 11169 (-0.0%) | 11384 (-1.4%) | 8303 (-0.7%) | 14627 (+0.0%) | 5148 (+0.0%) | 9874 (-0.0%) |
+| + streaming fetch | 1346 (-15.5%) | 10013 (-10.4%) | 10393 (-8.7%) | 7886 (-5.0%) | 12422 (-15.1%) | 5656 (+9.9%) | 8371 (-15.2%) |
+| + branch target buffer | 1222 (-9.2%) | 10013 (+0.0%) | 9828 (-5.4%) | 7114 (-9.8%) | 8952 (-27.9%) | 4639 (-18.0%) | 7835 (-6.4%) |
+| + return-address stack | 1222 (+0.0%) | 10013 (+0.0%) | 9542 (-2.9%) | 7114 (+0.0%) | 8952 (+0.0%) | 4639 (+0.0%) | 7835 (+0.0%) |
+| + branch history table | 1222 (+0.0%) | 10013 (+0.0%) | 8812 (-7.7%) | 7114 (+0.0%) | 8952 (+0.0%) | 4639 (+0.0%) | 7835 (+0.0%) |
+
+- The store buffer: stores to RAM retire at once and drain behind the loads (the drain gives way to a load
+  near the head of the ROB). It beats the ideal-store bound below on memcpy because the drain also leaves
+  the D$ free for the next load. On the flat SRAM it gains little: the bus beats are the same.
+- Streaming fetch: back-to-back requests, a four-entry fetch buffer, an eight-entry instruction queue.
+  On the flat SRAM it makes fetch and the memory port fight harder for the one bus: `listchase` loses
+  10 % there until the BTB gives the cycles back. (With the SoC's caches fetch has the I$ to itself.)
+- The branch target buffer follows a taken branch with the next fetch request, no bubble; sieve's loop
+  closes with a 32-bit branch that straddles two dwords, which the buffer files under the second one.
+- The return-address stack and the history table only matter to `qsort` (116 returns, a few hundred
+  data-dependent branches). The table costs `sieve` 3 cycles of 7551 on the SoC (aliasing).
+- The geometric mean of the SoC cycles is 0.804 of before, of the flat SRAM 0.792. With every knob off
+  (`QV_PIPE_SB_DEPTH=0 QV_PIPE_FETCH_STREAM=0 QV_PIPE_BP=0`, passed as `run_perf.sh --defines "..."`) the CSV is
+  the previous baseline, byte for byte.
+- `listchase` (dependent loads) does not move: its time is the load-to-use latency of a load that starts at the
+  head of the ROB, which only an early-load queue (the O2 load/store queue) shortens. That, and the
+  execute-time redirect of a mispredicted branch (saves the cycles one waits behind older instructions:
+  6 % of qsort, under 2 % of anything else), were not built in P9; see the P9 plan.
+
+The core's numbers were unchanged through P5, P6, P7 and the P8 switchover; P9 is the only step that moved
+them (`baseline_ref.csv` is the old `baseline_fsm.csv`). With satp Bare, translation costs nothing, and a
+redirect that changes the translation context waits one fetch cycle only while satp is on or being written.
 
 What Sv39 costs (`testbench/core_sv39_cpi_tb.sv`, run by the regression): the
 same loop of 300 iterations (8 instructions: ALU, a load, a store, a branch)
@@ -54,10 +95,11 @@ in M-mode and in S-mode under an identity 1 GiB leaf, in cycles:
 | core | 4805 | 5113 | 1.06 |
 
 A translated fetch dword and a translated access each take one more cycle
-(the answer is registered before it is used); the pipeline hides most of it.
-Overlapping the instruction-TLB lookup with the previous fetch beat is a follow-up (see the P9 plan).
+(the answer is registered before it is used); the pipeline hides most of it. Streaming and the predictors
+leave the translated fetch alone (every dword keeps its translation phase), so the figures are those of
+before P9; overlapping the instruction-TLB lookup with the previous fetch beat is a follow-up.
 
-## CPI stack (P9.0)
+## CPI stack
 
 `perf_stack.sv` (instantiated by `perf_tb.sv`, not part of the reference build) splits every cycle of a
 kernel's window into one class, and `run_perf.sh` writes the counts to `baseline_pipe_stack.csv`. The
@@ -74,7 +116,35 @@ kernel's `instret` (the monitor prints a warning when either fails; none does).
 - **frontend**: the ROB is empty and no redirect explains it.
 
 Share of the window, in percent (the CSV also holds the side counters, among them `bus_wait`, the cycles
-the LSU's request waits while fetch holds the shared SRAM, meaningful in the `sram` configuration only):
+the LSU's request waits while fetch holds the shared SRAM, meaningful in the `sram` configuration only).
+
+After P9 (`baseline_pipe_stack.csv`):
+
+| kernel | cycles | retire | LSU | ALU/BRU/SYS | after align | after commit | frontend | mispredicts cond/jal/jalr |
+|---|---|---|---|---|---|---|---|---|
+| **cache** (the SoC) | | | | | | | | |
+| memcpy | 1160 | 56.8 | 39.3 | 0.9 | 0.7 | 2.3 | 0.0 | 5/0/0 |
+| crc32 | 9933 | 89.0 | 3.0 | 1.3 | 0.0 | 6.7 | 0.0 | 129/0/0 |
+| qsort | 8583 | 53.7 | 22.4 | 3.2 | 1.4 | 18.7 | 0.6 | 333/0/2 |
+| matmul | 6990 | 61.3 | 32.2 | 1.1 | 0.0 | 5.5 | 0.0 | 73/0/0 |
+| sieve | 7554 | 78.0 | 19.7 | 0.3 | 0.0 | 1.8 | 0.2 | 24/0/0 |
+| listchase | 4901 | 52.3 | 47.2 | 0.1 | 0.0 | 0.4 | 0.0 | 1/0/0 |
+| mixedint | 6952 | 63.2 | 31.3 | 0.9 | 0.0 | 4.5 | 0.0 | 61/0/0 |
+| **sram** (core on flat SRAM) | | | | | | | | |
+| memcpy | 1222 | 53.9 | 41.9 | 0.8 | 0.7 | 2.2 | 0.5 | 5/0/0 |
+| crc32 | 10013 | 88.3 | 3.8 | 1.3 | 0.0 | 6.5 | 0.0 | 129/0/0 |
+| qsort | 8812 | 52.3 | 23.9 | 3.2 | 1.4 | 18.5 | 0.7 | 333/0/2 |
+| matmul | 7114 | 60.2 | 33.3 | 1.1 | 0.0 | 5.4 | 0.0 | 73/0/0 |
+| sieve | 8952 | 65.9 | 16.7 | 15.5 | 0.0 | 1.5 | 0.5 | 24/0/0 |
+| listchase | 4639 | 55.3 | 44.3 | 0.1 | 0.0 | 0.4 | 0.0 | 1/0/0 |
+| mixedint | 7835 | 56.1 | 36.8 | 1.6 | 0.0 | 4.0 | 1.5 | 61/0/0 |
+
+What is left: the load-to-use latency of loads that start at the head of the ROB is the biggest class on
+every memory kernel (17 to 47 %), then the refill after a mispredict (crc32's 129 loop exits, qsort's 333
+data-dependent branches, 4 to 19 %). Both are O1/O2 work: an early-load queue, and kill-by-age with an
+execute-time redirect.
+
+Before P9, the same table (the column heads are the same):
 
 | kernel | cycles | retire | LSU | ALU/BRU/SYS | after align | after commit | frontend | mispredicts cond/jal/jalr |
 |---|---|---|---|---|---|---|---|---|
@@ -114,7 +184,7 @@ What it says:
   older instructions are still to commit; the cycles it waits beyond that (the most an execute-time
   redirect can save) are 6.0 % of qsort, 3.2 % of mixedint and 1.3 % of memcpy and matmul on the SoC.
 
-### Ideal-store oracle
+### Ideal-store oracle (before the store buffer)
 
 `run_perf.sh --oracle store` builds the cache configuration with `oracle_dcache.sv` in place of the
 D$: a store is acknowledged like a load hit and written straight into the SRAM array, with no
@@ -133,7 +203,16 @@ a store buffer can gain (`oracle_store_pipe.csv`; `check_cpi.py --new verificati
 | mixedint | 9415 | 8033 | -14.7 % |
 
 Free stores help memcpy, mixedint and qsort, and sieve not at all (its fetch bound hides the gain), as
-the P9 plan predicted. The bound is at least 5 % on three kernels, so the store buffer (P9d) is a go.
+the P9 plan predicted. The bound is at least 5 % on three kernels, so the store buffer (P9d) was a go; it
+did better than the bound on memcpy (-24.5 %) and mixedint (-23.0 %), since its drain also keeps the D$ free
+for the loads behind it.
+
+### Branch traces
+
+`+BRTRACE` (a plusarg of `perf_tb`) makes the monitor print one line per control-flow instruction retired
+inside the window; `brpred.py` replays such traces through a history table, a target buffer and a
+return-address stack to see what each would buy before building it. Its cost model overestimates (a taken
+branch's bubble is mostly hidden by the queues; a mispredict costs about 4.5 cycles in the stack above, not 8).
 
 `check_cpi.py` compares a run's `baseline_pipe.csv` with the committed one: it fails when a kernel's
 instret changes or its cycles rise on the SoC configuration.
