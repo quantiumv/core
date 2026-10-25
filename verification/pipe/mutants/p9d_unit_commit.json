@@ -1,0 +1,71 @@
+{
+ "dut": "design/pipe/qv_commit.sv",
+ "tb": "design/pipe/qv_commit_sb_tb.sv",
+ "files": [
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_commit.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench"
+ ],
+ "cwd": "design",
+ "timeout": 600,
+ "mutants": [
+  {
+   "name": "pushes whatever retires",
+   "old": "assign o_sb_push = commit && sb_posted;",
+   "new": "assign o_sb_push = commit;"
+  },
+  {
+   "name": "pushes before it retires",
+   "old": "assign o_sb_push = commit && sb_posted;",
+   "new": "assign o_sb_push = head_ready && sb_posted;"
+  },
+  {
+   "name": "a posted store retires into a full buffer",
+   "old": "wire sb_ok          = (!sb_posted || i_sb_ready) && (!sb_drain_first || i_sb_empty);",
+   "new": "wire sb_ok          = (!sb_drain_first || i_sb_empty);"
+  },
+  {
+   "name": "FENCE.I and EBREAK ignore the buffer",
+   "old": "wire sb_ok          = (!sb_posted || i_sb_ready) && (!sb_drain_first || i_sb_empty);",
+   "new": "wire sb_ok          = (!sb_posted || i_sb_ready);"
+  },
+  {
+   "name": "only FENCE.I waits",
+   "old": "wire sb_drain_first = is_fence_i || (is_sys && i_head_ctrl.sys_op == QV_SYS_EBREAK);",
+   "new": "wire sb_drain_first = is_fence_i;"
+  },
+  {
+   "name": "only EBREAK waits",
+   "old": "wire sb_drain_first = is_fence_i || (is_sys && i_head_ctrl.sys_op == QV_SYS_EBREAK);",
+   "new": "wire sb_drain_first = (is_sys && i_head_ctrl.sys_op == QV_SYS_EBREAK);"
+  },
+  {
+   "name": "ECALL waits too",
+   "old": "wire sb_drain_first = is_fence_i || (is_sys && i_head_ctrl.sys_op == QV_SYS_EBREAK);",
+   "new": "wire sb_drain_first = is_fence_i || (is_sys && (i_head_ctrl.sys_op == QV_SYS_EBREAK || i_head_ctrl.sys_op == QV_SYS_ECALL));"
+  },
+  {
+   "name": "a debug-entry EBREAK waits for the buffer",
+   "old": "&& ebreak_bit\n                         && !i_dbg_in_debug && !irq && !halt_take;",
+   "new": "&& ebreak_bit\n                         && !i_dbg_in_debug && !irq && !halt_take && i_sb_empty;"
+  },
+  {
+   "name": "a posted store whose LSU result carries an exception is pushed",
+   "old": "wire sb_posted      = (i_head_ctrl.cls == QV_FU_LSU) && !i_head_ctrl.xcpt && i_lsu_res.posted;",
+   "new": "wire sb_posted      = (i_head_ctrl.cls == QV_FU_LSU) && !i_head_ctrl.xcpt && (i_lsu_res.posted || i_lsu_res.xcpt);"
+  },
+  {
+   "name": "any LSU op is a posted store",
+   "old": "wire sb_posted      = (i_head_ctrl.cls == QV_FU_LSU) && !i_head_ctrl.xcpt && i_lsu_res.posted;",
+   "new": "wire sb_posted      = (i_head_ctrl.cls == QV_FU_LSU) && !i_head_ctrl.xcpt;"
+  }
+ ]
+}

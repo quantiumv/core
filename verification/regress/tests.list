@@ -11,7 +11,7 @@
 #   ref   the frozen multi-cycle reference, verification/reference/ref_core.sv
 #         (named `core` by -DQV_REF_AS_CORE) -- 75 rows
 # run_regress.sh --core X SKIPS any row not listing X, silently, so a row that
-# names neither core would just never run: there must be 107 rows listing pipe.
+# names neither core would just never run: there must be 112 rows listing pipe.
 #
 # The rows that omit ref are the design/*_tb.sv unit tests of a leaf module
 # (alu, c_expand, csr_file, divider, register_file) and of the divider's
@@ -74,9 +74,11 @@ tb_soc_tb|testbench/soc_tb.sv||design|ref,pipe|pass|
 tb_soc_uart_rx_tb|testbench/soc_uart_rx_tb.sv||design|ref,pipe|pass|
 tb_soc_uart_plic_tb|testbench/soc_uart_plic_tb.sv||design|ref,pipe|pass|
 tb_soc_sba_running_tb|testbench/soc_sba_running_tb.sv||design|ref,pipe|pass|
+tb_soc_sb_halt_sba_tb|testbench/soc_sb_halt_sba_tb.sv||design|pipe|pass|600
 
 # === testbench/*_tb.sv (core_wb4_sram_harness) ===
 tb_core_a_ext_tb|testbench/core_a_ext_tb.sv|testbench/core_wb4_sram_harness.sv|design|ref,pipe|pass|
+tb_core_sb_tb|testbench/core_sb_tb.sv|testbench/core_wb4_sram_harness.sv|design|pipe|pass|
 tb_core_bus_fault_trap_tb|testbench/core_bus_fault_trap_tb.sv|testbench/core_wb4_sram_harness.sv,testbench/state_reached_monitor.sv|design|ref,pipe|pass|
 tb_core_c_ext_tb|testbench/core_c_ext_tb.sv|testbench/core_wb4_sram_harness.sv|design|ref,pipe|pass|
 tb_core_c_illegal_trap_tb|testbench/core_c_illegal_trap_tb.sv|testbench/core_wb4_sram_harness.sv|design|ref,pipe|pass|

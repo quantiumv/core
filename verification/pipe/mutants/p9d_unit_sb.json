@@ -1,0 +1,135 @@
+{
+ "dut": "design/pipe/qv_sb.sv",
+ "tb": "design/pipe/qv_sb_tb.sv",
+ "files": [
+  "design/pipe/qv_sb.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench"
+ ],
+ "cwd": "design",
+ "timeout": 600,
+ "mutants": [
+  {
+   "name": "drain out of order",
+   "old": "assign o_addr      = {addr_q[rd_q], 3'b000};",
+   "new": "assign o_addr      = {addr_q[wr_q], 3'b000};"
+  },
+  {
+   "name": "byte select lost",
+   "old": "assign o_sel       = sel_q[rd_q];",
+   "new": "assign o_sel       = 8'hFF;"
+  },
+  {
+   "name": "data of the wrong entry",
+   "old": "assign o_dat       = dat_q[rd_q];",
+   "new": "assign o_dat       = dat_q[wr_q];"
+  },
+  {
+   "name": "starts while the LSU is on the bus",
+   "old": "has_next && !i_lsu_inflight && !i_ptw_beat",
+   "new": "has_next && !i_ptw_beat"
+  },
+  {
+   "name": "starts while the walker's beat is in flight",
+   "old": "has_next && !i_lsu_inflight && !i_ptw_beat",
+   "new": "has_next && !i_lsu_inflight"
+  },
+  {
+   "name": "always urgent",
+   "old": "wire urgent   = full || (held_q >= 8'(YIELD_MAX));",
+   "new": "wire urgent   = 1'b1;"
+  },
+  {
+   "name": "never yields out",
+   "old": "wire urgent   = full || (held_q >= 8'(YIELD_MAX));",
+   "new": "wire urgent   = full;"
+  },
+  {
+   "name": "the held counter never counts",
+   "old": "held_q <= held_q + 8'd1;",
+   "new": "held_q <= held_q;"
+  },
+  {
+   "name": "ignores a load near the head",
+   "old": "(urgent || (!i_lsu_busy && !i_load_near))",
+   "new": "(urgent || !i_lsu_busy)"
+  },
+  {
+   "name": "ignores a ready LSU access",
+   "old": "(urgent || (!i_lsu_busy && !i_load_near))",
+   "new": "(urgent || !i_load_near)"
+  },
+  {
+   "name": "no beat decided in the response cycle",
+   "old": "wire go       = (!beat_q || resp)",
+   "new": "wire go       = (!beat_q)"
+  },
+  {
+   "name": "cyc held into the response cycle",
+   "old": "assign o_cyc       = beat_q && !(i_ack || i_err);",
+   "new": "assign o_cyc       = beat_q;"
+  },
+  {
+   "name": "takes an answer that is not its own",
+   "old": "wire resp     = beat_q && (i_ack || i_err);",
+   "new": "wire resp     = (i_ack || i_err);"
+  },
+  {
+   "name": "an error is not an answer",
+   "old": "wire resp     = beat_q && (i_ack || i_err);",
+   "new": "wire resp     = beat_q && i_ack;"
+  },
+  {
+   "name": "match sees a dead entry",
+   "old": "if (v_q[i] && addr_q[i] == i_match_addr) o_match = 1'b1;",
+   "new": "if (addr_q[i] == i_match_addr) o_match = 1'b1;"
+  },
+  {
+   "name": "match compares too few bits",
+   "old": "if (v_q[i] && addr_q[i] == i_match_addr) o_match = 1'b1;",
+   "new": "if (v_q[i] && addr_q[i][31:4] == i_match_addr[31:4]) o_match = 1'b1;"
+  },
+  {
+   "name": "an entry stays valid after its beat",
+   "old": "v_q[rd_q] <= 1'b0;",
+   "new": "v_q[rd_q] <= v_q[rd_q];"
+  },
+  {
+   "name": "a beat with nothing to write",
+   "old": "wire has_next = (cnt_q > (resp ? CNT_W'(1) : CNT_W'(0)));",
+   "new": "wire has_next = 1'b1;"
+  },
+  {
+   "name": "a beat for the entry that is leaving",
+   "old": "wire has_next = (cnt_q > (resp ? CNT_W'(1) : CNT_W'(0)));",
+   "new": "wire has_next = (cnt_q != '0);"
+  },
+  {
+   "name": "push into a full buffer",
+   "old": "wire push = i_push && o_ready;",
+   "new": "wire push = i_push;"
+  },
+  {
+   "name": "empty is wrong",
+   "old": "assign o_empty = (cnt_q == '0);",
+   "new": "assign o_empty = (cnt_q <= CNT_W'(1));"
+  },
+  {
+   "name": "ready is wrong",
+   "old": "assign o_ready = !full;",
+   "new": "assign o_ready = 1'b1;"
+  },
+  {
+   "name": "the pointer does not advance on a response",
+   "old": "rd_q      <= ptr_inc(rd_q);",
+   "new": "rd_q      <= rd_q;"
+  }
+ ]
+}

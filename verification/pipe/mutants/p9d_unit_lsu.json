@@ -1,0 +1,118 @@
+{
+ "dut": "design/pipe/qv_lsu.sv",
+ "tb": "design/pipe/qv_lsu_sb_tb.sv",
+ "files": [
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_pmp.sv",
+  "design/pipe/qv_lsu.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench"
+ ],
+ "cwd": "design",
+ "timeout": 600,
+ "mutants": [
+  {
+   "name": "posts outside the window",
+   "old": "wire pa_in_window = (PMA_RAM_SIZE != 64'd0) && (pa[63:32] == 32'b0) && (pa >= PMA_RAM_BASE)\n                        && ((pa - PMA_RAM_BASE) < PMA_RAM_SIZE);",
+   "new": "wire pa_in_window = 1'b1;"
+  },
+  {
+   "name": "the window's upper end is not checked",
+   "old": "&& ((pa - PMA_RAM_BASE) < PMA_RAM_SIZE);",
+   "new": ";"
+  },
+  {
+   "name": "posts a Program Buffer store",
+   "old": "wire postable     = is_ram && store_q && !atomic_q && !i_pmp_bypass;",
+   "new": "wire postable     = is_ram && store_q && !atomic_q;"
+  },
+  {
+   "name": "a load ignores the match",
+   "old": "wire sb_wait      = match_case ? i_sb_match : (!postable && !i_sb_empty);",
+   "new": "wire sb_wait      = match_case ? 1'b0 : (!postable && !i_sb_empty);"
+  },
+  {
+   "name": "a load waits for an empty buffer",
+   "old": "wire sb_wait      = match_case ? i_sb_match : (!postable && !i_sb_empty);",
+   "new": "wire sb_wait      = match_case ? !i_sb_empty : (!postable && !i_sb_empty);"
+  },
+  {
+   "name": "an atomic or an outside access ignores the buffer",
+   "old": "wire sb_wait      = match_case ? i_sb_match : (!postable && !i_sb_empty);",
+   "new": "wire sb_wait      = match_case ? i_sb_match : 1'b0;"
+  },
+  {
+   "name": "start ignores a drain beat in flight",
+   "old": "wire start     = start_raw && !i_ptw_beat && !i_sb_beat && !i_sb_go;",
+   "new": "wire start     = start_raw && !i_ptw_beat && !i_sb_go;"
+  },
+  {
+   "name": "start ignores a drain beat decided this cycle",
+   "old": "wire start     = start_raw && !i_ptw_beat && !i_sb_beat && !i_sb_go;",
+   "new": "wire start     = start_raw && !i_ptw_beat && !i_sb_beat;"
+  },
+  {
+   "name": "a misaligned store is posted",
+   "old": "wire post_done = at_head && !misaligned_q && !pmp_deny && pa_valid && postable;",
+   "new": "wire post_done = at_head && !pmp_deny && pa_valid && postable;"
+  },
+  {
+   "name": "a PMP-denied store is posted",
+   "old": "wire post_done = at_head && !misaligned_q && !pmp_deny && pa_valid && postable;",
+   "new": "wire post_done = at_head && !misaligned_q && pa_valid && postable;"
+  },
+  {
+   "name": "a store is posted before its address is translated",
+   "old": "wire post_done = at_head && !misaligned_q && !pmp_deny && pa_valid && postable;",
+   "new": "wire post_done = at_head && !misaligned_q && !pmp_deny && postable;",
+   "equivalent": true
+  },
+  {
+   "name": "never says posted",
+   "old": "o_res.posted    <= post_done;",
+   "new": "o_res.posted    <= 1'b0;"
+  },
+  {
+   "name": "a foreign error makes a posted store fault",
+   "old": "o_res.xcpt      <= done_nobus || (done_bus && wb_mem_err_i);",
+   "new": "o_res.xcpt      <= done_nobus || wb_mem_err_i;"
+  },
+  {
+   "name": "load_near reaches one entry too far",
+   "old": "(head_dist <= QV_ROB_TAG_W'(2))",
+   "new": "(head_dist <= QV_ROB_TAG_W'(3))"
+  },
+  {
+   "name": "load_near stops one entry short",
+   "old": "(head_dist <= QV_ROB_TAG_W'(2))",
+   "new": "(head_dist <= QV_ROB_TAG_W'(1))"
+  },
+  {
+   "name": "load_near for a load that waits for the buffer",
+   "old": "&& pa_valid && !i_sb_match\n",
+   "new": "&& pa_valid\n"
+  },
+  {
+   "name": "load_near for a store",
+   "old": "wire match_case   = is_ram && !store_q && !atomic_q && !i_pmp_bypass;",
+   "new": "wire match_case   = is_ram && !atomic_q && !i_pmp_bypass;"
+  },
+  {
+   "name": "a posted store keeps the slot",
+   "old": "else if (done_nobus || post_done) state_q <= S_IDLE;",
+   "new": "else if (done_nobus) state_q <= S_IDLE;"
+  },
+  {
+   "name": "a posted store does not complete",
+   "old": "o_wb.valid = done_bus || done_nobus || post_done;",
+   "new": "o_wb.valid = done_bus || done_nobus;"
+  }
+ ]
+}

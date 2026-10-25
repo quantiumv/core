@@ -2,7 +2,7 @@
 # run.sh [--mutants] -- module-level SymbiYosys proofs for units of the pipelined core.
 # Run under WSL (sby, yosys-slang, boolector; see the riscv-formal README).
 #
-#   fetch.sby, lsu.sby, dbg.sby, ptw.sby: prove (k-induction), bmc and cover tasks must all
+#   fetch.sby, lsu.sby, dbg.sby, ptw.sby, sb.sby: prove (k-induction), bmc and cover tasks must all
 #   PASS (cover: every non-vacuity cover point reached).
 #   --mutants: each property set must also catch known-bad versions, each
 #   FAILing a BMC: the pre-fix qv_fetch whose 1-bit epoch let a stale
@@ -16,7 +16,10 @@
 #   Debug Module owning the ports during a run, a step that is never armed;
 #   for the walker a cancelled walk that reports, a beat that starts while the
 #   LSU is busy or for a denied address, a beat abandoned on a cancel or held
-#   into its response cycle).
+#   into its response cycle; for the store buffer a drain out of order, a lost byte select, a beat that starts while
+#   the LSU is on the bus or the walker's beat is in flight, one that ignores the full-buffer rule, a cyc held into
+#   the response cycle, an answer taken that is not the buffer's own, an o_match that sees a dead entry, a beat
+#   with nothing to write, a push into a full buffer).
 set -u
 cd "$(dirname "$0")" || exit 1
 HERE=$(pwd)
@@ -25,7 +28,7 @@ fail=0
 
 status() { grep -o 'DONE ([A-Z]*' | head -1 | sed 's/DONE (//'; }
 
-for unit in fetch lsu dbg ptw; do
+for unit in fetch lsu dbg ptw sb; do
     for task in prove bmc cover; do
         r=$(sby -f $unit.sby $task 2>&1 | status)
         printf '%-12s %s\n' "$unit $task" "$r"
@@ -80,8 +83,8 @@ EOF
     mutant fetch_ignores_hold  fetch 's/ \&\& !i_hold$//'
     mutant fetch_abandons      fetch 's/assign wb_fetch_cyc_o  = bus \&\& !(wb_fetch_ack_i || wb_fetch_err_i);/assign wb_fetch_cyc_o  = bus \&\& !(wb_fetch_ack_i || wb_fetch_err_i) \&\& !i_redirect_valid;/'
     mutant lsu_ignores_head    lsu 's/wire at_head  = (state_q == S_WAIT_HEAD) \&\& i_head_valid \&\& (i_head_tag == tag_q) \&\& !i_flush;/wire at_head  = (state_q == S_WAIT_HEAD) \&\& !i_flush;/'
-    mutant lsu_misaligned_bus  lsu 's/wire start_raw = at_head \&\& !misaligned_q \&\& !pmp_deny \&\& !sc_fail \&\& pa_valid;/wire start_raw = at_head \&\& !pmp_deny \&\& !sc_fail \&\& pa_valid;/'
-    mutant lsu_pmp_bus         lsu 's/wire start_raw = at_head \&\& !misaligned_q \&\& !pmp_deny \&\& !sc_fail \&\& pa_valid;/wire start_raw = at_head \&\& !misaligned_q \&\& !sc_fail \&\& pa_valid;/'
+    mutant lsu_misaligned_bus  lsu 's/wire start_raw = at_head \&\& !misaligned_q \&\& !pmp_deny/wire start_raw = at_head \&\& !pmp_deny/'
+    mutant lsu_pmp_bus         lsu 's/wire start_raw = at_head \&\& !misaligned_q \&\& !pmp_deny \&\& !sc_fail/wire start_raw = at_head \&\& !misaligned_q \&\& !sc_fail/'
     mutant lsu_reissues        lsu 's/^                        state_q <= S_IDLE;/                        state_q <= S_WAIT_HEAD;/'
     mutant lsu_abandons        lsu 's/assign wb_mem_cyc_o  = (start || in_bus) \&\& !resp;/assign wb_mem_cyc_o  = (start || in_bus) \&\& !resp \&\& !i_flush;/'
     mutant lsu_sc_no_reservation lsu 's/wire sc_fail  = sc_q \&\& !(i_res_valid \&\& i_res_addr == addr_q);/wire sc_fail  = 1'"'"'b0;/'
@@ -104,6 +107,16 @@ EOF
     mutant ptw_cyc_in_response ptw 's/assign o_bus_cyc  = beat_q \&\& !(i_bus_ack || i_bus_err);/assign o_bus_cyc  = beat_q;/'
     mutant ptw_abandons_on_cancel ptw 's/assign o_bus_cyc  = beat_q \&\& !(i_bus_ack || i_bus_err);/assign o_bus_cyc  = beat_q \&\& !(i_bus_ack || i_bus_err) \&\& !cancel_srv;/'
     mutant ptw_stale_decoded   ptw 's/if (st_q == W_DEC \&\& !stale_eff) begin/if (st_q == W_DEC) begin/'
+    mutant sb_out_of_order     sb 's/assign o_addr      = {addr_q\[rd_q\], 3'"'"'b000};/assign o_addr      = {addr_q[wr_q], 3'"'"'b000};/'
+    mutant sb_loses_select     sb 's/assign o_sel       = sel_q\[rd_q\];/assign o_sel       = 8'"'"'hFF;/'
+    mutant sb_ignores_lsu_bus  sb 's/ \&\& !i_lsu_inflight \&\& !i_ptw_beat$/ \&\& !i_ptw_beat/'
+    mutant sb_ignores_walker   sb 's/ \&\& !i_lsu_inflight \&\& !i_ptw_beat$/ \&\& !i_lsu_inflight/'
+    mutant sb_always_urgent    sb 's/wire urgent   = full || (held_q >= 8'"'"'(YIELD_MAX));/wire urgent   = 1'"'"'b1;/'
+    mutant sb_cyc_in_response  sb 's/assign o_cyc       = beat_q \&\& !(i_ack || i_err);/assign o_cyc       = beat_q;/'
+    mutant sb_takes_foreign_ack sb 's/wire resp     = beat_q \&\& (i_ack || i_err);/wire resp     = (i_ack || i_err);/'
+    mutant sb_match_dead_entry sb 's/if (v_q\[i\] \&\& addr_q\[i\] == i_match_addr) o_match = 1'"'"'b1;/if (addr_q[i] == i_match_addr) o_match = 1'"'"'b1;/'
+    mutant sb_beat_with_nothing sb 's/wire has_next = (cnt_q > (resp ? CNT_W'"'"'(1) : CNT_W'"'"'(0)));/wire has_next = 1'"'"'b1;/'
+    mutant sb_push_when_full   sb 's/wire push = i_push \&\& o_ready;/wire push = i_push;/'
     rm -rf "$T"
 fi
 

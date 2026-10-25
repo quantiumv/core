@@ -47,6 +47,7 @@ module qv_lsu_sb_tb;
     logic [31:3]             sb_addr;
     logic                    load_near, bus_busy;
     logic                    foreign_ack = 1'b0;      // a response that is not the LSU's
+    logic                    foreign_err = 1'b0;      // ... an error response (the walker's PTE read, say)
 
     qv_lsu #(.SB_EN(1'b1), .PMA_RAM_BASE(64'h0), .PMA_RAM_SIZE(64'h400)) dut (
         .clk(clk), .rst(rst), .i_flush(flush),
@@ -56,7 +57,7 @@ module qv_lsu_sb_tb;
         .i_pmpcfg0(pmpcfg0), .i_pmpaddr0(pmpaddr0),
         .wb_mem_addr_o(addr), .wb_mem_dat_o(dat_o), .wb_mem_sel_o(sel), .wb_mem_we_o(we),
         .wb_mem_cyc_o(cyc), .wb_mem_stb_o(stb), .wb_mem_lock_o(lock),
-        .wb_mem_dat_i(dat_i), .wb_mem_ack_i(ack | foreign_ack), .wb_mem_err_i(err),
+        .wb_mem_dat_i(dat_i), .wb_mem_ack_i(ack | foreign_ack), .wb_mem_err_i(err | foreign_err),
         .o_wb(wb), .o_res(res), .o_head_started(started),
         .o_bus_busy(bus_busy),
         .i_sb_empty(sb_empty), .i_sb_match(sb_match), .i_sb_beat(sb_beat), .i_sb_go(sb_go),
@@ -189,6 +190,15 @@ module qv_lsu_sb_tb;
         check("posted store: rvfi rmask", {56'b0, res.mem_rmask}, 64'd0);
         check("posted store: rvfi wdata", res.mem_wdata, 64'hDEAD_BEEF_0123_4567);
         check("posted store: memory untouched", mem[8'h21], {32'hA5A5_0000 + 32'd33, 32'h5A5A_0000 + 32'd33});
+
+        // another master's bus error landing in the head cycle is not this store's
+        dispatch(1'b0, QV_AMO_LR, 1'b1, 2'd3, 64'h120, 64'h0F0F_0F0F_0F0F_0F0F);
+        foreign_err = 1'b1;
+        go_head(8);
+        foreign_err = 1'b0;
+        check("posted store under a foreign error: completes", {63'b0, got_wb}, 64'd1);
+        check("posted store under a foreign error: no exception", {63'b0, res.xcpt}, 64'd0);
+        check("posted store under a foreign error: posted", {63'b0, res.posted}, 64'd1);
 
         // sub-dword posted stores carry their lanes
         dispatch(1'b0, QV_AMO_LR, 1'b1, 2'd1, 64'h156, 64'h0000_0000_0000_ABCD);
