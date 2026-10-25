@@ -23,12 +23,13 @@ JOBS="$(nproc 2>/dev/null || echo 4)"
 FORCE=0
 LIST_ONLY=0
 OUTDIR=""
+DEFINES=""
 DEFAULT_TIMEOUT=${QV_REGRESS_TIMEOUT:-180}   # seconds per test; raise it on a loaded machine
 
 usage() {
     cat <<'EOF'
 Usage: run_regress.sh [--core pipe|ref] [--only REGEX] [-j N]
-                       [--force] [--list] [--outdir DIR]
+                       [--force] [--list] [--outdir DIR] [--defines "A=1 B=0"]
 
   --core pipe|ref       Which core build to test (default: pipe, the
                         pipelined core in design/pipe/). "ref" is the
@@ -40,7 +41,9 @@ Usage: run_regress.sh [--core pipe|ref] [--only REGEX] [-j N]
                         per-tag results from a previous run.
   --list                Print the tags that would run, then exit.
   --outdir DIR          Where per-tag results/logs go (default:
-                        /tmp/qv_regress_<core>).
+                        /tmp/qv_regress_<core>, with a hash of --defines added).
+  --defines "A=1 B=0"   Preprocessor defines for every compile (the QV_PIPE_*
+                        feature knobs).
 EOF
 }
 
@@ -52,6 +55,7 @@ while [ $# -gt 0 ]; do
         --force) FORCE=1; shift ;;
         --list) LIST_ONLY=1; shift ;;
         --outdir) OUTDIR="$2"; shift 2 ;;
+        --defines) DEFINES="$2"; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "Unknown argument: $1" >&2; usage; exit 1 ;;
     esac
@@ -72,7 +76,8 @@ case "$CORE" in
         ;;
 esac
 
-[ -n "$OUTDIR" ] || OUTDIR="/tmp/qv_regress_${CORE}"
+for d in $DEFINES; do CORE_DEFINE="$CORE_DEFINE -D$d"; done
+[ -n "$OUTDIR" ] || OUTDIR="/tmp/qv_regress_${CORE}${DEFINES:+_$(echo "$DEFINES" | sha1sum | cut -c1-6)}"
 mkdir -p "$OUTDIR"
 
 # Read design_files.list into a space-joined string (skip blank/# lines).

@@ -57,6 +57,8 @@ DUT=ref
 PIPE_DIR=design/pipe
 SIM=${QV_LOCKSTEP_SIM:-iverilog}
 MUTANT=0
+# extra preprocessor defines for the pipelined core ("QV_PIPE_X=0 QV_PIPE_Y=1"): the P9 feature knobs
+DEFINES=""
 MEMCFG_B=sram
 # 0: no delay injection. --delay-max N perturbs each side's bus timing;
 # lockstep_tb.sv's exact stop keeps the resulting skew harmless.
@@ -107,6 +109,8 @@ Usage: run_lockstep.sh --mode selfproof|mutant|corrupt [options]
   --sim iverilog|verilator  the simulator the harness is built for (default iverilog)
   --dut ref|pipe       side B's core (default ref; pipe = the pipelined core, not with --mode mutant)
   --pipe-dir DIR       design/pipe/ replacement for --dut pipe (default design/pipe)
+  --defines "A=1 B=0"  preprocessor defines for the build (the QV_PIPE_* feature knobs); part of the cache key
+  --defines "A=1 B=0"  preprocessor defines for the build (the QV_PIPE_* feature knobs); part of the cache key
   --mutant N           QV_MUTANT_B value, 1-13 (--mode mutant only)
   --memcfg-b sram|cache  side B's memory config (default sram -- also applies
                         under --mode mutant, e.g. --mutant 9 needs cache)
@@ -151,6 +155,7 @@ while [ $# -gt 0 ]; do
         --mode) MODE="$2"; shift 2 ;;
         --dut) DUT="$2"; shift 2 ;;
         --pipe-dir) PIPE_DIR="$2"; shift 2 ;;
+        --defines) DEFINES="$2"; shift 2 ;;
         --sim) SIM="$2"; shift 2 ;;
         --mutant) MUTANT="$2"; shift 2 ;;
         --memcfg-b) MEMCFG_B="$2"; shift 2 ;;
@@ -215,6 +220,8 @@ fi
 
 MEMCFG_B_CACHE=0
 [ "$MEMCFG_B" == "cache" ] && MEMCFG_B_CACHE=1
+DEFINE_FLAGS=""
+for d in $DEFINES; do DEFINE_FLAGS="$DEFINE_FLAGS -D$d"; done
 QV_MUTANT_B=0
 [ "$MODE" == "mutant" ] && QV_MUTANT_B=$MUTANT
 RUN_DELAY_MAX=$DELAY_MAX
@@ -226,9 +233,9 @@ RUN_DELAY_MAX=$DELAY_MAX
 # testbench sources themselves (SRC_HASH, which also covers a --pipe-dir
 # copy), the interrupt and delay seeds, and (see result_path) the program.
 # shellcheck disable=SC2086
-SRC_HASH=$(cat $PIPE_FILES $REF_FILES $SUPPORT_FILES $LOCKSTEP_FILES \
+SRC_HASH=$( (cat $PIPE_FILES $REF_FILES $SUPPORT_FILES $LOCKSTEP_FILES \
                design/defaults/*.sv verification/reference/*.svh verification/lockstep/*.svh \
-               2>/dev/null | sha1sum | cut -c1-8)
+               2>/dev/null; echo "defines: $DEFINES") | sha1sum | cut -c1-8)
 RUN_KEY="${MODE}_${DUT}_m${QV_MUTANT_B}_${MEMCFG_B}_d${RUN_DELAY_MAX}_i${IRQ_MODE}_l${IRQ_LATE}_q${IRQ_SEED}_y${IRQ_DENSITY}_g${DBG_MODE}-${DBG_FEAT}-${DBG_DENSITY}-${DBG_LATE}_s${RUN_SEED}_${SRC_HASH}"
 [ "$SIM" == "iverilog" ] || RUN_KEY="${RUN_KEY}_${SIM}"
 VVP_BIN="$OUTDIR/lockstep_${MODE}_${DUT}_m${QV_MUTANT_B}_${MEMCFG_B}_d${RUN_DELAY_MAX}_${SRC_HASH}.vvp"
@@ -237,7 +244,7 @@ case "$SIM" in
     iverilog)
         if [ ! -e "$VVP_BIN" ] || [ "$FORCE" == "1" ]; then
             echo "=== building $VVP_BIN ==="
-            iverilog -g2012 -DRISCV_FORMAL $([ "$B_PIPE" == "1" ] && echo -DLS_HAVE_PIPE) \
+            iverilog -g2012 -DRISCV_FORMAL $DEFINE_FLAGS $([ "$B_PIPE" == "1" ] && echo -DLS_HAVE_PIPE) \
                 -I design -I design/defaults -I verification/reference -I verification/lockstep \
                 -Plockstep_tb.QV_MUTANT_B=$QV_MUTANT_B \
                 -Plockstep_tb.MEMCFG_B_CACHE=$MEMCFG_B_CACHE \
@@ -263,7 +270,7 @@ case "$SIM" in
             # redefinition, which is harmless here: each file expands its own uses while it is being read.
             verilator --binary --timing -O2 -j ${VL_JOBS:-4} -Wno-fatal -Wno-lint -Wno-style -Wno-WIDTH \
                 -Wno-CASEINCOMPLETE -Wno-UNOPTFLAT -Wno-BLKANDNBLK -Wno-INITIALDLY -Wno-MULTIDRIVEN -Wno-REDEFMACRO \
-                -DRISCV_FORMAL $([ "$B_PIPE" == "1" ] && echo -DLS_HAVE_PIPE) -Idesign -Idesign/defaults -Iverification/reference -Iverification/lockstep \
+                -DRISCV_FORMAL $DEFINE_FLAGS $([ "$B_PIPE" == "1" ] && echo -DLS_HAVE_PIPE) -Idesign -Idesign/defaults -Iverification/reference -Iverification/lockstep \
                 -GQV_MUTANT_B=$QV_MUTANT_B -GMEMCFG_B_CACHE=$MEMCFG_B_CACHE -GDELAY_MAX=$RUN_DELAY_MAX -GB_PIPE=$B_PIPE \
                 --top-module lockstep_tb --Mdir "$VL_DIR" -o lockstep_vl \
                 $PIPE_FILES $REF_FILES $SUPPORT_FILES $LOCKSTEP_FILES > "$BUILD_LOG" 2>&1

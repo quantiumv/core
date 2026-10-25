@@ -19,8 +19,8 @@
  "mutants": [
   {
    "name": "sampled without a retirement in the cycle before",
-   "old": "wire  irq = commit_q && (mei_take || mti_take || sei_take);",
-   "new": "wire  irq = (mei_take || mti_take || sei_take);"
+   "old": "wire  sample_pt  = commit_q && !i_dbg_in_debug;",
+   "new": "wire  sample_pt  = !i_dbg_in_debug;"
   },
   {
    "name": "sampled one cycle late",
@@ -29,8 +29,8 @@
   },
   {
    "name": "interrupt does not beat the head's commit",
-   "old": "(!is_fence_i || i_fetch_idle) && !irq;",
-   "new": "(!is_fence_i || i_fetch_idle);"
+   "old": "wire commit = head_ready && (!is_fence_i || i_fetch_idle) && !irq && !halt_take && !head_dbg_entry;",
+   "new": "wire commit = head_ready && (!is_fence_i || i_fetch_idle) && !halt_take && !head_dbg_entry;"
   },
   {
    "name": "MEI enable ignores the privilege (MIE only)",
@@ -144,8 +144,8 @@
   },
   {
    "name": "architectural pc not moved to the vector",
-   "old": "        else if (irq)    arch_pc_q <= irq_vector;",
-   "new": "        else if (irq)    arch_pc_q <= arch_pc_q;"
+   "old": "        else if (irq)           arch_pc_q <= irq_vector;",
+   "new": "        else if (irq)           arch_pc_q <= arch_pc_q;"
   },
   {
    "name": "interrupt vector ignores stvec",
@@ -159,13 +159,13 @@
   },
   {
    "name": "no redirect on an interrupt",
-   "old": "assign o_redirect_valid = irq || (commit && (is_trap || is_mret || is_sret || i_head_entry.mispredict\n                                                 || i_head_ctrl.serialize));",
-   "new": "assign o_redirect_valid = (commit && (is_trap || is_mret || is_sret || i_head_entry.mispredict\n                                                 || i_head_ctrl.serialize));"
+   "old": "assign o_redirect_valid = irq || halt_take",
+   "new": "assign o_redirect_valid = halt_take"
   },
   {
    "name": "redirect pc ignores the interrupt vector",
-   "old": "assign o_redirect_pc    = irq ? irq_vector : actual_next_pc;",
-   "new": "assign o_redirect_pc    = actual_next_pc;"
+   "old": "assign o_redirect_pc    = irq ? irq_vector : (halt_take",
+   "new": "assign o_redirect_pc    = (halt_take"
   },
   {
    "name": "an interrupt advances the order counter and the previous pc",
@@ -174,13 +174,13 @@
   },
   {
    "name": "no trap channel pulse for an interrupt",
-   "old": "assign o_trap_taken    = (commit && is_trap) || irq;",
-   "new": "assign o_trap_taken    = (commit && is_trap);"
+   "old": "assign o_trap_taken    = (commit && trap_fx) || irq;",
+   "new": "assign o_trap_taken    = (commit && trap_fx);"
   },
   {
    "name": "interrupt counted as a retirement",
-   "old": "assign o_instr_retired = commit && !is_trap;",
-   "new": "assign o_instr_retired = (commit && !is_trap) || irq;"
+   "old": "assign o_instr_retired = commit && !faulted && !(i_dbg_in_debug && i_dcsr[10]);",
+   "new": "assign o_instr_retired = (commit && !faulted && !(i_dbg_in_debug && i_dcsr[10])) || irq;"
   }
  ]
 }

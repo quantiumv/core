@@ -9,9 +9,11 @@
 # interrupts, one program at a time). Run from WSL, any cwd.
 #
 #   run_rvfi_diff.sh [--seeds N] [--first S] [--len L]
-#                    [--serialize 0|1] [--bypass 0|1] [--no-div] [--no-amo] [--pipe-dir DIR]
+#                    [--serialize 0|1] [--bypass 0|1] [--no-div] [--no-amo] [--pipe-dir DIR] [--defines "A=1 B=0"]
 #
 # --pipe-dir builds the pipelined core from a copy of design/pipe/ (for mutants);
+# --defines passes preprocessor defines to the pipelined core only (the QV_PIPE_* feature knobs),
+# and puts a hash of them in the build name;
 # --outdir keeps concurrent runs apart.
 #
 # Prints one PASS/FAIL line per seed, then RVFI_DIFF_SUMMARY. Logs for
@@ -20,7 +22,7 @@ set -u
 cd "$(dirname "$0")/../.."
 REPO=$(pwd)
 
-SEEDS=20; FIRST=1; LEN=400; SER=0; BYP=1; GEN_ARGS=""; PIPE_DIR="$REPO/design/pipe"
+SEEDS=20; FIRST=1; LEN=400; SER=0; BYP=1; GEN_ARGS=""; PIPE_DIR="$REPO/design/pipe"; DEFS=""
 OUT="$REPO/verification/pipe/.results"
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -33,6 +35,7 @@ while [ $# -gt 0 ]; do
         --len)       LEN=$2; shift 2 ;;
         --serialize) SER=$2; shift 2 ;;
         --bypass)    BYP=$2; shift 2 ;;
+        --defines)   DEFS=$2; shift 2 ;;
         *) echo "unknown option: $1" >&2; exit 2 ;;
     esac
 done
@@ -43,6 +46,11 @@ esac
 
 mkdir -p "$OUT"
 TAG="s${SER}b${BYP}"
+DEF_FLAGS=""
+if [ -n "$DEFS" ]; then
+    for d in $DEFS; do DEF_FLAGS="$DEF_FLAGS -D$d"; done
+    TAG="${TAG}_$(echo "$DEFS" | sha1sum | cut -c1-6)"
+fi
 REF_VVP="$OUT/ref.vvp"
 DUT_VVP="$OUT/pipe_$TAG.vvp"
 
@@ -67,7 +75,7 @@ build() {
 # shellcheck disable=SC2086
 build "$REF_VVP" -DQV_REF_AS_CORE -I "$REF_DIR" $REF_FILES
 # shellcheck disable=SC2086
-build "$DUT_VVP" -DQV_PIPE_SERIALIZE=$SER -DQV_PIPE_BYPASS_EN=$BYP $PIPE_FILES
+build "$DUT_VVP" -DQV_PIPE_SERIALIZE=$SER -DQV_PIPE_BYPASS_EN=$BYP $DEF_FLAGS $PIPE_FILES
 
 pass=0; fail=0
 for ((s = FIRST; s < FIRST + SEEDS; s++)); do
