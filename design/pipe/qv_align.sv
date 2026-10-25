@@ -33,6 +33,9 @@
  * it, a return pops, and a return with an entry on the stack is predicted taken to it (a redirect, like any other
  * predicted-taken instruction here).
  *
+ * Conditional branches are predicted from a branch history table (qv_bht, outside) once it has seen the branch: its
+ * two-bit counter decides; until then the static rule below does.
+ *
  * Static prediction happens here too: JAL and C.J are predicted taken,
  * conditional branches (including C.BEQZ/C.BNEZ) taken when their offset
  * is negative -- loops. A predicted-taken instruction carries pred_taken
@@ -80,12 +83,16 @@ module qv_align #(
     input  logic [63:0]       i_buf_htgt  = 64'b0,
     output logic              o_buf_pop,
 
-    // the return-address stack: its top two entries, and the operations of this cycle's instructions
+    // the return-address stack: its top, and the operations of this cycle's instructions (none for what was not emitted)
     input  logic [63:0]       i_ras_top   = 64'b0,
-    input  logic [63:0]       i_ras_next  = 64'b0,
     input  logic              i_ras_has1  = 1'b0,
-    input  logic              i_ras_has2  = 1'b0,
-    output logic              o_ras_go,
+    // the branch history table: looked up for the four halfword positions of the head dword and for a pending instruction
+    output logic [63:0]       o_bht_base,
+    output logic [63:0]       o_bht_ppc,
+    input  logic [3:0]        i_bht_known = 4'b0,
+    input  logic [3:0]        i_bht_taken = 4'b0,
+    input  logic              i_bht_pknown = 1'b0,
+    input  logic              i_bht_ptaken = 1'b0,
     output logic [1:0]        o_ras_op0,                  // 2'b01 push, 2'b10 pop
     output logic [63:0]       o_ras_addr0,
     output logic [1:0]        o_ras_op1,
@@ -112,6 +119,8 @@ module qv_align #(
     logic [43:0] pend_pg_q;
 
     wire [63:0] base  = {i_buf_pc[63:3], 3'b000};
+    assign o_bht_base = base;
+    assign o_bht_ppc  = pend_pc_q;
     wire [1:0]  start = mid_q ? off_q : i_buf_pc[2:1];
     wire        room1 = i_push_ready || (ONE_OK && i_push_ready1);
     wire        go    = i_buf_valid && room1 && !i_flush;
@@ -127,7 +136,8 @@ module qv_align #(
 
     // Static prediction: JAL/C.J always taken, conditional branches
     // (32-bit and C.BEQZ/C.BNEZ) taken when backward. Returns {taken, target}.
-    function automatic logic [64:0] predict(input logic [31:0] raw, input logic rvc, input logic [63:0] pc);
+    function automatic logic [64:0] predict(input logic [31:0] raw, input logic rvc, input logic [63:0] pc,
+                                            input logic bk = 1'b0, input logic bt = 1'b0);
         logic        taken;
         logic [63:0] off;
         taken = 1'b0;
@@ -138,14 +148,14 @@ module qv_align #(
                 off   = {{52{raw[12]}}, raw[12], raw[8], raw[10:9], raw[6], raw[7], raw[2],
                          raw[11], raw[5:3], 1'b0};
             end else if (raw[1:0] == 2'b01 && raw[15:14] == 2'b11) begin            // C.BEQZ/C.BNEZ
-                taken = raw[12];
+                taken = bk ? bt : raw[12];
                 off   = {{55{raw[12]}}, raw[12], raw[6:5], raw[2], raw[11:10], raw[4:3], 1'b0};
             end
         end else if (raw[6:0] == 7'b1101111) begin                                  // JAL
             taken = 1'b1;
             off   = {{43{raw[31]}}, raw[31], raw[19:12], raw[20], raw[30:21], 1'b0};
         end else if (raw[6:0] == 7'b1100011 && raw[14:13] != 2'b01) begin           // branch
-            taken = raw[31];
+            taken = bk ? bt : raw[31];
             off   = {{51{raw[31]}}, raw[31], raw[7], raw[30:25], raw[11:8], 1'b0};
         end
         return {taken, pc + off};
@@ -155,28 +165,31 @@ module qv_align #(
     // jump that is not a return (its target is a guess the branch unit checks).
     /* verilator lint_off UNUSEDSIGNAL */
     function automatic logic hint_holds(input logic [31:0] raw, input logic rvc, input logic [63:0] pc,
-                                        input logic hint_here, input logic [63:0] htgt);
+                                        input logic hint_here, input logic [63:0] htgt,
+                                        input logic bk = 1'b0, input logic bt = 1'b0);
         logic [64:0] p;
         logic [1:0]  k;
-        p = predict(raw, rvc, pc);
+        p = predict(raw, rvc, pc, bk, bt);
         k = qv_ctl_kind(raw);
-        return hint_here && ((k == 2'd1 && p[63:0] == htgt) || k == 2'd2);
+        // a conditional branch the table has seen and expects not to be taken does not take the hint
+        return hint_here && ((k == 2'd1 && p[63:0] == htgt && !(qv_is_cond(raw) && bk && !bt)) || k == 2'd2);
     endfunction
     /* verilator lint_on UNUSEDSIGNAL */
 
     function automatic fe_instr_t mk(input logic [63:0] pc, input logic [31:0] raw, input logic rvc,
                                      input logic xl, input logic [43:0] pg_lo, input logic [43:0] pg_hi,
                                      input logic hint_here = 1'b0, input logic [63:0] htgt = 64'b0,
-                                     input logic ras_ok = 1'b0, input logic [63:0] ras_tgt = 64'b0);
+                                     input logic ras_ok = 1'b0, input logic [63:0] ras_tgt = 64'b0,
+                                     input logic bk = 1'b0, input logic bt = 1'b0);
         logic [64:0] p;
-        p             = predict(raw, rvc, pc);
+        p             = predict(raw, rvc, pc, bk, bt);
         mk            = '0;
         mk.pc         = pc;
         mk.raw        = raw;
         mk.rvc        = rvc;
         mk.pred_taken = p[64];
         mk.pred_tgt   = p[63:0];
-        if (hint_holds(raw, rvc, pc, hint_here, htgt)) begin
+        if (hint_holds(raw, rvc, pc, hint_here, htgt, bk, bt)) begin
             mk.pred_taken = 1'b1;
             mk.pred_tgt   = (qv_ctl_kind(raw) == 2'd1) ? p[63:0] : htgt;
         end
@@ -196,8 +209,9 @@ module qv_align #(
     logic        hint_here;      // the instruction being looked at starts at the hinted halfword
     logic        conf0, conf1;   // ... and the hint holds for it (slot 0, slot 1)
     logic        hint_redir;     // the dword's hint came to nothing: fetch goes back to the next sequential dword
+    logic        bk0, bt0, bk1, bt1;         // the table has seen the branch in this slot / expects it taken
     logic        ras_ok0, ras_ok1;           // a return in this slot has a predicted address (the stack's, after the slot before)
-    logic [63:0] ras_tgt0, ras_tgt1;
+    logic [63:0] ras_tgt0, ras_tgt1;            // (slot 1 sees slot 0's call; slot 0 is never a predicted return when slot 1 is emitted)
 
     function automatic logic [1:0] ras_op_of(input logic [31:0] raw);
         return (qv_ctl_kind(raw) == 2'd3) ? 2'b10 : qv_is_call(raw) ? 2'b01 : 2'b00;
@@ -218,7 +232,10 @@ module qv_align #(
         conf0         = 1'b0;
         conf1         = 1'b0;
         hint_redir    = 1'b0;
-        o_ras_go      = go;
+        bk0           = pend_q ? i_bht_pknown : i_bht_known[start];
+        bt0           = pend_q ? i_bht_ptaken : i_bht_taken[start];
+        bk1           = 1'b0;
+        bt1           = 1'b0;
         o_ras_op0     = 2'b00;
         o_ras_op1     = 2'b00;
         o_ras_addr0   = '0;
@@ -243,8 +260,8 @@ module qv_align #(
                 hint_here = i_buf_hint && i_buf_hx;
                 o_push0_valid = 1'b1;
                 o_push0_data  = mk(pend_pc_q, {hw(i_buf_data, 2'd0), pend_hw_q}, 1'b0, pend_xl_q, pend_pg_q, i_buf_pg,
-                                   hint_here, i_buf_htgt, ras_ok0, ras_tgt0);
-                conf0 = hint_holds({hw(i_buf_data, 2'd0), pend_hw_q}, 1'b0, pend_pc_q, hint_here, i_buf_htgt);
+                                   hint_here, i_buf_htgt, ras_ok0, ras_tgt0, bk0, bt0);
+                conf0 = hint_holds({hw(i_buf_data, 2'd0), pend_hw_q}, 1'b0, pend_pc_q, hint_here, i_buf_htgt, bk0, bt0);
                 cur = 3'd1;
             end else begin
                 h = hw(i_buf_data, cur[1:0]);
@@ -252,8 +269,8 @@ module qv_align #(
                 if (h[1:0] != 2'b11) begin
                     o_push0_valid = 1'b1;
                     o_push0_data  = mk(base + {61'b0, cur[1:0], 1'b0}, {16'b0, h}, 1'b1, i_buf_xl, i_buf_pg, i_buf_pg,
-                                       hint_here, i_buf_htgt, ras_ok0, ras_tgt0);
-                    conf0 = hint_holds({16'b0, h}, 1'b1, base + {61'b0, cur[1:0], 1'b0}, hint_here, i_buf_htgt);
+                                       hint_here, i_buf_htgt, ras_ok0, ras_tgt0, bk0, bt0);
+                    conf0 = hint_holds({16'b0, h}, 1'b1, base + {61'b0, cur[1:0], 1'b0}, hint_here, i_buf_htgt, bk0, bt0);
                     cur = cur + 3'd1;
                 end else if (cur == 3'd3) begin
                     stash    = 1'b1;
@@ -262,17 +279,17 @@ module qv_align #(
                 end else begin
                     o_push0_valid = 1'b1;
                     o_push0_data  = mk(base + {61'b0, cur[1:0], 1'b0}, {hw(i_buf_data, cur[1:0] + 2'd1), h}, 1'b0,
-                                       i_buf_xl, i_buf_pg, i_buf_pg, hint_here, i_buf_htgt, ras_ok0, ras_tgt0);
+                                       i_buf_xl, i_buf_pg, i_buf_pg, hint_here, i_buf_htgt, ras_ok0, ras_tgt0, bk0, bt0);
                     conf0 = hint_holds({hw(i_buf_data, cur[1:0] + 2'd1), h}, 1'b0, base + {61'b0, cur[1:0], 1'b0},
-                                       hint_here, i_buf_htgt);
+                                       hint_here, i_buf_htgt, bk0, bt0);
                     cur = cur + 3'd2;
                 end
             end
             if (o_push0_valid) begin
                 o_ras_op0   = ras_op_of(o_push0_data.raw);
                 o_ras_addr0 = o_push0_data.pc + (o_push0_data.rvc ? 64'd2 : 64'd4);
-                ras_ok1     = (o_ras_op0 == 2'b01) ? 1'b1 : (o_ras_op0 == 2'b10) ? i_ras_has2 : i_ras_has1;
-                ras_tgt1    = (o_ras_op0 == 2'b01) ? o_ras_addr0 : (o_ras_op0 == 2'b10) ? i_ras_next : i_ras_top;
+                ras_ok1     = (o_ras_op0 == 2'b01) ? 1'b1 : i_ras_has1;
+                ras_tgt1    = (o_ras_op0 == 2'b01) ? o_ras_addr0 : i_ras_top;
             end
             if (o_push0_valid && o_push0_data.pred_taken) begin
                 if (conf0) begin
@@ -285,12 +302,14 @@ module qv_align #(
             // slot 1: one more, if this dword has any left
             if (o_push0_valid && !o_redirect_valid && cur != 3'd4 && i_push_ready) begin
                 h = hw(i_buf_data, cur[1:0]);
+                bk1 = i_bht_known[cur[1:0]];
+                bt1 = i_bht_taken[cur[1:0]];
                 hint_here = i_buf_hint && !i_buf_hx && (cur[1:0] == i_buf_hoff);
                 if (h[1:0] != 2'b11) begin
                     o_push1_valid = 1'b1;
                     o_push1_data  = mk(base + {61'b0, cur[1:0], 1'b0}, {16'b0, h}, 1'b1, i_buf_xl, i_buf_pg, i_buf_pg,
-                                       hint_here, i_buf_htgt, ras_ok1, ras_tgt1);
-                    conf1 = hint_holds({16'b0, h}, 1'b1, base + {61'b0, cur[1:0], 1'b0}, hint_here, i_buf_htgt);
+                                       hint_here, i_buf_htgt, ras_ok1, ras_tgt1, bk1, bt1);
+                    conf1 = hint_holds({16'b0, h}, 1'b1, base + {61'b0, cur[1:0], 1'b0}, hint_here, i_buf_htgt, bk1, bt1);
                     cur = cur + 3'd1;
                 end else if (cur == 3'd3) begin
                     stash    = 1'b1;
@@ -299,9 +318,9 @@ module qv_align #(
                 end else begin
                     o_push1_valid = 1'b1;
                     o_push1_data  = mk(base + {61'b0, cur[1:0], 1'b0}, {hw(i_buf_data, cur[1:0] + 2'd1), h}, 1'b0,
-                                       i_buf_xl, i_buf_pg, i_buf_pg, hint_here, i_buf_htgt, ras_ok1, ras_tgt1);
+                                       i_buf_xl, i_buf_pg, i_buf_pg, hint_here, i_buf_htgt, ras_ok1, ras_tgt1, bk1, bt1);
                     conf1 = hint_holds({hw(i_buf_data, cur[1:0] + 2'd1), h}, 1'b0, base + {61'b0, cur[1:0], 1'b0},
-                                       hint_here, i_buf_htgt);
+                                       hint_here, i_buf_htgt, bk1, bt1);
                     cur = cur + 3'd2;
                 end
                 if (o_push1_valid && o_push1_data.pred_taken) begin

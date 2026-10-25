@@ -195,6 +195,9 @@ module qv_commit #(
     output logic [63:0]                      o_btb_upd_pc,
     output logic                             o_btb_upd_taken,
     output logic                             o_btb_upd_cross,
+    // Branch history table training: a retiring conditional branch and whether it was taken.
+    output logic                             o_bht_upd_valid,
+    output logic                             o_bht_upd_taken,
     // The committed return-address stack: a retiring call pushes its return address, a retiring return pops.
     output logic                             o_ras_push,
     output logic [63:0]                      o_ras_addr,
@@ -391,6 +394,10 @@ module qv_commit #(
     wire        h_rvc  = i_head_entry.raw[1:0] != 2'b11;
     assign o_btb_upd_valid = commit && !faulted && !i_pb_active && (h_kind == 2'd1 || h_kind == 2'd2);
     assign o_btb_upd_cross = !h_rvc && i_head_entry.pc[2:1] == 2'b11;
+
+    // ---------------- branch history table training ----------------
+    assign o_bht_upd_valid = commit && !faulted && !i_pb_active && qv_is_cond(i_head_entry.raw);
+    assign o_bht_upd_taken = i_head_entry.next_pc != i_head_entry.pc + (h_rvc ? 64'd2 : 64'd4);
 
     // ---------------- return-address stack ----------------
     wire h_retires = commit && !faulted && !i_pb_active;

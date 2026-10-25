@@ -265,6 +265,14 @@ package qv_pkg;
     endfunction
     /* verilator lint_on UNUSEDSIGNAL */
 
+    // A conditional branch (32-bit, or C.BEQZ/C.BNEZ).
+    /* verilator lint_off UNUSEDSIGNAL */
+    function automatic logic qv_is_cond(input logic [31:0] raw);
+        if (raw[1:0] == 2'b11) return raw[6:0] == 7'b1100011 && raw[14:13] != 2'b01;
+        else                   return raw[1:0] == 2'b01 && raw[15:14] == 2'b11;
+    endfunction
+    /* verilator lint_on UNUSEDSIGNAL */
+
     // A call: JAL or JALR that links to ra or t0 (the return address is then pushed on the return-address stack), and
     // C.JALR (which links to ra).
     /* verilator lint_off UNUSEDSIGNAL */

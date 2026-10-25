@@ -95,6 +95,7 @@
 `define QV_PIPE_TLB_ENTRIES 1
 `define QV_PIPE_BTB_ENTRIES ((`QV_PIPE_BP) ? 2 : 0)
 `define QV_PIPE_RAS_DEPTH ((`QV_PIPE_BP) ? 2 : 0)
+`define QV_PIPE_BHT_ENTRIES ((`QV_PIPE_BP) ? 8 : 0)
 `else
 `define QV_PIPE_ROB_DEPTH qv_pkg::QV_ROB_DEPTH
 `define QV_PIPE_IQ_DEPTH  ((`QV_PIPE_FETCH_STREAM) ? 8 : 4)
@@ -102,6 +103,7 @@
 `define QV_PIPE_TLB_ENTRIES 4
 `define QV_PIPE_BTB_ENTRIES ((`QV_PIPE_BP) ? 32 : 0)
 `define QV_PIPE_RAS_DEPTH ((`QV_PIPE_BP) ? 8 : 0)
+`define QV_PIPE_BHT_ENTRIES ((`QV_PIPE_BP) ? 512 : 0)
 `endif
 
 // The store buffer (P9d). QV_PIPE_SB_DEPTH 0 leaves it out. Stores are posted only to RAM, which the core is told
@@ -140,6 +142,7 @@ module core
     parameter bit FETCH_YIELD  = `QV_PIPE_FETCH_YIELD,    // fetch gives way to the memory port's masters (shared bus)
     parameter int BTB_ENTRIES  = `QV_PIPE_BTB_ENTRIES,    // branch target buffer entries, 0: none
     parameter int RAS_DEPTH    = `QV_PIPE_RAS_DEPTH,      // return-address stack entries, 0: none (>= 2 otherwise)
+    parameter int BHT_ENTRIES  = `QV_PIPE_BHT_ENTRIES,    // branch history table counters, 0: none (>= 8 otherwise)
     parameter bit SV39_EN   = `QV_PIPE_SV39_EN,     // address translation present
     parameter int TLB_ENTRIES = `QV_PIPE_TLB_ENTRIES, // entries in each of the two TLBs
     parameter int SB_DEPTH  = `QV_PIPE_SB_DEPTH,     // store buffer entries, 0: none
@@ -349,22 +352,40 @@ module core
     endgenerate
 
     // ---------------- the return-address stack ----------------
-    logic        ras_go, ras_has1, ras_has2, ras_push, ras_pop;
+    logic        ras_has1, ras_push, ras_pop;
     logic [1:0]  ras_op0, ras_op1;
-    logic [63:0] ras_addr0, ras_addr1, ras_top, ras_next, ras_c_addr;
+    logic [63:0] ras_addr0, ras_addr1, ras_top, ras_c_addr;
     generate
         if (RAS_DEPTH > 0) begin : g_ras
             qv_ras #(.DEPTH(RAS_DEPTH)) ras0 (
                 .clk(clk), .rst(rst),
-                .i_sp_go(ras_go), .i_sp_op0(ras_op0), .i_sp_addr0(ras_addr0), .i_sp_op1(ras_op1), .i_sp_addr1(ras_addr1),
+                .i_sp_op0(ras_op0), .i_sp_addr0(ras_addr0), .i_sp_op1(ras_op1), .i_sp_addr1(ras_addr1),
                 .i_cm_push(ras_push), .i_cm_addr(ras_c_addr), .i_cm_pop(ras_pop), .i_flush(flush),
-                .o_top(ras_top), .o_next(ras_next), .o_has1(ras_has1), .o_has2(ras_has2)
+                .o_top(ras_top), .o_has1(ras_has1)
             );
         end else begin : g_noras
             assign ras_top  = 64'b0;
-            assign ras_next = 64'b0;
             assign ras_has1 = 1'b0;
-            assign ras_has2 = 1'b0;
+        end
+    endgenerate
+
+    // ---------------- the branch history table ----------------
+    logic [63:0] bht_base, bht_ppc;
+    logic [3:0]  bht_known, bht_taken;
+    logic        bht_pknown, bht_ptaken, bht_upd_valid, bht_upd_taken;
+    generate
+        if (BHT_ENTRIES > 0) begin : g_bht
+            qv_bht #(.ENTRIES(BHT_ENTRIES)) bht0 (
+                .clk(clk), .rst(rst),
+                .i_base_pc(bht_base), .i_pend_pc(bht_ppc),
+                .o_known(bht_known), .o_taken(bht_taken), .o_pend_known(bht_pknown), .o_pend_taken(bht_ptaken),
+                .i_upd_valid(bht_upd_valid), .i_upd_pc(btb_upd_pc), .i_upd_taken(bht_upd_taken)
+            );
+        end else begin : g_nobht
+            assign bht_known  = 4'b0;
+            assign bht_taken  = 4'b0;
+            assign bht_pknown = 1'b0;
+            assign bht_ptaken = 1'b0;
         end
     endgenerate
 
@@ -387,8 +408,10 @@ module core
         .i_buf_cause(fb_cause), .i_buf_xl(fb_xl), .i_buf_pg(fb_pg),
         .i_buf_hint(fb_hint), .i_buf_hoff(fb_hoff), .i_buf_hx(fb_hx), .i_buf_htgt(fb_htgt),
         .o_buf_pop(fb_pop),
-        .i_ras_top(ras_top), .i_ras_next(ras_next), .i_ras_has1(ras_has1), .i_ras_has2(ras_has2),
-        .o_ras_go(ras_go), .o_ras_op0(ras_op0), .o_ras_addr0(ras_addr0), .o_ras_op1(ras_op1), .o_ras_addr1(ras_addr1),
+        .o_bht_base(bht_base), .o_bht_ppc(bht_ppc),
+        .i_bht_known(bht_known), .i_bht_taken(bht_taken), .i_bht_pknown(bht_pknown), .i_bht_ptaken(bht_ptaken),
+        .i_ras_top(ras_top), .i_ras_has1(ras_has1),
+        .o_ras_op0(ras_op0), .o_ras_addr0(ras_addr0), .o_ras_op1(ras_op1), .o_ras_addr1(ras_addr1),
         .o_push0_valid(a0_valid), .o_push0_data(a0_data),
         .o_push1_valid(a1_valid), .o_push1_data(a1_data),
         .i_push_ready(iq_push_ready), .i_push_ready1(iq_push_ready1),
@@ -729,6 +752,7 @@ module core
         .i_sb_ready(sb_ready), .i_sb_empty(sb_empty), .o_sb_push(c_sb_push),
         .o_btb_upd_valid(btb_upd_valid), .o_btb_upd_pc(btb_upd_pc), .o_btb_upd_taken(btb_upd_taken),
         .o_btb_upd_cross(btb_upd_cross),
+        .o_bht_upd_valid(bht_upd_valid), .o_bht_upd_taken(bht_upd_taken),
         .o_ras_push(ras_push), .o_ras_addr(ras_c_addr), .o_ras_pop(ras_pop),
         .o_btb_upd_tgt(btb_upd_tgt),
         .o_commit_now(commit_now_w), .o_pc(arch_pc), .o_next_pc(retire_next_pc),
