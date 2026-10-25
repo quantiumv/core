@@ -21,6 +21,7 @@ CORE=pipe
 WALL_TIMEOUT=120
 MAX_CYCLES=2000000
 FORCE=0
+ORACLE=""
 
 usage() {
     cat <<EOF
@@ -29,6 +30,8 @@ Usage: run_perf.sh [options]
   --core pipe|ref     which core (default pipe)
   --outdir DIR        results directory (default verification/perf/.results)
   --force             rebuild kernels/testbenches even if cached
+  --oracle store      the cache configuration only, with the ideal-store D$ (oracle_dcache.sv): an upper bound for a store buffer;
+                      writes oracle_store_<core>.csv, never the baselines
   --timeout N          per-run cycle budget passed as +TIMEOUT (default 2000000)
   --wall-timeout N      real seconds per run before it's killed (default 120)
   -h, --help
@@ -40,6 +43,7 @@ while [ $# -gt 0 ]; do
         --core) CORE="$2"; shift 2 ;;
         --outdir) OUTDIR="$2"; shift 2 ;;
         --force) FORCE=1; shift ;;
+        --oracle) ORACLE="$2"; shift 2 ;;
         --timeout) MAX_CYCLES="$2"; shift 2 ;;
         --wall-timeout) WALL_TIMEOUT="$2"; shift 2 ;;
         -h|--help) usage; exit 0 ;;
@@ -71,8 +75,16 @@ case "$CORE" in
     *) echo "Unknown --core: $CORE (expected pipe or ref; the FSM core is ref)" >&2; exit 1 ;;
 esac
 DESIGN_FILES=$(grep -vE '^\s*(#|$)' "verification/regress/$DESIGN_LIST" | tr '\n' ' ')
+TAG="$CORE"
+if [ "$ORACLE" == "store" ]; then
+    ORACLE_DCACHE=verification/perf/oracle_dcache.sv
+    DESIGN_FILES="${DESIGN_FILES/design\/dcache.sv/$ORACLE_DCACHE}"
+    TAG="${CORE}_oracle_store"
+elif [ -n "$ORACLE" ]; then
+    echo "Unknown --oracle: $ORACLE (expected store)" >&2; exit 1
+fi
 HARNESS_FILES="testbench/core_wb4_sram_harness.sv"
-PERF_FILES="verification/perf/perf_tb.sv"
+PERF_FILES="verification/perf/perf_tb.sv verification/perf/perf_stack.sv"
 
 build_tb() {
     local cfg="$1" vvp="$2" log="$3"
@@ -96,12 +108,25 @@ build_tb() {
     fi
 }
 
-build_tb 0 "$OUTDIR/perf_tb_${CORE}_sram.vvp"  "$OUTDIR/build_${CORE}_sram.log"
-build_tb 1 "$OUTDIR/perf_tb_${CORE}_cache.vvp" "$OUTDIR/build_${CORE}_cache.log"
+if [ -z "$ORACLE" ]; then build_tb 0 "$OUTDIR/perf_tb_${TAG}_sram.vvp" "$OUTDIR/build_${TAG}_sram.log"; fi
+build_tb 1 "$OUTDIR/perf_tb_${TAG}_cache.vvp" "$OUTDIR/build_${TAG}_cache.log"
 
 # ---------------- run every kernel against both configs ----------------
 CSV="$SCRIPT_DIR/baseline_${CORE}.csv"
+if [ -n "$ORACLE" ]; then CSV="$SCRIPT_DIR/oracle_${ORACLE}_${CORE}.csv"; fi
 echo "kernel,config,cycles,instret,cpi" > "$CSV"
+
+# The CPI stack of the pipelined core (perf_stack.sv): where the window's cycles go, and the side counters. The
+# columns are the keys of the PERF_STACK and PERF_SIDE lines, in this order.
+STACK_CSV="$SCRIPT_DIR/baseline_${CORE}_stack.csv"
+STACK_KEYS="window retire blk_lsu blk_div blk_alu blk_sys ear_align ear_mispred ear_serial ear_other empty_front"
+SIDE_KEYS="iq_empty fb_empty no_uop is_rob is_oper is_lsu is_div re_align re_mispred re_serial re_other mp_cond mp_jal mp_jalr mp_wait bus_wait"
+if [ "$CORE" == "pipe" ] && [ -z "$ORACLE" ]; then
+    echo "kernel,config,$(echo $STACK_KEYS $SIDE_KEYS | tr ' ' ',')" > "$STACK_CSV"
+fi
+
+# kv "<line>" key: the number after key= in a PERF_ line
+kv() { echo "$1" | grep -oE "(^| )$2=[0-9]+" | grep -oE '[0-9]+$'; }
 
 run_one() {
     local kernel="$1" cfg_name="$2" vvp="$3"
@@ -128,12 +153,27 @@ run_one() {
     cpi=$(awk -v c="$cycles" -v i="$instret" 'BEGIN { if (i > 0) printf "%.3f", c / i; else print "nan" }')
     echo "${kernel},${cfg_name},${cycles},${instret},${cpi}" >> "$CSV"
     printf "%-10s %-6s cycles=%-8s instret=%-8s cpi=%s\n" "$kernel" "$cfg_name" "$cycles" "$instret" "$cpi"
+
+    if [ "$CORE" == "pipe" ] && [ -z "$ORACLE" ]; then
+        local sline pline row
+        sline=$(echo "$out" | grep "^PERF_STACK:" | head -1)
+        pline=$(echo "$out" | grep "^PERF_SIDE:" | head -1)
+        if [ -z "$sline" ] || [ -z "$pline" ]; then
+            echo "WARN: $kernel ($cfg_name): no PERF_STACK/PERF_SIDE line" >&2
+            return
+        fi
+        echo "$out" | grep "^PERF_STACK_WARN" | sed "s/^/WARN: $kernel ($cfg_name): /" >&2
+        row="${kernel},${cfg_name}"
+        for k in $STACK_KEYS; do row="$row,$(kv "$sline" $k)"; done
+        for k in $SIDE_KEYS; do row="$row,$(kv "$pline" $k)"; done
+        echo "$row" >> "$STACK_CSV"
+    fi
 }
 
 echo "=== running kernels ==="
 for kernel in $KERNELS; do
-    run_one "$kernel" "sram"  "$OUTDIR/perf_tb_${CORE}_sram.vvp"
-    run_one "$kernel" "cache" "$OUTDIR/perf_tb_${CORE}_cache.vvp"
+    if [ -z "$ORACLE" ]; then run_one "$kernel" "sram" "$OUTDIR/perf_tb_${TAG}_sram.vvp"; fi
+    run_one "$kernel" "cache" "$OUTDIR/perf_tb_${TAG}_cache.vvp"
 done
 
 echo "=== wrote $CSV ==="

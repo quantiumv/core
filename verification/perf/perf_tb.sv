@@ -48,6 +48,11 @@ module perf_tb #(
                 .clk(clk), .rst(rst)
             );
 
+`ifndef QV_REF_AS_CORE
+            // the LSU's request waits for the arbiter while fetch holds the shared SRAM
+            `PERF_STACK_INST(dut.core0, (dut.wbm_cyc && !dut.fetch_mem_arb0.grant))
+`endif
+
             always @(posedge clk)
                 if (dut.core0.trap_taken && dut.core0.is_ebreak) halted <= 1'b1;
 
@@ -63,12 +68,17 @@ module perf_tb #(
 
                 wait_halted_or_timeout(timeout_cycles, "kernel never reached EBREAK (fsm)");
                 `PERF_REPORT(dut.sram0.memory, perf_result_addr)
+                `PERF_STACK_REPORT(stack, dut.sram0.memory, perf_result_addr)
                 $finish;
             end
         end else begin : g_cache
             logic halted = 1'b0;
 
             soc dut (.clk(clk), .rst(rst));
+
+`ifndef QV_REF_AS_CORE
+            `PERF_STACK_INST(dut.core0, 1'b0)
+`endif
 
             always @(posedge clk)
                 if (dut.core0.trap_taken && dut.core0.is_ebreak) halted <= 1'b1;
@@ -85,6 +95,7 @@ module perf_tb #(
 
                 wait_halted_or_timeout(timeout_cycles, "kernel never reached EBREAK (cache)");
                 `PERF_REPORT(dut.sram0.memory, perf_result_addr)
+                `PERF_STACK_REPORT(stack, dut.sram0.memory, perf_result_addr)
                 $finish;
             end
         end

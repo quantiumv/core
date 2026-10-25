@@ -16,4 +16,31 @@
         $display("PERF_RESULT: cycles=%0d instret=%0d", _perf_cycles, _perf_instret); \
     end
 
+// The CPI stack (perf_stack.sv) belongs to the pipelined core; the reference has none of the nets it reads, so under
+// QV_REF_AS_CORE the report is empty.
+`ifdef QV_REF_AS_CORE
+`define PERF_STACK_REPORT(STACK, MEM_ARRAY, ADDR)
+`else
+// the monitor, named `stack`, wired to the core's own nets (CORE is the hierarchical path to the core instance)
+`define PERF_STACK_INST(CORE, BUSWAIT) \
+    perf_stack stack ( \
+        .clk(clk), .rst(rst), \
+        .commit(CORE.commit_now_w), .head_valid(CORE.head_valid), .head_complete(CORE.head_entry.complete), \
+        .head_cls(CORE.head_ctrl.cls), .head_raw(CORE.head_entry.raw), .head_mispredict(CORE.head_entry.mispredict), \
+        .head_serialize(CORE.head_ctrl.serialize), .head_tag(CORE.head_tag), \
+        .flush(CORE.flush), .fe_redirect(CORE.fe_redirect_valid), .rob_empty(CORE.rob_empty), \
+        .fb_valid(CORE.fb_valid), .iq_valid(CORE.iq_valid), .uop_valid(CORE.uop_valid), .uop_fu(CORE.uop.fu), \
+        .issue_fire(CORE.issue_fire), .a_ready(CORE.issue0.a_ready), .b_ready(CORE.issue0.b_ready), \
+        .alloc_ready(CORE.alloc_ready), .lsu_free(CORE.lsu_free), .div_free(CORE.div_free), \
+        .wb_valid(CORE.wb_bus.valid), .wb_mispredict(CORE.wb_bus.mispredict), .wb_tag(CORE.wb_bus.tag), \
+        .lsu_bus_wait(BUSWAIT) \
+    );
+`define PERF_STACK_REPORT(STACK, MEM_ARRAY, ADDR) \
+    begin \
+        longint unsigned _perf_instret_s; \
+        _perf_instret_s = MEM_ARRAY[ADDR[31:3] + 1]; \
+        STACK.report(_perf_instret_s); \
+    end
+`endif
+
 `endif
