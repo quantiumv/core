@@ -1,0 +1,187 @@
+{
+ "dut": "design/pipe/qv_align.sv",
+ "tb": "design/pipe/qv_align_hint_tb.sv",
+ "files": [
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_align.sv",
+  "design/pipe/qv_fifo.sv",
+  "design/pipe/qv_ras.sv",
+  "design/pipe/qv_bht.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench"
+ ],
+ "cwd": "design",
+ "timeout": 900,
+ "mutants": [
+  {
+   "name": "the hint is trusted without checking the target",
+   "old": "return hint_here && ((k == 2'd1 && p[63:0] == htgt && !(qv_is_cond(raw) && bk && !bt)) || k == 2'd2);",
+   "new": "return hint_here && ((k == 2'd1 && !(qv_is_cond(raw) && bk && !bt)) || k == 2'd2);"
+  },
+  {
+   "name": "the hint is trusted on any instruction",
+   "old": "return hint_here && ((k == 2'd1 && p[63:0] == htgt && !(qv_is_cond(raw) && bk && !bt)) || k == 2'd2);",
+   "new": "return hint_here;"
+  },
+  {
+   "name": "a return takes the hint",
+   "old": "return hint_here && ((k == 2'd1 && p[63:0] == htgt && !(qv_is_cond(raw) && bk && !bt)) || k == 2'd2);",
+   "new": "return hint_here && ((k == 2'd1 && p[63:0] == htgt && !(qv_is_cond(raw) && bk && !bt)) || k >= 2'd2);"
+  },
+  {
+   "name": "an indirect jump never takes the hint",
+   "old": "return hint_here && ((k == 2'd1 && p[63:0] == htgt && !(qv_is_cond(raw) && bk && !bt)) || k == 2'd2);",
+   "new": "return hint_here && (k == 2'd1 && p[63:0] == htgt && !(qv_is_cond(raw) && bk && !bt));"
+  },
+  {
+   "name": "a direct branch never takes the hint",
+   "old": "return hint_here && ((k == 2'd1 && p[63:0] == htgt && !(qv_is_cond(raw) && bk && !bt)) || k == 2'd2);",
+   "new": "return hint_here && (k == 2'd2);"
+  },
+  {
+   "name": "an indirect jump goes to the static target",
+   "old": "mk.pred_tgt   = (qv_ctl_kind(raw) == 2'd1) ? p[63:0] : htgt;",
+   "new": "mk.pred_tgt   = p[63:0];"
+  },
+  {
+   "name": "no sequential correction for a worthless hint",
+   "old": "if (i_buf_hint && !conf0 && !conf1 && !o_redirect_valid && cur == 3'd4) begin",
+   "new": "if (1'b0 && i_buf_hint && !conf0 && !conf1 && !o_redirect_valid && cur == 3'd4) begin"
+  },
+  {
+   "name": "the correction goes to the wrong dword",
+   "old": "o_redirect_pc    = base + 64'd8;",
+   "new": "o_redirect_pc    = base + 64'd16;"
+  },
+  {
+   "name": "the correction drops a crossing instruction's first half",
+   "old": "if (rst || i_flush || (o_redirect_valid && !hint_redir)) begin",
+   "new": "if (rst || i_flush || o_redirect_valid) begin"
+  },
+  {
+   "name": "a confirmed hint keeps the rest of the dword (slot 0)",
+   "old": "cur = 3'd4;                      // fetch is already at the target: drop the rest of this dword",
+   "new": ";"
+  },
+  {
+   "name": "a confirmed hint keeps the rest of the dword (slot 1)",
+   "old": "if (conf1) begin\n                        cur = 3'd4;",
+   "new": "if (conf1) begin\n                        ;"
+  },
+  {
+   "name": "the hinted halfword is off by one",
+   "old": "hint_here = i_buf_hint && !i_buf_hx && (cur[1:0] == i_buf_hoff);",
+   "new": "hint_here = i_buf_hint && !i_buf_hx && (cur[1:0] == i_buf_hoff + 2'd1);",
+   "count": 2
+  },
+  {
+   "name": "a crossing hint is never taken",
+   "old": "hint_here = i_buf_hint && i_buf_hx;",
+   "new": "hint_here = 1'b0;"
+  },
+  {
+   "name": "an ordinary hint is taken on the crossing flag's dword (unobservable: any hint the aligner accepts is on the path fetch took; the branch unit repairs a wrong association)",
+   "old": "hint_here = i_buf_hint && !i_buf_hx && (cur[1:0] == i_buf_hoff);",
+   "new": "hint_here = i_buf_hint && (cur[1:0] == i_buf_hoff);",
+   "count": 2,
+   "equivalent": true
+  },
+  {
+   "name": "the table is ignored for a 32-bit branch",
+   "old": "taken = bk ? bt : raw[31];",
+   "new": "taken = raw[31];"
+  },
+  {
+   "name": "the table is ignored for a 16-bit branch",
+   "old": "taken = bk ? bt : raw[12];",
+   "new": "taken = raw[12];"
+  },
+  {
+   "name": "an unseen branch is predicted not taken",
+   "old": "taken = bk ? bt : raw[31];",
+   "new": "taken = bk ? bt : 1'b0;"
+  },
+  {
+   "name": "the table's answer is inverted",
+   "old": "taken = bk ? bt : raw[31];",
+   "new": "taken = bk ? !bt : raw[31];"
+  },
+  {
+   "name": "a hint overrides the table",
+   "old": " && !(qv_is_cond(raw) && bk && !bt)) || k == 2'd2);",
+   "new": ") || k == 2'd2);"
+  },
+  {
+   "name": "slot 1 reads slot 0's counter",
+   "old": "bk1 = i_bht_known[cur[1:0]];",
+   "new": "bk1 = i_bht_known[start];"
+  },
+  {
+   "name": "slot 1 reads slot 0's direction",
+   "old": "bt1 = i_bht_taken[cur[1:0]];",
+   "new": "bt1 = i_bht_taken[start];"
+  },
+  {
+   "name": "a crossing branch reads the dword's counter",
+   "old": "bk0           = pend_q ? i_bht_pknown : i_bht_known[start];",
+   "new": "bk0           = i_bht_known[start];"
+  },
+  {
+   "name": "a crossing branch reads the dword's direction",
+   "old": "bt0           = pend_q ? i_bht_ptaken : i_bht_taken[start];",
+   "new": "bt0           = i_bht_taken[start];"
+  },
+  {
+   "name": "the pending lookup is of the dword",
+   "old": "assign o_bht_ppc  = pend_pc_q;",
+   "new": "assign o_bht_ppc  = base;"
+  },
+  {
+   "name": "a return is never predicted from the stack",
+   "old": "if (ras_ok && qv_ctl_kind(raw) == 2'd3) begin",
+   "new": "if (1'b0 && ras_ok && qv_ctl_kind(raw) == 2'd3) begin"
+  },
+  {
+   "name": "a return is predicted with an empty stack",
+   "old": "if (ras_ok && qv_ctl_kind(raw) == 2'd3) begin",
+   "new": "if (qv_ctl_kind(raw) == 2'd3) begin"
+  },
+  {
+   "name": "calls do not push",
+   "old": "return (qv_ctl_kind(raw) == 2'd3) ? 2'b10 : qv_is_call(raw) ? 2'b01 : 2'b00;",
+   "new": "return (qv_ctl_kind(raw) == 2'd3) ? 2'b10 : 2'b00;"
+  },
+  {
+   "name": "returns do not pop",
+   "old": "return (qv_ctl_kind(raw) == 2'd3) ? 2'b10 : qv_is_call(raw) ? 2'b01 : 2'b00;",
+   "new": "return qv_is_call(raw) ? 2'b01 : 2'b00;"
+  },
+  {
+   "name": "the pushed address ignores a 16-bit call",
+   "old": "o_ras_addr0 = o_push0_data.pc + (o_push0_data.rvc ? 64'd2 : 64'd4);",
+   "new": "o_ras_addr0 = o_push0_data.pc + 64'd4;"
+  },
+  {
+   "name": "slot 1 does not see slot 0's call",
+   "old": "ras_ok1     = (o_ras_op0 == 2'b01) ? 1'b1 : i_ras_has1;",
+   "new": "ras_ok1     = i_ras_has1;"
+  },
+  {
+   "name": "slot 1 does not see slot 0's call address",
+   "old": "ras_tgt1    = (o_ras_op0 == 2'b01) ? o_ras_addr0 : i_ras_top;",
+   "new": "ras_tgt1    = i_ras_top;"
+  },
+  {
+   "name": "the redirect for a mismatched direct branch is lost",
+   "old": "o_redirect_valid = 1'b1;\n                    o_redirect_pc    = o_push0_data.pred_tgt;",
+   "new": "o_redirect_valid = 1'b0;\n                    o_redirect_pc    = o_push0_data.pred_tgt;"
+  }
+ ]
+}

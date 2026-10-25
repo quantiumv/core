@@ -1,0 +1,81 @@
+{
+ "dut": "design/pipe/qv_fetch.sv",
+ "tb": "design/pipe/qv_fetch_stream_tb.sv",
+ "files": [
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_fetch.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench"
+ ],
+ "cwd": "design",
+ "timeout": 900,
+ "mutants": [
+  {
+   "name": "the next request ignores a hit",
+   "old": "fpc_q       <= hint ? i_btb_tgt : {issue_pc[63:3], 3'b000} + 64'd8;",
+   "new": "fpc_q       <= {issue_pc[63:3], 3'b000} + 64'd8;"
+  },
+  {
+   "name": "the next request is always the target",
+   "old": "fpc_q       <= hint ? i_btb_tgt : {issue_pc[63:3], 3'b000} + 64'd8;",
+   "new": "fpc_q       <= i_btb_tgt;"
+  },
+  {
+   "name": "the request register loses the hint",
+   "old": "req_hint_q  <= hint;",
+   "new": "req_hint_q  <= 1'b0;"
+  },
+  {
+   "name": "the request register latches the wrong halfword",
+   "old": "req_hoff_q  <= i_btb_off;",
+   "new": "req_hoff_q  <= 2'b0;"
+  },
+  {
+   "name": "the request register loses the crossing flag",
+   "old": "req_hx_q    <= i_btb_x;",
+   "new": "req_hx_q    <= 1'b0;"
+  },
+  {
+   "name": "the request register latches the wrong target",
+   "old": "req_htgt_q  <= i_btb_tgt;",
+   "new": "req_htgt_q  <= i_btb_tgt + 64'd2;"
+  },
+  {
+   "name": "the entry loses the hint",
+   "old": "fb_hint[fb_wr_q]  <= req_hint_q;",
+   "new": "fb_hint[fb_wr_q]  <= 1'b0;"
+  },
+  {
+   "name": "the entry loses the halfword",
+   "old": "fb_hoff[fb_wr_q]  <= req_hoff_q;",
+   "new": "fb_hoff[fb_wr_q]  <= 2'b0;"
+  },
+  {
+   "name": "the entry loses the crossing flag",
+   "old": "fb_hx[fb_wr_q]    <= req_hx_q;",
+   "new": "fb_hx[fb_wr_q]    <= 1'b0;"
+  },
+  {
+   "name": "the entry carries the wrong target",
+   "old": "fb_htgt[fb_wr_q]  <= req_htgt_q;",
+   "new": "fb_htgt[fb_wr_q]  <= req_htgt_q + 64'd2;"
+  },
+  {
+   "name": "the BTB is asked about the sequential pc, not the one being issued",
+   "old": "assign o_btb_pc = issue_pc;",
+   "new": "assign o_btb_pc = fpc_q;"
+  },
+  {
+   "name": "a hint is followed with the BTB off",
+   "old": "wire        hint     = BTB_EN && i_btb_hit;",
+   "new": "wire        hint     = 1'b0;"
+  }
+ ]
+}

@@ -1,0 +1,85 @@
+{
+ "dut": "design/pipe/qv_btb.sv",
+ "tb": "design/pipe/qv_btb_tb.sv",
+ "files": [
+  "design/pipe/qv_btb.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench"
+ ],
+ "cwd": "design",
+ "timeout": 900,
+ "mutants": [
+  {
+   "name": "hit ignores the tag",
+   "old": "assign o_hit = v_q[lk_idx] && (tag_q[lk_idx] == {i_lk_pc[63:3], 3'b000}) && (off_q[lk_idx] >= i_lk_pc[2:1]);",
+   "new": "assign o_hit = v_q[lk_idx] && (off_q[lk_idx] >= i_lk_pc[2:1]);"
+  },
+  {
+   "name": "hit ignores valid",
+   "old": "assign o_hit = v_q[lk_idx] && (tag_q[lk_idx] == {i_lk_pc[63:3], 3'b000}) && (off_q[lk_idx] >= i_lk_pc[2:1]);",
+   "new": "assign o_hit = (tag_q[lk_idx] == {i_lk_pc[63:3], 3'b000}) && (off_q[lk_idx] >= i_lk_pc[2:1]);"
+  },
+  {
+   "name": "hit ignores the start halfword",
+   "old": "assign o_hit = v_q[lk_idx] && (tag_q[lk_idx] == {i_lk_pc[63:3], 3'b000}) && (off_q[lk_idx] >= i_lk_pc[2:1]);",
+   "new": "assign o_hit = v_q[lk_idx] && (tag_q[lk_idx] == {i_lk_pc[63:3], 3'b000});"
+  },
+  {
+   "name": "the start halfword compare is strict",
+   "old": "assign o_hit = v_q[lk_idx] && (tag_q[lk_idx] == {i_lk_pc[63:3], 3'b000}) && (off_q[lk_idx] >= i_lk_pc[2:1]);",
+   "new": "assign o_hit = v_q[lk_idx] && (tag_q[lk_idx] == {i_lk_pc[63:3], 3'b000}) && (off_q[lk_idx] > i_lk_pc[2:1]);"
+  },
+  {
+   "name": "the crossing flag is not stored",
+   "old": "x_q[up_idx]   <= i_upd_cross;",
+   "new": "x_q[up_idx]   <= 1'b0;"
+  },
+  {
+   "name": "a crossing branch is filed under its own dword",
+   "old": "wire [63:0]      up_key = i_upd_cross ? i_upd_pc + 64'd2 : i_upd_pc;",
+   "new": "wire [63:0]      up_key = i_upd_pc;"
+  },
+  {
+   "name": "a not-taken update removes whatever is in the slot",
+   "old": "end else if (own) begin",
+   "new": "end else if (v_q[up_idx]) begin"
+  },
+  {
+   "name": "own ignores the tag",
+   "old": "wire own = v_q[up_idx] && (tag_q[up_idx] == {up_key[63:3], 3'b000}) && (off_q[up_idx] == up_key[2:1])",
+   "new": "wire own = v_q[up_idx] && (off_q[up_idx] == up_key[2:1])"
+  },
+  {
+   "name": "own ignores the halfword",
+   "old": " && (off_q[up_idx] == up_key[2:1])\n               && (x_q[up_idx] == i_upd_cross);",
+   "new": "\n               && (x_q[up_idx] == i_upd_cross);"
+  },
+  {
+   "name": "own ignores the crossing flag",
+   "old": "\n               && (x_q[up_idx] == i_upd_cross);",
+   "new": ";"
+  },
+  {
+   "name": "the target is not updated",
+   "old": "tgt_q[up_idx] <= i_upd_tgt;",
+   "new": "tgt_q[up_idx] <= tgt_q[up_idx];"
+  },
+  {
+   "name": "a not-taken update inserts",
+   "old": "if (i_upd_taken) begin",
+   "new": "if (1'b1) begin"
+  },
+  {
+   "name": "the halfword is not stored",
+   "old": "off_q[up_idx] <= up_key[2:1];",
+   "new": "off_q[up_idx] <= 2'b00;"
+  }
+ ]
+}

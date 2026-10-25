@@ -7,3 +7,5 @@
 /dbg/
 /ptw/
 /sb/
+*_prove_*/
+*_bmc_*/

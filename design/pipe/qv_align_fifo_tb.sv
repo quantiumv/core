@@ -618,6 +618,33 @@ module qv_align_fifo_tb #(
         check("F3: second entry", {32'b0, log_raw[1]}, {32'b0, w32(17)});
         check("F3: empty again", {63'b0, head_valid}, 64'd0);
 
+        // ---- F4: the queue one short of room for two: the aligner takes one instruction only with ONE_OK ----
+        // dword 0: a 32-bit, a C, a C (pushed 2 + 1 = 3 entries); dword 1: two 32-bit instructions, of which only the
+        // first can follow into the fourth slot
+        clear_mem();
+        put32(64'h0, w32(40));
+        put16(64'h4, 16'h0001);
+        put16(64'h6, 16'h0001);
+        put32(64'h8, w32(41));
+        put32(64'hC, w32(42));
+        flush_all(64'h0);
+        flimit = 64'h10;
+        src_en = 1'b1;
+        pop_en = 1'b0;
+        repeat (8) @(posedge clk);
+        #1;
+        check("F4: entries held with the queue not popped", 64'(iq0.count_q), ONE_OK ? 64'd4 : 64'd3);
+        check("F4: the source is at the second dword either way", fpc, ONE_OK ? 64'h8 : 64'h8);
+        pop_en = 1'b1;
+        repeat (12) @(posedge clk);
+        #1;
+        check("F4: all five instructions come out", 64'(log_n), 64'd5);
+        check("F4: order 0", {32'b0, log_raw[0]}, {32'b0, w32(40)});
+        check("F4: order 1", {32'b0, log_raw[1]}, 64'h0001);
+        check("F4: order 2", {32'b0, log_raw[2]}, 64'h0001);
+        check("F4: order 3", {32'b0, log_raw[3]}, {32'b0, w32(41)});
+        check("F4: order 4", {32'b0, log_raw[4]}, {32'b0, w32(42)});
+
         $display("");
         $display("qv_align_fifo_tb: %0d passed, %0d failed", pass_count, fail_count);
         if (fail_count > 0) $display("qv_align_fifo_tb: FAILURES PRESENT");

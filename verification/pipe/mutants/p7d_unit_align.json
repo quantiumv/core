@@ -35,13 +35,13 @@
   },
   {
    "name": "a crossing instruction takes its first page from the dword that completes it",
-   "old": "1'b0, pend_xl_q, pend_pg_q, i_buf_pg);",
-   "new": "1'b0, pend_xl_q, i_buf_pg, i_buf_pg);"
+   "old": "1'b0, pend_xl_q, pend_pg_q, i_buf_pg,",
+   "new": "1'b0, pend_xl_q, i_buf_pg, i_buf_pg,"
   },
   {
    "name": "a crossing instruction takes its second page from the pending dword",
-   "old": "1'b0, pend_xl_q, pend_pg_q, i_buf_pg);",
-   "new": "1'b0, pend_xl_q, pend_pg_q, pend_pg_q);"
+   "old": "1'b0, pend_xl_q, pend_pg_q, i_buf_pg,",
+   "new": "1'b0, pend_xl_q, pend_pg_q, pend_pg_q,"
   },
   {
    "name": "the page of the held half is not kept",
@@ -75,8 +75,8 @@
   },
   {
    "name": "slot 0 loses the page and flag of a 16-bit instruction",
-   "old": "{16'b0, h}, 1'b1, i_buf_xl, i_buf_pg, i_buf_pg);\n                    cur = cur + 3'd1;\n                end else if (cur == 3'd3) begin\n                    stash    = 1'b1;\n                    stash_hw = h;\n                    cur      = 3'd4;\n                end else begin\n                    o_push0_valid = 1'b1;",
-   "new": "{16'b0, h}, 1'b1, 1'b0, 44'b0, 44'b0);\n                    cur = cur + 3'd1;\n                end else if (cur == 3'd3) begin\n                    stash    = 1'b1;\n                    stash_hw = h;\n                    cur      = 3'd4;\n                end else begin\n                    o_push0_valid = 1'b1;"
+   "old": "{16'b0, h}, 1'b1, i_buf_xl, i_buf_pg, i_buf_pg,\n                                       hint_here, i_buf_htgt, ras_ok0, ras_tgt0, bk0, bt0);\n                    conf0",
+   "new": "{16'b0, h}, 1'b1, 1'b0, 44'b0, 44'b0,\n                                       hint_here, i_buf_htgt, ras_ok0, ras_tgt0, bk0, bt0);\n                    conf0"
   }
  ]
 }

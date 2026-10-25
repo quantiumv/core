@@ -16,6 +16,9 @@
  *     one breaks this. Its data is the data of its own address;
  *   - while held (FENCE.I), no new request starts; held and idle means
  *     nothing on the bus;
+ *   - a hint from the branch target buffer (free here, at a halfword at or after the request's first, as the BTB
+ *     promises) redirects the stream: the dword after a hinted one is the hint's target, and the hint travels with
+ *     its dword unchanged;
  *   - streaming (STREAM): a request presented in the cycle another is answered
  *     needs no redirect, hold or yield in that cycle and a free slot in the
  *     buffer for its own answer; the buffer never overflows.
@@ -34,7 +37,11 @@ module fetch_props (
     input logic [63:0] redirect_pc,
     input logic        hold,
     input logic        yield,
-    input logic        pop
+    input logic        pop,
+    input logic        btb_hit,
+    input logic [1:0]  btb_off,
+    input logic        btb_x,
+    input logic [63:0] btb_tgt
 );
     localparam logic [63:0] RESET_PC = 64'h0;
     localparam int FBD = `FBD;
@@ -48,6 +55,9 @@ module fetch_props (
     logic [31:0] addr;
     logic        cyc, stb, idle, buf_valid, buf_err;
     logic [63:0] buf_pc, buf_data;
+    logic [63:0] btb_pc, buf_htgt;
+    logic        buf_hint, buf_hx;
+    logic [1:0]  buf_hoff;
     // the slave's memory: data = f(address), registered like wb4_sram's (the data of the request seen the cycle before)
     reg  [63:0]  dat = 64'b0;
     always @(posedge clk) dat <= {addr, ~addr};
@@ -55,7 +65,7 @@ module fetch_props (
 `ifdef FETCH_OLD
     qv_fetch #(.RESET_PC(RESET_PC)) dut (
 `else
-    qv_fetch #(.RESET_PC(RESET_PC), .FB_DEPTH(FBD), .STREAM(STREAM)) dut (
+    qv_fetch #(.RESET_PC(RESET_PC), .FB_DEPTH(FBD), .STREAM(STREAM), .BTB_EN(1'b1)) dut (
 `endif
         .clk(clk), .rst(rst),
         .wb_fetch_addr_o(addr), .wb_fetch_cyc_o(cyc), .wb_fetch_stb_o(stb),
@@ -63,6 +73,8 @@ module fetch_props (
         .i_redirect_valid(redirect_valid), .i_redirect_pc(redirect_pc),
 `ifndef FETCH_OLD
         .i_hold(hold), .o_idle(idle), .i_yield(yield),
+        .o_btb_pc(btb_pc), .i_btb_hit(btb_hit), .i_btb_off(btb_off), .i_btb_x(btb_x), .i_btb_tgt(btb_tgt),
+        .o_buf_hint(buf_hint), .o_buf_hoff(buf_hoff), .o_buf_hx(buf_hx), .o_buf_htgt(buf_htgt),
 `endif
         .o_buf_valid(buf_valid), .o_buf_pc(buf_pc), .o_buf_data(buf_data),
         .o_buf_err(buf_err), .i_buf_pop(pop)
@@ -89,7 +101,11 @@ module fetch_props (
             exp_pc     <= redirect_pc;
             redirected <= 1'b1;
         end else if (buf_valid && pop) begin
+`ifdef FETCH_OLD
             exp_pc <= {exp_pc[63:3], 3'b000} + 64'd8;
+`else
+            exp_pc <= buf_hint ? buf_htgt : {exp_pc[63:3], 3'b000} + 64'd8;
+`endif
         end
     end
 
@@ -100,6 +116,10 @@ module fetch_props (
     always @* begin
         if (init) assume (rst);
         if (!(p_valid && p_cyc)) assume (!ack && !err);
+`ifndef FETCH_OLD
+        // the BTB's promise: its branch is at or after the first halfword of the request being issued
+        if (btb_hit) assume (btb_off >= btb_pc[2:1]);
+`endif
     end
 
     // ---------------- properties ----------------
@@ -160,7 +180,15 @@ module fetch_props (
     endfunction
 
     wire [CW-1:0] cnt = dut.fb_count_q;
-    wire [63:0]   npush = (cnt == '0) ? exp_pc : ahead(exp_pc, int'(cnt));
+
+    // the pc fetch continues at after entry j of the buffer: the hint's target, or the next dword
+    function automatic logic [63:0] after(input int j);
+        int k;
+        k = (int'(dut.fb_rd_q) + j) % FBD;
+        return dut.fb_hint[k] ? dut.fb_htgt[k] : ahead(dut.fb_pc[k], 1);
+    endfunction
+    // where the next push (the next response) lands: the head's pc when the buffer is empty, else after the last entry
+    wire [63:0]   npush = (cnt == '0) ? exp_pc : after(int'(cnt) - 1);
 
     always @* begin
         if (!init && !rst) begin
@@ -168,15 +196,20 @@ module fetch_props (
             assert (int'(dut.fb_wr_q) == (int'(dut.fb_rd_q) + int'(cnt)) % FBD);
             for (int j = 0; j < FBD; j++) begin
                 if (j < int'(cnt)) begin
-                    assert (dut.fb_pc[(int'(dut.fb_rd_q) + j) % FBD] == ((j == 0) ? exp_pc : ahead(exp_pc, j)));
+                    // the head is the expected pc; every later entry is where the one before it led
+                    assert (dut.fb_pc[(int'(dut.fb_rd_q) + j) % FBD] == ((j == 0) ? exp_pc : after(j - 1)));
                     if (!dut.fb_err[(int'(dut.fb_rd_q) + j) % FBD])
-                        assert (dut.fb_data[(int'(dut.fb_rd_q) + j) % FBD] == word((j == 0) ? exp_pc : ahead(exp_pc, j)));
+                        assert (dut.fb_data[(int'(dut.fb_rd_q) + j) % FBD] == word(dut.fb_pc[(int'(dut.fb_rd_q) + j) % FBD]));
+                    // a hint never names a halfword before the dword's own first one
+                    if (dut.fb_hint[(int'(dut.fb_rd_q) + j) % FBD])
+                        assert (dut.fb_hoff[(int'(dut.fb_rd_q) + j) % FBD] >= dut.fb_pc[(int'(dut.fb_rd_q) + j) % FBD][2:1]);
                 end
             end
             if (dut.req_valid_q && !dut.req_stale_q) begin
                 assert (cnt <= CW'(FBD - 1));      // issue reserved its response's slot
                 assert (dut.req_pc_q == npush);
-                assert (dut.fpc_q == ahead(npush, 1));
+                assert (dut.fpc_q == (dut.req_hint_q ? dut.req_htgt_q : ahead(npush, 1)));
+                if (dut.req_hint_q) assert (dut.req_hoff_q >= dut.req_pc_q[2:1]);
             end else begin
                 assert (dut.fpc_q == npush);
             end

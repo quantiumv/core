@@ -99,6 +99,11 @@ module qv_commit_tb;
     logic                    pb_act = 1'b0, pb_commit, pb_done, pb_abort;
     logic [2:0]              dbg_cause;
     logic                    sfence, redirect_ctx;
+    logic                    btb_valid, btb_taken, btb_cross;
+    logic                    ras_push, ras_pop;
+    logic                    bht_valid, bht_taken;
+    logic [63:0]             ras_addr;
+    logic [63:0]             btb_pc, btb_tgt;
 
     qv_commit #(.RESET_PC(64'h1000)) dut (
         .clk(clk), .rst(rst),
@@ -115,6 +120,10 @@ module qv_commit_tb;
         .o_dbg_ebreak_entry(dbg_ebreak_entry), .o_dbg_trigger_entry(dbg_trigger_entry),
         .i_pb_active(pb_act), .o_pb_commit(pb_commit), .o_pb_done(pb_done), .o_pb_abort(pb_abort),
         .o_sfence(sfence),
+        .o_btb_upd_valid(btb_valid), .o_btb_upd_pc(btb_pc), .o_btb_upd_taken(btb_taken), .o_btb_upd_cross(btb_cross),
+        .o_btb_upd_tgt(btb_tgt),
+        .o_ras_push(ras_push), .o_ras_addr(ras_addr), .o_ras_pop(ras_pop),
+        .o_bht_upd_valid(bht_valid), .o_bht_upd_taken(bht_taken),
         .o_regfile_we(rf_we), .o_regfile_sel(rf_sel), .o_regfile_data(rf_data),
         .o_commit_valid(c_valid), .o_commit_rd(c_rd), .o_commit_rd_wen(c_rd_wen), .o_commit_tag(c_tag),
         .o_csr_addr(csr_addr), .i_csr_rdata(csr_rdata), .o_csr_we(csr_we), .o_csr_wdata(csr_wdata),
@@ -1714,6 +1723,214 @@ module qv_commit_tb;
         check("no run: ebreak is no Program Buffer retirement", b(pb_commit), 64'd0);
         retire();
         go_priv(2'b11);
+
+        // ---- branch target buffer training ----
+        // a retiring branch or jump with its target in the encoding or in a register (not a return)
+        set_entry(64'h5000, 32'h0000_0063, 0, 1'b0, 64'd0);                  // beq x0,x0: taken
+        c.cls = QV_FU_BRU; e.next_pc = 64'h5040;
+        #1;
+        check("btb: taken conditional branch trains", b(btb_valid), 64'd1);
+        check("btb: its pc", btb_pc, 64'h5000);
+        check("btb: taken", b(btb_taken), 64'd1);
+        check("btb: its target", btb_tgt, 64'h5040);
+        check("btb: not crossing", b(btb_cross), 64'd0);
+        retire();
+        set_entry(64'h5000, 32'h0000_0063, 0, 1'b0, 64'd0);                  // ... not taken: next_pc = pc + 4
+        c.cls = QV_FU_BRU;
+        #1;
+        check("btb: fallen-through conditional branch trains (to remove its entry)", b(btb_valid), 64'd1);
+        check("btb: not taken", b(btb_taken), 64'd0);
+        retire();
+        set_entry(64'h5008, 32'h0000_006F, 1, 1'b1, 64'h500C);              // jal ra
+        c.cls = QV_FU_BRU; e.next_pc = 64'h6000;
+        #1;
+        check("btb: jal trains", b(btb_valid), 64'd1);
+        check("btb: jal is taken", b(btb_taken), 64'd1);
+        check("btb: jal target", btb_tgt, 64'h6000);
+        retire();
+        set_entry(64'h5010, 32'h0007_80E7, 1, 1'b1, 64'h5014);              // jalr ra, 0(a5): an indirect call
+        c.cls = QV_FU_BRU; e.next_pc = 64'h7000;
+        #1;
+        check("btb: an indirect jump trains", b(btb_valid), 64'd1);
+        check("btb: an indirect jump is always taken", b(btb_taken), 64'd1);
+        check("btb: its target", btb_tgt, 64'h7000);
+        retire();
+        set_entry(64'h5014, 32'h0007_80E7, 1, 1'b1, 64'h5018);              // jalr ra, 0(a5) that lands on the next instruction
+        c.cls = QV_FU_BRU; e.next_pc = 64'h5018;
+        #1;
+        check("btb: an indirect jump is taken even to the fall-through", b(btb_taken), 64'd1);
+        retire();
+        set_entry(64'h5300, 32'h0000_0063, 0, 1'b0, 64'd0);                  // a branch that faults does not retire
+        c.cls = QV_FU_BRU; c.xcpt = 1'b1; c.cause = 4'd2; e.next_pc = 64'h5340;
+        #1;
+        check("btb: a faulting branch does not train", b(btb_valid), 64'd0);
+        retire();
+        set_entry(64'h5018, 32'h0000_8067, 0, 1'b0, 64'd0);                  // jalr x0, 0(ra): a return
+        c.cls = QV_FU_BRU; e.next_pc = 64'h5020;
+        #1;
+        check("btb: a return does not train", b(btb_valid), 64'd0);
+        retire();
+        set_entry(64'h5020, 32'h0000_8082, 0, 1'b0, 64'd0);                  // c.jr ra: a return
+        c.cls = QV_FU_BRU; e.next_pc = 64'h5030;
+        #1;
+        check("btb: c.jr ra does not train", b(btb_valid), 64'd0);
+        retire();
+        set_entry(64'h5020, 32'h0000_8382, 0, 1'b0, 64'd0);                  // c.jr t2: an indirect jump, not a return
+        c.cls = QV_FU_BRU; e.next_pc = 64'h5030;
+        #1;
+        check("btb: c.jr t2 trains", b(btb_valid), 64'd1);
+        retire();
+        set_entry(64'h5022, 32'h0000_A001, 0, 1'b0, 64'd0);                  // c.j
+        c.cls = QV_FU_BRU; e.next_pc = 64'h5000;
+        #1;
+        check("btb: c.j trains", b(btb_valid), 64'd1);
+        check("btb: c.j is taken", b(btb_taken), 64'd1);
+        retire();
+        set_entry(64'h5024, 32'h0000_C001, 0, 1'b0, 64'd0);                  // c.beqz, fell through
+        c.cls = QV_FU_BRU; e.next_pc = 64'h5026;
+        #1;
+        check("btb: c.beqz fallen through trains", b(btb_valid), 64'd1);
+        check("btb: ... not taken (the length is 2)", b(btb_taken), 64'd0);
+        retire();
+        set_entry(64'h5030, 32'h0000_0013, 5, 1'b1, 64'd1);                  // an ALU op: nothing
+        #1;
+        check("btb: an ALU op does not train", b(btb_valid), 64'd0);
+        retire();
+        // a 32-bit branch in the last halfword of its dword is a crossing one
+        set_entry(64'h5106, 32'h0000_0063, 0, 1'b0, 64'd0);
+        c.cls = QV_FU_BRU; e.next_pc = 64'h5000;
+        #1;
+        check("btb: a crossing branch trains", b(btb_valid), 64'd1);
+        check("btb: ... flagged crossing", b(btb_cross), 64'd1);
+        retire();
+        set_entry(64'h5106, 32'h0000_8082, 0, 1'b0, 64'd0);                  // a compressed jump there does not cross
+        c.cls = QV_FU_BRU; e.next_pc = 64'h5000;
+        #1;
+        check("btb: a 16-bit jump in the last halfword is not crossing", b(btb_cross), 64'd0);
+        retire();
+        // not when the instruction does not retire, nor in a Program Buffer run
+        set_entry(64'h5200, 32'h0000_0063, 0, 1'b0, 64'd0);
+        c.cls = QV_FU_BRU; e.next_pc = 64'h5240;
+        e.complete = 1'b0;
+        #1;
+        check("btb: an incomplete head does not train", b(btb_valid), 64'd0);
+        e.complete = 1'b1;
+        pb_act = 1'b1;
+        #1;
+        check("btb: a Program Buffer run does not train", b(btb_valid), 64'd0);
+        pb_act = 1'b0;
+        retire();
+
+        // ---- branch history table training ----
+        set_entry(64'h6200, 32'h0000_0063, 0, 1'b0, 64'd0);                  // beq: taken
+        c.cls = QV_FU_BRU; e.next_pc = 64'h6240;
+        #1;
+        check("bht: a taken conditional branch trains", b(bht_valid), 64'd1);
+        check("bht: ... taken", b(bht_taken), 64'd1);
+        retire();
+        set_entry(64'h6200, 32'h0000_0063, 0, 1'b0, 64'd0);                  // ... fell through
+        c.cls = QV_FU_BRU;
+        #1;
+        check("bht: a fallen-through branch trains", b(bht_valid), 64'd1);
+        check("bht: ... not taken", b(bht_taken), 64'd0);
+        retire();
+        set_entry(64'h6204, 32'h0000_C001, 0, 1'b0, 64'd0);                  // c.beqz, fell through (2 bytes)
+        c.cls = QV_FU_BRU; e.next_pc = 64'h6206;
+        #1;
+        check("bht: a 16-bit branch trains", b(bht_valid), 64'd1);
+        check("bht: ... its fall-through is 2 bytes on", b(bht_taken), 64'd0);
+        retire();
+        set_entry(64'h6208, 32'h0000_E001, 0, 1'b0, 64'd0);                  // c.bnez, taken
+        c.cls = QV_FU_BRU; e.next_pc = 64'h6240;
+        #1;
+        check("bht: a taken c.bnez trains taken", b(bht_valid & bht_taken), 64'd1);
+        retire();
+        set_entry(64'h620C, 32'h0000_006F, 0, 1'b0, 64'd0);                  // jal x0: not conditional
+        c.cls = QV_FU_BRU; e.next_pc = 64'h6300;
+        #1;
+        check("bht: a jump does not train", b(bht_valid), 64'd0);
+        retire();
+        set_entry(64'h6210, 32'h0007_80E7, 1, 1'b1, 64'h6214);              // jalr: not conditional
+        c.cls = QV_FU_BRU; e.next_pc = 64'h6300;
+        #1;
+        check("bht: an indirect jump does not train", b(bht_valid), 64'd0);
+        retire();
+        set_entry(64'h6214, 32'h0000_0063, 0, 1'b0, 64'd0);                  // a branch that faults does not retire
+        c.cls = QV_FU_BRU; c.xcpt = 1'b1; c.cause = 4'd2; e.next_pc = 64'h6240;
+        #1;
+        check("bht: a faulting branch does not train", b(bht_valid), 64'd0);
+        retire();
+        set_entry(64'h6218, 32'h0000_0063, 0, 1'b0, 64'd0);                  // a Program Buffer run does not train
+        c.cls = QV_FU_BRU; e.next_pc = 64'h6240;
+        pb_act = 1'b1;
+        #1;
+        check("bht: a Program Buffer run does not train", b(bht_valid), 64'd0);
+        pb_act = 1'b0;
+        retire();
+        set_entry(64'h6220, 32'h0000_0013, 5, 1'b1, 64'd1);                  // an ALU op
+        #1;
+        check("bht: an ALU op does not train", b(bht_valid), 64'd0);
+        retire();
+
+        // ---- the committed return-address stack ----
+        set_entry(64'h6000, 32'h0000_00EF, 1, 1'b1, 64'h6004);              // jal ra, ...: a call
+        c.cls = QV_FU_BRU; e.next_pc = 64'h6100;
+        #1;
+        check("ras: a call pushes", b(ras_push), 64'd1);
+        check("ras: ... the address behind it", ras_addr, 64'h6004);
+        check("ras: ... and does not pop", b(ras_pop), 64'd0);
+        retire();
+        set_entry(64'h6008, 32'h0000_006F, 0, 1'b0, 64'd0);                  // jal x0: a plain jump
+        c.cls = QV_FU_BRU; e.next_pc = 64'h6100;
+        #1;
+        check("ras: jal x0 does not push", b(ras_push), 64'd0);
+        check("ras: ... nor pop", b(ras_pop), 64'd0);
+        retire();
+        set_entry(64'h6010, 32'h0007_80E7, 1, 1'b1, 64'h6014);              // jalr ra, 0(a5): an indirect call
+        c.cls = QV_FU_BRU; e.next_pc = 64'h7000;
+        #1;
+        check("ras: an indirect call pushes", b(ras_push), 64'd1);
+        check("ras: ... its return address", ras_addr, 64'h6014);
+        retire();
+        set_entry(64'h6020, 32'h0000_9382, 1, 1'b1, 64'h6022);              // c.jalr t2: a 16-bit call
+        c.cls = QV_FU_BRU; e.next_pc = 64'h7000;
+        #1;
+        check("ras: c.jalr pushes", b(ras_push), 64'd1);
+        check("ras: ... the address behind its 2 bytes", ras_addr, 64'h6022);
+        retire();
+        set_entry(64'h6030, 32'h0000_8067, 0, 1'b0, 64'd0);                  // jalr x0, 0(ra): a return
+        c.cls = QV_FU_BRU; e.next_pc = 64'h6004;
+        #1;
+        check("ras: a return pops", b(ras_pop), 64'd1);
+        check("ras: ... and does not push", b(ras_push), 64'd0);
+        retire();
+        set_entry(64'h6034, 32'h0000_8082, 0, 1'b0, 64'd0);                  // c.jr ra: a return
+        c.cls = QV_FU_BRU; e.next_pc = 64'h6004;
+        #1;
+        check("ras: c.jr ra pops", b(ras_pop), 64'd1);
+        retire();
+        set_entry(64'h6038, 32'h0000_8382, 0, 1'b0, 64'd0);                  // c.jr t2: not a return
+        c.cls = QV_FU_BRU; e.next_pc = 64'h6004;
+        #1;
+        check("ras: c.jr t2 does not pop", b(ras_pop), 64'd0);
+        retire();
+        set_entry(64'h603C, 32'h0000_0063, 0, 1'b0, 64'd0);                  // a conditional branch: nothing
+        c.cls = QV_FU_BRU; e.next_pc = 64'h6100;
+        #1;
+        check("ras: a branch neither pushes nor pops", b(ras_push | ras_pop), 64'd0);
+        retire();
+        set_entry(64'h6040, 32'h0000_00EF, 1, 1'b1, 64'h6044);              // a call that faults does not retire
+        c.cls = QV_FU_BRU; c.xcpt = 1'b1; c.cause = 4'd2; e.next_pc = 64'h6100;
+        #1;
+        check("ras: a faulting call does not push", b(ras_push), 64'd0);
+        retire();
+        set_entry(64'h6050, 32'h0000_8067, 0, 1'b0, 64'd0);                  // a return in a Program Buffer run
+        c.cls = QV_FU_BRU; e.next_pc = 64'h6004;
+        pb_act = 1'b1;
+        #1;
+        check("ras: a Program Buffer run does not pop", b(ras_pop), 64'd0);
+        pb_act = 1'b0;
+        retire();
 
         $display("");
         $display("qv_commit_tb: %0d passed, %0d failed", pass_count, fail_count);

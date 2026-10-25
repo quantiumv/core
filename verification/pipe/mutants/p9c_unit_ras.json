@@ -1,0 +1,60 @@
+{
+ "dut": "design/pipe/qv_ras.sv",
+ "tb": "design/pipe/qv_ras_tb.sv",
+ "files": [
+  "design/pipe/qv_ras.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench"
+ ],
+ "cwd": "design",
+ "timeout": 900,
+ "mutants": [
+  {
+   "name": "a push of a full stack does not drop the oldest",
+   "old": "return (n == CNT_W'(DEPTH)) ? n : n + CNT_W'(1);",
+   "new": "return n + CNT_W'(1);"
+  },
+  {
+   "name": "a pop of an empty stack underflows",
+   "old": "return (n == '0) ? n : n - CNT_W'(1);",
+   "new": "return n - CNT_W'(1);"
+  },
+  {
+   "name": "a flush keeps the speculative stack",
+   "old": "s_q   <= c_next;\n                s_n_q <= c_next_n;",
+   "new": "s_q   <= s_next;\n                s_n_q <= s_next_n;"
+  },
+  {
+   "name": "a flush misses this cycle's retirement",
+   "old": "s_q   <= c_next;\n                s_n_q <= c_next_n;",
+   "new": "s_q   <= c_q;\n                s_n_q <= c_n_q;"
+  },
+  {
+   "name": "slot 1's operation is lost",
+   "old": "s_next   = (i_sp_op1 == 2'b01) ? push(s_mid, i_sp_addr1) : (i_sp_op1 == 2'b10) ? pop(s_mid) : s_mid;",
+   "new": "s_next   = s_mid;"
+  },
+  {
+   "name": "commit's pop and push are swapped",
+   "old": "c_mid    = i_cm_pop ? pop(c_q) : c_q;",
+   "new": "c_mid    = i_cm_push ? pop(c_q) : c_q;"
+  },
+  {
+   "name": "commit's push is lost",
+   "old": "c_next   = i_cm_push ? push(c_mid, i_cm_addr) : c_mid;",
+   "new": "c_next   = c_mid;"
+  },
+  {
+   "name": "the committed stack follows the speculative one",
+   "old": "c_q   <= c_next;",
+   "new": "c_q   <= s_next;"
+  }
+ ]
+}

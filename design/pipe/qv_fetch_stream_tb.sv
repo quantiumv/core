@@ -22,6 +22,10 @@
  * answers after 0 to 2 cycles with the identity (a fault beyond the memory) and keeps the answer until the request
  * drops; a request is never streamed while translation is on.
  *
+ * Branch target buffer: a random BTB model answers every lookup (a hit at a halfword at or after the request's first,
+ * crossing flag and target random); after a dword that carries a hint the next one expected is the hinted target, as
+ * fetch must have followed it (also after an error answer: the request after it was already issued).
+ *
  * Rate (no redirect, hold or yield; the consumer pops every cycle): one dword per cycle on a zero-wait slave; with
  * a slave that ignores the streamed request, or with yield held high, one per two.
  */
@@ -57,17 +61,87 @@ module qv_fetch_stream_tb;
     logic [3:0]  buf_cause;
     logic [43:0] buf_pg;
 
-    qv_fetch #(.FB_DEPTH(FBD), .STREAM(1'b1)) dut (
+    logic [63:0] btb_pc;
+    logic        btb_hit, btb_x, buf_hint, buf_hx;
+    logic [1:0]  btb_off, buf_hoff;
+    logic [63:0] btb_tgt, buf_htgt;
+
+    qv_fetch #(.FB_DEPTH(FBD), .STREAM(1'b1), .BTB_EN(1'b1)) dut (
         .clk(clk), .rst(rst),
         .wb_fetch_addr_o(addr), .wb_fetch_cyc_o(cyc), .wb_fetch_stb_o(stb),
         .wb_fetch_dat_i(dat), .wb_fetch_ack_i(ack), .wb_fetch_err_i(err),
         .i_redirect_valid(redirect_valid), .i_redirect_pc(redirect_pc),
         .i_hold(hold), .o_idle(idle), .i_yield(yield),
+        .o_btb_pc(btb_pc), .i_btb_hit(btb_hit), .i_btb_off(btb_off), .i_btb_x(btb_x), .i_btb_tgt(btb_tgt),
         .i_xl_on(xl_on), .o_xl_req(xl_req), .o_xl_va(xl_va), .o_xl_cancel(xl_cancel),
         .i_xl_done(xl_done), .i_xl_pf(xl_pf), .i_xl_af(xl_af), .i_xl_ppn(xl_ppn),
         .o_buf_valid(buf_valid), .o_buf_pc(buf_pc), .o_buf_data(buf_data),
-        .o_buf_err(buf_err), .o_buf_cause(buf_cause), .o_buf_xl(buf_xl), .o_buf_pg(buf_pg), .i_buf_pop(buf_pop)
+        .o_buf_err(buf_err), .o_buf_cause(buf_cause), .o_buf_xl(buf_xl), .o_buf_pg(buf_pg),
+        .o_buf_hint(buf_hint), .o_buf_hoff(buf_hoff), .o_buf_hx(buf_hx), .o_buf_htgt(buf_htgt), .i_buf_pop(buf_pop)
     );
+
+    // ---------------- BTB model ----------------
+    // an answer for whatever pc is being issued: a hit with probability p_btb, at a halfword at or after the first
+    int          p_btb = 0;
+    logic        r_hit, r_x;
+    logic [1:0]  r_off;
+    logic [63:0] r_tgt;
+    always @(negedge clk) begin
+        r_hit = ($urandom % 100) < p_btb;
+        r_off = 2'($urandom);
+        r_x   = ($urandom % 4) == 0;
+        r_tgt = 64'(($urandom % (MEM_WORDS * 4 + 32)) * 2);                  // inside the memory, or a little beyond
+    end
+    assign btb_hit = r_hit;
+    assign btb_off = (r_off < btb_pc[2:1]) ? btb_pc[2:1] : r_off;
+    assign btb_x   = r_x;
+    assign btb_tgt = r_tgt;
+
+    // What the BTB answered when each request issued, followed to the entry that request becomes: the request
+    // register must latch it, the buffer must hand it out unchanged. (issq: requests not yet answered or dropped,
+    // pushq: answers sitting in the buffer. Both a few deep at most.)
+    logic        iq_h [0:7];  logic [1:0] iq_o [0:7];  logic iq_x [0:7];  logic [63:0] iq_t [0:7];
+    int          iq_n = 0;
+    logic        pq_h [0:15]; logic [1:0] pq_o [0:15]; logic pq_x [0:15]; logic [63:0] pq_t [0:15];
+    int          pq_n = 0;
+    int          hint_errs = 0;
+    logic        c_h, c_x;  logic [1:0] c_o;  logic [63:0] c_t;
+    always @(posedge clk) begin
+        if (rst) begin
+            iq_n = 0; pq_n = 0;
+        end else begin
+            // a request ends (answered, or dropped before the bus): its answer is the oldest
+            if (dut.resp || dut.drop) begin
+                if (iq_n == 0) begin hint_errs++; $display("HINT: a response with no request issued"); end
+                else begin
+                    c_h = iq_h[0]; c_o = iq_o[0]; c_x = iq_x[0]; c_t = iq_t[0];
+                    for (int i = 0; i < 7; i++) begin iq_h[i] = iq_h[i+1]; iq_o[i] = iq_o[i+1]; iq_x[i] = iq_x[i+1]; iq_t[i] = iq_t[i+1]; end
+                    iq_n--;
+                    if (dut.fb_push) begin
+                        pq_h[pq_n] = c_h; pq_o[pq_n] = c_o; pq_x[pq_n] = c_x; pq_t[pq_n] = c_t; pq_n++;
+                    end
+                end
+            end
+            // a request issues
+            if (dut.can_issue) begin
+                iq_h[iq_n] = btb_hit; iq_o[iq_n] = btb_off; iq_x[iq_n] = btb_x; iq_t[iq_n] = btb_tgt; iq_n++;
+                if (dut.req_valid_q && !dut.resp && !dut.drop) begin hint_errs++; $display("HINT: two requests outstanding"); end
+            end
+            // the buffer: a redirect empties it; a pop hands out the oldest
+            if (redirect_valid) begin
+                pq_n = 0;
+            end else if (buf_pop && pq_n > 0) begin
+                if (buf_hint !== pq_h[0]
+                    || (pq_h[0] && (buf_hoff !== pq_o[0] || buf_hx !== pq_x[0] || buf_htgt !== pq_t[0]))) begin
+                    hint_errs++;
+                    $display("HINT: entry %h carries hint %b off %0d x %b tgt %h, the BTB said %b %0d %b %h", buf_pc,
+                             buf_hint, buf_hoff, buf_hx, buf_htgt, pq_h[0], pq_o[0], pq_x[0], pq_t[0]);
+                end
+                for (int i = 0; i < 15; i++) begin pq_h[i] = pq_h[i+1]; pq_o[i] = pq_o[i+1]; pq_x[i] = pq_x[i+1]; pq_t[i] = pq_t[i+1]; end
+                pq_n--;
+            end
+        end
+    end
 
     // ---------------- translator ----------------
     // the answer comes xl_lat cycles after the request appeared, and stays while the request is held
@@ -164,7 +238,11 @@ module qv_fetch_stream_tb;
             if (buf_err && buf_cause !== 4'd1 && buf_cause !== 4'd12) begin
                 sb_errs++; $display("SCOREBOARD: pc %h fault cause %0d at t=%0t", buf_pc, buf_cause, $time);
             end
-            exp_pc <= {exp_pc[63:3], 3'b000} + 64'd8;
+            if (buf_hint) exp_pc <= buf_htgt;
+            else          exp_pc <= {exp_pc[63:3], 3'b000} + 64'd8;
+            if (buf_hint && buf_hoff < buf_pc[2:1]) begin
+                sb_errs++; $display("SCOREBOARD: pc %h hinted at halfword %0d, before its own start", buf_pc, buf_hoff);
+            end
         end
     end
 
@@ -179,8 +257,8 @@ module qv_fetch_stream_tb;
 
     // random stimulus: per-cycle probabilities in percent
     task automatic random_run(input int cycles, input int p_redir, input int p_hold_on, input int p_yield, input int p_pop,
-                              input int wmax, input bit swl, input int p_xl = 0);
-        wait_max = wmax; swallow = swl;
+                              input int wmax, input bit swl, input int p_xl = 0, input int pb = 0);
+        wait_max = wmax; swallow = swl; p_btb = pb;
         do_reset();
         for (int c = 0; c < cycles; c++) begin
             @(negedge clk);
@@ -246,7 +324,11 @@ module qv_fetch_stream_tb;
                 random_run(6000, 0, 10, 50, 20, w, s[0]);       // a slow consumer: the buffer fills
                 random_run(6000, 4,  3, 10, 70, w, s[0], 50);   // translation on and off
                 random_run(6000, 1,  2,  5, 90, w, s[0], 80);
+                random_run(6000, 4,  3, 10, 70, w, s[0], 0, 30);    // a BTB that hits now and then
+                random_run(6000, 2,  2, 10, 90, w, s[0], 30, 80);   // ... and often, with translation
+                random_run(6000, 0,  5, 30, 20, w, s[0], 0, 60);    // ... and a slow consumer
             end
+        check("random runs: hints followed their requests", 64'(hint_errs), 64'd0);
         check("random runs: protocol", 64'(proto_errs), 64'd0);
         check("random runs: scoreboard", 64'(sb_errs), 64'd0);
         check("random runs: entries were consumed", 64'(popped > 100), 64'd1);

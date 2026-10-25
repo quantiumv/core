@@ -1,0 +1,75 @@
+{
+ "dut": "design/pipe/qv_bht.sv",
+ "tb": "design/pipe/qv_bht_tb.sv",
+ "files": [
+  "design/pipe/qv_bht.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench"
+ ],
+ "cwd": "design",
+ "timeout": 900,
+ "mutants": [
+  {
+   "name": "the first retirement does not train",
+   "old": "v_q[uix] <= 1'b1;",
+   "new": "v_q[uix] <= v_q[uix];"
+  },
+  {
+   "name": "the first retirement ignores the outcome",
+   "old": "if (!v_q[uix])        ctr_q[uix] <= i_upd_taken ? 2'b10 : 2'b01;",
+   "new": "if (!v_q[uix])        ctr_q[uix] <= 2'b10;"
+  },
+  {
+   "name": "the counter does not saturate high",
+   "old": "(ctr_q[uix] == 2'b11) ? 2'b11 : ctr_q[uix] + 2'b01",
+   "new": "ctr_q[uix] + 2'b01"
+  },
+  {
+   "name": "the counter does not saturate low",
+   "old": "(ctr_q[uix] == 2'b00) ? 2'b00 : ctr_q[uix] - 2'b01",
+   "new": "ctr_q[uix] - 2'b01"
+  },
+  {
+   "name": "taken is predicted from 1",
+   "old": "assign o_taken[pg] = v_q[ix] && ctr_q[ix][1];",
+   "new": "assign o_taken[pg] = v_q[ix] && (ctr_q[ix] != 2'b00);"
+  },
+  {
+   "name": "taken is predicted only at 3",
+   "old": "assign o_taken[pg] = v_q[ix] && ctr_q[ix][1];",
+   "new": "assign o_taken[pg] = v_q[ix] && (ctr_q[ix] == 2'b11);"
+  },
+  {
+   "name": "every position reads the first counter",
+   "old": "wire [IDX_W-1:0]  ix  = {i_base_pc[IDX_W:3], pos};",
+   "new": "wire [IDX_W-1:0]  ix  = {i_base_pc[IDX_W:3], 2'b00};"
+  },
+  {
+   "name": "the update index is shifted",
+   "old": "wire [IDX_W-1:0] uix = i_upd_pc[IDX_W:1];",
+   "new": "wire [IDX_W-1:0] uix = i_upd_pc[IDX_W+1:2];"
+  },
+  {
+   "name": "the pending lookup is of the dword",
+   "old": "wire [IDX_W-1:0] pix = i_pend_pc[IDX_W:1];",
+   "new": "wire [IDX_W-1:0] pix = i_base_pc[IDX_W:1];"
+  },
+  {
+   "name": "the pending direction is not read",
+   "old": "assign o_pend_taken = v_q[pix] && ctr_q[pix][1];",
+   "new": "assign o_pend_taken = v_q[pix] && ctr_q[pix][0];"
+  },
+  {
+   "name": "an update counts down on taken",
+   "old": "else if (i_upd_taken) ctr_q[uix] <= (ctr_q[uix] == 2'b11) ? 2'b11 : ctr_q[uix] + 2'b01;",
+   "new": "else if (i_upd_taken) ctr_q[uix] <= (ctr_q[uix] == 2'b00) ? 2'b00 : ctr_q[uix] - 2'b01;"
+  }
+ ]
+}
