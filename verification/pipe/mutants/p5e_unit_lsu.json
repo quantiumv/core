@@ -90,8 +90,8 @@
   },
   {
    "name": "a denied access still starts on the bus",
-   "old": "wire start_raw = at_head && !misaligned_q && !pmp_deny && !sc_fail && pa_valid;",
-   "new": "wire start_raw = at_head && !misaligned_q && !sc_fail && pa_valid;"
+   "old": "wire start_raw = at_head && !misaligned_q && !pmp_deny && !sc_fail && pa_valid",
+   "new": "wire start_raw = at_head && !misaligned_q && !sc_fail && pa_valid"
   },
   {
    "name": "a denial does not complete the op",
@@ -105,8 +105,8 @@
   },
   {
    "name": "a denial is not flagged as an exception",
-   "old": "o_res.xcpt      <= done_nobus || wb_mem_err_i;",
-   "new": "o_res.xcpt      <= (done_nobus && misaligned_q) || wb_mem_err_i;"
+   "old": "o_res.xcpt      <= done_nobus || (done_bus && wb_mem_err_i);",
+   "new": "o_res.xcpt      <= (done_nobus && misaligned_q) || (done_bus && wb_mem_err_i);"
   },
   {
    "name": "the check uses the dword-aligned address",

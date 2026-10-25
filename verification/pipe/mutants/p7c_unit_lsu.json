@@ -176,8 +176,8 @@
   },
   {
    "name": "an access starts while the walker has a beat in flight",
-   "old": "wire start     = start_raw && !i_ptw_beat;",
-   "new": "wire start     = start_raw;"
+   "old": "wire start     = start_raw && !i_ptw_beat",
+   "new": "wire start     = start_raw"
   },
   {
    "name": "the walker is not told the access is ready to start (unobservable: start and start_raw differ only while a walker beat is in flight, and the walker looks at the flag only in W_GO)",

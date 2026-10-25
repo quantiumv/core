@@ -38,7 +38,7 @@ module sb_props (
     localparam int DEPTH = 2;
     localparam int YIELD_MAX = 3;
 
-    logic        ready, empty, match, start_now, beat, cyc;
+    logic        ready, empty, match, start_now, start_idle, beat, cyc;
     logic [31:0] addr;
     logic [63:0] dat;
     logic [7:0]  sel;
@@ -49,7 +49,7 @@ module sb_props (
         .o_ready(ready), .o_empty(empty),
         .i_match_addr(match_addr), .o_match(match),
         .i_lsu_busy(lsu_busy), .i_lsu_inflight(lsu_inflight), .i_ptw_beat(ptw_beat), .i_load_near(load_near),
-        .o_start_now(start_now), .o_beat(beat), .o_cyc(cyc), .o_addr(addr), .o_dat(dat), .o_sel(sel),
+        .o_start_now(start_now), .o_start_idle(start_idle), .o_beat(beat), .o_cyc(cyc), .o_addr(addr), .o_dat(dat), .o_sel(sel),
         .i_ack(ack), .i_err(err)
     );
 
@@ -150,6 +150,8 @@ module sb_props (
                 if (!(cnt_model == DEPTH) && !(dut.held_q >= YIELD_MAX)) assert (!lsu_busy && !load_near);
             end
             if (p_start) assert (beat);
+            // the decision the LSU takes: an idle drain's, which does not look at the response
+            assert (start_idle == (start_now && !beat));
             if (beat && !p_start && !(p_valid && p_out) && !p_out) begin end
             // the first cycle of a beat is preceded by its start
             if (cyc && !in_beat) assert (p_start);

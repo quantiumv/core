@@ -35,7 +35,7 @@ module qv_sb_tb;
     logic [31:3] match_addr = '0;
     logic        match;
     logic        lsu_busy = 1'b0, lsu_inflight = 1'b0, ptw_beat = 1'b0, load_near = 1'b0;
-    logic        start_now, beat, cyc;
+    logic        start_now, start_idle, beat, cyc;
     logic [31:0] addr;
     logic [63:0] dat;
     logic [7:0]  sel;
@@ -48,7 +48,7 @@ module qv_sb_tb;
         .o_ready(ready), .o_empty(empty),
         .i_match_addr(match_addr), .o_match(match),
         .i_lsu_busy(lsu_busy), .i_lsu_inflight(lsu_inflight), .i_ptw_beat(ptw_beat), .i_load_near(load_near),
-        .o_start_now(start_now), .o_beat(beat), .o_cyc(cyc), .o_addr(addr), .o_dat(dat), .o_sel(sel),
+        .o_start_now(start_now), .o_start_idle(start_idle), .o_beat(beat), .o_cyc(cyc), .o_addr(addr), .o_dat(dat), .o_sel(sel),
         .i_ack(ack | foreign_ack), .i_err(err)
     );
 
@@ -190,6 +190,8 @@ module qv_sb_tb;
                           {63'b0, lsu_busy || load_near}, 64'd0);
             end
             check("o_start_now is followed by a beat", {63'b0, prev_start ? beat : 1'b1}, 64'd1);
+            // what the LSU is told: the decision of an idle drain, never one taken in a response cycle
+            check("o_start_idle is o_start_now with no beat in flight", {63'b0, start_idle}, {63'b0, start_now && !beat});
             prev_start = start_now;
         end
     end

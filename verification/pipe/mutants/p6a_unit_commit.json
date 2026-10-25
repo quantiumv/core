@@ -34,8 +34,8 @@
   },
   {
    "name": "a halt does not beat the head's commit",
-   "old": "(!is_fence_i || i_fetch_idle) && !irq && !halt_take && !head_dbg_entry;",
-   "new": "(!is_fence_i || i_fetch_idle) && !irq && !head_dbg_entry;"
+   "old": "(!is_fence_i || i_fetch_idle) && sb_ok && !irq && !halt_take && !head_dbg_entry;",
+   "new": "(!is_fence_i || i_fetch_idle) && sb_ok && !irq && !head_dbg_entry;"
   },
   {
    "name": "an interrupt beats a halt request and a step",

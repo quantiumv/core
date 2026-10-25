@@ -59,12 +59,14 @@
   {
    "name": "ignores a load near the head",
    "old": "(urgent || (!i_lsu_busy && !i_load_near))",
-   "new": "(urgent || !i_lsu_busy)"
+   "new": "(urgent || !i_lsu_busy)",
+   "count": 2
   },
   {
    "name": "ignores a ready LSU access",
    "old": "(urgent || (!i_lsu_busy && !i_load_near))",
-   "new": "(urgent || !i_load_near)"
+   "new": "(urgent || !i_load_near)",
+   "count": 2
   },
   {
    "name": "no beat decided in the response cycle",
@@ -130,6 +132,11 @@
    "name": "the pointer does not advance on a response",
    "old": "rd_q      <= ptr_inc(rd_q);",
    "new": "rd_q      <= rd_q;"
+  },
+  {
+   "name": "the idle start follows the response",
+   "old": "assign o_start_idle = !beat_q && (cnt_q != '0)",
+   "new": "assign o_start_idle = (!beat_q || resp) && (cnt_q != '0)"
   }
  ]
 }

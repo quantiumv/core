@@ -99,8 +99,8 @@
   },
   {
    "name": "the entering head still commits",
-   "old": "(!is_fence_i || i_fetch_idle) && !irq && !halt_take && !head_dbg_entry;",
-   "new": "(!is_fence_i || i_fetch_idle) && !irq && !halt_take;"
+   "old": "(!is_fence_i || i_fetch_idle) && sb_ok && !irq && !halt_take && !head_dbg_entry;",
+   "new": "(!is_fence_i || i_fetch_idle) && sb_ok && !irq && !halt_take;"
   },
   {
    "name": "a head entry does not redirect",

@@ -19,7 +19,7 @@
 #   into its response cycle; for the store buffer a drain out of order, a lost byte select, a beat that starts while
 #   the LSU is on the bus or the walker's beat is in flight, one that ignores the full-buffer rule, a cyc held into
 #   the response cycle, an answer taken that is not the buffer's own, an o_match that sees a dead entry, a beat
-#   with nothing to write, a push into a full buffer).
+#   with nothing to write, a push into a full buffer, an idle start that follows the response).
 set -u
 cd "$(dirname "$0")" || exit 1
 HERE=$(pwd)
@@ -117,6 +117,7 @@ EOF
     mutant sb_match_dead_entry sb 's/if (v_q\[i\] \&\& addr_q\[i\] == i_match_addr) o_match = 1'"'"'b1;/if (addr_q[i] == i_match_addr) o_match = 1'"'"'b1;/'
     mutant sb_beat_with_nothing sb 's/wire has_next = (cnt_q > (resp ? CNT_W'"'"'(1) : CNT_W'"'"'(0)));/wire has_next = 1'"'"'b1;/'
     mutant sb_push_when_full   sb 's/wire push = i_push \&\& o_ready;/wire push = i_push;/'
+    mutant sb_idle_in_response sb 's/assign o_start_idle = !beat_q \&\& (cnt_q != .0)/assign o_start_idle = (!beat_q || resp) \&\& (cnt_q != 0)/'
     rm -rf "$T"
 fi
 
