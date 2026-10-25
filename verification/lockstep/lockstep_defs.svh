@@ -45,8 +45,8 @@
 // Fixed-depth rings (Verilator-compatible: no dynamic/fork constructs in
 // the compare path).
 `define QV_LOCKSTEP_REC_DEPTH   128   // retirement-record ring, per side
-`define QV_LOCKSTEP_WR_DEPTH    64    // bus-write-log ring, per side
-`define QV_LOCKSTEP_RD_DEPTH    64    // mmio-read-log ring, per side
+`define QV_LOCKSTEP_WR_DEPTH    128   // bus-write-log ring, per side (a store buffer lets one side's log run ahead of its records)
+`define QV_LOCKSTEP_RD_DEPTH    128   // mmio-read-log ring, per side
 `define QV_LOCKSTEP_HIST_DEPTH  16    // "last N matched" report history
 `define QV_LOCKSTEP_AHEAD_MAX   64    // pause a side's clock past this many unconsumed records
 `define QV_LOCKSTEP_EV_DEPTH    512   // debug-event ring, per side (lockstep_dbg.sv)

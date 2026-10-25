@@ -343,7 +343,11 @@ module lockstep_rec #(
     assign rp_mstatus_tvm  = ring_mstatus_tvm[rec_rp_q];
 
     // -------------------- bus-write log ring --------------------
-    logic [$clog2(WR_DEPTH)-1:0] wr_wp_q = '0, wr_rp_q = '0;
+    // One more bit of pointer than the index needs, so a full ring is told apart from an empty one and an
+    // overflow is fatal instead of a silent lap: the pipelined core writes the bus after the store retires (the
+    // store buffer), so this side's log can run up to the buffer's depth beyond the pacing limit.
+    localparam int WR_PTR_W = $clog2(WR_DEPTH) + 1;
+    logic [WR_PTR_W-1:0] wr_wp_q = '0, wr_rp_q = '0;
     logic [31:0] wring_addr [0:WR_DEPTH-1];
     logic [7:0]  wring_sel  [0:WR_DEPTH-1];
     logic [63:0] wring_data [0:WR_DEPTH-1];
@@ -354,9 +358,13 @@ module lockstep_rec #(
         if (rst) begin
             wr_wp_q <= '0;
         end else if (wr_valid_i) begin
-            wring_addr[wr_wp_q] <= wr_addr_i;
-            wring_sel[wr_wp_q]  <= wr_sel_i;
-            wring_data[wr_wp_q] <= wr_data_i;
+            if ((wr_wp_q - wr_rp_q) >= WR_PTR_W'(WR_DEPTH)) begin
+                $display("LOCKSTEP_RESULT: FAIL (bus-write log ring overflow: the other side is too far behind)");
+                $finish;
+            end
+            wring_addr[wr_wp_q[WR_PTR_W-2:0]] <= wr_addr_i;
+            wring_sel[wr_wp_q[WR_PTR_W-2:0]]  <= wr_sel_i;
+            wring_data[wr_wp_q[WR_PTR_W-2:0]] <= wr_data_i;
             wr_wp_q <= wr_wp_q + 1'b1;
         end
     end
@@ -367,12 +375,13 @@ module lockstep_rec #(
             wr_rp_q <= wr_rp_q + 1'b1;
         end
     end
-    assign wrp_addr = wring_addr[wr_rp_q];
-    assign wrp_sel  = wring_sel[wr_rp_q];
-    assign wrp_data = wring_data[wr_rp_q];
+    assign wrp_addr = wring_addr[wr_rp_q[WR_PTR_W-2:0]];
+    assign wrp_sel  = wring_sel[wr_rp_q[WR_PTR_W-2:0]];
+    assign wrp_data = wring_data[wr_rp_q[WR_PTR_W-2:0]];
 
     // -------------------- mmio-read log ring --------------------
-    logic [$clog2(RD_DEPTH)-1:0] rd_wp_q = '0, rd_rp_q = '0;
+    localparam int RD_PTR_W = $clog2(RD_DEPTH) + 1;
+    logic [RD_PTR_W-1:0] rd_wp_q = '0, rd_rp_q = '0;
     logic [31:0] rdring_addr [0:RD_DEPTH-1];
     logic [63:0] rdring_data [0:RD_DEPTH-1];
 
@@ -382,8 +391,12 @@ module lockstep_rec #(
         if (rst) begin
             rd_wp_q <= '0;
         end else if (rd_valid_i) begin
-            rdring_addr[rd_wp_q] <= rd_addr_i;
-            rdring_data[rd_wp_q] <= rd_data_i;
+            if ((rd_wp_q - rd_rp_q) >= RD_PTR_W'(RD_DEPTH)) begin
+                $display("LOCKSTEP_RESULT: FAIL (MMIO-read log ring overflow: the other side is too far behind)");
+                $finish;
+            end
+            rdring_addr[rd_wp_q[RD_PTR_W-2:0]] <= rd_addr_i;
+            rdring_data[rd_wp_q[RD_PTR_W-2:0]] <= rd_data_i;
             rd_wp_q <= rd_wp_q + 1'b1;
         end
     end
@@ -394,8 +407,8 @@ module lockstep_rec #(
             rd_rp_q <= rd_rp_q + 1'b1;
         end
     end
-    assign rdp_addr = rdring_addr[rd_rp_q];
-    assign rdp_data = rdring_data[rd_rp_q];
+    assign rdp_addr = rdring_addr[rd_rp_q[RD_PTR_W-2:0]];
+    assign rdp_data = rdring_data[rd_rp_q[RD_PTR_W-2:0]];
 
     // -------------------- debug-event ring --------------------
     // One more bit of pointer than the index needs, so a full ring is

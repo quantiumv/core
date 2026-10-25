@@ -51,6 +51,11 @@ module lockstep_side #(
     input  logic [31:0] dbg_feat_i,          // runtime, feature mask
     input  logic        dbg_late_i,          // runtime, halt level visible one cycle later
     input  logic [63:0] dbg_max_retire_i,    // runtime, the run's MAX_RETIRE (0 = tohost-terminated)
+    // The run is over for this side's retirements (it has pushed its stop_at records): halt the core at that
+    // boundary, so it retires nothing more while it keeps clocking until its store buffer has drained (the pipelined
+    // core writes the bus after a store retires; ref_core before). The halt belongs to the harness, not to the
+    // compared behavior: the debug script is silenced, so it logs no event and writes nothing from here on.
+    input  logic        stop_i,
 
     // RVFI passthrough (core/ref_core always built with -DRISCV_FORMAL
     // by this harness -- see run_lockstep.sh)
@@ -140,7 +145,7 @@ module lockstep_side #(
     logic [6:0]  dmi_addr;
     logic [31:0] dmi_wdata, dmi_rdata;
     logic        dmi_we;
-    assign core_halt_req = dm_halt_req | script_halt_req;
+    assign core_halt_req = dm_halt_req | script_halt_req | stop_i;
 
     // the port list both branches share
 `define LS_CORE_PORTS \
@@ -189,7 +194,8 @@ module lockstep_side #(
     /* verilator lint_off PINCONNECTEMPTY */
     generate
         if (CORE_PIPE) begin : g_core
-            core core0 (`LS_CORE_PORTS);
+            // RAM is the 1 MiB flat image: its stores are posted by the store buffer
+            core #(.PMA_RAM_SIZE(64'(`QV_LOCKSTEP_RAM_WORDS) * 64'd8)) core0 (`LS_CORE_PORTS);
 `ifdef LS_HAVE_PIPE
             // the pipelined core takes an interrupt, a halt or an EBREAK/trigger entry without waiting for the LSU, which is
             // only safe because nothing can be on the data bus then (it asserts that too, but an assertion only
@@ -255,7 +261,7 @@ module lockstep_side #(
     /* verilator lint_off PINCONNECTEMPTY */
     dm dm0 (
         .clk(clk), .rst(rst),
-        .i_reg_addr(dmi_addr), .i_reg_wdata(dmi_wdata), .i_reg_we(dmi_we), .i_reg_re(1'b0),
+        .i_reg_addr(dmi_addr), .i_reg_wdata(dmi_wdata), .i_reg_we(dmi_we && !stop_i), .i_reg_re(1'b0),
         .o_reg_rdata(dmi_rdata),
         .i_hart_halted(dbg_halted),
         .o_debug_halt_req(dm_halt_req), .o_debug_resume_req(dm_resume_req),
@@ -272,6 +278,9 @@ module lockstep_side #(
     );
     /* verilator lint_on PINCONNECTEMPTY */
 
+    logic ev_valid_raw;
+    assign o_ev_valid = ev_valid_raw && !stop_i;
+
     lockstep_dbg dbg0 (
         .clk(clk), .rst(rst),
         .mode_i(dbg_mode_i), .seed_i(dbg_seed_i), .density_i(dbg_density_i), .feat_i(dbg_feat_i),
@@ -279,7 +288,7 @@ module lockstep_side #(
         .rvfi_valid(rvfi_valid), .debug_mode_i(dbg_halted),
         .o_reg_addr(dmi_addr), .o_reg_wdata(dmi_wdata), .o_reg_we(dmi_we), .i_reg_rdata(dmi_rdata),
         .o_halt_req(script_halt_req),
-        .o_ev_valid(o_ev_valid), .o_ev_kind(o_ev_kind), .o_ev_order(o_ev_order),
+        .o_ev_valid(ev_valid_raw), .o_ev_kind(o_ev_kind), .o_ev_order(o_ev_order),
         .o_ev_a(o_ev_a), .o_ev_b(o_ev_b)
     );
 

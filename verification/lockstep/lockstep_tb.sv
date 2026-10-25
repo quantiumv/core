@@ -106,6 +106,7 @@ module lockstep_tb #(
     logic rst   = 1'b1;
     logic pace_a_hold, pace_b_hold;
     logic a_stopped, b_stopped;         // see "exact stop" below
+    logic b_stop_req;                   // side B has pushed its stop_at records: halt it (see below)
 
     always #5 if (!pace_a_hold) clk_a = ~clk_a;
     always #5 if (!pace_b_hold) clk_b = ~clk_b;
@@ -146,6 +147,7 @@ module lockstep_tb #(
         .irq_mode_i(irq_mode[31:0]), .irq_seed_i(irq_seed[31:0]), .irq_density_i(irq_density[31:0]), .irq_late_i(irq_late != 0),
         .dbg_mode_i(dbg_mode[31:0]), .dbg_seed_i(dbg_seed[31:0]), .dbg_density_i(dbg_density[31:0]),
         .dbg_feat_i(dbg_feat[31:0]), .dbg_late_i(dbg_late != 0), .dbg_max_retire_i(max_retire[63:0]),
+        .stop_i(1'b0),
         .rvfi_valid(a_rvfi_valid), .rvfi_order(a_rvfi_order), .rvfi_insn(a_rvfi_insn),
         .rvfi_trap(a_rvfi_trap), .rvfi_halt(a_rvfi_halt), .rvfi_intr(a_rvfi_intr),
         .rvfi_mode(a_rvfi_mode), .rvfi_ixl(a_rvfi_ixl),
@@ -218,6 +220,7 @@ module lockstep_tb #(
         .irq_mode_i(irq_mode[31:0]), .irq_seed_i(irq_seed[31:0]), .irq_density_i(irq_density[31:0]), .irq_late_i(irq_late != 0),
         .dbg_mode_i(dbg_mode[31:0]), .dbg_seed_i(dbg_seed[31:0]), .dbg_density_i(dbg_density[31:0]),
         .dbg_feat_i(dbg_feat[31:0]), .dbg_late_i(dbg_late != 0), .dbg_max_retire_i(max_retire[63:0]),
+        .stop_i(b_stop_req),
         .rvfi_valid(b_rvfi_valid), .rvfi_order(b_rvfi_order), .rvfi_insn(b_rvfi_insn),
         .rvfi_trap(b_rvfi_trap), .rvfi_halt(b_rvfi_halt), .rvfi_intr(b_rvfi_intr),
         .rvfi_mode(b_rvfi_mode), .rvfi_ixl(b_rvfi_ixl),
@@ -511,8 +514,14 @@ module lockstep_tb #(
                  && (stop_at == 0 || longint'(b_rvfi_order) + 1 < stop_at))
             stop_at = longint'(b_rvfi_order) + 1;
 
+    // Side B being the pipelined core, its last stores may still be in the store buffer when it has pushed stop_at
+    // records (it writes the bus after a store retires). It is halted at that boundary (b_stop_req, through its
+    // halt request: the sampling rule takes the halt before the next retirement, and a halt is no retirement) and
+    // keeps clocking until o_debug_mode shows, which the core delays until the buffer is empty.
     assign a_stopped = (stop_at != 0) && (longint'(a_rec_total) >= stop_at);
-    assign b_stopped = (stop_at != 0) && (longint'(b_rec_total) >= stop_at);
+    wire   b_records_done = (stop_at != 0) && (longint'(b_rec_total) >= stop_at);
+    assign b_stop_req = B_PIPE && b_records_done;
+    assign b_stopped  = b_records_done && (!B_PIPE || side_b.dbg_halted);
 
     // +RVFI_TRACE: one line per retirement of side A (debugging a hang or a divergence; dbg= is 1 for a
     // retirement made while the hart is in Debug Mode, i.e. a Program Buffer instruction; mem= is the

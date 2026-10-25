@@ -420,6 +420,64 @@ def emit_mem(p: Program, recent: list[int], misalign_rate: float, badaddr_rate: 
     del recent[:-8]
 
 
+def emit_mem_pair(p: Program, recent: list[int]):
+    """--mem-dense: stores and loads on the same, overlapping and neighbouring bytes of a small window, at every
+    size and offset -- what a store buffer in front of memory has to get right (a load behind a store to its dword,
+    a lane merged into a dword already stored, a misaligned or faulting access in between), with the things that
+    must see the stores already in memory mixed in: FENCE, an atomic, a load-reserved/store-conditional pair, the
+    UART's registers (a device access must come after the stores before it)."""
+    base = p.reg()
+    window = p.rng.choice([0x40, 0x100])
+    p.e(f"    addi    x{base}, x27, {8 + p.rng.randrange(0, window, 8)}")
+
+    def other():
+        r = p.reg()
+        while r == base:
+            r = p.reg()
+        return r
+
+    def mem_op(store: bool):
+        mnem, width = p.rng.choice(_STORES if store else _LOADS)
+        off = p.rng.randrange(-8, 16, width)
+        if width > 1 and p.rng.random() < p.args.misalign_rate:
+            off += 1                                       # misaligned: a trap, not an access
+        if store:
+            p.e(f"    {mnem:<7} x{other()}, {off}(x{base})")
+        else:
+            rd = other()
+            p.e(f"    {mnem:<7} x{rd}, {off}(x{base})")
+            recent.append(rd)
+
+    mem_op(True)
+    for _ in range(p.rng.randint(2, 5)):
+        r = p.rng.random()
+        if r < 0.40:
+            mem_op(True)
+        elif r < 0.85:
+            mem_op(False)
+        elif r < 0.90:
+            p.e("    fence")
+        elif r < 0.95 and "a" in p.args.isa:
+            rs = other()
+            p.e(f"    amoadd.d x{other()}, x{rs}, (x{base})")
+        elif "a" in p.args.isa:
+            rd, rs = other(), other()
+            p.e(f"    lr.d    x{rd}, (x{base})")
+            p.e(f"    sc.d    x{other()}, x{rs}, (x{base})")
+        else:
+            mem_op(False)
+    if not p.args.sv39 and p.rng.random() < 0.15:
+        m = other()
+        p.li(m, 0x04008000)                                # the UART's THR: a device store, then its LSR
+        p.e(f"    sb      x{other()}, 0(x{m})")
+        p.li(m, 0x0400F018)
+        rd = other()
+        p.e(f"    lbu     x{rd}, 0(x{m})")
+        recent.append(rd)
+    mem_op(False)
+    del recent[:-8]
+
+
 def emit_amo(p: Program, recent: list[int]):
     addr_r = p.reg()
     _sandbox_addr(p, addr_r, misaligned=False, width=8)
@@ -1839,6 +1897,9 @@ def emit_main_body(p: Program):
     have_c = "c" in a.isa
 
     def one_instr():
+        if getattr(a, "mem_dense", False) and p.rng.random() < 0.30:
+            emit_mem_pair(p, recent)
+            return
         if a.sv39 and p.rng.random() < 0.06:
             emit_sv39_op(p, recent)
             return
@@ -2027,6 +2088,9 @@ def main():
                     help="keep x22/x23 out of the random pool, for the lockstep harness's scripted "
                          "debugger (--dbg-mode): it overwrites them from the Debug Module, and runs "
                          "Program Buffer snippets that use them and the sandbox base x27")
+    ap.add_argument("--mem-dense", action="store_true", dest="mem_dense",
+                    help="a third of the instructions are runs of stores and loads on the same, overlapping and "
+                         "neighbouring bytes (see emit_mem_pair): for the store buffer")
     ap.add_argument("--no-div", action="store_true", dest="no_div",
                     help="keep M to the multiplies (for cores without a divider yet)")
     ap.add_argument("--len", type=int, default=200)
