@@ -163,3 +163,7 @@ the cheapest check of every other model after them: `pipe` `liveness` and `hang`
 `ref_macros.svh`, `-D QV_REF_AS_CORE`) elaborates and proves `causal`, `insn_add` and `pc_fwd`, and its `hang` passes on
 boolector in 2:43 of CPU time as before (on bitwuzla it runs out of memory at step 40 and the sweep reports ERROR). The
 module proofs were run again (12 proofs PASS, all 29 known-bad versions caught).
+
+The full re-sweep on the switched tree then ran in the background (`-j 4`, bitwuzla, 24 h timeout, from freshly
+generated checks) and is clean: `pipe` 93/93, `pipe-sv39` 9/9, `pipe-amo` 18/18, `pipe-full` 5/5 (`reg`, `causal`,
+`insn_lw`, `insn_jalr`, `insn_c_lw`). The same results as before the switch, as the unchanged RTL says they must be.
