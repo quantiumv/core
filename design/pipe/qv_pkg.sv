@@ -178,6 +178,8 @@ package qv_pkg;
     // (dword-aligned addr, shifted masks, raw bus rdata, shifted wdata).
     typedef struct packed {
         logic        xcpt;
+        logic        posted;       // a plain store to RAM whose bus write is left to the store buffer: commit pushes
+                                   // {mem_addr, mem_wmask, mem_wdata} into it as the store retires
         logic [3:0]  cause;
         logic [63:0] tval;
         logic [63:0] vaddr;        // the exact access address (LR's reservation address)

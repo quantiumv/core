@@ -83,6 +83,23 @@
 `define QV_PIPE_TLB_ENTRIES 4
 `endif
 
+// The store buffer (P9d). QV_PIPE_SB_DEPTH 0 leaves it out. Stores are posted only to RAM, which the core is told
+// by the physical window PMA_RAM_BASE/PMA_RAM_SIZE (default size 0: nothing is RAM, so the buffer is idle and the
+// timing is the one without it); the harness or SoC that knows its memory sets it.
+`ifndef QV_PIPE_SB_DEPTH
+`ifdef QV_FORMAL_SMALL
+`define QV_PIPE_SB_DEPTH 2
+`else
+`define QV_PIPE_SB_DEPTH 4
+`endif
+`endif
+`ifndef QV_PIPE_PMA_RAM_BASE
+`define QV_PIPE_PMA_RAM_BASE 64'h0
+`endif
+`ifndef QV_PIPE_PMA_RAM_SIZE
+`define QV_PIPE_PMA_RAM_SIZE 64'h0
+`endif
+
 // QV_FORMAL_NO_SV39: no translation at all (no walker, no TLB): the Bare paths only. The riscv-formal sweep that
 // pins satp to Bare uses it, so its models do not grow by the TLBs and the walker.
 `ifdef QV_FORMAL_NO_SV39
@@ -98,7 +115,10 @@ module core
     parameter int ROB_DEPTH = `QV_PIPE_ROB_DEPTH,   // power of 2, <= qv_pkg::QV_ROB_DEPTH
     parameter int IQ_DEPTH  = `QV_PIPE_IQ_DEPTH,    // power of 2, >= 2
     parameter bit SV39_EN   = `QV_PIPE_SV39_EN,     // address translation present
-    parameter int TLB_ENTRIES = `QV_PIPE_TLB_ENTRIES // entries in each of the two TLBs
+    parameter int TLB_ENTRIES = `QV_PIPE_TLB_ENTRIES, // entries in each of the two TLBs
+    parameter int SB_DEPTH  = `QV_PIPE_SB_DEPTH,     // store buffer entries, 0: none
+    parameter logic [63:0] PMA_RAM_BASE = `QV_PIPE_PMA_RAM_BASE,   // physical window of RAM: stores into it are posted
+    parameter logic [63:0] PMA_RAM_SIZE = `QV_PIPE_PMA_RAM_SIZE
 ) (
     input logic clk,
     input logic rst,
@@ -426,13 +446,20 @@ module core
     logic        lsu_we, lsu_cyc, lsu_stb, lsu_lock;
     logic [31:0] ptw_addr;
     logic        ptw_cyc, ptw_beat, lsu_bus_busy;
-    assign wb_mem_addr_o = ptw_beat ? ptw_addr : lsu_addr;
-    assign wb_mem_dat_o  = lsu_dat;
-    assign wb_mem_sel_o  = ptw_beat ? 8'hFF : lsu_sel;
-    assign wb_mem_we_o   = ptw_beat ? 1'b0 : lsu_we;
-    assign wb_mem_cyc_o  = ptw_beat ? ptw_cyc : lsu_cyc;
+    // the store buffer's drain is the third master: a beat in flight is never interrupted, and the three never
+    // start together (the LSU and the walker are held off by sb_beat/sb_go, the drain by their own busy signals)
+    logic [31:0] sb_addr;
+    logic [63:0] sb_dat;
+    logic [7:0]  sb_sel;
+    logic        sb_cyc, sb_beat, sb_go, sb_ready, sb_empty, sb_match, lsu_load_near, lsu_in_bus, c_sb_push;
+    logic [31:3] sb_match_addr;
+    assign wb_mem_addr_o = sb_beat ? sb_addr : ptw_beat ? ptw_addr : lsu_addr;
+    assign wb_mem_dat_o  = sb_beat ? sb_dat : lsu_dat;
+    assign wb_mem_sel_o  = sb_beat ? sb_sel : ptw_beat ? 8'hFF : lsu_sel;
+    assign wb_mem_we_o   = sb_beat ? 1'b1 : ptw_beat ? 1'b0 : lsu_we;
+    assign wb_mem_cyc_o  = sb_beat ? sb_cyc : ptw_beat ? ptw_cyc : lsu_cyc;
     assign wb_mem_stb_o  = wb_mem_cyc_o;
-    assign wb_mem_lock_o = ptw_beat ? 1'b0 : lsu_lock;
+    assign wb_mem_lock_o = (sb_beat || ptw_beat) ? 1'b0 : lsu_lock;
     /* verilator lint_off UNUSEDSIGNAL */
     logic        lsu_stb_unused;
     /* verilator lint_on UNUSEDSIGNAL */
@@ -447,7 +474,7 @@ module core
 
     // No bypass from the LSU's writeback: a dependent reads the ROB the next cycle, which
     // keeps wb_mem_dat_i out of issue's combinational paths.
-    qv_lsu lsu0 (
+    qv_lsu #(.SB_EN(SB_DEPTH > 0), .PMA_RAM_BASE(PMA_RAM_BASE), .PMA_RAM_SIZE(PMA_RAM_SIZE)) lsu0 (
         .clk(clk), .rst(rst), .i_flush(flush),
         .i_req(lsu_req), .o_free(lsu_free),
         .i_head_valid(head_valid), .i_head_tag(head_tag),
@@ -465,8 +492,37 @@ module core
         .o_xl_req(x_req), .o_xl_va(x_va), .o_xl_wr(x_wr), .o_xl_active(x_active), .o_xl_priv(x_priv),
         .o_xl_cancel(x_cancel),
         .i_xl_done(x_done), .i_xl_pf(x_pf), .i_xl_af(x_af), .i_xl_ppn(x_ppn),
-        .i_ptw_beat(ptw_beat), .o_bus_busy(lsu_bus_busy)
+        .i_ptw_beat(ptw_beat), .o_bus_busy(lsu_bus_busy),
+        .i_sb_empty(sb_empty), .i_sb_match(sb_match), .i_sb_beat(sb_beat), .i_sb_go(sb_go),
+        .o_sb_addr(sb_match_addr), .o_load_near(lsu_load_near), .o_in_bus(lsu_in_bus)
     );
+
+    // ---------------- the store buffer ----------------
+    generate
+        if (SB_DEPTH > 0) begin : g_sb
+            qv_sb #(.DEPTH(SB_DEPTH)) sb0 (
+                .clk(clk), .rst(rst),
+                .i_push(c_sb_push), .i_push_addr(lsu_res.mem_addr[31:3]), .i_push_sel(lsu_res.mem_wmask),
+                .i_push_data(lsu_res.mem_wdata), .o_ready(sb_ready), .o_empty(sb_empty),
+                .i_match_addr(sb_match_addr), .o_match(sb_match),
+                .i_lsu_busy(lsu_bus_busy), .i_lsu_inflight(lsu_in_bus), .i_ptw_beat(ptw_beat),
+                .i_load_near(lsu_load_near),
+                .o_start_now(sb_go), .o_beat(sb_beat), .o_cyc(sb_cyc),
+                .o_addr(sb_addr), .o_dat(sb_dat), .o_sel(sb_sel),
+                .i_ack(wb_mem_ack_i), .i_err(wb_mem_err_i)
+            );
+        end else begin : g_nosb
+            assign sb_ready = 1'b1;
+            assign sb_empty = 1'b1;
+            assign sb_match = 1'b0;
+            assign sb_go    = 1'b0;
+            assign sb_beat  = 1'b0;
+            assign sb_cyc   = 1'b0;
+            assign sb_addr  = 32'b0;
+            assign sb_dat   = 64'b0;
+            assign sb_sel   = 8'b0;
+        end
+    endgenerate
 
     generate
         if (SV39_EN) begin : g_sv39
@@ -481,7 +537,7 @@ module core
                 .clk(clk), .rst(rst),
                 .o_bus_addr(ptw_addr), .o_bus_cyc(ptw_cyc),
                 .i_bus_dat(wb_mem_dat_i), .i_bus_ack(wb_mem_ack_i), .i_bus_err(wb_mem_err_i),
-                .i_lsu_busy(lsu_bus_busy), .o_beat(ptw_beat),
+                .i_lsu_busy(lsu_bus_busy || sb_beat || sb_go || !sb_empty), .o_beat(ptw_beat),
                 .i_pmpcfg0(pmpcfg0_w), .i_pmpaddr0(pmpaddr0_w), .i_pmpaddr1(pmpaddr1_w),
                 .i_pmpaddr2(pmpaddr2_w), .i_pmpaddr3(pmpaddr3_w),
                 .i_d_req(w_d_req), .i_d_va(x_va), .i_d_wr(x_wr), .i_d_priv(x_priv),
@@ -585,6 +641,7 @@ module core
         .i_pb_active(pb_active), .o_pb_commit(pb_commit), .o_pb_done(pb_done), .o_pb_abort(pb_abort),
         .o_fetch_hold(commit_fetch_hold), .i_fetch_idle(fetch_idle), .o_icache_flush(icache_flush_o),
         .o_sfence(c_sfence),
+        .i_sb_ready(sb_ready), .i_sb_empty(sb_empty), .o_sb_push(c_sb_push),
         .o_commit_now(commit_now_w), .o_pc(arch_pc), .o_next_pc(retire_next_pc),
         .o_redirect_valid(redirect_valid), .o_redirect_pc(redirect_pc), .o_redirect_ctx(c_redirect_ctx),
         .o_rvfi_order(c_order), .o_rvfi_insn(c_insn), .o_rvfi_trap(c_rvfi_trap), .o_rvfi_intr(c_intr),
@@ -692,7 +749,9 @@ module core
     /* verilator lint_on UNUSEDSIGNAL */
 
     // ---------------- ports ----------------
-    assign o_debug_mode    = in_debug_mode;
+    // the Debug Module's system bus access must not read memory behind a retired store: the hart shows as halted
+    // to it once the store buffer has drained (internally it is halted at the sample point, as before)
+    assign o_debug_mode    = in_debug_mode && sb_empty;
     assign o_dm_csr_rdata  = csr_rdata;
     assign o_dm_gpr_rdata  = rs2_data;
     assign o_progbuf_pc    = pb_idx;
@@ -765,9 +824,9 @@ module core
     // flight; it is a read that completes and is dropped, and the LSU's next start waits for it.)
     always @* assert (!((interrupt_taken || debug_halt_req_entry || debug_ebreak_entry || trigger_debug_entry)
                         && lsu_head_started));
-    // The LSU and the walker never drive the memory port together: the walker starts a beat only while the LSU
-    // has nothing started or ready to start, and the LSU waits out a beat in flight.
-    always @* assert (!(lsu_cyc && ptw_cyc));
+    // The LSU, the walker and the store buffer's drain never drive the memory port together: each starts a beat
+    // only while the others have nothing started or ready to start, and waits out a beat in flight.
+    always @* assert (!((lsu_cyc && ptw_cyc) || (lsu_cyc && sb_cyc) || (ptw_cyc && sb_cyc)));
 
     // The translators are safe only while a client keeps to one rule: a request it holds does not change (what it
     // asks for, the context it asks in) except in the cycle after a cancel, so that the answer of a walk that was

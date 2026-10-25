@@ -85,8 +85,26 @@
  * after a retirement, when nothing waits, but the formal harness drives it freely).
  * The walker shares the memory port: i_ptw_beat (a PTE read of its in flight) keeps the LSU off the
  * bus, and o_bus_busy (an access started, or ready to start this cycle) keeps the walker off it.
+ *
+ * Store buffer (P9d, SB_EN): a plain store to RAM -- its physical address inside the PMA window
+ * PMA_RAM_BASE/PMA_RAM_SIZE, not an atomic, not in a Program Buffer run -- does not use the bus at the head.
+ * Once its checks pass it completes in that very cycle with the bus fields in o_res and o_res.posted set,
+ * and commit pushes them into the store buffer as it retires. Every other access that reaches the bus
+ * keeps the head and keeps its order with the buffered stores, which have retired and are older:
+ *   - a plain load from RAM waits while the buffer still holds a store to the same dword (the drain is
+ *     in order, so it is soon gone), then reads memory as usual -- no data is taken from the buffer, since
+ *     the whole raw bus word is what RVFI reports;
+ *   - an atomic, a load or store outside the window, a Program Buffer access waits for an empty buffer.
+ * The buffer is the third master of the memory port: the LSU takes any ack/err for its own, so start is
+ * held off while a drain beat is in flight (i_sb_beat) or decided in this cycle (i_sb_go), just as it is for
+ * the walker's. o_load_near tells the buffer that a load that does not wait for it is among the oldest ROB
+ * entries, so the drain yields to it.
  */
-module qv_lsu (
+module qv_lsu #(
+    parameter bit          SB_EN        = 1'b0,
+    parameter logic [63:0] PMA_RAM_BASE = 64'h0,
+    parameter logic [63:0] PMA_RAM_SIZE = 64'h0      // 0: nothing is RAM, nothing is posted
+) (
     input  logic                             clk,
     input  logic                             rst,
     input  logic                             i_flush,
@@ -149,7 +167,15 @@ module qv_lsu (
     input  logic [43:0]                      i_xl_ppn = 44'b0,
     // sharing the memory port with the walker
     input  logic                             i_ptw_beat = 1'b0,
-    output logic                             o_bus_busy
+    output logic                             o_bus_busy,
+    // the store buffer
+    input  logic                             i_sb_empty = 1'b1,
+    input  logic                             i_sb_match = 1'b0,     // a buffered store to the dword o_sb_addr names
+    input  logic                             i_sb_beat  = 1'b0,     // a drain beat is in flight
+    input  logic                             i_sb_go    = 1'b0,     // ... is decided in this cycle
+    output logic [31:3]                      o_sb_addr,
+    output logic                             o_load_near,
+    output logic                             o_in_bus      // an access is on the bus (registered state: no path to start)
 );
     import qv_pkg::*;
 
@@ -231,8 +257,25 @@ module qv_lsu (
     wire pmp_deny = !misaligned_q && !i_pmp_bypass && pa_valid && !(xl_on && sc_fail)
                     && !(fault_st ? pmp_w_ok : pmp_r_ok);
 
-    wire start_raw = at_head && !misaligned_q && !pmp_deny && !sc_fail && pa_valid;
-    wire start     = start_raw && !i_ptw_beat;
+    // ---------------- the store buffer ----------------
+    // what the access is, by its physical address (registered: addr_q or pa_q), for the buffer's rules
+    wire pa_in_window = (PMA_RAM_SIZE != 64'd0) && (pa[63:32] == 32'b0) && (pa >= PMA_RAM_BASE)
+                        && ((pa - PMA_RAM_BASE) < PMA_RAM_SIZE);
+    wire is_ram       = SB_EN && pa_in_window;
+    wire postable     = is_ram && store_q && !atomic_q && !i_pmp_bypass;      // a plain store to RAM
+    wire match_case   = is_ram && !store_q && !atomic_q && !i_pmp_bypass;     // a plain load from RAM
+    wire sb_wait      = match_case ? i_sb_match : (!postable && !i_sb_empty);
+    assign o_sb_addr  = pa[31:3];
+
+    wire post_done = at_head && !misaligned_q && !pmp_deny && pa_valid && postable;
+    wire start_raw = at_head && !misaligned_q && !pmp_deny && !sc_fail && pa_valid && !postable && !sb_wait;
+    wire start     = start_raw && !i_ptw_beat && !i_sb_beat && !i_sb_go;
+
+    // a load that does not wait for the buffer, among the three oldest ROB entries (the tags carry a wrap bit,
+    // so the difference modulo the tag width is the distance): the drain yields to it
+    wire [QV_ROB_TAG_W-1:0] head_dist = tag_q - i_head_tag;
+    assign o_load_near = (state_q == S_WAIT_HEAD) && i_head_valid && match_case && pa_valid && !i_sb_match
+                         && !misaligned_q && !pmp_deny && (head_dist <= QV_ROB_TAG_W'(2));
     wire resp     = wb_mem_ack_i || wb_mem_err_i;
     wire in_bus   = (state_q == S_BUS) || (state_q == S_DRAIN);
 
@@ -250,6 +293,7 @@ module qv_lsu (
 
     assign o_free         = (state_q == S_IDLE);
     assign o_head_started = start || in_bus;
+    assign o_in_bus       = in_bus;
     assign o_bus_busy     = start_raw || in_bus;           // the walker waits while this is high
 
     // A response in the start cycle can't happen (every slave answers a
@@ -295,7 +339,7 @@ module qv_lsu (
     wire sc_fail_done = at_head && sc_fail && !misaligned_q && !pmp_deny; // SC without its reservation: rd = 1
     always_comb begin
         o_wb       = '0;
-        o_wb.valid = done_bus || done_nobus;
+        o_wb.valid = done_bus || done_nobus || post_done;
         o_wb.tag   = tag_q;
         if (sc_fail_done)                             o_wb.value = 64'd1;
         else if (done_bus && !wb_mem_err_i && amo_q)  o_wb.value = old_q;
@@ -329,7 +373,7 @@ module qv_lsu (
                 S_WAIT_HEAD: begin
                     if (i_flush)         state_q <= S_IDLE;
                     else if (start)      state_q <= S_BUS;
-                    else if (done_nobus) state_q <= S_IDLE;
+                    else if (done_nobus || post_done) state_q <= S_IDLE;
                     else if (x_ok) begin                      // translated: the physical address, checked and used from the next cycle
                         pa_q     <= {8'b0, i_xl_ppn, addr_q[11:0]};
                         xlated_q <= 1'b1;
@@ -349,11 +393,12 @@ module qv_lsu (
                 default: state_q <= S_IDLE;
             endcase
 
-            if (done_bus || done_nobus) begin
+            if (done_bus || done_nobus || post_done) begin
                 o_res        <= '0;
                 // an SC without its reservation did nothing: no fields at all
                 if (!sc_fail_done) begin
-                    o_res.xcpt      <= done_nobus || wb_mem_err_i;
+                    o_res.xcpt      <= done_nobus || (done_bus && wb_mem_err_i);
+                    o_res.posted    <= post_done;
                     // misaligned: 4/6; a page fault from the translation: 13 (load, LR) or 15 (store, SC, AMO); a PMP
                     // denial, a failed PTE read or a bus error: 5/7 (stores, SC, LR, AMOs: the odd ones)
                     o_res.cause     <= (done_nobus && misaligned_q) ? (fault_st ? 4'd6 : 4'd4)

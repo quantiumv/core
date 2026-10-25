@@ -180,6 +180,13 @@ module qv_commit #(
     // SFENCE.VMA: the TLBs are emptied at the edge that ends the retiring cycle (no wait, unlike FENCE.I: it is a
     // serializing instruction, so its redirect refetches against the empty TLB). Not for one that traps (TVM)
     output logic                             o_sfence,
+    // The store buffer. A posted store (the LSU completed it without the bus) retires only when the buffer has room
+    // and is pushed in the cycle it retires. FENCE.I and an EBREAK wait for the buffer to be empty: FENCE.I so that
+    // the instructions it refetches are the stored ones, EBREAK because tests and debuggers treat it as the end of
+    // the program and read memory then (a core that restarted at mtvec before the drain would hide the stores).
+    input  logic                             i_sb_ready = 1'b1,
+    input  logic                             i_sb_empty = 1'b1,
+    output logic                             o_sb_push,
 
     output logic                             o_commit_now,
     output logic [63:0]                      o_pc,
@@ -275,7 +282,11 @@ module qv_commit #(
     assign o_dbg_entry         = halt_take || head_dbg_entry;
     assign o_dbg_cause         = ebreak_entry ? 3'd1 : trigger_entry ? 3'd2 : i_dbg_stepping ? 3'd4 : 3'd3;
 
-    wire commit = head_ready && (!is_fence_i || i_fetch_idle) && !irq && !halt_take && !head_dbg_entry;
+    wire sb_posted      = (i_head_ctrl.cls == QV_FU_LSU) && !i_head_ctrl.xcpt && i_lsu_res.posted;
+    wire sb_drain_first = is_fence_i || (is_sys && i_head_ctrl.sys_op == QV_SYS_EBREAK);
+    wire sb_ok          = (!sb_posted || i_sb_ready) && (!sb_drain_first || i_sb_empty);
+    wire commit = head_ready && (!is_fence_i || i_fetch_idle) && sb_ok && !irq && !halt_take && !head_dbg_entry;
+    assign o_sb_push = commit && sb_posted;
     always_ff @(posedge clk) begin
         if (rst) commit_q <= 1'b0;
         else     commit_q <= commit;
