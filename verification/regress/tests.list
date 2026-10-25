@@ -11,7 +11,7 @@
 #   ref   the frozen multi-cycle reference, verification/reference/ref_core.sv
 #         (named `core` by -DQV_REF_AS_CORE) -- 75 rows
 # run_regress.sh --core X SKIPS any row not listing X, silently, so a row that
-# names neither core would just never run: there must be 112 rows listing pipe.
+# names neither core would just never run: there must be 114 rows listing pipe.
 #
 # The rows that omit ref are the design/*_tb.sv unit tests of a leaf module
 # (alu, c_expand, csr_file, divider, register_file) and of the divider's
@@ -125,7 +125,9 @@ tb_core_trigger_tb|testbench/core_trigger_tb.sv|testbench/dm_core_harness.sv|des
 # Module-level tests; the pipe file list compiles every module they use.
 pipe_fetch_tb|design/pipe/qv_fetch_tb.sv||design|pipe|pass|
 pipe_fetch_xl_tb|design/pipe/qv_fetch_xl_tb.sv||design|pipe|pass|
+pipe_fetch_stream_tb|design/pipe/qv_fetch_stream_tb.sv||design|pipe|pass|
 pipe_align_fifo_tb|design/pipe/qv_align_fifo_tb.sv||design|pipe|pass|600
+pipe_align_fifo_one_tb|design/pipe/qv_align_fifo_tb.sv||design|pipe|pass|600|-Pqv_align_fifo_tb.ONE_OK=1
 pipe_decode_tb|design/pipe/qv_decode_tb.sv||design|pipe|pass|
 pipe_pmp_tb|design/pipe/qv_pmp_tb.sv||design|pipe|pass||
 pipe_pte_tb|design/pipe/qv_pte_tb.sv||design|pipe|pass|

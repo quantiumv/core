@@ -1,15 +1,26 @@
 # qv_fetch properties (fetch_props.sv): k-induction proof, plus a deep
 # BMC as a cross-check. Run with run.sh, or: sby -f fetch.sby
+# prove/bmc/cover: the shipping configuration (FB_DEPTH 4, streaming). *_fb2: the formal small
+# configuration's FB_DEPTH 2. prove_ns: FB_DEPTH 2 without streaming (the old rate).
 [tasks]
 prove
 bmc
 cover
+prove_fb2
+bmc_fb2
+prove_ns
 
 [options]
 prove: mode prove
-prove: depth 8
+prove: depth 10
+prove_fb2: mode prove
+prove_fb2: depth 10
+prove_ns: mode prove
+prove_ns: depth 10
 bmc: mode bmc
-bmc: depth 24
+bmc: depth 16
+bmc_fb2: mode bmc
+bmc_fb2: depth 24
 cover: mode cover
 cover: depth 24
 
@@ -18,7 +29,12 @@ smtbmc boolector
 
 [script]
 plugin -i /home/potato/yosys-slang-src/build/slang.so
-read_slang --single-unit qv_pkg.sv qv_fetch.sv fetch_props.sv --top fetch_props
+prove: read_slang --single-unit qv_pkg.sv qv_fetch.sv fetch_props.sv --top fetch_props
+bmc: read_slang --single-unit qv_pkg.sv qv_fetch.sv fetch_props.sv --top fetch_props
+cover: read_slang --single-unit qv_pkg.sv qv_fetch.sv fetch_props.sv --top fetch_props
+prove_fb2: read_slang --single-unit -D FBD=2 qv_pkg.sv qv_fetch.sv fetch_props.sv --top fetch_props
+bmc_fb2: read_slang --single-unit -D FBD=2 qv_pkg.sv qv_fetch.sv fetch_props.sv --top fetch_props
+prove_ns: read_slang --single-unit -D FBD=2 -D NOSTREAM qv_pkg.sv qv_fetch.sv fetch_props.sv --top fetch_props
 prep -top fetch_props
 
 [files]

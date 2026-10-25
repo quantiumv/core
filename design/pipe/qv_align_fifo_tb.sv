@@ -22,7 +22,9 @@
  */
 `include "riscv_encode.sv"
 
-module qv_align_fifo_tb;
+module qv_align_fifo_tb #(
+    parameter bit ONE_OK = 1'b0     // the aligner emits one instruction when the queue has room for one
+);
     import qv_pkg::*;
 
     int   pass_count = 0;
@@ -42,7 +44,7 @@ module qv_align_fifo_tb;
     logic [3:0]  buf_cause;
     logic [43:0] buf_pg;
     logic        buf_pop;
-    logic        p0_valid, p1_valid, push_ready;
+    logic        p0_valid, p1_valid, push_ready, push_ready1;
     fe_instr_t   p0_data, p1_data;
     logic        fe_redir;
     logic [63:0] fe_redir_pc;
@@ -57,14 +59,14 @@ module qv_align_fifo_tb;
 
     assign head = fe_instr_t'(head_bits);
 
-    qv_align align0 (
+    qv_align #(.ONE_OK(ONE_OK)) align0 (
         .clk(clk), .rst(rst), .i_flush(flush),
         .i_buf_valid(buf_valid), .i_buf_pc(buf_pc), .i_buf_data(buf_data), .i_buf_err(buf_err),
         .i_buf_cause(buf_cause), .i_buf_xl(buf_xl), .i_buf_pg(buf_pg),
         .o_buf_pop(buf_pop),
         .o_push0_valid(p0_valid), .o_push0_data(p0_data),
         .o_push1_valid(p1_valid), .o_push1_data(p1_data),
-        .i_push_ready(push_ready),
+        .i_push_ready(push_ready), .i_push_ready1(push_ready1),
         .o_redirect_valid(fe_redir), .o_redirect_pc(fe_redir_pc)
     );
 
@@ -72,7 +74,7 @@ module qv_align_fifo_tb;
         .clk(clk), .rst(rst), .i_flush(flush),
         .i_push0_valid(p0_valid), .i_push0_data(p0_data),
         .i_push1_valid(p1_valid), .i_push1_data(p1_data),
-        .o_push_ready(push_ready),
+        .o_push_ready(push_ready), .o_push_ready1(push_ready1),
         .o_head_valid(head_valid), .o_head_data(head_bits),
         .i_pop(pop)
     );
@@ -392,12 +394,14 @@ module qv_align_fifo_tb;
         walk(64'hA00, 12);
         src_en = 1'b1;
         force push_ready = 1'b0;
+        force push_ready1 = 1'b0;
         #1;
         check("D4: no pop without room", {63'b0, buf_pop}, 64'd0);
         check("D4: no push without room", {63'b0, p0_valid | p1_valid}, 64'd0);
         check("D4: no redirect without room", {63'b0, fe_redir}, 64'd0);
         repeat (3) @(posedge clk);
         release push_ready;
+        release push_ready1;
         run_check("D4: program intact after the stall", 12, 120);
 
         // ---- D5: flush while a crossing half is held ----
@@ -570,8 +574,10 @@ module qv_align_fifo_tb;
         src_en = 1'b1;
         @(posedge clk); #1;
         check("F1: ready at count 2", {63'b0, push_ready}, 64'd1);
+        check("F1: room for one at count 2", {63'b0, push_ready1}, 64'd1);
         @(posedge clk); #1;
         check("F1: not ready at count 4 (full)", {63'b0, push_ready}, 64'd0);
+        check("F1: no room for one at count 4 (full)", {63'b0, push_ready1}, 64'd0);
         repeat (3) @(posedge clk);
         #1;
         check("F1: still full, source stalled", fpc, 64'h10);

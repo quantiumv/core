@@ -19,7 +19,8 @@
 #   into its response cycle; for the store buffer a drain out of order, a lost byte select, a beat that starts while
 #   the LSU is on the bus or the walker's beat is in flight, one that ignores the full-buffer rule, a cyc held into
 #   the response cycle, an answer taken that is not the buffer's own, an o_match that sees a dead entry, a beat
-#   with nothing to write, a push into a full buffer, an idle start that follows the response).
+#   with nothing to write, a push into a full buffer, an idle start that follows the response; for fetch a stream through a redirect, a yield or
+#   a full buffer, a request presented with the old address).
 set -u
 cd "$(dirname "$0")" || exit 1
 HERE=$(pwd)
@@ -81,7 +82,12 @@ EOF
     mutant fetch_epoch_aba     fetch "$T/qv_fetch_epoch.sv" "-D FETCH_OLD"
     mutant fetch_no_stale      fetch 's/wire resp_ok  = resp \&\& !req_stale_q \&\& !i_redirect_valid;/wire resp_ok  = resp \&\& !i_redirect_valid;/'
     mutant fetch_ignores_hold  fetch 's/ \&\& !i_hold$//'
-    mutant fetch_abandons      fetch 's/assign wb_fetch_cyc_o  = bus \&\& !(wb_fetch_ack_i || wb_fetch_err_i);/assign wb_fetch_cyc_o  = bus \&\& !(wb_fetch_ack_i || wb_fetch_err_i) \&\& !i_redirect_valid;/'
+    mutant fetch_abandons      fetch 's/assign wb_fetch_cyc_o  = bus \&\& (!(wb_fetch_ack_i || wb_fetch_err_i) || stream_go);/assign wb_fetch_cyc_o  = bus \&\& (!(wb_fetch_ack_i || wb_fetch_err_i) || stream_go) \&\& !i_redirect_valid;/'
+    mutant fetch_stream_redirect fetch 's/ \&\& !i_redirect_valid \&\& !i_xl_on/ \&\& !i_xl_on/'
+    mutant fetch_stream_yield  fetch 's/ \&\& !i_xl_on \&\& !i_yield;/ \&\& !i_xl_on;/'
+    mutant fetch_stream_room   fetch 's/wire stream_go = STREAM \&\& can_issue \&\& bus_resp/wire stream_go = STREAM \&\& bus_resp/'
+    mutant fetch_credit        fetch 's/(fb_count_next < CNT_W.(FB_DEPTH))/(fb_count_next <= CNT_W'"'"'(FB_DEPTH))/'
+    mutant fetch_stream_addr   fetch 's/assign wb_fetch_addr_o = stream_go  ? {fpc_q\[31:3\], 3.b000}/assign wb_fetch_addr_o = stream_go  ? {req_pc_q[31:3], 3'"'"'b000}/'
     mutant lsu_ignores_head    lsu 's/wire at_head  = (state_q == S_WAIT_HEAD) \&\& i_head_valid \&\& (i_head_tag == tag_q) \&\& !i_flush;/wire at_head  = (state_q == S_WAIT_HEAD) \&\& !i_flush;/'
     mutant lsu_misaligned_bus  lsu 's/wire start_raw = at_head \&\& !misaligned_q \&\& !pmp_deny/wire start_raw = at_head \&\& !pmp_deny/'
     mutant lsu_pmp_bus         lsu 's/wire start_raw = at_head \&\& !misaligned_q \&\& !pmp_deny \&\& !sc_fail/wire start_raw = at_head \&\& !misaligned_q \&\& !sc_fail/'
