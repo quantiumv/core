@@ -83,17 +83,23 @@
 `ifndef QV_PIPE_FETCH_YIELD
 `define QV_PIPE_FETCH_YIELD 1'b0
 `endif
+// Branch prediction (P9c). QV_PIPE_BP 0 leaves all of it out; the pieces size themselves, each 0 = absent.
+`ifndef QV_PIPE_BP
+`define QV_PIPE_BP 1
+`endif
 // QV_FORMAL_SMALL: a smaller ROB, IQ and TLBs, to keep riscv-formal's models small
 `ifdef QV_FORMAL_SMALL
 `define QV_PIPE_ROB_DEPTH 4
 `define QV_PIPE_IQ_DEPTH  2
 `define QV_PIPE_FB_DEPTH  2
 `define QV_PIPE_TLB_ENTRIES 1
+`define QV_PIPE_BTB_ENTRIES ((`QV_PIPE_BP) ? 2 : 0)
 `else
 `define QV_PIPE_ROB_DEPTH qv_pkg::QV_ROB_DEPTH
 `define QV_PIPE_IQ_DEPTH  ((`QV_PIPE_FETCH_STREAM) ? 8 : 4)
 `define QV_PIPE_FB_DEPTH  ((`QV_PIPE_FETCH_STREAM) ? 4 : 2)
 `define QV_PIPE_TLB_ENTRIES 4
+`define QV_PIPE_BTB_ENTRIES ((`QV_PIPE_BP) ? 32 : 0)
 `endif
 
 // The store buffer (P9d). QV_PIPE_SB_DEPTH 0 leaves it out. Stores are posted only to RAM, which the core is told
@@ -130,6 +136,7 @@ module core
     parameter int FB_DEPTH  = `QV_PIPE_FB_DEPTH,    // fetch buffer entries
     parameter bit FETCH_STREAM = `QV_PIPE_FETCH_STREAM,   // back-to-back fetch requests
     parameter bit FETCH_YIELD  = `QV_PIPE_FETCH_YIELD,    // fetch gives way to the memory port's masters (shared bus)
+    parameter int BTB_ENTRIES  = `QV_PIPE_BTB_ENTRIES,    // branch target buffer entries, 0: none
     parameter bit SV39_EN   = `QV_PIPE_SV39_EN,     // address translation present
     parameter int TLB_ENTRIES = `QV_PIPE_TLB_ENTRIES, // entries in each of the two TLBs
     parameter int SB_DEPTH  = `QV_PIPE_SB_DEPTH,     // store buffer entries, 0: none
@@ -294,20 +301,49 @@ module core
     logic [43:0] f_xl_ppn;
     logic        fetch_redirect_ctx;         // below, once commit's outputs are declared
     logic        fetch_yield;                // below, once the memory port's masters are declared
+    logic        fb_hint;                    // the fetch buffer's head dword was flagged by the BTB
+    logic [1:0]  fb_hoff;
+    logic        fb_hx;
+    logic [63:0] fb_htgt;
+    logic [63:0] btb_lk_pc;
+    logic        btb_hit, btb_x;
+    logic [1:0]  btb_off;
+    logic [63:0] btb_tgt;
 
-    qv_fetch #(.RESET_PC(RESET_PC), .FB_DEPTH(FB_DEPTH), .STREAM(FETCH_STREAM)) fetch0 (
+    qv_fetch #(.RESET_PC(RESET_PC), .FB_DEPTH(FB_DEPTH), .STREAM(FETCH_STREAM), .BTB_EN(BTB_ENTRIES > 0)) fetch0 (
         .clk(clk), .rst(rst),
         .wb_fetch_addr_o(wb_fetch_addr_o), .wb_fetch_cyc_o(wb_fetch_cyc_o), .wb_fetch_stb_o(wb_fetch_stb_o),
         .wb_fetch_dat_i(wb_fetch_dat_i), .wb_fetch_ack_i(wb_fetch_ack_i), .wb_fetch_err_i(wb_fetch_err_i),
         .i_redirect_valid(fetch_redirect), .i_redirect_pc(fetch_redirect_pc), .i_redirect_ctx(fetch_redirect_ctx),
         .i_hold(fetch_hold), .o_idle(fetch_idle), .i_yield(fetch_yield),
+        .o_btb_pc(btb_lk_pc), .i_btb_hit(btb_hit), .i_btb_off(btb_off), .i_btb_x(btb_x), .i_btb_tgt(btb_tgt),
         .i_xl_on(fetch_xl_on),
         .o_xl_req(f_xl_req), .o_xl_va(f_xl_va), .o_xl_cancel(f_xl_cancel),
         .i_xl_done(f_xl_done), .i_xl_pf(f_xl_pf), .i_xl_af(f_xl_af), .i_xl_ppn(f_xl_ppn),
         .o_buf_valid(fb_valid), .o_buf_pc(fb_pc), .o_buf_data(fb_data), .o_buf_err(fb_err),
         .o_buf_cause(fb_cause), .o_buf_xl(fb_xl), .o_buf_pg(fb_pg),
+        .o_buf_hint(fb_hint), .o_buf_hoff(fb_hoff), .o_buf_hx(fb_hx), .o_buf_htgt(fb_htgt),
         .i_buf_pop(fb_pop)
     );
+
+    // ---------------- the branch target buffer ----------------
+    logic        btb_upd_valid, btb_upd_taken, btb_upd_cross;
+    logic [63:0] btb_upd_pc, btb_upd_tgt;
+    generate
+        if (BTB_ENTRIES > 0) begin : g_btb
+            qv_btb #(.ENTRIES(BTB_ENTRIES)) btb0 (
+                .clk(clk), .rst(rst),
+                .i_lk_pc(btb_lk_pc), .o_hit(btb_hit), .o_off(btb_off), .o_x(btb_x), .o_tgt(btb_tgt),
+                .i_upd_valid(btb_upd_valid), .i_upd_pc(btb_upd_pc), .i_upd_taken(btb_upd_taken), .i_upd_cross(btb_upd_cross),
+                .i_upd_tgt(btb_upd_tgt)
+            );
+        end else begin : g_nobtb
+            assign btb_hit = 1'b0;
+            assign btb_off = 2'b0;
+            assign btb_x   = 1'b0;
+            assign btb_tgt = 64'b0;
+        end
+    endgenerate
 
     // ---------------- A: align -> instruction queue ----------------
     localparam int FE_W = $bits(fe_instr_t);
@@ -326,6 +362,7 @@ module core
         .clk(clk), .rst(rst), .i_flush(flush),
         .i_buf_valid(fb_valid), .i_buf_pc(fb_pc), .i_buf_data(fb_data), .i_buf_err(fb_err),
         .i_buf_cause(fb_cause), .i_buf_xl(fb_xl), .i_buf_pg(fb_pg),
+        .i_buf_hint(fb_hint), .i_buf_hoff(fb_hoff), .i_buf_hx(fb_hx), .i_buf_htgt(fb_htgt),
         .o_buf_pop(fb_pop),
         .o_push0_valid(a0_valid), .o_push0_data(a0_data),
         .o_push1_valid(a1_valid), .o_push1_data(a1_data),
@@ -665,6 +702,9 @@ module core
         .o_fetch_hold(commit_fetch_hold), .i_fetch_idle(fetch_idle), .o_icache_flush(icache_flush_o),
         .o_sfence(c_sfence),
         .i_sb_ready(sb_ready), .i_sb_empty(sb_empty), .o_sb_push(c_sb_push),
+        .o_btb_upd_valid(btb_upd_valid), .o_btb_upd_pc(btb_upd_pc), .o_btb_upd_taken(btb_upd_taken),
+        .o_btb_upd_cross(btb_upd_cross),
+        .o_btb_upd_tgt(btb_upd_tgt),
         .o_commit_now(commit_now_w), .o_pc(arch_pc), .o_next_pc(retire_next_pc),
         .o_redirect_valid(redirect_valid), .o_redirect_pc(redirect_pc), .o_redirect_ctx(c_redirect_ctx),
         .o_rvfi_order(c_order), .o_rvfi_insn(c_insn), .o_rvfi_trap(c_rvfi_trap), .o_rvfi_intr(c_intr),

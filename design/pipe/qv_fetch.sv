@@ -63,11 +63,17 @@
  * with another master, i_yield makes the stream pause for a cycle (cyc low in the answer's cycle) so that
  * master can be granted. An arbiter that drops a request presented in an answer's cycle (DROP_REQ_ON_RESP)
  * costs nothing but the gain: the request is held until it is answered.
+ *
+ * BTB_EN: the branch target buffer (qv_btb) is looked up with the pc of every request as it issues. A hit means a
+ * taken branch or jump sits in that dword (at halfword i_btb_off, at or after the request's first): the request
+ * after this one is the branch's target instead of the next dword, and the dword's fetch buffer entry carries the
+ * hint (where the branch is, where it goes) so the aligner can confirm it or, if it is wrong, put the stream back.
  */
 module qv_fetch #(
     parameter logic [63:0] RESET_PC = 64'h0,
     parameter int          FB_DEPTH = 2,
-    parameter bit          STREAM   = 1'b0
+    parameter bit          STREAM   = 1'b0,
+    parameter bit          BTB_EN   = 1'b0
 ) (
     input  logic        clk,
     input  logic        rst,
@@ -90,6 +96,13 @@ module qv_fetch #(
     // another master wants the bus this cycle: do not stream into the answer's cycle
     input  logic        i_yield = 1'b0,
 
+    // the branch target buffer: asked with the pc of the request being issued, answers in the same cycle
+    output logic [63:0] o_btb_pc,
+    input  logic        i_btb_hit = 1'b0,
+    input  logic [1:0]  i_btb_off = 2'b0,
+    input  logic        i_btb_x   = 1'b0,
+    input  logic [63:0] i_btb_tgt = 64'b0,
+
     // translation (qv_xlate): the request is held until i_xl_done or o_xl_cancel
     input  logic        i_xl_on    = 1'b0,
     output logic        o_xl_req,
@@ -107,6 +120,10 @@ module qv_fetch #(
     output logic [3:0]  o_buf_cause,
     output logic        o_buf_xl,                  // the dword was fetched through translation: o_buf_pg is its physical page
     output logic [43:0] o_buf_pg,
+    output logic        o_buf_hint,                // the BTB said a taken branch is at halfword o_buf_hoff, going to o_buf_htgt
+    output logic [1:0]  o_buf_hoff,
+    output logic        o_buf_hx,                  // ... it is the second half of a crossing branch (the dword's halfword 0)
+    output logic [63:0] o_buf_htgt,
     input  logic        i_buf_pop
 );
     localparam int PTR_W = (FB_DEPTH > 1) ? $clog2(FB_DEPTH) : 1;
@@ -121,6 +138,10 @@ module qv_fetch #(
     logic        req_pf_q;       // ... a page fault (cause 12), not an access fault (cause 1)
     logic        req_isxl_q;     // issued with translation on: req_pa_q is its physical page
     logic [43:0] req_pa_q;
+    logic        req_hint_q;     // the BTB flagged this dword (a taken branch at req_hoff_q, going to req_htgt_q)
+    logic [1:0]  req_hoff_q;
+    logic        req_hx_q;
+    logic [63:0] req_htgt_q;
 
     logic [63:0] fpc_q;          // next sequential fetch pc
 
@@ -143,6 +164,10 @@ module qv_fetch #(
     logic [3:0]  fb_cause [0:FB_DEPTH-1];
     logic        fb_xl    [0:FB_DEPTH-1];
     logic [43:0] fb_pg    [0:FB_DEPTH-1];
+    logic        fb_hint  [0:FB_DEPTH-1];
+    logic [1:0]  fb_hoff  [0:FB_DEPTH-1];
+    logic        fb_hx    [0:FB_DEPTH-1];
+    logic [63:0] fb_htgt  [0:FB_DEPTH-1];
     logic [PTR_W-1:0] fb_rd_q, fb_wr_q;
     logic [CNT_W-1:0] fb_count_q;
 
@@ -177,6 +202,10 @@ module qv_fetch #(
 
     wire [63:0] issue_pc    = i_redirect_valid ? i_redirect_pc : fpc_q;
 
+    // the BTB's word on the request being issued: the next one is the branch's target
+    assign o_btb_pc = issue_pc;
+    wire        hint     = BTB_EN && i_btb_hit;
+
     function automatic logic [PTR_W-1:0] ptr_inc(input logic [PTR_W-1:0] p);
         ptr_inc = (p == PTR_W'(FB_DEPTH - 1)) ? '0 : p + 1'b1;
     endfunction
@@ -191,6 +220,10 @@ module qv_fetch #(
             req_pf_q    <= 1'b0;
             req_isxl_q  <= 1'b0;
             req_pa_q    <= '0;
+            req_hint_q  <= 1'b0;
+            req_hoff_q  <= 2'b0;
+            req_hx_q    <= 1'b0;
+            req_htgt_q  <= '0;
             fpc_q       <= RESET_PC;
             fb_rd_q     <= '0;
             fb_wr_q     <= '0;
@@ -203,7 +236,11 @@ module qv_fetch #(
                 req_xl_q    <= i_xl_on;
                 req_flt_q   <= 1'b0;
                 req_isxl_q  <= i_xl_on;
-                fpc_q       <= {issue_pc[63:3], 3'b000} + 64'd8;
+                req_hint_q  <= hint;
+                req_hoff_q  <= i_btb_off;
+                req_hx_q    <= i_btb_x;
+                req_htgt_q  <= i_btb_tgt;
+                fpc_q       <= hint ? i_btb_tgt : {issue_pc[63:3], 3'b000} + 64'd8;
             end else begin
                 if (resp || drop) req_valid_q <= 1'b0;
                 if (i_redirect_valid) begin
@@ -234,6 +271,10 @@ module qv_fetch #(
                     fb_cause[fb_wr_q] <= (flt_resp && req_pf_q) ? 4'd12 : 4'd1;
                     fb_xl[fb_wr_q]    <= req_isxl_q;
                     fb_pg[fb_wr_q]    <= req_isxl_q ? req_pa_q : 44'b0;
+                    fb_hint[fb_wr_q]  <= req_hint_q;
+                    fb_hoff[fb_wr_q]  <= req_hoff_q;
+                    fb_hx[fb_wr_q]    <= req_hx_q;
+                    fb_htgt[fb_wr_q]  <= req_htgt_q;
                     fb_wr_q           <= ptr_inc(fb_wr_q);
                 end
                 if (fb_pop) fb_rd_q <= ptr_inc(fb_rd_q);
@@ -249,4 +290,8 @@ module qv_fetch #(
     assign o_buf_cause = fb_cause[fb_rd_q];
     assign o_buf_xl    = fb_xl[fb_rd_q];
     assign o_buf_pg    = fb_pg[fb_rd_q];
+    assign o_buf_hint  = fb_hint[fb_rd_q];
+    assign o_buf_hoff  = fb_hoff[fb_rd_q];
+    assign o_buf_hx    = fb_hx[fb_rd_q];
+    assign o_buf_htgt  = fb_htgt[fb_rd_q];
 endmodule

@@ -187,6 +187,15 @@ module qv_commit #(
     input  logic                             i_sb_ready = 1'b1,
     input  logic                             i_sb_empty = 1'b1,
     output logic                             o_sb_push,
+    // Branch target buffer training, from architectural outcomes only: a retiring branch or jump with its target in
+    // the encoding or in a register (not a return), outside a Program Buffer run. taken says whether it went to the
+    // target; a conditional branch that fell through removes its own entry; cross: a 32-bit instruction that starts in
+    // the last halfword of its dword.
+    output logic                             o_btb_upd_valid,
+    output logic [63:0]                      o_btb_upd_pc,
+    output logic                             o_btb_upd_taken,
+    output logic                             o_btb_upd_cross,
+    output logic [63:0]                      o_btb_upd_tgt,
 
     output logic                             o_commit_now,
     output logic [63:0]                      o_pc,
@@ -372,6 +381,15 @@ module qv_commit #(
 
     assign o_commit_pop = commit;
     assign o_commit_now = commit;
+
+    // ---------------- branch target buffer training ----------------
+    wire [1:0]  h_kind = qv_ctl_kind(i_head_entry.raw);
+    wire        h_rvc  = i_head_entry.raw[1:0] != 2'b11;
+    assign o_btb_upd_valid = commit && !faulted && !i_pb_active && (h_kind == 2'd1 || h_kind == 2'd2);
+    assign o_btb_upd_cross = !h_rvc && i_head_entry.pc[2:1] == 2'b11;
+    assign o_btb_upd_pc    = i_head_entry.pc;
+    assign o_btb_upd_tgt   = i_head_entry.next_pc;
+    assign o_btb_upd_taken = (h_kind == 2'd2) || (i_head_entry.next_pc != i_head_entry.pc + (h_rvc ? 64'd2 : 64'd4));
 
     // ---------------- LR/SC reservation ----------------
     // Set by a clean LR, to the address it loaded. Cleared by retiring any

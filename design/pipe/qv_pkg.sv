@@ -237,4 +237,32 @@ package qv_pkg;
         logic [QV_ROB_TAG_W-1:0] tag;
     } prod_entry_t;
 
+    // What kind of control-flow instruction an encoding is (32-bit, or RVC with raw[31:16] = 0), for the branch
+    // predictors: 0 none, 1 direct (conditional branch, JAL, C.J, C.BEQZ/C.BNEZ: the target is in the encoding),
+    // 2 an indirect jump that is not a return (JALR, C.JR, C.JALR: the target is a register; a call or a jump),
+    // 3 a return (JALR/C.JR with rd = x0 and rs1 = x1 or x5).
+    /* verilator lint_off UNUSEDSIGNAL */
+    function automatic logic [1:0] qv_ctl_kind(input logic [31:0] raw);
+        logic [4:0] rd, rs1;
+        if (raw[1:0] == 2'b11) begin
+            rd  = raw[11:7];
+            rs1 = raw[19:15];
+            if (raw[6:0] == 7'b1100011 && raw[14:13] != 2'b01) return 2'd1;       // conditional branch
+            if (raw[6:0] == 7'b1101111)                        return 2'd1;       // JAL
+            if (raw[6:0] == 7'b1100111 && raw[14:12] == 3'b000)
+                return (rd == 5'd0 && (rs1 == 5'd1 || rs1 == 5'd5)) ? 2'd3 : 2'd2;
+            return 2'd0;
+        end else begin
+            if (raw[1:0] == 2'b01 && raw[15:13] == 3'b101)     return 2'd1;       // C.J
+            if (raw[1:0] == 2'b01 && raw[15:14] == 2'b11)      return 2'd1;       // C.BEQZ / C.BNEZ
+            if (raw[1:0] == 2'b10 && raw[15:13] == 3'b100 && raw[6:2] == 5'd0 && raw[11:7] != 5'd0) begin
+                rs1 = raw[11:7];
+                if (!raw[12] && (rs1 == 5'd1 || rs1 == 5'd5)) return 2'd3;       // C.JR ra / t0
+                return 2'd2;                                                      // C.JR, C.JALR
+            end
+            return 2'd0;
+        end
+    endfunction
+    /* verilator lint_on UNUSEDSIGNAL */
+
 endpackage

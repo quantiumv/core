@@ -38,6 +38,16 @@
  * predicted (its target is a register). The BRU checks every prediction
  * and commit corrects a wrong one.
  *
+ * Branch target buffer hints: fetch may have followed a taken branch inside this dword without waiting for us
+ * (the dword comes with i_buf_hint, the halfword i_buf_hoff the branch starts at and the target i_buf_htgt; the
+ * dwords behind it in the fetch buffer are the target's; with i_buf_hx the branch is a crossing 32-bit instruction
+ * whose second half is this dword's first halfword). The instruction that starts at that halfword is checked
+ * when it is emitted: a direct branch or jump whose own target is the hinted one, or an indirect jump that is not
+ * a return, is predicted taken to the hinted target, with no redirect (fetch is already there) and the rest of the
+ * dword dropped. Anything else makes the hint worthless: the dword's instructions are emitted as usual, and when
+ * it is used up fetch is sent back to the next sequential dword (a crossing instruction's first half stays
+ * pending: its second half is the first halfword of that dword). A hint costs only time, never correctness.
+ *
  * Instructions are emitted only when the IQ has room for two -- or, with ONE_OK, room for one: then the
  * first instruction of the cycle goes alone and the rest of the dword is taken the next cycle (the aligner
  * already drains a dword over several cycles, so this adds no state). Without it a queue that holds all but
@@ -60,6 +70,10 @@ module qv_align #(
     input  logic [3:0]        i_buf_cause = 4'd1,
     input  logic              i_buf_xl    = 1'b0,        // fetch was translated: i_buf_pg is the dword's physical page
     input  logic [43:0]       i_buf_pg    = 44'b0,
+    input  logic              i_buf_hint  = 1'b0,        // the BTB flagged this dword: a taken branch at halfword i_buf_hoff
+    input  logic [1:0]        i_buf_hoff  = 2'b0,
+    input  logic              i_buf_hx    = 1'b0,        // ... the branch is a crossing one that ends in this dword's halfword 0
+    input  logic [63:0]       i_buf_htgt  = 64'b0,
     output logic              o_buf_pop,
 
     output logic              o_push0_valid,
@@ -122,8 +136,22 @@ module qv_align #(
         return {taken, pc + off};
     endfunction
 
+    // Does the hint for this instruction hold? A direct branch or jump whose target is the hinted one, or an indirect
+    // jump that is not a return (its target is a guess the branch unit checks).
+    /* verilator lint_off UNUSEDSIGNAL */
+    function automatic logic hint_holds(input logic [31:0] raw, input logic rvc, input logic [63:0] pc,
+                                        input logic hint_here, input logic [63:0] htgt);
+        logic [64:0] p;
+        logic [1:0]  k;
+        p = predict(raw, rvc, pc);
+        k = qv_ctl_kind(raw);
+        return hint_here && ((k == 2'd1 && p[63:0] == htgt) || k == 2'd2);
+    endfunction
+    /* verilator lint_on UNUSEDSIGNAL */
+
     function automatic fe_instr_t mk(input logic [63:0] pc, input logic [31:0] raw, input logic rvc,
-                                     input logic xl, input logic [43:0] pg_lo, input logic [43:0] pg_hi);
+                                     input logic xl, input logic [43:0] pg_lo, input logic [43:0] pg_hi,
+                                     input logic hint_here = 1'b0, input logic [63:0] htgt = 64'b0);
         logic [64:0] p;
         p             = predict(raw, rvc, pc);
         mk            = '0;
@@ -132,6 +160,10 @@ module qv_align #(
         mk.rvc        = rvc;
         mk.pred_taken = p[64];
         mk.pred_tgt   = p[63:0];
+        if (hint_holds(raw, rvc, pc, hint_here, htgt)) begin
+            mk.pred_taken = 1'b1;
+            mk.pred_tgt   = (qv_ctl_kind(raw) == 2'd1) ? p[63:0] : htgt;
+        end
         mk.xl         = xl;
         mk.pg_lo      = pg_lo;
         mk.pg_hi      = pg_hi;
@@ -141,6 +173,9 @@ module qv_align #(
     logic        stash;
     logic [15:0] stash_hw;
     logic [15:0] h;
+    logic        hint_here;      // the instruction being looked at starts at the hinted halfword
+    logic        conf0, conf1;   // ... and the hint holds for it (slot 0, slot 1)
+    logic        hint_redir;     // the dword's hint came to nothing: fetch goes back to the next sequential dword
 
     always_comb begin
         o_push0_valid = 1'b0;
@@ -153,6 +188,10 @@ module qv_align #(
         stash_hw      = '0;
         cur           = {1'b0, start};
         h             = '0;
+        hint_here     = 1'b0;
+        conf0         = 1'b0;
+        conf1         = 1'b0;
+        hint_redir    = 1'b0;
 
         if (go && i_buf_err) begin
             o_push0_valid = 1'b1;
@@ -166,14 +205,20 @@ module qv_align #(
         end else if (go) begin
             // slot 0: finish a crossing instruction, or start at cur
             if (pend_q) begin
+                hint_here = i_buf_hint && i_buf_hx;
                 o_push0_valid = 1'b1;
-                o_push0_data  = mk(pend_pc_q, {hw(i_buf_data, 2'd0), pend_hw_q}, 1'b0, pend_xl_q, pend_pg_q, i_buf_pg);
+                o_push0_data  = mk(pend_pc_q, {hw(i_buf_data, 2'd0), pend_hw_q}, 1'b0, pend_xl_q, pend_pg_q, i_buf_pg,
+                                   hint_here, i_buf_htgt);
+                conf0 = hint_holds({hw(i_buf_data, 2'd0), pend_hw_q}, 1'b0, pend_pc_q, hint_here, i_buf_htgt);
                 cur = 3'd1;
             end else begin
                 h = hw(i_buf_data, cur[1:0]);
+                hint_here = i_buf_hint && !i_buf_hx && (cur[1:0] == i_buf_hoff);
                 if (h[1:0] != 2'b11) begin
                     o_push0_valid = 1'b1;
-                    o_push0_data  = mk(base + {61'b0, cur[1:0], 1'b0}, {16'b0, h}, 1'b1, i_buf_xl, i_buf_pg, i_buf_pg);
+                    o_push0_data  = mk(base + {61'b0, cur[1:0], 1'b0}, {16'b0, h}, 1'b1, i_buf_xl, i_buf_pg, i_buf_pg,
+                                       hint_here, i_buf_htgt);
+                    conf0 = hint_holds({16'b0, h}, 1'b1, base + {61'b0, cur[1:0], 1'b0}, hint_here, i_buf_htgt);
                     cur = cur + 3'd1;
                 end else if (cur == 3'd3) begin
                     stash    = 1'b1;
@@ -182,20 +227,29 @@ module qv_align #(
                 end else begin
                     o_push0_valid = 1'b1;
                     o_push0_data  = mk(base + {61'b0, cur[1:0], 1'b0}, {hw(i_buf_data, cur[1:0] + 2'd1), h}, 1'b0,
-                                       i_buf_xl, i_buf_pg, i_buf_pg);
+                                       i_buf_xl, i_buf_pg, i_buf_pg, hint_here, i_buf_htgt);
+                    conf0 = hint_holds({hw(i_buf_data, cur[1:0] + 2'd1), h}, 1'b0, base + {61'b0, cur[1:0], 1'b0},
+                                       hint_here, i_buf_htgt);
                     cur = cur + 3'd2;
                 end
             end
             if (o_push0_valid && o_push0_data.pred_taken) begin
-                o_redirect_valid = 1'b1;
-                o_redirect_pc    = o_push0_data.pred_tgt;
+                if (conf0) begin
+                    cur = 3'd4;                      // fetch is already at the target: drop the rest of this dword
+                end else begin
+                    o_redirect_valid = 1'b1;
+                    o_redirect_pc    = o_push0_data.pred_tgt;
+                end
             end
             // slot 1: one more, if this dword has any left
             if (o_push0_valid && !o_redirect_valid && cur != 3'd4 && i_push_ready) begin
                 h = hw(i_buf_data, cur[1:0]);
+                hint_here = i_buf_hint && !i_buf_hx && (cur[1:0] == i_buf_hoff);
                 if (h[1:0] != 2'b11) begin
                     o_push1_valid = 1'b1;
-                    o_push1_data  = mk(base + {61'b0, cur[1:0], 1'b0}, {16'b0, h}, 1'b1, i_buf_xl, i_buf_pg, i_buf_pg);
+                    o_push1_data  = mk(base + {61'b0, cur[1:0], 1'b0}, {16'b0, h}, 1'b1, i_buf_xl, i_buf_pg, i_buf_pg,
+                                       hint_here, i_buf_htgt);
+                    conf1 = hint_holds({16'b0, h}, 1'b1, base + {61'b0, cur[1:0], 1'b0}, hint_here, i_buf_htgt);
                     cur = cur + 3'd1;
                 end else if (cur == 3'd3) begin
                     stash    = 1'b1;
@@ -204,13 +258,25 @@ module qv_align #(
                 end else begin
                     o_push1_valid = 1'b1;
                     o_push1_data  = mk(base + {61'b0, cur[1:0], 1'b0}, {hw(i_buf_data, cur[1:0] + 2'd1), h}, 1'b0,
-                                       i_buf_xl, i_buf_pg, i_buf_pg);
+                                       i_buf_xl, i_buf_pg, i_buf_pg, hint_here, i_buf_htgt);
+                    conf1 = hint_holds({hw(i_buf_data, cur[1:0] + 2'd1), h}, 1'b0, base + {61'b0, cur[1:0], 1'b0},
+                                       hint_here, i_buf_htgt);
                     cur = cur + 3'd2;
                 end
                 if (o_push1_valid && o_push1_data.pred_taken) begin
-                    o_redirect_valid = 1'b1;
-                    o_redirect_pc    = o_push1_data.pred_tgt;
+                    if (conf1) begin
+                        cur = 3'd4;
+                    end else begin
+                        o_redirect_valid = 1'b1;
+                        o_redirect_pc    = o_push1_data.pred_tgt;
+                    end
                 end
+            end
+            // a hint that no instruction here confirmed, with the dword used up: fetch followed it for nothing
+            if (i_buf_hint && !conf0 && !conf1 && !o_redirect_valid && cur == 3'd4) begin
+                o_redirect_valid = 1'b1;
+                o_redirect_pc    = base + 64'd8;
+                hint_redir       = 1'b1;
             end
         end
     end
@@ -219,7 +285,7 @@ module qv_align #(
     assign o_buf_pop = go && (cur == 3'd4) && !o_redirect_valid;
 
     always_ff @(posedge clk) begin
-        if (rst || i_flush || o_redirect_valid) begin
+        if (rst || i_flush || (o_redirect_valid && !hint_redir)) begin
             mid_q  <= 1'b0;
             pend_q <= 1'b0;
         end else if (go) begin
