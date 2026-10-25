@@ -16,8 +16,8 @@
  * the instructions before it stay.
  *
  * The aligner emits up to two instructions a cycle, and each can be a call (push its return address) or a return
- * (pop): ops 0 and 1, in program order. The outputs it needs to predict a return in either slot are the top two
- * entries and how many there are.
+ * (pop): ops 0 and 1, in program order. Only the top is read: a return that is predicted redirects fetch, so no
+ * instruction follows it in the same cycle, and one that is not (an empty stack) has nothing behind it to pop.
  */
 module qv_ras #(
     parameter int DEPTH = 8
@@ -25,8 +25,7 @@ module qv_ras #(
     input  logic        clk,
     input  logic        rst,
 
-    // the aligner's operations this cycle: none, push, pop (slot 0 first)
-    input  logic        i_sp_go,            // the aligner emitted this cycle (its ops count)
+    // the aligner's operations this cycle: none, push, pop (slot 0 first); none when it emitted nothing
     input  logic [1:0]  i_sp_op0,           // 2'b01 push i_sp_addr0, 2'b10 pop
     input  logic [63:0] i_sp_addr0,
     input  logic [1:0]  i_sp_op1,
@@ -40,10 +39,8 @@ module qv_ras #(
     // a redirect from commit: the speculative stack becomes the committed one
     input  logic        i_flush,
 
-    output logic [63:0] o_top,              // the speculative stack's top and next entry
-    output logic [63:0] o_next,
-    output logic        o_has1,             // ... at least one / two entries
-    output logic        o_has2
+    output logic [63:0] o_top,              // the speculative stack's top
+    output logic        o_has1              // ... and whether there is one
 );
     localparam int CNT_W = $clog2(DEPTH + 1);
     localparam int W = DEPTH * 64;
@@ -52,9 +49,7 @@ module qv_ras #(
     logic [CNT_W-1:0] s_n_q, c_n_q;
 
     assign o_top  = s_q[63:0];
-    assign o_next = s_q[127:64];
     assign o_has1 = (s_n_q != '0);
-    assign o_has2 = (s_n_q > CNT_W'(1));
 
     /* verilator lint_off UNUSEDSIGNAL */
     function automatic logic [W-1:0] push(input logic [W-1:0] st, input logic [63:0] a);
@@ -83,10 +78,10 @@ module qv_ras #(
         c_next   = i_cm_push ? push(c_mid, i_cm_addr) : c_mid;
         c_next_n = i_cm_push ? n_push(c_mid_n) : c_mid_n;
 
-        s_mid    = (i_sp_go && i_sp_op0 == 2'b01) ? push(s_q, i_sp_addr0) : (i_sp_go && i_sp_op0 == 2'b10) ? pop(s_q) : s_q;
-        s_mid_n  = (i_sp_go && i_sp_op0 == 2'b01) ? n_push(s_n_q) : (i_sp_go && i_sp_op0 == 2'b10) ? n_pop(s_n_q) : s_n_q;
-        s_next   = (i_sp_go && i_sp_op1 == 2'b01) ? push(s_mid, i_sp_addr1) : (i_sp_go && i_sp_op1 == 2'b10) ? pop(s_mid) : s_mid;
-        s_next_n = (i_sp_go && i_sp_op1 == 2'b01) ? n_push(s_mid_n) : (i_sp_go && i_sp_op1 == 2'b10) ? n_pop(s_mid_n) : s_mid_n;
+        s_mid    = (i_sp_op0 == 2'b01) ? push(s_q, i_sp_addr0) : (i_sp_op0 == 2'b10) ? pop(s_q) : s_q;
+        s_mid_n  = (i_sp_op0 == 2'b01) ? n_push(s_n_q) : (i_sp_op0 == 2'b10) ? n_pop(s_n_q) : s_n_q;
+        s_next   = (i_sp_op1 == 2'b01) ? push(s_mid, i_sp_addr1) : (i_sp_op1 == 2'b10) ? pop(s_mid) : s_mid;
+        s_next_n = (i_sp_op1 == 2'b01) ? n_push(s_mid_n) : (i_sp_op1 == 2'b10) ? n_pop(s_mid_n) : s_mid_n;
     end
 
     always_ff @(posedge clk) begin
