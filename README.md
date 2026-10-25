@@ -8,8 +8,9 @@ Join the [Discord](https://discord.gg/sQjhBvWXjF) if you want to take part.
 **Core** (`design/pipe/core.sv`, module `core`): a pipelined core that one hart runs on.
 Fetch, align (RVC), decode, in-order issue into a reorder buffer, ALU / branch / divide /
 load-store units, and in-order commit, which owns every architectural effect (register
-writes, CSRs, traps, privilege changes, interrupts and debug entry). Single issue, static
-branch prediction, loads and stores execute at the head of the ROB.
+writes, CSRs, traps, privilege changes, interrupts and debug entry). Single issue; fetch runs back to
+back and predicts branches (a target buffer, a history table, a return-address stack); loads execute at
+the head of the ROB, and stores to RAM retire into a store buffer that writes them out behind it.
 
 - RV64IMAC, Zicsr, Zifencei
 - M, S and U modes, with trap delegation

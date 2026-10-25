@@ -17,14 +17,17 @@
  * modules (decoder/alu/register_file/csr_file), so no macro renaming is
  * needed.
  *
- *   F  qv_fetch    pc generation, Wishbone fetch master, fetch buffer
- *   A  qv_align    dword -> up to two fe_instr_t
+ *   F  qv_fetch    pc generation, Wishbone fetch master, fetch buffer; back-to-back requests (P9a)
+ *      qv_btb      branch target buffer: where a taken branch in a dword goes (P9c)
+ *   A  qv_align    dword -> up to two fe_instr_t; predicts branches: the history table (qv_bht) for
+ *                  conditional ones, the return-address stack (qv_ras) for returns, the target buffer's hint
  *      qv_fifo     instruction queue
  *   D  qv_decode   decoder.sv + uop builder
  *   I  qv_issue    operand resolution, producer table, ROB allocation
  *   X  qv_exu_alu  alu.sv
  *      qv_exu_div  divider.sv, one divide at a time
- *   C  qv_commit   in-order retirement, regfile0 write, RVFI
+ *   C  qv_commit   in-order retirement, regfile0 write, RVFI; trains the predictors with architectural outcomes
+ *      qv_sb       store buffer: stores to RAM retire before they reach the bus (P9d)
  *      qv_dbg      Debug Mode state (halted, single-stepping)
  *
  * regfile0 and csr_file0 live here at top level (regfile0 is written
@@ -38,7 +41,9 @@
  * RV64I register/immediate ops including the *W forms, LUI, AUIPC, and
  * MUL/MULH/MULHSU/MULHU/MULW -- DIV/DIVU/REM/REMU and the W forms (one at
  * a time, on the divider), conditional branches, JAL, JALR,
- * loads and stores (performed one at a time, at the ROB head), FENCE,
+ * loads and stores (performed one at a time, at the ROB head; a plain store to RAM, inside the physical window
+ * PMA_RAM_BASE/SIZE the instantiating harness gives, is only checked there and completes at once, and its bus
+ * write happens after it retires, from the store buffer), FENCE,
  * FENCE.I, LR/SC and the nine AMOs (.W and .D, also at the head, with the
  * bus locked across an AMO's read and write), the six Zicsr instructions,
  * ECALL, EBREAK, MRET, SRET, WFI (a no-op) and SFENCE.VMA (it serializes and
@@ -61,8 +66,14 @@
  *
  * Redirects: commit's (a trap, xRET, serialize, or a retiring
  * mispredicted branch or jump) kill everything in flight -- the same
- * signal is every stage's flush. Align's (a statically predicted-taken
- * branch or jump) only restart fetch; commit's wins a tie.
+ * signal is every stage's flush. Align's (a predicted-taken branch or
+ * jump, or a target-buffer hint that came to nothing) only restart fetch;
+ * commit's wins a tie.
+ *
+ * Knobs (defines, each also a parameter): QV_PIPE_SB_DEPTH (store buffer, 0 = none),
+ * QV_PIPE_FETCH_STREAM (back-to-back fetch, bigger fetch buffer and queue), QV_PIPE_BP (the three predictors;
+ * their sizes QV_PIPE_BTB_ENTRIES / QV_PIPE_RAS_DEPTH / QV_PIPE_BHT_ENTRIES). With every one off the timing is
+ * the one of P8, cycle for cycle.
  */
 // Testbenches instantiate `core` with no parameter overrides, so the
 // debug knobs can also be set from the command line.

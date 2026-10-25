@@ -143,6 +143,27 @@ Not architectural:
 - A DIV or FENCE.I that traps on an action-0 trigger: the FSM starts the divider and flushes the icache
   before trapping, the pipe does neither (the flush is harmless).
 
+P9 (store buffer and branch prediction; the retired stream is the same, the timing is not):
+- A plain store to RAM (the physical window `PMA_RAM_BASE/SIZE` the harness tells the core: the SoC's 64 MB, the SRAM
+  harness's memory, the lockstep's 1 MiB; the default window is empty and nothing is buffered) retires before its
+  bus write. Its write comes from `qv_sb` in order, one beat at a time, and gives way to a load near the head of the
+  ROB. The FSM writes before it retires. So the bus-write log is the same in content and order but a store is
+  logged later than its retirement, by a few cycles; a lockstep run therefore halts side B at the last record
+  and lets it drain before the final memory comparison (`stop_i`).
+- Anything that could see the difference waits: a load whose dword has a store in the buffer (no forwarding: the
+  comparator checks the whole raw bus word), an atomic, a load or store outside the window, a Program Buffer
+  access, a PTE read, FENCE.I, and an EBREAK. `o_debug_mode` is raised only once the buffer is empty, so the
+  Debug Module's System Bus Access of a halted hart sees every retired store. An interrupt or a halt leaves
+  the buffer draining.
+- A bus error cannot be reported for a buffered store: inside the window the memory does not fault (asserted in
+  `qv_sb` under `RISCV_FORMAL`, which the lockstep build compiles in; the riscv-formal models keep the window empty).
+  The generated programs' faulting accesses (past the 1 MiB) are outside the window.
+- The pipe predicts branches with a target buffer (fetch follows a taken branch with no bubble), a history table
+  and a return-address stack, and fetches back to back. A prediction is only a guess that the branch unit
+  checks; the aligner confirms or corrects a target-buffer hint, so an aliased or stale entry costs time only.
+  The predictors are trained by retirements only (never in a Program Buffer run), so the fetch stream they
+  produce is a function of the retired history, and a FENCE.I needs no special handling.
+
 Sv39 (the data side and the instruction side are both translated; same pages, same faults, same causes and
 mtvals per instruction):
 - The FSM translates once per instruction (the pc, and pc + 8 for a 32-bit one that crosses); the pipe translates
