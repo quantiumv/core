@@ -57,6 +57,7 @@ module qv_sb #(
     input  logic        i_ptw_beat,    // the walker's beat is in flight
     input  logic        i_load_near,   // a load that does not wait for this buffer is among the oldest ROB entries
     output logic        o_start_now,   // a beat is decided this cycle: the LSU must not start in it
+    output logic        o_start_idle,  // ... the part of it with no beat in flight (no i_ack/i_err in it): what the LSU takes
     output logic        o_beat,        // a beat is in flight, its response cycle included
     output logic        o_cyc,
     output logic [31:0] o_addr,
@@ -102,6 +103,12 @@ module qv_sb #(
                     && (urgent || (!i_lsu_busy && !i_load_near));
 
     assign o_start_now = go;
+    // With a beat in flight the LSU is held off by o_beat anyway, so it only needs the decision of an idle drain.
+    // That one is independent of the response: the LSU's start, and so its lock, would otherwise be a function of
+    // ack (arbiter grant -> ack -> start -> lock -> grant), a loop in the netlist even though no ack can arrive
+    // when the grant is open.
+    assign o_start_idle = !beat_q && (cnt_q != '0) && !i_lsu_inflight && !i_ptw_beat
+                          && (urgent || (!i_lsu_busy && !i_load_near));
     assign o_beat      = beat_q;
     assign o_cyc       = beat_q && !(i_ack || i_err);
     assign o_addr      = {addr_q[rd_q], 3'b000};

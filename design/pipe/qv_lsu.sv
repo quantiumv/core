@@ -172,7 +172,7 @@ module qv_lsu #(
     input  logic                             i_sb_empty = 1'b1,
     input  logic                             i_sb_match = 1'b0,     // a buffered store to the dword o_sb_addr names
     input  logic                             i_sb_beat  = 1'b0,     // a drain beat is in flight
-    input  logic                             i_sb_go    = 1'b0,     // ... is decided in this cycle
+    input  logic                             i_sb_go    = 1'b0,     // ... is decided in this cycle (by an idle drain: i_sb_beat covers the rest)
     output logic [31:3]                      o_sb_addr,
     output logic                             o_load_near,
     output logic                             o_in_bus      // an access is on the bus (registered state: no path to start)
@@ -259,8 +259,10 @@ module qv_lsu #(
 
     // ---------------- the store buffer ----------------
     // what the access is, by its physical address (registered: addr_q or pa_q), for the buffer's rules
+    /* verilator lint_off UNSIGNED */
     wire pa_in_window = (PMA_RAM_SIZE != 64'd0) && (pa[63:32] == 32'b0) && (pa >= PMA_RAM_BASE)
                         && ((pa - PMA_RAM_BASE) < PMA_RAM_SIZE);
+    /* verilator lint_on UNSIGNED */
     wire is_ram       = SB_EN && pa_in_window;
     wire postable     = is_ram && store_q && !atomic_q && !i_pmp_bypass;      // a plain store to RAM
     wire match_case   = is_ram && !store_q && !atomic_q && !i_pmp_bypass;     // a plain load from RAM

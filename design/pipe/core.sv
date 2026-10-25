@@ -451,7 +451,7 @@ module core
     logic [31:0] sb_addr;
     logic [63:0] sb_dat;
     logic [7:0]  sb_sel;
-    logic        sb_cyc, sb_beat, sb_go, sb_ready, sb_empty, sb_match, lsu_load_near, lsu_in_bus, c_sb_push;
+    logic        sb_cyc, sb_beat, sb_go, sb_go_idle, sb_ready, sb_empty, sb_match, lsu_load_near, lsu_in_bus, c_sb_push;
     logic [31:3] sb_match_addr;
     assign wb_mem_addr_o = sb_beat ? sb_addr : ptw_beat ? ptw_addr : lsu_addr;
     assign wb_mem_dat_o  = sb_beat ? sb_dat : lsu_dat;
@@ -493,7 +493,7 @@ module core
         .o_xl_cancel(x_cancel),
         .i_xl_done(x_done), .i_xl_pf(x_pf), .i_xl_af(x_af), .i_xl_ppn(x_ppn),
         .i_ptw_beat(ptw_beat), .o_bus_busy(lsu_bus_busy),
-        .i_sb_empty(sb_empty), .i_sb_match(sb_match), .i_sb_beat(sb_beat), .i_sb_go(sb_go),
+        .i_sb_empty(sb_empty), .i_sb_match(sb_match), .i_sb_beat(sb_beat), .i_sb_go(sb_go_idle),
         .o_sb_addr(sb_match_addr), .o_load_near(lsu_load_near), .o_in_bus(lsu_in_bus)
     );
 
@@ -507,7 +507,7 @@ module core
                 .i_match_addr(sb_match_addr), .o_match(sb_match),
                 .i_lsu_busy(lsu_bus_busy), .i_lsu_inflight(lsu_in_bus), .i_ptw_beat(ptw_beat),
                 .i_load_near(lsu_load_near),
-                .o_start_now(sb_go), .o_beat(sb_beat), .o_cyc(sb_cyc),
+                .o_start_now(sb_go), .o_start_idle(sb_go_idle), .o_beat(sb_beat), .o_cyc(sb_cyc),
                 .o_addr(sb_addr), .o_dat(sb_dat), .o_sel(sb_sel),
                 .i_ack(wb_mem_ack_i), .i_err(wb_mem_err_i)
             );
@@ -516,6 +516,7 @@ module core
             assign sb_empty = 1'b1;
             assign sb_match = 1'b0;
             assign sb_go    = 1'b0;
+            assign sb_go_idle = 1'b0;
             assign sb_beat  = 1'b0;
             assign sb_cyc   = 1'b0;
             assign sb_addr  = 32'b0;
