@@ -22,6 +22,8 @@ WALL_TIMEOUT=120
 MAX_CYCLES=2000000
 FORCE=0
 ORACLE=""
+DEFINES=""
+LABEL=""
 
 usage() {
     cat <<EOF
@@ -32,6 +34,8 @@ Usage: run_perf.sh [options]
   --force             rebuild kernels/testbenches even if cached
   --oracle store      the cache configuration only, with the ideal-store D$ (oracle_dcache.sv): an upper bound for a store buffer;
                       writes oracle_store_<core>.csv, never the baselines
+  --defines "A=1 B"    extra Verilog defines for the testbench builds (e.g. "QV_PIPE_SB_DEPTH=0" for the old timing)
+  --label NAME        results go to baseline_<core>_<NAME>.csv (and its _stack.csv) and the builds are tagged, so the committed baselines stay
   --timeout N          per-run cycle budget passed as +TIMEOUT (default 2000000)
   --wall-timeout N      real seconds per run before it's killed (default 120)
   -h, --help
@@ -44,6 +48,8 @@ while [ $# -gt 0 ]; do
         --outdir) OUTDIR="$2"; shift 2 ;;
         --force) FORCE=1; shift ;;
         --oracle) ORACLE="$2"; shift 2 ;;
+        --defines) DEFINES="$2"; shift 2 ;;
+        --label) LABEL="$2"; shift 2 ;;
         --timeout) MAX_CYCLES="$2"; shift 2 ;;
         --wall-timeout) WALL_TIMEOUT="$2"; shift 2 ;;
         -h|--help) usage; exit 0 ;;
@@ -83,6 +89,9 @@ if [ "$ORACLE" == "store" ]; then
 elif [ -n "$ORACLE" ]; then
     echo "Unknown --oracle: $ORACLE (expected store)" >&2; exit 1
 fi
+[ -n "$LABEL" ] && TAG="${TAG}_${LABEL}"
+DEF_FLAGS=""
+for d in $DEFINES; do DEF_FLAGS="$DEF_FLAGS -D$d"; done
 HARNESS_FILES="testbench/core_wb4_sram_harness.sv"
 PERF_FILES="verification/perf/perf_tb.sv verification/perf/perf_stack.sv"
 
@@ -92,7 +101,7 @@ build_tb() {
         return
     fi
     echo "=== building $vvp ==="
-    iverilog -g2012 $CORE_DEFINE -I design -I design/defaults -I testbench -I verification/perf $CORE_INC \
+    iverilog -g2012 $CORE_DEFINE $DEF_FLAGS -I design -I design/defaults -I testbench -I verification/perf $CORE_INC \
         -Pperf_tb.CACHE_CFG=$cfg \
         -o "$vvp" \
         $DESIGN_FILES $HARNESS_FILES $PERF_FILES > "$log" 2>&1
@@ -112,13 +121,13 @@ if [ -z "$ORACLE" ]; then build_tb 0 "$OUTDIR/perf_tb_${TAG}_sram.vvp" "$OUTDIR/
 build_tb 1 "$OUTDIR/perf_tb_${TAG}_cache.vvp" "$OUTDIR/build_${TAG}_cache.log"
 
 # ---------------- run every kernel against both configs ----------------
-CSV="$SCRIPT_DIR/baseline_${CORE}.csv"
-if [ -n "$ORACLE" ]; then CSV="$SCRIPT_DIR/oracle_${ORACLE}_${CORE}.csv"; fi
+CSV="$SCRIPT_DIR/baseline_${CORE}${LABEL:+_$LABEL}.csv"
+if [ -n "$ORACLE" ]; then CSV="$SCRIPT_DIR/oracle_${ORACLE}_${CORE}${LABEL:+_$LABEL}.csv"; fi
 echo "kernel,config,cycles,instret,cpi" > "$CSV"
 
 # The CPI stack of the pipelined core (perf_stack.sv): where the window's cycles go, and the side counters. The
 # columns are the keys of the PERF_STACK and PERF_SIDE lines, in this order.
-STACK_CSV="$SCRIPT_DIR/baseline_${CORE}_stack.csv"
+STACK_CSV="$SCRIPT_DIR/baseline_${CORE}${LABEL:+_$LABEL}_stack.csv"
 STACK_KEYS="window retire blk_lsu blk_div blk_alu blk_sys ear_align ear_mispred ear_serial ear_other empty_front"
 SIDE_KEYS="iq_empty fb_empty no_uop is_rob is_oper is_lsu is_div re_align re_mispred re_serial re_other mp_cond mp_jal mp_jalr mp_wait bus_wait"
 if [ "$CORE" == "pipe" ] && [ -z "$ORACLE" ]; then
