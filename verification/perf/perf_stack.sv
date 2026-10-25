@@ -41,6 +41,8 @@ module perf_stack #(
     input logic             head_complete,
     input logic [2:0]       head_cls,           // qv_fu_e: 0 ALU, 1 BRU, 2 DIV, 3 LSU, 4 CSR, 5 SYS
     input logic [31:0]      head_raw,
+    input logic [63:0]      head_pc,
+    input logic [63:0]      head_next_pc,
     input logic             head_mispredict,
     input logic             head_serialize,
     input logic [TAG_W-1:0] head_tag,
@@ -86,6 +88,14 @@ module perf_stack #(
     logic            mp_done_valid [0:(1<<TAG_W)-1];
 
     wire is_win_csr = commit && head_raw[6:0] == 7'h73 && head_raw[31:20] == 12'hB00;
+
+    // +BRTRACE: one line per control-flow instruction retired inside the window (pc, encoding, next pc), for
+    // evaluating branch predictors offline (verification/perf/brpred.py)
+    bit brtrace;
+    initial brtrace = $test$plusargs("BRTRACE");
+    always @(posedge clk)
+        if (brtrace && win_q == 1 && commit && head_cls == 3'd1)
+            $display("BR %h %h %h", head_pc, head_raw, head_next_pc);
 
     // the kind of a mispredicted branch from its encoding (32-bit and RVC)
     function automatic int mp_kind(input logic [31:0] raw);

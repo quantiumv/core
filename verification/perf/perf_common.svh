@@ -26,7 +26,8 @@
     perf_stack stack ( \
         .clk(clk), .rst(rst), \
         .commit(CORE.commit_now_w), .head_valid(CORE.head_valid), .head_complete(CORE.head_entry.complete), \
-        .head_cls(CORE.head_ctrl.cls), .head_raw(CORE.head_entry.raw), .head_mispredict(CORE.head_entry.mispredict), \
+        .head_cls(CORE.head_ctrl.cls), .head_raw(CORE.head_entry.raw), .head_pc(CORE.head_entry.pc), .head_next_pc(CORE.head_entry.next_pc), \
+        .head_mispredict(CORE.head_entry.mispredict), \
         .head_serialize(CORE.head_ctrl.serialize), .head_tag(CORE.head_tag), \
         .flush(CORE.flush), .fe_redirect(CORE.fe_redirect_valid), .rob_empty(CORE.rob_empty), \
         .fb_valid(CORE.fb_valid), .iq_valid(CORE.iq_valid), .uop_valid(CORE.uop_valid), .uop_fu(CORE.uop.fu), \
