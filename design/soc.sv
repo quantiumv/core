@@ -218,7 +218,14 @@ module soc (
     logic [7:0]  sba_sel;
     logic        sba_we, sba_cyc, sba_stb, sba_ack, sba_err;
 
-    core core0 (
+    // RAM is addr[26] == 0 (wb_addr_decoder.sv): the 64 MB the store buffer may post stores into. (The reference
+    // build has no such parameter: its `core` is ref_core.)
+`ifdef QV_REF_AS_CORE
+`define QV_SOC_CORE_PARAMS
+`else
+`define QV_SOC_CORE_PARAMS #(.PMA_RAM_SIZE(64'h0400_0000))
+`endif
+    core `QV_SOC_CORE_PARAMS core0 (
         .clk(clk), .rst(rst),
         .wb_fetch_addr_o(core_wb_fetch_addr), .wb_fetch_cyc_o(core_wb_fetch_cyc),
         .wb_fetch_stb_o(core_wb_fetch_stb), .wb_fetch_dat_i(core_wb_fetch_dat),
