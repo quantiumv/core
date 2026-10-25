@@ -20,6 +20,7 @@ design/pipe/qv_fetch.sv
 design/pipe/qv_align.sv
 design/pipe/qv_fifo.sv
 design/pipe/qv_btb.sv
+design/pipe/qv_ras.sv
 design/pipe/qv_pmp.sv
 design/pipe/qv_pte.sv
 design/pipe/qv_tlb.sv

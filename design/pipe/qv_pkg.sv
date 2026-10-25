@@ -265,4 +265,16 @@ package qv_pkg;
     endfunction
     /* verilator lint_on UNUSEDSIGNAL */
 
+    // A call: JAL or JALR that links to ra or t0 (the return address is then pushed on the return-address stack), and
+    // C.JALR (which links to ra).
+    /* verilator lint_off UNUSEDSIGNAL */
+    function automatic logic qv_is_call(input logic [31:0] raw);
+        if (raw[1:0] == 2'b11)
+            return (raw[6:0] == 7'b1101111 || (raw[6:0] == 7'b1100111 && raw[14:12] == 3'b000))
+                   && (raw[11:7] == 5'd1 || raw[11:7] == 5'd5);
+        else
+            return raw[1:0] == 2'b10 && raw[15:12] == 4'b1001 && raw[6:2] == 5'd0 && raw[11:7] != 5'd0;
+    endfunction
+    /* verilator lint_on UNUSEDSIGNAL */
+
 endpackage

@@ -195,6 +195,10 @@ module qv_commit #(
     output logic [63:0]                      o_btb_upd_pc,
     output logic                             o_btb_upd_taken,
     output logic                             o_btb_upd_cross,
+    // The committed return-address stack: a retiring call pushes its return address, a retiring return pops.
+    output logic                             o_ras_push,
+    output logic [63:0]                      o_ras_addr,
+    output logic                             o_ras_pop,
     output logic [63:0]                      o_btb_upd_tgt,
 
     output logic                             o_commit_now,
@@ -387,6 +391,12 @@ module qv_commit #(
     wire        h_rvc  = i_head_entry.raw[1:0] != 2'b11;
     assign o_btb_upd_valid = commit && !faulted && !i_pb_active && (h_kind == 2'd1 || h_kind == 2'd2);
     assign o_btb_upd_cross = !h_rvc && i_head_entry.pc[2:1] == 2'b11;
+
+    // ---------------- return-address stack ----------------
+    wire h_retires = commit && !faulted && !i_pb_active;
+    assign o_ras_push = h_retires && qv_is_call(i_head_entry.raw);
+    assign o_ras_addr = i_head_entry.pc + (h_rvc ? 64'd2 : 64'd4);
+    assign o_ras_pop  = h_retires && h_kind == 2'd3;
     assign o_btb_upd_pc    = i_head_entry.pc;
     assign o_btb_upd_tgt   = i_head_entry.next_pc;
     assign o_btb_upd_taken = (h_kind == 2'd2) || (i_head_entry.next_pc != i_head_entry.pc + (h_rvc ? 64'd2 : 64'd4));

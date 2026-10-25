@@ -29,6 +29,10 @@
  * physical page of the dword it starts in (pg_lo) and, if it crosses, of the
  * next one (pg_hi); decode checks the PMP on those.
  *
+ * Returns are predicted from a return-address stack (qv_ras, outside): a call that is emitted pushes the address behind
+ * it, a return pops, and a return with an entry on the stack is predicted taken to it (a redirect, like any other
+ * predicted-taken instruction here).
+ *
  * Static prediction happens here too: JAL and C.J are predicted taken,
  * conditional branches (including C.BEQZ/C.BNEZ) taken when their offset
  * is negative -- loops. A predicted-taken instruction carries pred_taken
@@ -75,6 +79,17 @@ module qv_align #(
     input  logic              i_buf_hx    = 1'b0,        // ... the branch is a crossing one that ends in this dword's halfword 0
     input  logic [63:0]       i_buf_htgt  = 64'b0,
     output logic              o_buf_pop,
+
+    // the return-address stack: its top two entries, and the operations of this cycle's instructions
+    input  logic [63:0]       i_ras_top   = 64'b0,
+    input  logic [63:0]       i_ras_next  = 64'b0,
+    input  logic              i_ras_has1  = 1'b0,
+    input  logic              i_ras_has2  = 1'b0,
+    output logic              o_ras_go,
+    output logic [1:0]        o_ras_op0,                  // 2'b01 push, 2'b10 pop
+    output logic [63:0]       o_ras_addr0,
+    output logic [1:0]        o_ras_op1,
+    output logic [63:0]       o_ras_addr1,
 
     output logic              o_push0_valid,
     output qv_pkg::fe_instr_t o_push0_data,
@@ -151,7 +166,8 @@ module qv_align #(
 
     function automatic fe_instr_t mk(input logic [63:0] pc, input logic [31:0] raw, input logic rvc,
                                      input logic xl, input logic [43:0] pg_lo, input logic [43:0] pg_hi,
-                                     input logic hint_here = 1'b0, input logic [63:0] htgt = 64'b0);
+                                     input logic hint_here = 1'b0, input logic [63:0] htgt = 64'b0,
+                                     input logic ras_ok = 1'b0, input logic [63:0] ras_tgt = 64'b0);
         logic [64:0] p;
         p             = predict(raw, rvc, pc);
         mk            = '0;
@@ -163,6 +179,10 @@ module qv_align #(
         if (hint_holds(raw, rvc, pc, hint_here, htgt)) begin
             mk.pred_taken = 1'b1;
             mk.pred_tgt   = (qv_ctl_kind(raw) == 2'd1) ? p[63:0] : htgt;
+        end
+        if (ras_ok && qv_ctl_kind(raw) == 2'd3) begin
+            mk.pred_taken = 1'b1;
+            mk.pred_tgt   = ras_tgt;
         end
         mk.xl         = xl;
         mk.pg_lo      = pg_lo;
@@ -176,6 +196,12 @@ module qv_align #(
     logic        hint_here;      // the instruction being looked at starts at the hinted halfword
     logic        conf0, conf1;   // ... and the hint holds for it (slot 0, slot 1)
     logic        hint_redir;     // the dword's hint came to nothing: fetch goes back to the next sequential dword
+    logic        ras_ok0, ras_ok1;           // a return in this slot has a predicted address (the stack's, after the slot before)
+    logic [63:0] ras_tgt0, ras_tgt1;
+
+    function automatic logic [1:0] ras_op_of(input logic [31:0] raw);
+        return (qv_ctl_kind(raw) == 2'd3) ? 2'b10 : qv_is_call(raw) ? 2'b01 : 2'b00;
+    endfunction
 
     always_comb begin
         o_push0_valid = 1'b0;
@@ -192,6 +218,15 @@ module qv_align #(
         conf0         = 1'b0;
         conf1         = 1'b0;
         hint_redir    = 1'b0;
+        o_ras_go      = go;
+        o_ras_op0     = 2'b00;
+        o_ras_op1     = 2'b00;
+        o_ras_addr0   = '0;
+        o_ras_addr1   = '0;
+        ras_ok0       = i_ras_has1;
+        ras_tgt0      = i_ras_top;
+        ras_ok1       = i_ras_has1;
+        ras_tgt1      = i_ras_top;
 
         if (go && i_buf_err) begin
             o_push0_valid = 1'b1;
@@ -208,7 +243,7 @@ module qv_align #(
                 hint_here = i_buf_hint && i_buf_hx;
                 o_push0_valid = 1'b1;
                 o_push0_data  = mk(pend_pc_q, {hw(i_buf_data, 2'd0), pend_hw_q}, 1'b0, pend_xl_q, pend_pg_q, i_buf_pg,
-                                   hint_here, i_buf_htgt);
+                                   hint_here, i_buf_htgt, ras_ok0, ras_tgt0);
                 conf0 = hint_holds({hw(i_buf_data, 2'd0), pend_hw_q}, 1'b0, pend_pc_q, hint_here, i_buf_htgt);
                 cur = 3'd1;
             end else begin
@@ -217,7 +252,7 @@ module qv_align #(
                 if (h[1:0] != 2'b11) begin
                     o_push0_valid = 1'b1;
                     o_push0_data  = mk(base + {61'b0, cur[1:0], 1'b0}, {16'b0, h}, 1'b1, i_buf_xl, i_buf_pg, i_buf_pg,
-                                       hint_here, i_buf_htgt);
+                                       hint_here, i_buf_htgt, ras_ok0, ras_tgt0);
                     conf0 = hint_holds({16'b0, h}, 1'b1, base + {61'b0, cur[1:0], 1'b0}, hint_here, i_buf_htgt);
                     cur = cur + 3'd1;
                 end else if (cur == 3'd3) begin
@@ -227,11 +262,17 @@ module qv_align #(
                 end else begin
                     o_push0_valid = 1'b1;
                     o_push0_data  = mk(base + {61'b0, cur[1:0], 1'b0}, {hw(i_buf_data, cur[1:0] + 2'd1), h}, 1'b0,
-                                       i_buf_xl, i_buf_pg, i_buf_pg, hint_here, i_buf_htgt);
+                                       i_buf_xl, i_buf_pg, i_buf_pg, hint_here, i_buf_htgt, ras_ok0, ras_tgt0);
                     conf0 = hint_holds({hw(i_buf_data, cur[1:0] + 2'd1), h}, 1'b0, base + {61'b0, cur[1:0], 1'b0},
                                        hint_here, i_buf_htgt);
                     cur = cur + 3'd2;
                 end
+            end
+            if (o_push0_valid) begin
+                o_ras_op0   = ras_op_of(o_push0_data.raw);
+                o_ras_addr0 = o_push0_data.pc + (o_push0_data.rvc ? 64'd2 : 64'd4);
+                ras_ok1     = (o_ras_op0 == 2'b01) ? 1'b1 : (o_ras_op0 == 2'b10) ? i_ras_has2 : i_ras_has1;
+                ras_tgt1    = (o_ras_op0 == 2'b01) ? o_ras_addr0 : (o_ras_op0 == 2'b10) ? i_ras_next : i_ras_top;
             end
             if (o_push0_valid && o_push0_data.pred_taken) begin
                 if (conf0) begin
@@ -248,7 +289,7 @@ module qv_align #(
                 if (h[1:0] != 2'b11) begin
                     o_push1_valid = 1'b1;
                     o_push1_data  = mk(base + {61'b0, cur[1:0], 1'b0}, {16'b0, h}, 1'b1, i_buf_xl, i_buf_pg, i_buf_pg,
-                                       hint_here, i_buf_htgt);
+                                       hint_here, i_buf_htgt, ras_ok1, ras_tgt1);
                     conf1 = hint_holds({16'b0, h}, 1'b1, base + {61'b0, cur[1:0], 1'b0}, hint_here, i_buf_htgt);
                     cur = cur + 3'd1;
                 end else if (cur == 3'd3) begin
@@ -258,7 +299,7 @@ module qv_align #(
                 end else begin
                     o_push1_valid = 1'b1;
                     o_push1_data  = mk(base + {61'b0, cur[1:0], 1'b0}, {hw(i_buf_data, cur[1:0] + 2'd1), h}, 1'b0,
-                                       i_buf_xl, i_buf_pg, i_buf_pg, hint_here, i_buf_htgt);
+                                       i_buf_xl, i_buf_pg, i_buf_pg, hint_here, i_buf_htgt, ras_ok1, ras_tgt1);
                     conf1 = hint_holds({hw(i_buf_data, cur[1:0] + 2'd1), h}, 1'b0, base + {61'b0, cur[1:0], 1'b0},
                                        hint_here, i_buf_htgt);
                     cur = cur + 3'd2;
@@ -271,6 +312,10 @@ module qv_align #(
                         o_redirect_pc    = o_push1_data.pred_tgt;
                     end
                 end
+            end
+            if (o_push1_valid) begin
+                o_ras_op1   = ras_op_of(o_push1_data.raw);
+                o_ras_addr1 = o_push1_data.pc + (o_push1_data.rvc ? 64'd2 : 64'd4);
             end
             // a hint that no instruction here confirmed, with the dword used up: fetch followed it for nothing
             if (i_buf_hint && !conf0 && !conf1 && !o_redirect_valid && cur == 3'd4) begin
