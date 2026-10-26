@@ -173,6 +173,7 @@ module qv_lsu #(
     input  logic                             i_sb_match = 1'b0,     // a buffered store to the dword o_sb_addr names
     input  logic                             i_sb_beat  = 1'b0,     // a drain beat is in flight
     input  logic                             i_sb_go    = 1'b0,     // ... is decided in this cycle (by an idle drain: i_sb_beat covers the rest)
+    input  logic                             i_fetch_start = 1'b0,  // fetch's translated request starts its bus beat in this cycle: give way
     output logic [31:3]                      o_sb_addr,
     output logic                             o_load_near,
     output logic                             o_in_bus      // an access is on the bus (registered state: no path to start)
@@ -271,7 +272,7 @@ module qv_lsu #(
 
     wire post_done = at_head && !misaligned_q && !pmp_deny && pa_valid && postable;
     wire start_raw = at_head && !misaligned_q && !pmp_deny && !sc_fail && pa_valid && !postable && !sb_wait;
-    wire start     = start_raw && !i_ptw_beat && !i_sb_beat && !i_sb_go;
+    wire start     = start_raw && !i_ptw_beat && !i_sb_beat && !i_sb_go && !i_fetch_start;
 
     // a load that does not wait for the buffer, among the three oldest ROB entries (the tags carry a wrap bit,
     // so the difference modulo the tag width is the distance): the drain yields to it

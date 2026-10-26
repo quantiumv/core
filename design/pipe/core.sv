@@ -569,6 +569,14 @@ module core
     logic        ptw_wants;                  // a translation request is waiting for the walker (and so for the memory port)
     // fetch pauses its stream for a cycle when another master of the shared bus wants it
     assign fetch_yield = FETCH_YIELD && (lsu_bus_busy || sb_beat || sb_go_idle || ptw_wants);
+    // On a shared bus a translated fetch uses the port in two of every three cycles: its translation phase is the
+    // gap. A store that retires at once lets the load behind it reach the ROB head a cycle earlier, and the load's
+    // access can then start in the very cycle fetch's request begins its bus beat; the memory port wins that tie
+    // and fetch waits out the whole access. The LSU gives way for that one cycle (the access then starts in fetch's
+    // response cycle and fetch waits one cycle, not two). Only with the store buffer, so that without it the timing
+    // is the one of P8; never with a private fetch path (FETCH_YIELD 0).
+    logic fetch_start_q;
+    always_ff @(posedge clk) fetch_start_q <= !rst && FETCH_YIELD && (SB_DEPTH > 0) && f_xl_req && f_xl_done && !f_xl_cancel;
     assign wb_mem_addr_o = sb_beat ? sb_addr : ptw_beat ? ptw_addr : lsu_addr;
     assign wb_mem_dat_o  = sb_beat ? sb_dat : lsu_dat;
     assign wb_mem_sel_o  = sb_beat ? sb_sel : ptw_beat ? 8'hFF : lsu_sel;
@@ -609,7 +617,7 @@ module core
         .o_xl_cancel(x_cancel),
         .i_xl_done(x_done), .i_xl_pf(x_pf), .i_xl_af(x_af), .i_xl_ppn(x_ppn),
         .i_ptw_beat(ptw_beat), .o_bus_busy(lsu_bus_busy),
-        .i_sb_empty(sb_empty), .i_sb_match(sb_match), .i_sb_beat(sb_beat), .i_sb_go(sb_go_idle),
+        .i_sb_empty(sb_empty), .i_sb_match(sb_match), .i_sb_beat(sb_beat), .i_sb_go(sb_go_idle), .i_fetch_start(fetch_start_q),
         .o_sb_addr(sb_match_addr), .o_load_near(lsu_load_near), .o_in_bus(lsu_in_bus)
     );
 
