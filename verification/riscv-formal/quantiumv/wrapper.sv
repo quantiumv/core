@@ -138,6 +138,12 @@ module rvfi_wrapper (
 `endif
 `endif
 
+`ifdef QV_PIPE_PMA_RAM_SIZE
+    // the pipe-sb model (a RAM window is configured, so stores are posted to the store buffer): memory inside the
+    // window is RAM and cannot answer a drain beat with an error; the buffer asserts as much
+    always @* assume (!(uut.sb_beat && wb_mem_err));
+`endif
+
     core uut (
         .clk(clock),
         .rst(reset),
