@@ -94,30 +94,48 @@ shared-SRAM harness (fetch and data on one bus):
 |---|---|---|---|
 | reference (`ref_core.sv`) | 8400 | 11400 | 1.35 |
 | core before P9 (all knobs off) | 4805 | 5113 | 1.06 |
-| core | 3908 | 5404 | 1.38 |
+| core | 3908 | 5106 | 1.30 |
 
 A translated fetch dword and a translated access each take one more cycle
 (the answer is registered before it is used); the pipeline hides most of it. P9 made the M-mode loop 19 %
-faster, but the translated loop 6 % slower, so the ratio went up. Per knob (`run_regress.sh --defines`):
+faster and the translated loop as fast as before (0.1 % faster); the ratio went up because the M-mode loop did.
+
+A translated fetch uses the shared port in two of every three cycles (its translation phase is the gap), so
+on this harness a loop in S-mode is bound by the port, and who wins a tie matters. With the store buffer a store
+retires at once, which lets the load behind it reach the ROB head a cycle earlier, and its access could start in
+the very cycle fetch's request begins its bus beat. The memory port wins that tie, and fetch waited out the whole
+access (two cycles; before P9 the access started in fetch's response cycle and cost it one): that was +6 %
+(5404 cycles) in the first P9 results. The LSU now gives way for that one cycle (`fetch_start_q` in `core.sv`; only on a
+shared bus, `FETCH_YIELD`, and only with the store buffer, so the knobs-off timing is P8's). Per knob
+(`run_regress.sh --defines`), with the rule:
 
 | knobs on | M-mode | S-mode, Sv39 |
 |---|---|---|
 | none | 4805 | 5113 |
-| store buffer | 4805 | 6000 |
 | streaming | 4356 | 5113 |
 | predictors | 4209 | 5113 |
 | streaming + predictors | 3909 | 5113 |
-| store buffer + streaming | 3908 | 6000 |
-| all (default) | 3908 | 5404 |
+| store buffer | 4805 | 5410 |
+| store buffer + streaming | 3908 | 5404 |
+| all (default) | 3908 | 5106 |
 
 Streaming and the predictors leave the translated fetch alone (every dword keeps its translation phase), so
-they do nothing here. The store buffer costs 3 cycles per iteration: a translated loop is bound by its fetch, and
-the store's bus write now happens after it retires, in the cycles where the next iteration's first fetch wants
-the one shared SRAM (the memory port wins ties at the arbiter), so fetch waits two cycles. Before P9 the same
-write happened earlier, while fetch was ahead. The predictors win a part of it back. The SoC does not have this
-contention (fetch has a private path to the I$), and none of the seven kernels runs translated. If a shared-bus
-S-mode workload matters, a drain that gives way to a waiting fetch request is the lever (not built: it would
-reopen the P9 gates); overlapping the instruction-TLB lookup with the previous fetch beat is the other follow-up.
+they do nothing here. The two rows with the store buffer but without the predictors keep most of the loss (the drain
+beat meets fetch's next request in the same way; giving the drain the same rule did not help the default
+configuration and is not built). The same loop in other shapes (S-mode cycles; M-mode in brackets for the default):
+
+| loop body | before P9 | first P9 results | now |
+|---|---|---|---|
+| load, store (the table above) | 5113 | 5404 | 5106 (3908) |
+| ALU only | 4803 | 4506 | 4506 (2406) |
+| two loads | 5113 | 5113 | 5117 (3909) |
+| two stores | 5703 | 5403 | 5403 (3305) |
+| load, then store of the loaded value | 5113 | 5404 | 5106 (3908) |
+| store, then load of another dword | 5703 | 5703 | 5703 (3460) |
+
+No shape is slower than before P9 (the two-load loop by 4 cycles in 5113). The SoC has a private fetch path
+(`FETCH_YIELD` 0), where none of this applies, and none of the seven kernels runs translated. Overlapping the
+instruction-TLB lookup with the previous fetch beat is the other follow-up.
 
 ## CPI stack
 
