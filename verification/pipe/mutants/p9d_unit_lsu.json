@@ -50,13 +50,13 @@
   },
   {
    "name": "start ignores a drain beat in flight",
-   "old": "wire start     = start_raw && !i_ptw_beat && !i_sb_beat && !i_sb_go;",
-   "new": "wire start     = start_raw && !i_ptw_beat && !i_sb_go;"
+   "old": "wire start     = start_raw && !i_ptw_beat && !i_sb_beat && !i_sb_go && !i_fetch_start;",
+   "new": "wire start     = start_raw && !i_ptw_beat && !i_sb_go && !i_fetch_start;"
   },
   {
    "name": "start ignores a drain beat decided this cycle",
-   "old": "wire start     = start_raw && !i_ptw_beat && !i_sb_beat && !i_sb_go;",
-   "new": "wire start     = start_raw && !i_ptw_beat && !i_sb_beat;"
+   "old": "wire start     = start_raw && !i_ptw_beat && !i_sb_beat && !i_sb_go && !i_fetch_start;",
+   "new": "wire start     = start_raw && !i_ptw_beat && !i_sb_beat && !i_fetch_start;"
   },
   {
    "name": "a misaligned store is posted",
@@ -113,6 +113,16 @@
    "name": "a posted store does not complete",
    "old": "o_wb.valid = done_bus || done_nobus || post_done;",
    "new": "o_wb.valid = done_bus || done_nobus;"
+  },
+  {
+   "name": "start ignores fetch's bus beat starting",
+   "old": "wire start     = start_raw && !i_ptw_beat && !i_sb_beat && !i_sb_go && !i_fetch_start;",
+   "new": "wire start     = start_raw && !i_ptw_beat && !i_sb_beat && !i_sb_go;"
+  },
+  {
+   "name": "giving way to fetch hides the ready access from the walker and the drain",
+   "old": "assign o_bus_busy     = start_raw || in_bus;",
+   "new": "assign o_bus_busy     = (start_raw && !i_fetch_start) || in_bus;"
   }
  ]
 }

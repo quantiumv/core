@@ -43,7 +43,7 @@ module qv_lsu_sb_tb;
     logic                    pmp_bypass = 1'b0;
     logic [1:0]              priv = 2'b11;
     logic [63:0]             pmpcfg0 = 64'h1F, pmpaddr0 = 64'h003F_FFFF_FFFF_FFFF;
-    logic                    sb_empty = 1'b1, sb_match = 1'b0, sb_beat = 1'b0, sb_go = 1'b0;
+    logic                    sb_empty = 1'b1, sb_match = 1'b0, sb_beat = 1'b0, sb_go = 1'b0, fetch_start = 1'b0;
     logic [31:3]             sb_addr;
     logic                    load_near, bus_busy;
     logic                    foreign_ack = 1'b0;      // a response that is not the LSU's
@@ -60,7 +60,7 @@ module qv_lsu_sb_tb;
         .wb_mem_dat_i(dat_i), .wb_mem_ack_i(ack | foreign_ack), .wb_mem_err_i(err | foreign_err),
         .o_wb(wb), .o_res(res), .o_head_started(started),
         .o_bus_busy(bus_busy),
-        .i_sb_empty(sb_empty), .i_sb_match(sb_match), .i_sb_beat(sb_beat), .i_sb_go(sb_go),
+        .i_sb_empty(sb_empty), .i_sb_match(sb_match), .i_sb_beat(sb_beat), .i_sb_go(sb_go), .i_fetch_start(fetch_start),
         .o_sb_addr(sb_addr), .o_load_near(load_near), .o_in_bus(in_bus)
     );
 
@@ -341,6 +341,22 @@ module qv_lsu_sb_tb;
             done = 1'b0;
             for (c = 0; c < 30 && !done; c++) begin #1; if (wb.valid) done = 1'b1; @(posedge clk); end
             check("the load runs once the drain steps aside", {63'b0, done}, 64'd1);
+        end
+        @(negedge clk); head_valid = 1'b0; settle();
+
+        // ---- fetch's translated request starts its bus beat in this cycle: the load gives way for that cycle only ----
+        fetch_start = 1'b1;
+        dispatch(1'b0, QV_AMO_LR, 1'b0, 2'd3, 64'h090, 64'd0);
+        @(negedge clk); head_valid = 1'b1; head_tag = last_tag; #1;
+        check("fetch starts its beat: the load does not start", {63'b0, cyc}, 64'd0);
+        check("... but it is ready: the walker and the drain see the LSU busy", {63'b0, bus_busy}, 64'd1);
+        @(negedge clk); fetch_start = 1'b0; #1;
+        check("the cycle after: the load starts", {63'b0, cyc}, 64'd1);
+        begin
+            int c; logic done;
+            done = 1'b0;
+            for (c = 0; c < 30 && !done; c++) begin #1; if (wb.valid) done = 1'b1; @(posedge clk); end
+            check("the load completes", {63'b0, done}, 64'd1);
         end
         @(negedge clk); head_valid = 1'b0; settle();
 

@@ -143,6 +143,11 @@ module core_sv39_cpi_tb;
                  (100 * (end_b - start_b)) / (end_a - start_a) / 100, (100 * (end_b - start_b)) / (end_a - start_a) % 100);
         check("translation costs less than double", 64'((end_b - start_b) < 2 * (end_a - start_a)), 64'd1);
         check("translation does not make it faster", 64'((end_b - start_b) >= (end_a - start_a)), 64'd1);
+`ifndef QV_REF_AS_CORE
+        // before the store buffer this loop took 5113 cycles under Sv39 on the shared bus; the store buffer alone made it
+        // 5404, because a load reached the ROB head in the very cycle fetch's translated request began its bus beat
+        check("the store buffer does not slow the translated loop (5113 cycles before it)", 64'((end_b - start_b) <= 5200), 64'd1);
+`endif
 
         $display("");
         $display("core_sv39_cpi_tb: %0d passed, %0d failed", pass_count, fail_count);
