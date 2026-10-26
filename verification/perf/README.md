@@ -87,17 +87,37 @@ redirect that changes the translation context waits one fetch cycle only while s
 
 What Sv39 costs (`testbench/core_sv39_cpi_tb.sv`, run by the regression): the
 same loop of 300 iterations (8 instructions: ALU, a load, a store, a branch)
-in M-mode and in S-mode under an identity 1 GiB leaf, in cycles:
+in M-mode and in S-mode under an identity 1 GiB leaf, in cycles, on the
+shared-SRAM harness (fetch and data on one bus):
 
 | core | M-mode | S-mode, Sv39 | ratio |
 |---|---|---|---|
 | reference (`ref_core.sv`) | 8400 | 11400 | 1.35 |
-| core | 4805 | 5113 | 1.06 |
+| core before P9 (all knobs off) | 4805 | 5113 | 1.06 |
+| core | 3908 | 5404 | 1.38 |
 
 A translated fetch dword and a translated access each take one more cycle
-(the answer is registered before it is used); the pipeline hides most of it. Streaming and the predictors
-leave the translated fetch alone (every dword keeps its translation phase), so the figures are those of
-before P9; overlapping the instruction-TLB lookup with the previous fetch beat is a follow-up.
+(the answer is registered before it is used); the pipeline hides most of it. P9 made the M-mode loop 19 %
+faster, but the translated loop 6 % slower, so the ratio went up. Per knob (`run_regress.sh --defines`):
+
+| knobs on | M-mode | S-mode, Sv39 |
+|---|---|---|
+| none | 4805 | 5113 |
+| store buffer | 4805 | 6000 |
+| streaming | 4356 | 5113 |
+| predictors | 4209 | 5113 |
+| streaming + predictors | 3909 | 5113 |
+| store buffer + streaming | 3908 | 6000 |
+| all (default) | 3908 | 5404 |
+
+Streaming and the predictors leave the translated fetch alone (every dword keeps its translation phase), so
+they do nothing here. The store buffer costs 3 cycles per iteration: a translated loop is bound by its fetch, and
+the store's bus write now happens after it retires, in the cycles where the next iteration's first fetch wants
+the one shared SRAM (the memory port wins ties at the arbiter), so fetch waits two cycles. Before P9 the same
+write happened earlier, while fetch was ahead. The predictors win a part of it back. The SoC does not have this
+contention (fetch has a private path to the I$), and none of the seven kernels runs translated. If a shared-bus
+S-mode workload matters, a drain that gives way to a waiting fetch request is the lever (not built: it would
+reopen the P9 gates); overlapping the instruction-TLB lookup with the previous fetch beat is the other follow-up.
 
 ## CPI stack
 
