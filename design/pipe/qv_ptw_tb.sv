@@ -642,6 +642,12 @@ module qv_ptw_tb #(
             // an F walk inside the window does not wait
             walk_f(va_of(9'd1, 9'd2, 9'd3, 12'h0), 2'b01, ROOT, 100);
             check("window: F's walk inside the window does not wait", b(got_done) + b(got_ok) + 64'(beat_log_n), 64'd5);
+            // ... with its level-0 table in the window's last page either
+            put(L1T, 6, pte_of(44'hF, V));
+            put(44'hF, 3, pte_of(44'h34567, V|R|W|X|A|D));
+            walk_f(va_of(9'd1, 9'd6, 9'd3, 12'h0), 2'b01, ROOT, 100);
+            check("window: a table in the window's last page does not wait", b(got_done) + b(got_ok) + 64'(beat_log_n), 64'd5);
+            check("window: ... its leaf", {20'b0, got_ppn}, 64'h34567);
             // a PMP-denied read outside the window: the access fault comes at once, no wait and no read
             deny_ppn = FAR; set_pmp();
             walk_f(va_of(9'd1, 9'd5, 9'd3, 12'h0), 2'b01, ROOT, 60);
