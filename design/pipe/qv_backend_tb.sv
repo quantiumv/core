@@ -17,12 +17,18 @@
  *     random bubbles.
  *
  * Run once per configuration via -P overrides (BYPASS_EN, SERIALIZE,
- * ROB_DEPTH).
+ * ROB_DEPTH, CSR_LATE).
+ *
+ * CSR_LATE (P10c): CSR reads that do not serialize, mixed into the stream. A
+ * CSR op's rd value is the CSR file's, made at its commit (here a constant the
+ * ALU's pass of the source never equals), so a dependent must wait for that
+ * commit and read regfile0: never the bypass, never the ROB.
  */
 module qv_backend_tb #(
     parameter bit BYPASS_EN = 1'b1,
     parameter bit SERIALIZE = 1'b0,
-    parameter int ROB_DEPTH = 8
+    parameter int ROB_DEPTH = 8,
+    parameter bit CSR_LATE  = 1'b0
 );
     import qv_pkg::*;
 
@@ -64,7 +70,7 @@ module qv_backend_tb #(
     logic                    r_intr;
     logic [4:0]              r_rs1_addr, r_rs2_addr, r_rd_addr;
 
-    qv_issue #(.SERIALIZE(SERIALIZE), .BYPASS_EN(BYPASS_EN)) issue0 (
+    qv_issue #(.SERIALIZE(SERIALIZE), .BYPASS_EN(BYPASS_EN), .CSR_LATE(CSR_LATE)) issue0 (
         .clk(clk), .rst(rst), .i_flush(1'b0),
         .i_uop_valid(uop_valid), .i_uop(uop), .o_issue(issue),
         .o_rs1_sel(rs1_sel), .o_rs2_sel(rs2_sel), .i_rs1_data(rs1_data), .i_rs2_data(rs2_data),
@@ -99,8 +105,8 @@ module qv_backend_tb #(
         .clk(clk), .rst(rst),
         .i_head_valid(head_valid), .i_head_entry(head_entry), .i_head_tag(head_tag),
         .i_head_shadow(head_shadow), .i_head_ctrl(head_ctrl), .i_lsu_res('0), .o_commit_pop(commit_pop),
-        // ALU-only uops: no CSR, trap or mret ever reaches commit here
-        .i_csr_rdata(64'b0), .i_mtvec(64'b0), .i_mepc(64'b0), .i_fetch_idle(1'b1),
+        // no trap or mret ever reaches commit here; a CSR op (CSR_LATE only, read-only, not serializing) reads CSR_VAL
+        .i_csr_rdata(CSR_VAL), .i_mtvec(64'b0), .i_mepc(64'b0), .i_fetch_idle(1'b1),
         .o_regfile_we(rf_we), .o_regfile_sel(rf_sel), .o_regfile_data(rf_data),
         .o_commit_valid(c_valid), .o_commit_rd(c_rd), .o_commit_rd_wen(c_rd_wen), .o_commit_tag(c_tag),
         .o_commit_now(commit_now), .o_pc(arch_pc), .o_next_pc(next_pc),
@@ -117,6 +123,8 @@ module qv_backend_tb #(
         .i_read_gpr_B_sel(rs2_sel), .o_read_gpr_B_data(rs2_data),
         .i_load_gpr(rf_we), .i_load_gpr_sel(rf_sel), .i_load_gpr_data(rf_data)
     );
+
+    localparam logic [63:0] CSR_VAL = 64'hC5C5_0000_1234_ABCD;
 
     // ---------------- golden model ----------------
     function automatic logic [63:0] golden_alu(input logic [4:0] op, input logic [63:0] a, input logic [63:0] b);
@@ -161,6 +169,20 @@ module qv_backend_tb #(
         return u;
     endfunction
 
+    // a CSR read (csrrs rd, csr, x0) that does not serialize: through the ALU as its source + 0, rd made at commit
+    function automatic uop_t mk_csrr(input logic [4:0] rd);
+        uop_t u;
+        u          = '0;
+        u.fu       = QV_FU_CSR;
+        u.alu_op   = `ADD;
+        u.rd       = rd;
+        u.rd_wen   = 1'b1;
+        u.csr_op   = QV_CSR_RS;
+        u.csr_addr = 12'h340;
+        u.csr_wsup = 1'b1;
+        return u;
+    endfunction
+
     // Append a uop: assign its pc/raw, compute its golden result.
     task automatic push(input uop_t u_in, input int bub);
         uop_t u;
@@ -172,6 +194,7 @@ module qv_backend_tb #(
         b = u.rs2_used ? G[u.rs2] : u.imm2;
         y = golden_alu(u.alu_op, a, b);
         if (u.is_word) y = {{32{y[31]}}, y[31:0]};
+        if (u.fu == QV_FU_CSR) y = CSR_VAL;                 // a read: rd is the CSR's value
         if (u.rd_wen && u.rd != 0) G[u.rd] = y;
         exp_wdata[n_uops] = (u.rd_wen && u.rd != 0) ? y : 64'd0;
         script[n_uops]    = u;
@@ -302,6 +325,36 @@ module qv_backend_tb #(
         push(mk(`ADD, 0, 0, 0, 64'd9, 0, 0, 64'd0), 0);       // writes x0: no-op
         push(mk(`ADD, 6, 0, 1, 0, 0, 0, 64'd3), 0);           // x6 = x0 + 3 = 3
         run_script("D4", 200);
+
+        // ---- C1/C2 (CSR_LATE): a CSR read and its dependents ----
+        if (CSR_LATE && !SERIALIZE) begin
+            begin_script();
+            push(mk(`ADD, 5, 0, 0, 64'd3, 0, 0, 64'd0), 0);       // x5 = 3
+            push(mk_csrr(5), 0);                                  // x5 = the CSR
+            push(mk(`ADD, 6, 5, 1, 0, 0, 0, 64'd1), 0);           // x6 = x5 + 1   (rs1)
+            push(mk(`SUB, 7, 0, 0, 64'd0, 5, 1, 0), 0);           // x7 = 0 - x5   (rs2)
+            push(mk(`ADD, 8, 0, 0, 64'd9, 0, 0, 64'd0), 0);       // independent
+            run_script("C1", 200);
+            check("C1: the dependent waits for the CSR op's commit (no bypass, no ROB read)",
+                  64'(issue_cyc[2] - issue_cyc[1] >= 3), 64'd1);
+            // a younger writer of the same register replaces the late claim
+            begin_script();
+            push(mk_csrr(5), 0);
+            push(mk(`ADD, 5, 0, 0, 64'd11, 0, 0, 64'd0), 0);      // x5 = 11, claims x5 after the CSR op
+            push(mk(`ADD, 6, 5, 1, 0, 0, 0, 64'd0), 0);           // x6 = x5 = 11, by bypass
+            run_script("C2", 200);
+            if (BYPASS_EN)
+                check("C2: a younger plain writer's claim is not late (bypassed the next cycle)",
+                      issue_cyc[2] - issue_cyc[1], 64'd1);
+            // a random stream with CSR reads among the ALU ops
+            begin_script();
+            for (i = 0; i < 1500; i++) begin
+                if ($urandom % 6 == 0) push(mk_csrr(5'($urandom % 8)), ($urandom % 5 == 0) ? int'($urandom % 3) : 0);
+                else push(mk(ops[$urandom % 10], 5'($urandom % 8), 5'($urandom % 8), 1'b1, {$urandom, $urandom},
+                             5'($urandom % 8), ($urandom % 3) != 0, 64'($urandom % 70)), 0);
+            end
+            run_script("C3 random with CSR reads", 30000);
+        end
 
         // ---- R1: random dense-hazard stream ----
         begin_script();

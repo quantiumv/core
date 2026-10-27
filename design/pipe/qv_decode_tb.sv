@@ -17,7 +17,9 @@
  *     amounts) without the test depending on decoder.sv's internal
  *     immediate representation.
  */
-module qv_decode_tb;
+module qv_decode_tb #(
+    parameter bit CSR_NOSER = 1'b0      // P10c: tests.list runs both
+);
     import qv_pkg::*;
 
     int   pass_count = 0;
@@ -48,7 +50,7 @@ module qv_decode_tb;
     logic        feed_xl = 1'b0, feed_hi = 1'b0;
     logic [43:0] feed_pg_lo = '0, feed_pg_hi = '0;
 
-    qv_decode dut (
+    qv_decode #(.CSR_NOSER(CSR_NOSER)) dut (
         .clk(clk), .rst(rst), .i_flush(flush),
         .i_priv(priv), .i_tsr(tsr), .i_tvm(tvm), .i_in_debug(in_debug), .i_pb_active(pb_active),
         .i_tdata1_0(tdata1_0), .i_tdata2_0(tdata2_0), .i_tdata1_1(tdata1_1), .i_tdata2_1(tdata2_1),
@@ -157,6 +159,11 @@ module qv_decode_tb;
         check({name, ": no fault"}, {63'b0, uop.xcpt}, 64'd0);
     endtask
 
+    // m/s scratch, epc, cause, tval: written without a flush under CSR_NOSER
+    function automatic logic trap_csr(input logic [11:0] a);
+        return (a >= 12'h340 && a <= 12'h343) || (a >= 12'h140 && a <= 12'h143);
+    endfunction
+
     task automatic expect_csr(
         input string name, input logic [31:0] instr, input logic [6:0] exp_code, input qv_csr_op_e exp_op,
         input logic [11:0] exp_addr, input logic [4:0] exp_rs1, input logic exp_rs1_used,
@@ -175,7 +182,8 @@ module qv_decode_tb;
         check({name, ": imm2 zeroed (ALU pass = source + 0)"}, uop.imm2, 64'd0);
         check({name, ": alu_op ADD"}, {59'b0, uop.alu_op}, {59'b0, `ADD});
         check({name, ": csr_wsup"}, {63'b0, uop.csr_wsup}, {63'b0, exp_wsup});
-        check({name, ": serialize"}, {63'b0, uop.serialize}, 64'd1);
+        // every CSR op flushes after it, but with CSR_NOSER (P10c) one that writes nothing or writes a trap CSR
+        check({name, ": serialize"}, {63'b0, uop.serialize}, {63'b0, !(CSR_NOSER && (exp_wsup || trap_csr(exp_addr)))});
         check({name, ": rd_wen"}, {63'b0, uop.rd_wen}, 64'd1);
         check({name, ": rd"}, {59'b0, uop.rd}, {59'b0, exp_rd});
         check({name, ": no fault"}, {63'b0, uop.xcpt}, 64'd0);
@@ -537,6 +545,32 @@ module qv_decode_tb;
                    QV_CSR_RS, 12'h7A5, 0, 0, 0, 1'b1, 5);
         expect_csr("write 0x7B4", encode_csr(12'h7B4, 6, 3'b001, 5, `OPC_SYSTEM), `INSTR_CODE(CSRRW),
                    QV_CSR_RW, 12'h7B4, 6, 1, 0, 1'b0, 5);
+        // which CSR writes flush after them (P10c: only the trap CSRs are written without one) -- the neighbours too
+        begin : ser_rule
+            logic [11:0] wa [0:17];
+            wa[0] = 12'h340; wa[1] = 12'h341; wa[2] = 12'h342; wa[3] = 12'h343;
+            wa[4] = 12'h140; wa[5] = 12'h141; wa[6] = 12'h142; wa[7] = 12'h143;
+            wa[8] = 12'h300; wa[9] = 12'h100; wa[10] = 12'h180; wa[11] = 12'h304; wa[12] = 12'h344;
+            wa[13] = 12'h33F; wa[14] = 12'h144; wa[15] = 12'h13F; wa[16] = 12'h3A0; wa[17] = 12'h305;
+            for (int w = 0; w < 18; w++) begin
+                expect_csr($sformatf("CSRRW 0x%03h", wa[w]), encode_csr(wa[w], 6, 3'b001, 5, `OPC_SYSTEM), `INSTR_CODE(CSRRW),
+                           QV_CSR_RW, wa[w], 6, 1, 0, 1'b0, 5);
+                expect_csr($sformatf("CSRRS 0x%03h, x6", wa[w]), encode_csr(wa[w], 6, 3'b010, 5, `OPC_SYSTEM), `INSTR_CODE(CSRRS),
+                           QV_CSR_RS, wa[w], 6, 1, 0, 1'b0, 5);
+                expect_csr($sformatf("CSRRSI 0x%03h, 0 (read)", wa[w]), encode_csr(wa[w], 0, 3'b110, 5, `OPC_SYSTEM),
+                           `INSTR_CODE(CSRRSI), QV_CSR_RS, wa[w], 0, 0, 64'd0, 1'b1, 5);
+            end
+            // the rule above, spelled out for the ones that matter most
+            feed(encode_csr(12'h300, 6, 3'b001, 5, `OPC_SYSTEM));
+            check("a write of mstatus always flushes after it", {63'b0, uop.serialize}, 64'd1);
+            feed(encode_csr(12'h180, 6, 3'b001, 5, `OPC_SYSTEM));
+            check("a write of satp always flushes after it", {63'b0, uop.serialize}, 64'd1);
+            feed(encode_csr(12'h141, 6, 3'b001, 5, `OPC_SYSTEM));
+            check("a write of sepc flushes after it only without CSR_NOSER", {63'b0, uop.serialize}, {63'b0, !CSR_NOSER});
+            feed(encode_csr(12'h300, 0, 3'b010, 5, `OPC_SYSTEM));
+            check("a read of mstatus flushes after it only without CSR_NOSER", {63'b0, uop.serialize}, {63'b0, !CSR_NOSER});
+        end
+
         // a fetch-faulted CSR op must never reach the CSR file
         feed(encode_csr(12'h340, 6, 3'b001, 5, `OPC_SYSTEM), 1'b1, 4'd1);
         check("faulted CSRRW: routed to the ALU", {61'b0, uop.fu}, {61'b0, QV_FU_ALU});

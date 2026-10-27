@@ -136,6 +136,7 @@ pipe_btb_tb|design/pipe/qv_btb_tb.sv||design|pipe|pass|
 pipe_ras_tb|design/pipe/qv_ras_tb.sv||design|pipe|pass|
 pipe_bht_tb|design/pipe/qv_bht_tb.sv||design|pipe|pass|
 pipe_decode_tb|design/pipe/qv_decode_tb.sv||design|pipe|pass|
+pipe_decode_noser_tb|design/pipe/qv_decode_tb.sv||design|pipe|pass||-Pqv_decode_tb.CSR_NOSER=1
 pipe_pmp_tb|design/pipe/qv_pmp_tb.sv||design|pipe|pass||
 pipe_pte_tb|design/pipe/qv_pte_tb.sv||design|pipe|pass|
 pipe_tlb_tb|design/pipe/qv_tlb_tb.sv||design|pipe|pass|
@@ -156,6 +157,8 @@ pipe_rob_tb_d4|design/pipe/qv_rob_tb.sv||design|pipe|pass||-Pqv_rob_tb.ROB_DEPTH
 pipe_rob_tb_d2|design/pipe/qv_rob_tb.sv||design|pipe|pass||-Pqv_rob_tb.ROB_DEPTH=2
 pipe_backend_tb_b1s0r8|design/pipe/qv_backend_tb.sv||design|pipe|pass||-Pqv_backend_tb.BYPASS_EN=1 -Pqv_backend_tb.SERIALIZE=0 -Pqv_backend_tb.ROB_DEPTH=8
 pipe_backend_tb_b0s0r8|design/pipe/qv_backend_tb.sv||design|pipe|pass||-Pqv_backend_tb.BYPASS_EN=0 -Pqv_backend_tb.SERIALIZE=0 -Pqv_backend_tb.ROB_DEPTH=8
+pipe_backend_tb_b1s0r8_csr|design/pipe/qv_backend_tb.sv||design|pipe|pass||-Pqv_backend_tb.BYPASS_EN=1 -Pqv_backend_tb.SERIALIZE=0 -Pqv_backend_tb.ROB_DEPTH=8 -Pqv_backend_tb.CSR_LATE=1
+pipe_backend_tb_b0s0r4_csr|design/pipe/qv_backend_tb.sv||design|pipe|pass||-Pqv_backend_tb.BYPASS_EN=0 -Pqv_backend_tb.SERIALIZE=0 -Pqv_backend_tb.ROB_DEPTH=4 -Pqv_backend_tb.CSR_LATE=1
 pipe_backend_tb_b1s1r8|design/pipe/qv_backend_tb.sv||design|pipe|pass||-Pqv_backend_tb.BYPASS_EN=1 -Pqv_backend_tb.SERIALIZE=1 -Pqv_backend_tb.ROB_DEPTH=8
 pipe_backend_tb_b1s0r4|design/pipe/qv_backend_tb.sv||design|pipe|pass||-Pqv_backend_tb.BYPASS_EN=1 -Pqv_backend_tb.SERIALIZE=0 -Pqv_backend_tb.ROB_DEPTH=4
 pipe_backend_tb_b0s0r4|design/pipe/qv_backend_tb.sv||design|pipe|pass||-Pqv_backend_tb.BYPASS_EN=0 -Pqv_backend_tb.SERIALIZE=0 -Pqv_backend_tb.ROB_DEPTH=4
