@@ -25,7 +25,9 @@
    "name": "mstatus writes do not serialize either",
    "file": "qv_decode.sv",
    "old": "(csr_addr[11:2] == 10'h0D0)",
-   "new": "(csr_addr[11:6] == 6'h0C)"
+   "new": "(csr_addr[11:6] == 6'h0C)",
+   "equivalent": true,
+   "why": "for this stimulus only: gen_alu programs stay in M mode with interrupts off and never write mstatus; their writes to mtvec, mie, medeleg and mideleg change nothing a younger instruction sees there. Killed by p10c_unit_decode [3]"
   }
  ]
 }
