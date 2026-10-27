@@ -1,7 +1,8 @@
 # CPI kernels
 
-Seven small C kernels, each timed with `mcycle`/`minstret` around its main
-loop. They run on two configurations:
+Eight small C kernels, each timed with `mcycle`/`minstret` around its main
+loop (the eighth, `trap`, since P10.0: see "S mode under Sv39, and the trap path").
+They run on two configurations:
 
 - **sram:** the core alone on flat SRAM (`core_wb4_sram_harness`).
 - **cache:** the full SoC with its L1 caches (`soc.sv`).
@@ -33,8 +34,11 @@ CPI (cycles per retired instruction):
 | sieve | 3.97 | 1.51 | 4.45 | 1.28 | 2.00 |
 | listchase | 3.80 | 1.80 | 3.90 | 1.91 | 1.91 |
 | mixedint | 3.99 | 1.78 | 4.33 | 1.58 | 2.14 |
+| trap (P10.0) | 4.00 | 3.89 | 4.43 | 3.58 | |
 
-The core is 2 to 3.5 times faster than the reference on every kernel, and P9 took the geometric mean of the
+The core is 2 to 3.5 times faster than the reference on every kernel but `trap`, where it is only 1.2 times
+faster on the SoC: every CSR op serializes (a flush and a refill), and the trap path is mostly CSR ops. The
+geometric means below are of the seven older kernels. P9 took the geometric mean of the
 cycles down by 20 % on the SoC (21 % on the flat SRAM). Single issue puts the floor at CPI 1.0; crc32 is
 within 12 % of it.
 
@@ -136,6 +140,60 @@ configuration and is not built). The same loop in other shapes (S-mode cycles; M
 No shape is slower than before P9 (the two-load loop by 4 cycles in 5113). The SoC has a private fetch path
 (`FETCH_YIELD` 0), where none of this applies, and none of the seven kernels runs translated. Overlapping the
 instruction-TLB lookup with the previous fetch beat is the other follow-up.
+
+## S mode under Sv39, and the trap path (P10.0)
+
+`run_perf.sh --mode s` builds the same kernels for S mode (`<kernel>_s.*`, `crt0_s.s`, `link_s.ld`) and writes
+`baseline_pipe_s.csv`. `crt0_s.s` maps the 64 KB image 1:1 with 4 KiB leaves, writes satp, and `mret`s to `main` in
+S. S cannot read `mcycle` or `minstret`, so under `PERF_SMODE` `perf.h` reads `sscratch` and `instret` (which reads
+0) instead. Those reads mark the window, and the result is the window the monitor counts, cycles and retirements
+(`perf_tb.sv` `SMODE`). Every kernel retires exactly what it retires in M (`check_cpi.py --same-instret`). There is
+no reference row: the monitor is not part of the reference build.
+
+The eighth kernel, `trap`, is an OS trap path: 200 `ecall`s, each taken by an M-mode handler shaped like Linux's
+entry and exit (swap `sp` with `mscratch`, save six registers, read `mcause`, `mepc`, `mtval` and `mstatus`, write
+`mepc + 4`, restore, swap back, `mret`). In the S build the `ecall`s come from S.
+
+Cycles, M mode against S mode under Sv39 (P9 RTL):
+
+| kernel | M, cache | S, cache | S/M | M, sram | S, sram | S/M |
+|---|---|---|---|---|---|---|
+| memcpy | 1160 | 1806 | 1.56 | 1222 | 1626 | 1.33 |
+| crc32 | 9933 | 14519 | 1.46 | 10013 | 14627 | 1.46 |
+| qsort | 8583 | 10734 | 1.25 | 8812 | 11241 | 1.28 |
+| matmul | 6990 | 8332 | 1.19 | 7114 | 8684 | 1.22 |
+| sieve | 7554 | 9158 | 1.21 | 8952 | 11258 | 1.26 |
+| listchase | 4901 | 5925 | 1.21 | 4639 | 6177 | 1.33 |
+| mixedint | 6952 | 10893 | 1.57 | 7835 | 10436 | 1.33 |
+| trap | 20041 | 22061 | 1.10 | 21825 | 23629 | 1.08 |
+
+The trap kernel's CPI is 3.6 on the SoC: 100 cycles per trap, 36 % of them refilling after its seven serializing
+CSR ops.
+
+What the P10 steps can save at most, from the monitor's counters (cache configuration; `baseline_pipe_s_stack.csv`
+and `baseline_pipe_stack.csv`):
+
+| kernel | translated fetch requests | in the last translated page | translation-phase cycles | translated accesses that hit after waiting (P10b) | serializing CSR refill cycles (P10c, M) |
+|---|---|---|---|---|---|
+| memcpy | 443 | 441 | 443 (25 %) | 256 (14 %) | 10 |
+| crc32 | 5007 | 5005 | 5007 (34 %) | 1 (0 %) | 10 |
+| qsort | 3791 | 3789 | 3791 (35 %) | 485 (5 %) | 10 |
+| matmul | 2507 | 2505 | 2507 (30 %) | 576 (7 %) | 10 |
+| sieve | 3055 | 3053 | 3055 (33 %) | 1389 (15 %) | 10 |
+| listchase | 1042 | 1040 | 1042 (18 %) | 1024 (17 %) | 10 |
+| mixedint | 3200 | 3198 | 3200 (29 %) | 1440 (13 %) | 10 |
+| trap | 1211 | 1009 | 1211 (5 %) | 0 | 7210 (36 %) |
+
+- Fetch (P10a): every translated request but the first in each page is in the page the last translation found,
+  under the same context: the small kernels never leave their page. Every such request pays a translation-phase
+  cycle (an ITLB hit) and never streams. The phase cycles overlap other work, so they bound the gain from above,
+  but they are a quarter to a third of every kernel.
+- Data (P10b): a translated access asks for its translation only at the head, a cycle before it can start. The
+  count is the accesses whose head lookup hit after the op had waited before the head, the cycles a lookup made
+  while waiting would save: at least 3 % on five kernels, so P10b is built.
+- CSRs (P10c): the seven kernels have only their two window markers. The trap kernel has 4 read-only CSR ops and
+  3 trap-CSR writes per trap, and the refill after them is 36 % of its cycles.
+- A full ROB stops issue in at most 39 cycles of any S-mode window (mixedint): growing the ROB is not worth it.
 
 ## CPI stack
 

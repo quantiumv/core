@@ -13,3 +13,5 @@ listchase,sram,4639,2564,1.809
 listchase,cache,4901,2564,1.911
 mixedint,sram,7835,4393,1.784
 mixedint,cache,6952,4393,1.583
+trap,sram,21825,5605,3.894
+trap,cache,20041,5605,3.576
