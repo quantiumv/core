@@ -104,6 +104,7 @@ tb_core_sv39_realfw_tb|testbench/core_sv39_realfw_tb.sv||design|ref,pipe|pass|
 tb_core_sv39_irq_tb|testbench/core_sv39_irq_tb.sv|testbench/core_wb4_sram_harness.sv|design|ref,pipe|pass|
 tb_core_sv39_spec_tb|testbench/core_sv39_spec_tb.sv|testbench/core_wb4_sram_harness.sv|design|ref,pipe|pass|
 tb_core_sv39_cpi_tb|testbench/core_sv39_cpi_tb.sv|testbench/core_wb4_sram_harness.sv|design|ref,pipe|pass|
+tb_core_sv39_pma_walk_tb|testbench/core_sv39_pma_walk_tb.sv|testbench/core_wb4_sram_harness.sv|design|ref,pipe|pass|
 tb_core_zicsr_tb|testbench/core_zicsr_tb.sv|testbench/core_wb4_sram_harness.sv,testbench/pc_trigger_sample_monitor.sv|design|ref,pipe|pass|
 
 # === testbench/*_tb.sv (core_cache_harness) ===
