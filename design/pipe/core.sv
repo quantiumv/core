@@ -685,7 +685,11 @@ module core
             wire  [1:0]  w_level;
             wire  [43:0] w_ppn;
 
-            qv_ptw ptw0 (
+            // F's PTE reads outside RAM wait until nothing older is left: no ROB entry, no uop in decode, nothing in
+            // the instruction queue or the fetch buffer (the aligner's stash waits for exactly the dword being walked)
+            wire f_nonspec = rob_empty && !uop_valid && !iq_valid && !fb_valid;
+
+            qv_ptw #(.PMA_RAM_BASE(PMA_RAM_BASE), .PMA_RAM_SIZE(PMA_RAM_SIZE)) ptw0 (
                 .clk(clk), .rst(rst),
                 .o_bus_addr(ptw_addr), .o_bus_cyc(ptw_cyc),
                 .i_bus_dat(wb_mem_dat_i), .i_bus_ack(wb_mem_ack_i), .i_bus_err(wb_mem_err_i),
@@ -696,7 +700,7 @@ module core
                 .i_d_sum(mstatus_sum_w), .i_d_mxr(mstatus_mxr_w), .i_d_root(satp_w[43:0]),
                 .i_d_cancel(w_d_cancel), .o_d_done(w_d_done),
                 .i_f_req(w_f_req), .i_f_va(f_xl_va), .i_f_priv(priv), .i_f_root(satp_w[43:0]),
-                .i_f_cancel(w_f_cancel), .o_f_done(w_f_done),
+                .i_f_cancel(w_f_cancel), .o_f_done(w_f_done), .i_f_nonspec(f_nonspec),
                 .o_res_ok(w_ok), .o_res_pf(w_pf), .o_res_af(w_af), .o_res_vpn(w_vpn), .o_res_level(w_level),
                 .o_res_ppn(w_ppn), .o_res_r(w_r), .o_res_w(w_w), .o_res_x(w_x), .o_res_u(w_u), .o_res_d(w_d)
             );

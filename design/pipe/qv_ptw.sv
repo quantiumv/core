@@ -38,8 +38,20 @@
  * retired) is low, and o_beat tells the LSU a beat is in flight, so the
  * two can never drive the bus in the same cycle. The LSU wins every gap
  * between two beats of a walk.
+ *
+ * Wrong-path walks and devices (P10d): F walks speculatively, on wrong paths too, and a PTE read with a read side
+ * effect (a PLIC claim, a UART receive register) must not happen for an instruction that never executes. With a
+ * RAM window (PMA_RAM_SIZE != 0, the same one the store buffer uses), an F beat whose PTE address is outside it
+ * goes out only once i_f_nonspec says the fetch is on the architectural path (nothing older is left in the
+ * pipeline); until then the walk waits before the beat, costing nothing. If D asks meanwhile, F is given up (back
+ * to idle, no result: its request stays, and it is accepted again once D's walk is done), so the head's data walk
+ * is never blocked by a fetch walk waiting for the head to drain. A PMP denial is judged before the wait. D's walks
+ * belong to the head and never wait. Only timing changes: a walk that reads the address does so on the real path.
  */
-module qv_ptw (
+module qv_ptw #(
+    parameter logic [63:0] PMA_RAM_BASE = 64'h0,
+    parameter logic [63:0] PMA_RAM_SIZE = 64'h0      // 0: no window, F never waits
+) (
     input  logic        clk,
     input  logic        rst,
 
@@ -81,6 +93,7 @@ module qv_ptw (
     input  logic [43:0] i_f_root,
     input  logic        i_f_cancel,
     output logic        o_f_done,
+    input  logic        i_f_nonspec = 1'b1,        // the fetch being walked for is on the architectural path
 
     // the result, valid in the cycle of a done pulse
     output logic        o_res_ok,
@@ -140,9 +153,17 @@ module qv_ptw (
     /* verilator lint_on PINCONNECTEMPTY */
     wire pmp_deny = !pmp_r_ok;
 
+    // F's beat outside the RAM window waits for the real path (see the header)
+    /* verilator lint_off UNSIGNED */
+    wire pte_in_ram = (PMA_RAM_SIZE == 64'd0)
+                      || (({8'b0, pte_addr} >= PMA_RAM_BASE) && (({8'b0, pte_addr} - PMA_RAM_BASE) < PMA_RAM_SIZE)
+                          && (pte_addr[55:32] == 24'b0));
+    /* verilator lint_on UNSIGNED */
+    wire f_wait  = cl_q && !pte_in_ram && !i_f_nonspec;
+
     // in W_GO a stale walk and a PMP denial are handled before a beat is considered (see the case below), so
     // a cancel in the cycle a beat would start means no beat
-    wire go_beat = (st_q == W_GO) && !i_lsu_busy;
+    wire go_beat = (st_q == W_GO) && !i_lsu_busy && !f_wait;
 
     wire resp = beat_q && (i_bus_ack || i_bus_err);
     assign o_bus_cyc  = beat_q && !(i_bus_ack || i_bus_err);
@@ -214,6 +235,8 @@ module qv_ptw (
                         st_q    <= W_IDLE;
                     end else if (pmp_deny) begin
                         st_q    <= W_IDLE;                  // reported below
+                    end else if (f_wait && d_can) begin     // D's walk goes first; F is accepted again after it
+                        st_q    <= W_IDLE;
                     end else if (go_beat) begin
                         beat_q <= 1'b1;
                         st_q   <= W_BEAT;
