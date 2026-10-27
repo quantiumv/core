@@ -134,6 +134,12 @@
 `define QV_PIPE_PMA_RAM_SIZE 64'h0
 `endif
 
+// Translated fetch keeps the page of its last translation and skips the translation phase for the next request in
+// that page (P10a). 0: every translated request has its own phase.
+`ifndef QV_PIPE_FETCH_PAGE_REUSE
+`define QV_PIPE_FETCH_PAGE_REUSE 1
+`endif
+
 // QV_FORMAL_NO_SV39: no translation at all (no walker, no TLB): the Bare paths only. The riscv-formal sweep that
 // pins satp to Bare uses it, so its models do not grow by the TLBs and the walker.
 `ifdef QV_FORMAL_NO_SV39
@@ -156,6 +162,7 @@ module core
     parameter int BHT_ENTRIES  = `QV_PIPE_BHT_ENTRIES,    // branch history table counters, 0: none (>= 8 otherwise)
     parameter bit SV39_EN   = `QV_PIPE_SV39_EN,     // address translation present
     parameter int TLB_ENTRIES = `QV_PIPE_TLB_ENTRIES, // entries in each of the two TLBs
+    parameter bit FETCH_PAGE_REUSE = `QV_PIPE_FETCH_PAGE_REUSE,   // a translated request reuses the last page
     parameter int SB_DEPTH  = `QV_PIPE_SB_DEPTH,     // store buffer entries, 0: none
     parameter logic [63:0] PMA_RAM_BASE = `QV_PIPE_PMA_RAM_BASE,   // physical window of RAM: stores into it are posted
     parameter logic [63:0] PMA_RAM_SIZE = `QV_PIPE_PMA_RAM_SIZE
@@ -317,6 +324,7 @@ module core
     logic [63:0] f_xl_va;
     logic [43:0] f_xl_ppn;
     logic        fetch_redirect_ctx;         // below, once commit's outputs are declared
+    logic        fetch_xl_flush;             // ... and this: fetch forgets its last translated page
     logic        fetch_yield;                // below, once the memory port's masters are declared
     logic        fb_hint;                    // the fetch buffer's head dword was flagged by the BTB
     logic [1:0]  fb_hoff;
@@ -327,7 +335,8 @@ module core
     logic [1:0]  btb_off;
     logic [63:0] btb_tgt;
 
-    qv_fetch #(.RESET_PC(RESET_PC), .FB_DEPTH(FB_DEPTH), .STREAM(FETCH_STREAM), .BTB_EN(BTB_ENTRIES > 0)) fetch0 (
+    qv_fetch #(.RESET_PC(RESET_PC), .FB_DEPTH(FB_DEPTH), .STREAM(FETCH_STREAM), .BTB_EN(BTB_ENTRIES > 0),
+               .PAGE_REUSE(SV39_EN && FETCH_PAGE_REUSE)) fetch0 (
         .clk(clk), .rst(rst),
         .wb_fetch_addr_o(wb_fetch_addr_o), .wb_fetch_cyc_o(wb_fetch_cyc_o), .wb_fetch_stb_o(wb_fetch_stb_o),
         .wb_fetch_dat_i(wb_fetch_dat_i), .wb_fetch_ack_i(wb_fetch_ack_i), .wb_fetch_err_i(wb_fetch_err_i),
@@ -337,6 +346,7 @@ module core
         .i_xl_on(fetch_xl_on),
         .o_xl_req(f_xl_req), .o_xl_va(f_xl_va), .o_xl_cancel(f_xl_cancel),
         .i_xl_done(f_xl_done), .i_xl_pf(f_xl_pf), .i_xl_af(f_xl_af), .i_xl_ppn(f_xl_ppn),
+        .i_xl_flush(fetch_xl_flush),
         .o_buf_valid(fb_valid), .o_buf_pc(fb_pc), .o_buf_data(fb_data), .o_buf_err(fb_err),
         .o_buf_cause(fb_cause), .o_buf_xl(fb_xl), .o_buf_pg(fb_pg),
         .o_buf_hint(fb_hint), .o_buf_hoff(fb_hoff), .o_buf_hx(fb_hx), .o_buf_htgt(fb_htgt),
@@ -745,6 +755,9 @@ module core
     logic        c_redirect_ctx;
     assign fetch_redirect_ctx = redirect_valid && c_redirect_ctx && SV39_EN
                                 && (satp_on || (head_ctrl.cls == QV_FU_CSR && head_ctrl.csr_addr == 12'h180));
+    // what else ends the context of fetch's last translated page: SFENCE.VMA, and halting (a debugger may write
+    // satp through the Access Register path, which raises no redirect at all)
+    assign fetch_xl_flush = c_sfence || dbg_in_debug || dbg_entry;
 
     qv_commit #(.RESET_PC(RESET_PC)) commit0 (
         .clk(clk), .rst(rst),
@@ -988,6 +1001,7 @@ module core
             assert (x_va == g_x_va && x_wr == g_x_wr && x_priv == g_x_priv && mstatus_sum_w == g_sum
                     && mstatus_mxr_w == g_mxr && satp_w == g_satp);
     end
+
     assign rvfi_any_debug_entry    = debug_ebreak_entry || debug_halt_req_entry || trigger_debug_entry
                                      || dm_access_active;
 `endif

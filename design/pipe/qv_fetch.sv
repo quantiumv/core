@@ -59,7 +59,8 @@
  * Still one request unanswered at a time, so the stale bit stays exact: the request just presented becomes
  * the request register at the edge. A redirect never changes what is presented in the cycle it arrives
  * (its target goes out from the request register in the cycle after, as without STREAM), and translated
- * fetch (i_xl_on) does not stream: every dword keeps its translation phase. Where an arbiter shares the bus
+ * fetch (i_xl_on) does not stream: every dword keeps its translation phase, unless PAGE_REUSE already has its
+ * page (then it is streamed at {that page, the offset}). Where an arbiter shares the bus
  * with another master, i_yield makes the stream pause for a cycle (cyc low in the answer's cycle) so that
  * master can be granted. An arbiter that drops a request presented in an answer's cycle (DROP_REQ_ON_RESP)
  * costs nothing but the gain: the request is held until it is answered.
@@ -68,12 +69,20 @@
  * taken branch or jump sits in that dword (at halfword i_btb_off, at or after the request's first): the request
  * after this one is the branch's target instead of the next dword, and the dword's fetch buffer entry carries the
  * hint (where the branch is, where it goes) so the aligner can confirm it or, if it is wrong, put the stream back.
+ *
+ * PAGE_REUSE: the page the last successful translation found (lp_*) is kept, and a translated request in the same
+ * virtual page (all of VA[63:12]) skips its translation phase: it goes to the bus at once with that physical page,
+ * like an untranslated one, and it may stream. The translation depends only on the privilege, satp and the TLB
+ * contents (no SUM or MXR for an execute), and every change of those comes with a redirect marked i_redirect_ctx,
+ * an SFENCE.VMA or a debugger's write while halted, which clear the page (the last two through i_xl_flush). A fault
+ * is never kept. Like any TLB entry, the page may be used until SFENCE.VMA.
  */
 module qv_fetch #(
-    parameter logic [63:0] RESET_PC = 64'h0,
-    parameter int          FB_DEPTH = 2,
-    parameter bit          STREAM   = 1'b0,
-    parameter bit          BTB_EN   = 1'b0
+    parameter logic [63:0] RESET_PC   = 64'h0,
+    parameter int          FB_DEPTH   = 2,
+    parameter bit          STREAM     = 1'b0,
+    parameter bit          BTB_EN     = 1'b0,
+    parameter bit          PAGE_REUSE = 1'b0
 ) (
     input  logic        clk,
     input  logic        rst,
@@ -112,6 +121,8 @@ module qv_fetch #(
     input  logic        i_xl_pf    = 1'b0,
     input  logic        i_xl_af    = 1'b0,
     input  logic [43:0] i_xl_ppn   = 44'b0,
+    // (PAGE_REUSE) forget the last translated page: an SFENCE.VMA, or debug mode (a debugger may rewrite satp)
+    input  logic        i_xl_flush = 1'b0,
 
     output logic        o_buf_valid,
     output logic [63:0] o_buf_pc,
@@ -189,18 +200,29 @@ module qv_fetch #(
 
     assign o_idle = !bus;
 
+    // ---------------- the last translated page (PAGE_REUSE): see the header ----------------
+    logic        lp_valid_q;
+    logic [51:0] lp_vpn_q;
+    logic [43:0] lp_ppn_q;
+    // (written out, not a function: Icarus does not re-evaluate a function in a continuous assignment when a module
+    // variable it reads changes)
+
     // the next request goes out in this very cycle (STREAM): see the header. It is the registered one's successor,
-    // so it needs no translation, no redirect and no hold, and room in the buffer for its answer.
-    wire stream_go = STREAM && can_issue && bus_resp && !i_redirect_valid && !i_xl_on && !i_yield;
+    // so it needs no translation (none at all, or its page kept), no redirect and no hold, and room in the buffer
+    // for its answer.
+    wire stream_reuse = PAGE_REUSE && i_xl_on && lp_valid_q && (fpc_q[63:12] == lp_vpn_q);
+    wire stream_go = STREAM && can_issue && bus_resp && !i_redirect_valid && (!i_xl_on || stream_reuse) && !i_yield;
 
     assign wb_fetch_cyc_o  = bus && (!(wb_fetch_ack_i || wb_fetch_err_i) || stream_go);
     assign wb_fetch_stb_o  = wb_fetch_cyc_o;
     // the bus carries PA[31:0]: the physical page's low 20 bits, then the offset within the page
-    assign wb_fetch_addr_o = stream_go  ? {fpc_q[31:3], 3'b000}
+    assign wb_fetch_addr_o = stream_go  ? (stream_reuse ? {lp_ppn_q[19:0], fpc_q[11:3], 3'b000} : {fpc_q[31:3], 3'b000})
                            : req_isxl_q ? {req_pa_q[19:0], req_pc_q[11:3], 3'b000}
                                         : {req_pc_q[31:3], 3'b000};
 
     wire [63:0] issue_pc    = i_redirect_valid ? i_redirect_pc : fpc_q;
+    // a translated request whose page is kept: no translation phase
+    wire        issue_reuse = PAGE_REUSE && i_xl_on && lp_valid_q && (issue_pc[63:12] == lp_vpn_q);
 
     // the BTB's word on the request being issued: the next one is the branch's target
     assign o_btb_pc = issue_pc;
@@ -224,6 +246,9 @@ module qv_fetch #(
             req_hoff_q  <= 2'b0;
             req_hx_q    <= 1'b0;
             req_htgt_q  <= '0;
+            lp_valid_q  <= 1'b0;
+            lp_vpn_q    <= '0;
+            lp_ppn_q    <= '0;
             fpc_q       <= RESET_PC;
             fb_rd_q     <= '0;
             fb_wr_q     <= '0;
@@ -233,9 +258,10 @@ module qv_fetch #(
                 req_valid_q <= 1'b1;
                 req_pc_q    <= issue_pc;
                 req_stale_q <= 1'b0;
-                req_xl_q    <= i_xl_on;
+                req_xl_q    <= i_xl_on && !issue_reuse;
                 req_flt_q   <= 1'b0;
                 req_isxl_q  <= i_xl_on;
+                if (issue_reuse) req_pa_q <= lp_ppn_q;
                 req_hint_q  <= hint;
                 req_hoff_q  <= i_btb_off;
                 req_hx_q    <= i_btb_x;
@@ -256,9 +282,16 @@ module qv_fetch #(
                     end else if (!i_hold) begin             // a held fetch starts no bus beat
                         req_xl_q  <= 1'b0;
                         req_pa_q  <= i_xl_ppn;
+                        if (PAGE_REUSE) begin
+                            lp_valid_q <= 1'b1;
+                            lp_vpn_q   <= req_pc_q[63:12];
+                            lp_ppn_q   <= i_xl_ppn;
+                        end
                     end
                 end
             end
+            // the context the page was found in ends (this beats a fill in the same cycle)
+            if (i_xl_flush || (i_redirect_valid && i_redirect_ctx)) lp_valid_q <= 1'b0;
 
             if (i_redirect_valid) begin
                 fb_rd_q <= '0;
