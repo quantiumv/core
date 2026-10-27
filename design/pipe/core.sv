@@ -140,6 +140,12 @@
 `define QV_PIPE_FETCH_PAGE_REUSE 1
 `endif
 
+// The data side looks its translation up before the op is the head, so a TLB hit costs no cycle at the head (P10b).
+// 0: looked up at the head only.
+`ifndef QV_PIPE_DTLB_PROBE
+`define QV_PIPE_DTLB_PROBE 1
+`endif
+
 // QV_FORMAL_NO_SV39: no translation at all (no walker, no TLB): the Bare paths only. The riscv-formal sweep that
 // pins satp to Bare uses it, so its models do not grow by the TLBs and the walker.
 `ifdef QV_FORMAL_NO_SV39
@@ -163,6 +169,7 @@ module core
     parameter bit SV39_EN   = `QV_PIPE_SV39_EN,     // address translation present
     parameter int TLB_ENTRIES = `QV_PIPE_TLB_ENTRIES, // entries in each of the two TLBs
     parameter bit FETCH_PAGE_REUSE = `QV_PIPE_FETCH_PAGE_REUSE,   // a translated request reuses the last page
+    parameter bit DTLB_PROBE = `QV_PIPE_DTLB_PROBE,   // the data side looks up its translation before the head
     parameter int SB_DEPTH  = `QV_PIPE_SB_DEPTH,     // store buffer entries, 0: none
     parameter logic [63:0] PMA_RAM_BASE = `QV_PIPE_PMA_RAM_BASE,   // physical window of RAM: stores into it are posted
     parameter logic [63:0] PMA_RAM_SIZE = `QV_PIPE_PMA_RAM_SIZE
@@ -605,10 +612,12 @@ module core
     logic [63:0] x_va;
     logic [1:0]  x_priv;
     logic [43:0] x_ppn;
+    logic        x_nowalk;                   // the LSU's request is a lookup only (before the head)
 
     // No bypass from the LSU's writeback: a dependent reads the ROB the next cycle, which
     // keeps wb_mem_dat_i out of issue's combinational paths.
-    qv_lsu #(.SB_EN(SB_DEPTH > 0), .PMA_RAM_BASE(PMA_RAM_BASE), .PMA_RAM_SIZE(PMA_RAM_SIZE)) lsu0 (
+    qv_lsu #(.SB_EN(SB_DEPTH > 0), .PMA_RAM_BASE(PMA_RAM_BASE), .PMA_RAM_SIZE(PMA_RAM_SIZE),
+             .PROBE(SV39_EN && DTLB_PROBE)) lsu0 (
         .clk(clk), .rst(rst), .i_flush(flush),
         .i_req(lsu_req), .o_free(lsu_free),
         .i_head_valid(head_valid), .i_head_tag(head_tag),
@@ -624,7 +633,7 @@ module core
         .o_head_started(lsu_head_started),
         .i_satp_on(satp_on),
         .o_xl_req(x_req), .o_xl_va(x_va), .o_xl_wr(x_wr), .o_xl_active(x_active), .o_xl_priv(x_priv),
-        .o_xl_cancel(x_cancel),
+        .o_xl_cancel(x_cancel), .o_xl_nowalk(x_nowalk),
         .i_xl_done(x_done), .i_xl_pf(x_pf), .i_xl_af(x_af), .i_xl_ppn(x_ppn),
         .i_ptw_beat(ptw_beat), .o_bus_busy(lsu_bus_busy),
         .i_sb_empty(sb_empty), .i_sb_match(sb_match), .i_sb_beat(sb_beat), .i_sb_go(sb_go_idle), .i_fetch_start(fetch_start_q),
@@ -689,6 +698,7 @@ module core
                 .clk(clk), .rst(rst),
                 .i_req(x_req), .i_va(x_va), .i_is_mem(1'b1), .i_wr(x_wr), .i_active(x_active), .i_priv(x_priv),
                 .i_sum(mstatus_sum_w), .i_mxr(mstatus_mxr_w), .i_cancel(x_cancel), .i_flush_tlb(c_sfence),
+                .i_nowalk(x_nowalk),
                 .o_done(x_done), .o_pf(x_pf), .o_af(x_af), .o_ppn(x_ppn),
                 .o_w_req(w_d_req), .o_w_cancel(w_d_cancel),
                 .i_w_done(w_d_done), .i_w_ok(w_ok), .i_w_pf(w_pf), .i_w_af(w_af), .i_w_vpn(w_vpn),

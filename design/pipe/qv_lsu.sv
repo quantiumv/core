@@ -83,6 +83,12 @@
  * address; the bus, the PMP and RVFI's memory address use the physical one. A flush while the
  * translation is pending cancels it (cannot happen in the real core: flushes only come in the cycle
  * after a retirement, when nothing waits, but the formal harness drives it freely).
+ * PROBE (P10b): before the op is the head, its translation is looked up already (o_xl_nowalk: the TLB only,
+ * never a walk). A hit without a fault is taken into pa_q at once, so the access can start in its first head
+ * cycle; a miss or a hit that faults leaves everything to the head, which looks up again (and walks). An SC is
+ * not looked up early (its reservation is the head's to judge). The answer stays right until the head: every
+ * change of the privilege, MPRV, SUM, MXR or satp, and every SFENCE.VMA, flushes the op first, and only the
+ * head's own walk fills this TLB (one op at a time).
  * The walker shares the memory port: i_ptw_beat (a PTE read of its in flight) keeps the LSU off the
  * bus, and o_bus_busy (an access started, or ready to start this cycle) keeps the walker off it.
  *
@@ -103,7 +109,8 @@
 module qv_lsu #(
     parameter bit          SB_EN        = 1'b0,
     parameter logic [63:0] PMA_RAM_BASE = 64'h0,
-    parameter logic [63:0] PMA_RAM_SIZE = 64'h0      // 0: nothing is RAM, nothing is posted
+    parameter logic [63:0] PMA_RAM_SIZE = 64'h0,     // 0: nothing is RAM, nothing is posted
+    parameter bit          PROBE        = 1'b0       // the translation is looked up before the head (P10b)
 ) (
     input  logic                             clk,
     input  logic                             rst,
@@ -161,6 +168,7 @@ module qv_lsu #(
     output logic                             o_xl_active,
     output logic [1:0]                       o_xl_priv,
     output logic                             o_xl_cancel,
+    output logic                             o_xl_nowalk,          // the request is a lookup only (before the head)
     input  logic                             i_xl_done = 1'b0,
     input  logic                             i_xl_pf = 1'b0,
     input  logic                             i_xl_af = 1'b0,
@@ -231,9 +239,12 @@ module qv_lsu #(
     wire [63:0] pa       = xl_on ? pa_q : addr_q;
 
     wire x_req   = at_head && xl_on && !misaligned_q && !sc_fail && !xlated_q;
+    // (PROBE) the same request before the head: a lookup only, and only its clean hit is taken
+    wire x_probe = PROBE && (state_q == S_WAIT_HEAD) && !at_head && !i_flush && xl_on && !misaligned_q && !sc_q && !xlated_q;
     wire x_fault = x_req && i_xl_done && (i_xl_pf || i_xl_af);
-    wire x_ok    = x_req && i_xl_done && !i_xl_pf && !i_xl_af;
-    assign o_xl_req    = x_req;
+    wire x_ok    = (x_req || x_probe) && i_xl_done && !i_xl_pf && !i_xl_af;
+    assign o_xl_req    = x_req || x_probe;
+    assign o_xl_nowalk = !x_req;
     assign o_xl_va     = addr_q;
     assign o_xl_wr     = kind_wr;           // a store, SC or AMO needs W and D; a load or LR does not
     assign o_xl_active = xl_on;

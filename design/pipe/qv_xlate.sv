@@ -22,6 +22,9 @@
  *     and the held request then hits; a fault (page fault, or an access
  *     fault: PTE read denied by the PMP or a bus error) is remembered until
  *     the request goes away, and is never cached
+ * i_nowalk makes the request a lookup only: a hit answers as above, a miss is
+ * left unanswered and the walker is not asked (the request may go on, without
+ * i_nowalk, and walk then).
  * i_cancel kills the request and the walk and clears a remembered fault;
  * i_flush_tlb (SFENCE.VMA) empties the TLB and does the same. Both beat a
  * fill that would land in the same cycle, so a walk that was cancelled, or
@@ -44,6 +47,8 @@ module qv_xlate #(
     input  logic        i_mxr,
     input  logic        i_cancel,
     input  logic        i_flush_tlb,
+    // a lookup only (the data side before the head): a miss asks the walker nothing and stays unanswered
+    input  logic        i_nowalk = 1'b0,
 
     // the answer
     output logic        o_done,
@@ -134,6 +139,6 @@ module qv_xlate #(
     end
 
     // ask the walker only while there is nothing to answer yet; its done pulse ends the ask
-    assign o_w_req    = i_req && i_active && !flt_q && !t_hit && !i_w_done;
+    assign o_w_req    = i_req && i_active && !flt_q && !t_hit && !i_w_done && !i_nowalk;
     assign o_w_cancel = i_cancel || i_flush_tlb;
 endmodule
