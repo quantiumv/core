@@ -3,13 +3,16 @@
 # track plan). Run under WSL bash:
 #   wsl bash -lc "verification/perf/run_perf.sh"
 #
-# Builds all seven kernels (verification/perf/Makefile), builds the two
+# Builds all the kernels (verification/perf/Makefile), builds the two
 # perf_tb.sv configurations ONCE (CACHE_CFG=0/1 -- the testbench itself
 # doesn't change per kernel, only +HEXFILE/+PERF_RESULT_ADDR do), runs
 # every kernel against both, and writes baseline_<core>.csv (config
 # "sram": the plain SRAM harness; "cache": the real SoC with caches).
 # --core pipe (default) is the pipelined core (design/pipe/core.sv),
 # --core ref the frozen multi-cycle reference (verification/reference/).
+# --mode s is the S-mode build (P10.0): the same kernels entered by crt0_s.s,
+# in S under a 4 KiB Sv39 identity map; their numbers are perf_stack's window
+# (perf_tb.sv SMODE), written to baseline_<core>_s.csv. Pipelined core only.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -24,12 +27,14 @@ FORCE=0
 ORACLE=""
 DEFINES=""
 LABEL=""
+MODE=m
 
 usage() {
     cat <<EOF
 Usage: run_perf.sh [options]
 
   --core pipe|ref     which core (default pipe)
+  --mode m|s          the kernels in M (default), or in S under Sv39 (baseline_<core>_s.csv; pipe only)
   --outdir DIR        results directory (default verification/perf/.results)
   --force             rebuild kernels/testbenches even if cached
   --oracle store      the cache configuration only, with the ideal-store D$ (oracle_dcache.sv): an upper bound for a store buffer;
@@ -45,6 +50,7 @@ EOF
 while [ $# -gt 0 ]; do
     case "$1" in
         --core) CORE="$2"; shift 2 ;;
+        --mode) MODE="$2"; shift 2 ;;
         --outdir) OUTDIR="$2"; shift 2 ;;
         --force) FORCE=1; shift ;;
         --oracle) ORACLE="$2"; shift 2 ;;
@@ -61,12 +67,21 @@ mkdir -p "$OUTDIR"
 
 KERNELS="memcpy crc32 qsort matmul sieve listchase mixedint"
 
+case "$MODE" in
+    m) SFX=""; MAKE_TARGET=all; SMODE=0 ;;
+    s) SFX="_s"; MAKE_TARGET=all_s; SMODE=1
+       if [ "$CORE" != "pipe" ] || [ -n "$ORACLE" ]; then
+           echo "--mode s needs --core pipe and no --oracle (its result is the pipelined core's CPI monitor)" >&2; exit 1
+       fi ;;
+    *) echo "Unknown --mode: $MODE (expected m or s)" >&2; exit 1 ;;
+esac
+
 # ---------------- build kernels ----------------
 echo "=== building kernels ==="
 if [ "$FORCE" == "1" ]; then
     (cd verification/perf && make clean > /dev/null 2>&1)
 fi
-(cd verification/perf && make all > "$OUTDIR/kernel_build.log" 2>&1)
+(cd verification/perf && make $MAKE_TARGET > "$OUTDIR/kernel_build.log" 2>&1)
 if [ $? -ne 0 ]; then
     echo "KERNEL BUILD FAILED -- see $OUTDIR/kernel_build.log" >&2
     tail -40 "$OUTDIR/kernel_build.log" >&2
@@ -81,7 +96,7 @@ case "$CORE" in
     *) echo "Unknown --core: $CORE (expected pipe or ref; the FSM core is ref)" >&2; exit 1 ;;
 esac
 DESIGN_FILES=$(grep -vE '^\s*(#|$)' "verification/regress/$DESIGN_LIST" | tr '\n' ' ')
-TAG="$CORE"
+TAG="${CORE}${SFX}"
 if [ "$ORACLE" == "store" ]; then
     ORACLE_DCACHE=verification/perf/oracle_dcache.sv
     DESIGN_FILES="${DESIGN_FILES/design\/dcache.sv/$ORACLE_DCACHE}"
@@ -102,7 +117,7 @@ build_tb() {
     fi
     echo "=== building $vvp ==="
     iverilog -g2012 $CORE_DEFINE $DEF_FLAGS -I design -I design/defaults -I testbench -I verification/perf $CORE_INC \
-        -Pperf_tb.CACHE_CFG=$cfg \
+        -Pperf_tb.CACHE_CFG=$cfg -Pperf_tb.SMODE=$SMODE \
         -o "$vvp" \
         $DESIGN_FILES $HARNESS_FILES $PERF_FILES > "$log" 2>&1
     # iverilog's own well-known "sorry: constant selects..." notes (see
@@ -121,15 +136,17 @@ if [ -z "$ORACLE" ]; then build_tb 0 "$OUTDIR/perf_tb_${TAG}_sram.vvp" "$OUTDIR/
 build_tb 1 "$OUTDIR/perf_tb_${TAG}_cache.vvp" "$OUTDIR/build_${TAG}_cache.log"
 
 # ---------------- run every kernel against both configs ----------------
-CSV="$SCRIPT_DIR/baseline_${CORE}${LABEL:+_$LABEL}.csv"
+CSV="$SCRIPT_DIR/baseline_${CORE}${SFX}${LABEL:+_$LABEL}.csv"
 if [ -n "$ORACLE" ]; then CSV="$SCRIPT_DIR/oracle_${ORACLE}_${CORE}${LABEL:+_$LABEL}.csv"; fi
 echo "kernel,config,cycles,instret,cpi" > "$CSV"
 
 # The CPI stack of the pipelined core (perf_stack.sv): where the window's cycles go, and the side counters. The
 # columns are the keys of the PERF_STACK and PERF_SIDE lines, in this order.
-STACK_CSV="$SCRIPT_DIR/baseline_${CORE}${LABEL:+_$LABEL}_stack.csv"
+STACK_CSV="$SCRIPT_DIR/baseline_${CORE}${SFX}${LABEL:+_$LABEL}_stack.csv"
 STACK_KEYS="window retire blk_lsu blk_div blk_alu blk_sys ear_align ear_mispred ear_serial ear_other empty_front"
 SIDE_KEYS="iq_empty fb_empty no_uop is_rob is_oper is_lsu is_div re_align re_mispred re_serial re_other mp_cond mp_jal mp_jalr mp_wait bus_wait"
+SIDE_KEYS="$SIDE_KEYS xl_req xl_reuse xl_cyc dx_n dx_hit dx_save re_ser_ro re_ser_trapw re_ser_csr re_ser_sys"
+SIDE_KEYS="$SIDE_KEYS ear_ser_ro ear_ser_trapw ear_ser_csr ear_ser_sys"
 if [ "$CORE" == "pipe" ] && [ -z "$ORACLE" ]; then
     echo "kernel,config,$(echo $STACK_KEYS $SIDE_KEYS | tr ' ' ',')" > "$STACK_CSV"
 fi
@@ -139,8 +156,8 @@ kv() { echo "$1" | grep -oE "(^| )$2=[0-9]+" | grep -oE '[0-9]+$'; }
 
 run_one() {
     local kernel="$1" cfg_name="$2" vvp="$3"
-    local hex="verification/perf/${kernel}.hex"
-    local elf="verification/perf/${kernel}.elf"
+    local hex="verification/perf/${kernel}${SFX}.hex"
+    local elf="verification/perf/${kernel}${SFX}.elf"
     local addr
     addr=$(riscv64-unknown-elf-nm "$elf" 2>/dev/null | awk '$3 == "_perf_result" { print $1 }')
     if [ -z "$addr" ]; then

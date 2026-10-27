@@ -1,4 +1,4 @@
-# P3.5 CPI-baseline kernels. All seven share one crt0.o/link.ld and one
+# P3.5 CPI-baseline kernels. All of them share one crt0.o/link.ld and one
 # flag set, unlike firmware/Makefile's per-target flags -- a pattern
 # rule covers all of them instead of repeating the same four commands
 # seven times.
@@ -24,11 +24,24 @@ KERNELS = memcpy crc32 qsort matmul sieve listchase mixedint
 
 all: $(addsuffix .hex,$(KERNELS))
 
+# the S-mode build (P10.0): the same kernels under Sv39, entered by crt0_s.s; <kernel>_s.*
+all_s: $(addsuffix _s.hex,$(KERNELS))
+
 crt0.o: crt0.s
 	riscv64-unknown-elf-as $(ASFLAGS) crt0.s -o crt0.o
 
+crt0_s.o: crt0_s.s
+	riscv64-unknown-elf-as $(ASFLAGS) crt0_s.s -o crt0_s.o
+
+%_s.o: %.c perf.h
+	riscv64-unknown-elf-gcc $(CFLAGS) -DPERF_SMODE -c $< -o $@
+
 %.o: %.c perf.h
 	riscv64-unknown-elf-gcc $(CFLAGS) -c $< -o $@
+
+%_s.elf: crt0_s.o %_s.o
+	riscv64-unknown-elf-gcc $(CFLAGS) -T link_s.ld -Wl,--no-warn-rwx-segments -o $@ crt0_s.o $*_s.o -lgcc
+	riscv64-unknown-elf-objdump -d $@ > $*_s.lst
 
 %.elf: crt0.o %.o
 	riscv64-unknown-elf-gcc $(CFLAGS) -T link.ld -Wl,--no-warn-rwx-segments -o $@ crt0.o $*.o -lgcc
@@ -44,6 +57,6 @@ clean:
 # the command line ever names them directly) and deletes them right
 # after building %.hex -- but run_perf.sh needs each kernel's .elf
 # around afterward, to resolve _perf_result's real address via `nm`.
-.PRECIOUS: %.elf %.o
+.PRECIOUS: %.elf %.o %_s.elf %_s.o
 
-.PHONY: all clean
+.PHONY: all all_s clean

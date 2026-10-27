@@ -4,6 +4,8 @@
     check_cpi.py                      working-tree baseline_pipe.csv against git HEAD's
     check_cpi.py --old A --new B      two files (--configs cache: only that configuration, e.g. for an oracle run)
     check_cpi.py --allow qsort,sieve  kernels whose cycles may rise (a per-kernel override)
+    check_cpi.py --core pipe_s --same-instret verification/perf/baseline_pipe.csv
+                                      the S-mode build: every kernel must also retire what it retires in M
 
 For every kernel and configuration it prints the old and new cycles, the change, and
 the new CPI. The exit status is 1 when
@@ -43,6 +45,7 @@ def main():
     ap.add_argument("--configs", default="", help="compare only these configurations (comma-separated; default all)")
     ap.add_argument("--gate", choices=["cache", "both"], default="cache",
                     help="which configurations fail the check when cycles rise (default cache)")
+    ap.add_argument("--same-instret", help="another CSV whose instret every row of the new one must equal")
     args = ap.parse_args()
 
     name = f"baseline_{args.core}.csv"
@@ -85,6 +88,13 @@ def main():
         print(f"{kernel:<10} {cfg:<6} {oc:>8} {nc:>8} {pct:>+7.1f}%  {nc / ni:>6.3f}{flag}")
     for key in sorted(set(new) - set(old)):
         print(f"{key[0]:<10} {key[1]:<6} (new row)")
+    if args.same_instret:
+        other = load(Path(args.same_instret).read_text())
+        for key in sorted(new):
+            if key not in other:
+                bad.append(f"{key[0]} {key[1]}: missing from {args.same_instret}")
+            elif other[key][1] != new[key][1]:
+                bad.append(f"{key[0]} {key[1]}: instret {new[key][1]}, {other[key][1]} in {args.same_instret}")
 
     if bad:
         print("\nFAIL:")

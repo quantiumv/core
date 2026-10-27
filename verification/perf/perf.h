@@ -7,7 +7,26 @@
  * mcycle/minstret via Zicsr, not a port -- csr_file.sv exports both as
  * plain 64-bit CSRs (CSR_ADDR_MCYCLE/CSR_ADDR_MINSTRET), so a kernel
  * reads its own cost exactly the way real RISC-V software would.
+ *
+ * PERF_SMODE (the S-mode build, crt0_s.s): S cannot read either, so the two
+ * reads become window markers for perf_stack.sv, which counts the window
+ * itself: rdcycle reads sscratch (the marker the monitor keys on), rdinstret
+ * reads instret (0xC02: legal from S, unmapped, reads 0), so the kernel retires
+ * the same instructions as in the M build. The values they return mean nothing.
  */
+#ifdef PERF_SMODE
+static inline uint64_t rdcycle(void) {
+    uint64_t x;
+    asm volatile("csrr %0, sscratch" : "=r"(x));
+    return x;
+}
+
+static inline uint64_t rdinstret(void) {
+    uint64_t x;
+    asm volatile("csrr %0, instret" : "=r"(x));
+    return x;
+}
+#else
 static inline uint64_t rdcycle(void) {
     uint64_t x;
     asm volatile("csrr %0, mcycle" : "=r"(x));
@@ -19,6 +38,7 @@ static inline uint64_t rdinstret(void) {
     asm volatile("csrr %0, minstret" : "=r"(x));
     return x;
 }
+#endif
 
 /*
  * link.ld places this (letting the linker pick the real address rather

@@ -16,6 +16,11 @@
  * +TOHOST_ADDR) -- run_perf.sh resolves PERF_RESULT_ADDR per kernel via
  * `nm`, the same way run_lockstep.sh resolves each ACT4 ELF's tohost.
  *
+ * SMODE=1 (the S-mode build, crt0_s.s): the kernel runs in S under Sv39 and
+ *   cannot read mcycle/minstret, so the result is perf_stack's own window
+ *   (cycles and retirements between the two sscratch markers of perf.h);
+ *   the flat-SRAM harness gets 64 KB (link_s.ld). Pipelined core only.
+ *
  * Each generate branch is fully self-contained (readmemh, halt-wait,
  * result readout) rather than referencing a shared `dut` from outside
  * the generate block -- a generate block is its own named scope
@@ -25,8 +30,10 @@
 `include "perf_common.svh"
 
 module perf_tb #(
-    parameter bit CACHE_CFG = 1'b0
+    parameter bit CACHE_CFG = 1'b0,
+    parameter bit SMODE     = 1'b0
 );
+    localparam logic [11:0] WIN_CSR = SMODE ? 12'h140 : 12'hB00;     // the window markers' CSR (perf_stack)
     string       hex_path;
     logic [31:0] perf_result_addr;
     longint      timeout_cycles;
@@ -44,7 +51,7 @@ module perf_tb #(
         if (!CACHE_CFG) begin : g_fsm
             logic halted = 1'b0;
 
-            core_wb4_sram_harness #(.NUM_WORDS(4096)) dut (
+            core_wb4_sram_harness #(.NUM_WORDS(SMODE ? 8192 : 4096)) dut (
                 .clk(clk), .rst(rst)
             );
 
@@ -67,8 +74,7 @@ module perf_tb #(
                 rst = 1'b0;
 
                 wait_halted_or_timeout(timeout_cycles, "kernel never reached EBREAK (fsm)");
-                `PERF_REPORT(dut.sram0.memory, perf_result_addr)
-                `PERF_STACK_REPORT(stack, dut.sram0.memory, perf_result_addr)
+                `PERF_RESULT_AND_STACK(stack, dut.sram0.memory, perf_result_addr)
                 $finish;
             end
         end else begin : g_cache
@@ -94,8 +100,7 @@ module perf_tb #(
                 rst = 1'b0;
 
                 wait_halted_or_timeout(timeout_cycles, "kernel never reached EBREAK (cache)");
-                `PERF_REPORT(dut.sram0.memory, perf_result_addr)
-                `PERF_STACK_REPORT(stack, dut.sram0.memory, perf_result_addr)
+                `PERF_RESULT_AND_STACK(stack, dut.sram0.memory, perf_result_addr)
                 $finish;
             end
         end
