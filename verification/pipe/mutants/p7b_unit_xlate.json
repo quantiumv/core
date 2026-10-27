@@ -98,23 +98,23 @@
   },
   {
    "name": "the walker is asked although translation is off",
-   "old": "assign o_w_req    = i_req && i_active && !flt_q && !t_hit && !i_w_done;",
-   "new": "assign o_w_req    = i_req && !flt_q && !t_hit && !i_w_done;"
+   "old": "assign o_w_req    = i_req && i_active && !flt_q && !t_hit && !i_w_done && !i_nowalk;",
+   "new": "assign o_w_req    = i_req && !flt_q && !t_hit && !i_w_done && !i_nowalk;"
   },
   {
    "name": "the walker is asked again while a fault is held",
-   "old": "assign o_w_req    = i_req && i_active && !flt_q && !t_hit && !i_w_done;",
-   "new": "assign o_w_req    = i_req && i_active && !t_hit && !i_w_done;"
+   "old": "assign o_w_req    = i_req && i_active && !flt_q && !t_hit && !i_w_done && !i_nowalk;",
+   "new": "assign o_w_req    = i_req && i_active && !t_hit && !i_w_done && !i_nowalk;"
   },
   {
    "name": "the walker is asked although the TLB hits",
-   "old": "assign o_w_req    = i_req && i_active && !flt_q && !t_hit && !i_w_done;",
-   "new": "assign o_w_req    = i_req && i_active && !flt_q && !i_w_done;"
+   "old": "assign o_w_req    = i_req && i_active && !flt_q && !t_hit && !i_w_done && !i_nowalk;",
+   "new": "assign o_w_req    = i_req && i_active && !flt_q && !i_w_done && !i_nowalk;"
   },
   {
    "name": "the walker is asked again in its done cycle (unobservable: the walker itself does not accept a client in the cycle of its done pulse)",
-   "old": "assign o_w_req    = i_req && i_active && !flt_q && !t_hit && !i_w_done;",
-   "new": "assign o_w_req    = i_req && i_active && !flt_q && !t_hit;",
+   "old": "assign o_w_req    = i_req && i_active && !flt_q && !t_hit && !i_w_done && !i_nowalk;",
+   "new": "assign o_w_req    = i_req && i_active && !flt_q && !t_hit && !i_nowalk;",
    "equivalent": true
   },
   {

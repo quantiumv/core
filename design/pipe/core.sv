@@ -1029,6 +1029,28 @@ module core
     always @* if (!rst && fetch0.can_issue && fetch0.issue_reuse)
         assert (g_lp_valid && satp_w == g_lp_satp && priv == g_lp_priv);
 
+    // The data side's translation, once taken (P10b: possibly before the op is the head), stays right while the op
+    // waits: from the cycle pa_q is taken until the op leaves WAIT_HEAD, satp, the effective privilege, SUM and MXR do
+    // not change and no SFENCE.VMA retires -- every change of them flushes the op first.
+    reg        g_px_valid = 1'b0;
+    reg [63:0] g_px_satp = '0;
+    reg [1:0]  g_px_priv = '0;
+    reg        g_px_sum = 1'b0, g_px_mxr = 1'b0;
+    always @(posedge clk) begin
+        if (rst || flush || lsu0.state_q != 2'd1)
+            g_px_valid <= 1'b0;
+        else if (lsu0.x_ok) begin
+            g_px_valid <= 1'b1;
+            g_px_satp  <= satp_w;
+            g_px_priv  <= x_priv;
+            g_px_sum   <= mstatus_sum_w;
+            g_px_mxr   <= mstatus_mxr_w;
+        end
+    end
+    always @* if (!rst && !flush && g_px_valid && lsu0.state_q == 2'd1 && lsu0.xlated_q)
+        assert (satp_w == g_px_satp && x_priv == g_px_priv && mstatus_sum_w == g_px_sum && mstatus_mxr_w == g_px_mxr
+                && !c_sfence);
+
     assign rvfi_any_debug_entry    = debug_ebreak_entry || debug_halt_req_entry || trigger_debug_entry
                                      || dm_access_active;
 `endif
