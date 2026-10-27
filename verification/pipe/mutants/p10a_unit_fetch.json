@@ -26,7 +26,9 @@
   {
    "name": "reuse with translation off",
    "old": "wire        issue_reuse = PAGE_REUSE && i_xl_on && lp_valid_q && (issue_pc[63:12] == lp_vpn_q);",
-   "new": "wire        issue_reuse = PAGE_REUSE && lp_valid_q && (issue_pc[63:12] == lp_vpn_q);"
+   "new": "wire        issue_reuse = PAGE_REUSE && lp_valid_q && (issue_pc[63:12] == lp_vpn_q);",
+   "equivalent": true,
+   "note": "with translation off the request's req_isxl_q still follows i_xl_on, so a 'reuse' only writes req_pa_q, which an untranslated request never reads (the i_xl_on term is redundant)"
   },
   {
    "name": "reuse of a page that is not kept",
