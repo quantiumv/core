@@ -19,7 +19,10 @@
  *   - a walk whose client cancelled it at any time since it was accepted never
  *     reports a result (nothing may be filled behind a cancel);
  *   - a result that came from reading a PTE needs a response to a beat of the
- *     walker's own (a stray ack or err is ignored).
+ *     walker's own (a stray ack or err is ignored);
+ *   - (P10d, a RAM window [0, 256 MB) set, i_f_nonspec free) a beat of client F
+ *     to a PTE outside the window starts only after a cycle with i_f_nonspec high,
+ *     and an F walk waiting for it gives the walker up at once when D asks.
  */
 module ptw_props (
     input logic        clk,
@@ -35,7 +38,8 @@ module ptw_props (
     input logic        f_req, f_cancel,
     input logic [63:0] f_va,
     input logic [1:0]  f_priv,
-    input logic [43:0] f_root
+    input logic [43:0] f_root,
+    input logic        f_nonspec
 );
     logic [31:0] addr;
     logic        cyc, beat, d_done, f_done;
@@ -44,7 +48,7 @@ module ptw_props (
     logic [1:0]  res_level;
     logic [43:0] res_ppn;
 
-    qv_ptw dut (
+    qv_ptw #(.PMA_RAM_BASE(64'h0), .PMA_RAM_SIZE(64'h1000_0000)) dut (
         .clk(clk), .rst(rst),
         .o_bus_addr(addr), .o_bus_cyc(cyc), .i_bus_dat(dat), .i_bus_ack(ack), .i_bus_err(err),
         .i_lsu_busy(lsu_busy), .o_beat(beat),
@@ -52,6 +56,7 @@ module ptw_props (
         .i_d_req(d_req), .i_d_va(d_va), .i_d_wr(d_wr), .i_d_priv(d_priv), .i_d_sum(d_sum), .i_d_mxr(d_mxr),
         .i_d_root(d_root), .i_d_cancel(d_cancel), .o_d_done(d_done),
         .i_f_req(f_req), .i_f_va(f_va), .i_f_priv(f_priv), .i_f_root(f_root), .i_f_cancel(f_cancel), .o_f_done(f_done),
+        .i_f_nonspec(f_nonspec),
         .o_res_ok(res_ok), .o_res_pf(res_pf), .o_res_af(res_af), .o_res_vpn(res_vpn), .o_res_level(res_level),
         .o_res_ppn(res_ppn), .o_res_r(res_r), .o_res_w(res_w), .o_res_x(res_x), .o_res_u(res_u), .o_res_d(res_d)
     );
@@ -63,6 +68,7 @@ module ptw_props (
     reg [2:0]  nbeats = 3'd0;         // PTE reads started by the walk in progress
     reg        canc = 1'b0;           // the serving client cancelled since the walk was accepted
     reg        resp_seen = 1'b0;      // a response to a beat of this walk arrived
+    reg        p_in_ram = 1'b1, p_nonspec = 1'b1, p_giveup = 1'b0;
     wire       accept = dut.accept_d || dut.accept_f;
     wire       brise  = beat && !p_beat;      // a beat starts (in the first cycle o_beat is up)
     always @(posedge clk) begin
@@ -74,6 +80,10 @@ module ptw_props (
         p_addr  <= addr;
         p_busy  <= lsu_busy;
         p_ok    <= dut.pmp_r_ok;
+        p_in_ram  <= dut.pte_in_ram;
+        p_nonspec <= f_nonspec;
+        // F waits in W_GO for the real path and D asks: the walker is to give F up at this edge
+        p_giveup  <= !rst && dut.st_q == 2'd1 && !dut.stale_eff && !dut.pmp_deny && dut.f_wait && dut.d_can;
         if (rst) begin
             nbeats    <= 3'd0;
             canc      <= 1'b0;
@@ -105,7 +115,11 @@ module ptw_props (
             if (brise) begin
                 assert (!p_busy);
                 assert (p_ok);
+                // ... and an F read outside the RAM window only on the architectural path
+                if (dut.cl_q) assert (p_in_ram || p_nonspec);
             end
+            // a waiting F walk gives the walker up as soon as D asks
+            if (p_giveup) assert (dut.st_q == 2'd0);
         end
         if (!rst) begin
             assert (!(cyc && (ack || err)));     // cyc is low in the response cycle
@@ -128,6 +142,9 @@ module ptw_props (
             cover (dut.rep_any && dut.rep_af);            // an access fault
             cover (canc && dut.st_q == 2'd0);             // a cancelled walk wound down
             cover (!p_beat && (ack || err));              // a stray response
+            cover (dut.st_q == 2'd1 && dut.f_wait);       // F waits for the real path
+            cover (p_giveup);                             // ... and gives the walker up to D
+            cover (brise && dut.cl_q && !p_in_ram);       // F reads outside the window, on the real path
         end
     end
 

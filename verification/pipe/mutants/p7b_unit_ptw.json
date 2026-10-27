@@ -96,8 +96,8 @@
   },
   {
    "name": "a beat starts while the LSU is busy",
-   "old": "wire go_beat = (st_q == W_GO) && !i_lsu_busy;",
-   "new": "wire go_beat = (st_q == W_GO);"
+   "old": "wire go_beat = (st_q == W_GO) && !i_lsu_busy && !f_wait;",
+   "new": "wire go_beat = (st_q == W_GO) && !f_wait;"
   },
   {
    "name": "a stale walk in W_GO is not dropped",

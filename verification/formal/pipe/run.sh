@@ -16,7 +16,8 @@
 #   Debug Module owning the ports during a run, a step that is never armed;
 #   for the walker a cancelled walk that reports, a beat that starts while the
 #   LSU is busy or for a denied address, a beat abandoned on a cancel or held
-#   into its response cycle; for the store buffer a drain out of order, a lost byte select, a beat that starts while
+#   into its response cycle, an F read outside the RAM window off the real path, a waiting F that does not give way
+#   to D; for the store buffer a drain out of order, a lost byte select, a beat that starts while
 #   the LSU is on the bus or the walker's beat is in flight, one that ignores the full-buffer rule, a cyc held into
 #   the response cycle, an answer taken that is not the buffer's own, an o_match that sees a dead entry, a beat
 #   with nothing to write, a push into a full buffer, an idle start that follows the response; for fetch a stream through a redirect, a yield or
@@ -111,7 +112,9 @@ EOF
     mutant dbg_access_in_run   dbg 's/assign o_dm_access_active = in_debug_q \&\& !active_q;/assign o_dm_access_active = in_debug_q;/'
     mutant dbg_step_unarmed    dbg 's/else if (o_resume)       stepping_q <= i_dcsr_step;/else if (o_resume)       stepping_q <= 1'"'"'b0;/'
     mutant ptw_cancelled_reports ptw 's/wire stale_eff  = stale_q || cancel_srv;/wire stale_eff  = 1'"'"'b0;/'
-    mutant ptw_ignores_lsu     ptw 's/wire go_beat = (st_q == W_GO) \&\& !i_lsu_busy;/wire go_beat = (st_q == W_GO);/'
+    mutant ptw_ignores_lsu     ptw 's/wire go_beat = (st_q == W_GO) \&\& !i_lsu_busy \&\& !f_wait;/wire go_beat = (st_q == W_GO) \&\& !f_wait;/'
+    mutant ptw_f_ignores_window ptw 's/wire go_beat = (st_q == W_GO) \&\& !i_lsu_busy \&\& !f_wait;/wire go_beat = (st_q == W_GO) \&\& !i_lsu_busy;/'
+    mutant ptw_f_never_gives_up ptw 's/end else if (f_wait \&\& d_can) begin/end else if (1'"'"'b0) begin/'
     mutant ptw_denied_reaches_bus ptw 's/end else if (pmp_deny) begin/end else if (1'"'"'b0) begin/'
     mutant ptw_cyc_in_response ptw 's/assign o_bus_cyc  = beat_q \&\& !(i_bus_ack || i_bus_err);/assign o_bus_cyc  = beat_q;/'
     mutant ptw_abandons_on_cancel ptw 's/assign o_bus_cyc  = beat_q \&\& !(i_bus_ack || i_bus_err);/assign o_bus_cyc  = beat_q \&\& !(i_bus_ack || i_bus_err) \&\& !cancel_srv;/'
