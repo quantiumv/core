@@ -21,26 +21,26 @@ never do.
 (and `make clean` in this directory for the kernels): re-run from clean after any
 RTL change.
 
-## Results (P9, 2026-10)
+## Results (after P10, 2026-10)
 
-CPI (cycles per retired instruction):
+CPI (cycles per retired instruction), M mode:
 
 | Kernel | reference, sram | core, sram | reference, cache | core, cache | core before P9, cache |
 |---|---|---|---|---|---|
-| memcpy | 3.77 | 1.85 | 4.28 | 1.76 | 2.36 |
+| memcpy | 3.77 | 1.84 | 4.28 | 1.74 | 2.36 |
 | crc32 | 3.03 | 1.13 | 3.03 | 1.12 | 1.25 |
 | qsort | 3.55 | 1.91 | 3.73 | 1.86 | 2.46 |
 | matmul | 3.62 | 1.66 | 3.69 | 1.63 | 1.78 |
-| sieve | 3.97 | 1.51 | 4.45 | 1.28 | 2.00 |
-| listchase | 3.80 | 1.80 | 3.90 | 1.91 | 1.91 |
+| sieve | 3.97 | 1.52 | 4.45 | 1.28 | 2.00 |
+| listchase | 3.80 | 1.80 | 3.90 | 1.90 | 1.91 |
 | mixedint | 3.99 | 1.78 | 4.33 | 1.58 | 2.14 |
-| trap (P10.0) | 4.00 | 3.89 | 4.43 | 3.58 | |
+| trap (P10.0) | 4.00 | 2.29 | 4.43 | 2.40 | |
 
-The core is 2 to 3.5 times faster than the reference on every kernel but `trap`, where it is only 1.2 times
-faster on the SoC: every CSR op serializes (a flush and a refill), and the trap path is mostly CSR ops. The
-geometric means below are of the seven older kernels. P9 took the geometric mean of the
-cycles down by 20 % on the SoC (21 % on the flat SRAM). Single issue puts the floor at CPI 1.0; crc32 is
-within 12 % of it.
+The core is 2 to 3.5 times faster than the reference on every kernel, and 1.8 times on `trap` (an OS trap path)
+since P10c stopped CSR reads and trap-CSR writes from flushing the pipeline (it was 3.58 on the SoC at P10.0).
+The geometric means below are of the seven older kernels. P9 took the geometric mean of the
+cycles down by 20 % on the SoC (21 % on the flat SRAM); P10 changes the M-mode kernels by under 1 % (their CSR
+window markers) and is about S mode, below. Single issue puts the floor at CPI 1.0; crc32 is within 12 % of it.
 
 What each P9 step bought, in cycles of each kernel's timed region (each row on top of the one above; the
 change is against that row; `check_cpi.py` compares two CSVs):
@@ -98,11 +98,14 @@ shared-SRAM harness (fetch and data on one bus):
 |---|---|---|---|
 | reference (`ref_core.sv`) | 8400 | 11400 | 1.35 |
 | core before P9 (all knobs off) | 4805 | 5113 | 1.06 |
-| core | 3908 | 5106 | 1.30 |
+| core after P9 | 3908 | 5106 | 1.30 |
+| core (after P10) | 3908 | 3915 | 1.00 |
 
 A translated fetch dword and a translated access each take one more cycle
 (the answer is registered before it is used); the pipeline hides most of it. P9 made the M-mode loop 19 %
 faster and the translated loop as fast as before (0.1 % faster); the ratio went up because the M-mode loop did.
+P10 took the translated loop to the M-mode figure: fetch reuses its translated page (P10a: 5106 to 4216) and the
+data side looks its translation up before the head (P10b: to 3915); the rest of this section is the P9 history.
 
 A translated fetch uses the shared port in two of every three cycles (its translation phase is the gap), so
 on this harness a loop in S-mode is bound by the port, and who wins a tie matters. With the store buffer a store
@@ -128,18 +131,23 @@ they do nothing here. The two rows with the store buffer but without the predict
 beat meets fetch's next request in the same way; giving the drain the same rule did not help the default
 configuration and is not built). The same loop in other shapes (S-mode cycles; M-mode in brackets for the default):
 
-| loop body | before P9 | first P9 results | now |
-|---|---|---|---|
-| load, store (the table above) | 5113 | 5404 | 5106 (3908) |
-| ALU only | 4803 | 4506 | 4506 (2406) |
-| two loads | 5113 | 5113 | 5117 (3909) |
-| two stores | 5703 | 5403 | 5403 (3305) |
-| load, then store of the loaded value | 5113 | 5404 | 5106 (3908) |
-| store, then load of another dword | 5703 | 5703 | 5703 (3460) |
+| loop body | before P9 | first P9 results | after P9 | after P10 |
+|---|---|---|---|---|
+| load, store (the table above) | 5113 | 5404 | 5106 (3908) | 3915 |
+| ALU only | 4803 | 4506 | 4506 (2406) | 2406 |
+| two loads | 5113 | 5113 | 5117 (3909) | 3916 |
+| two stores | 5703 | 5403 | 5403 (3305) | 3314 |
+| load, then store of the loaded value | 5113 | 5404 | 5106 (3908) | 3915 |
+| store, then load of another dword | 5703 | 5703 | 5703 (3460) | 3914 |
 
 No shape is slower than before P9 (the two-load loop by 4 cycles in 5113). The SoC has a private fetch path
-(`FETCH_YIELD` 0), where none of this applies, and none of the seven kernels runs translated. Overlapping the
-instruction-TLB lookup with the previous fetch beat is the other follow-up.
+(`FETCH_YIELD` 0), where none of this applies, and none of the seven kernels runs translated. After P10 every shape
+is within 0.3 % of its M-mode cycles (in brackets), except the last (3914 against 3460): its load reaches the head
+right behind the store, with no cycle to look its translation up before. One knob combination that is not the
+default runs slower than after P9: the lookup before the head without fetch's page reuse (`QV_PIPE_FETCH_PAGE_REUSE=0`)
+gives 5409 cycles for the first shape (not analysed: a diagnostic combination; likely the P9 tie between a load
+and a translated fetch beat on the shared bus, which page reuse removes by taking most fetch requests out of their
+translation phase).
 
 ## S mode under Sv39, and the trap path (P10.0)
 
@@ -194,6 +202,76 @@ and `baseline_pipe_stack.csv`):
 - CSRs (P10c): the seven kernels have only their two window markers. The trap kernel has 4 read-only CSR ops and
   3 trap-CSR writes per trap, and the refill after them is 36 % of its cycles.
 - A full ROB stops issue in at most 39 cycles of any S-mode window (mixedint): growing the ROB is not worth it.
+
+### P10a: translated fetch reuses its page
+
+Fetch keeps the physical page of its last successful translation, and a request in the same virtual page skips
+its translation phase and may stream (`QV_PIPE_FETCH_PAGE_REUSE`, on by default). Cycles in S mode, against
+P10.0, and against the same kernel in M mode:
+
+| kernel | S, cache | with reuse | S/M | S, sram | with reuse | S/M |
+|---|---|---|---|---|---|---|
+| memcpy | 1806 | 1793 (-0.7 %) | 1.55 | 1626 | 1485 (-8.7 %) | 1.22 |
+| crc32 | 14519 | 10059 (-30.7 %) | 1.01 | 14627 | 10147 (-30.6 %) | 1.01 |
+| qsort | 10734 | 9505 (-11.4 %) | 1.11 | 11241 | 9936 (-11.6 %) | 1.13 |
+| matmul | 8332 | 8090 (-2.9 %) | 1.16 | 8684 | 8157 (-6.1 %) | 1.15 |
+| sieve | 9158 | 8995 (-1.8 %) | 1.19 | 11258 | 8998 (-20.1 %) | 1.01 |
+| listchase | 5925 | 5928 (+0.1 %) | 1.21 | 6177 | 5662 (-8.3 %) | 1.22 |
+| mixedint | 10893 | 10415 (-4.4 %) | 1.50 | 10436 | 9236 (-11.5 %) | 1.18 |
+| trap | 22061 | 21260 (-3.6 %) | 1.06 | 23629 | 22831 (-3.4 %) | 1.05 |
+
+The geometric mean of the seven older kernels in S mode falls by 8 % on the SoC and 14 % on the flat SRAM;
+the M-mode CSV is unchanged. crc32, a fetch-bound loop, now runs translated as fast as in M mode. The
+translation-phase cycles of the counters above all but disappear (listchase: 1042 to 2). On the SoC listchase is
+3 cycles slower: fetch now runs ahead translated as it does in M mode, so the refill after the window's first
+CSR marker (a serializing redirect) waits for a fetch already under way (20 cycles of refill instead of 14).
+What is left of the S-mode cost is mostly the data side: a translated access still asks for its translation at
+the head (P10b). On the shared-SRAM harness the Sv39 loop of `core_sv39_cpi_tb` goes from 5106 to 4216 cycles
+(M mode 3908), and every one of its six shapes is faster (the ALU-only one now as fast as in M mode, 2406).
+
+### P10b, P10c, and the round as a whole
+
+P10b: the data side looks its translation up in the TLB while the op waits for the head (a lookup only, never a
+walk; `QV_PIPE_DTLB_PROBE`), so a hit lets the access start in its first head cycle. P10c: CSR ops that cannot
+change what a younger instruction does, the read-only forms and the writes of m/s scratch, epc, cause and tval,
+no longer flush and refetch (`QV_PIPE_CSR_NOSER`); a dependent waits for the op's commit, where its value is
+made. P10d (PTE reads outside RAM wait for the real path) changes no kernel's cycles. Each step on top of the one
+above, S mode:
+
+**cache (the SoC)**
+
+| step | memcpy | crc32 | qsort | matmul | sieve | listchase | mixedint | trap |
+|---|---|---|---|---|---|---|---|---|
+| P10.0 | 1806 | 14519 | 10734 | 8332 | 9158 | 5925 | 10893 | 22061 |
+| + fetch page reuse (P10a) | 1793 (-0.7%) | 10059 (-30.7%) | 9505 (-11.4%) | 8090 (-2.9%) | 8995 (-1.8%) | 5928 (+0.1%) | 10415 (-4.4%) | 21260 (-3.6%) |
+| + TLB lookup before the head (P10b) | 1661 (-7.4%) | 10057 (-0.0%) | 8925 (-6.1%) | 7514 (-7.1%) | 7558 (-16.0%) | 4904 (-17.3%) | 9635 (-7.5%) | 21260 (+0.0%) |
+| + CSR ops without a flush (P10c) | 1645 (-1.0%) | 10041 (-0.2%) | 8908 (-0.2%) | 7492 (-0.3%) | 7541 (-0.2%) | 4882 (-0.4%) | 9619 (-0.2%) | 13846 (-34.9%) |
+| M mode, P10 | 1148 | 9913 | 8566 | 6972 | 7540 | 4883 | 6939 | 13432 |
+| S/M, P10 | 1.43 | 1.01 | 1.04 | 1.07 | 1.00 | 1.00 | 1.39 | 1.03 |
+
+**sram** (core on flat SRAM)
+
+| step | memcpy | crc32 | qsort | matmul | sieve | listchase | mixedint | trap |
+|---|---|---|---|---|---|---|---|---|
+| P10.0 | 1626 | 14627 | 11241 | 8684 | 11258 | 6177 | 10436 | 23629 |
+| + fetch page reuse (P10a) | 1485 (-8.7%) | 10147 (-30.6%) | 9936 (-11.6%) | 8157 (-6.1%) | 8998 (-20.1%) | 5662 (-8.3%) | 9236 (-11.5%) | 22831 (-3.4%) |
+| + TLB lookup before the head (P10b) | 1357 (-8.6%) | 10145 (-0.0%) | 9369 (-5.7%) | 7629 (-6.5%) | 7584 (-15.7%) | 4638 (-18.1%) | 8456 (-8.4%) | 22831 (+0.0%) |
+| + CSR ops without a flush (P10c) | 1340 (-1.3%) | 10129 (-0.2%) | 9353 (-0.2%) | 7613 (-0.2%) | 7567 (-0.2%) | 4622 (-0.3%) | 8440 (-0.2%) | 13015 (-43.0%) |
+| M mode, P10 | 1210 | 10001 | 8799 | 7102 | 8940 | 4626 | 7823 | 12813 |
+| S/M, P10 | 1.11 | 1.01 | 1.06 | 1.07 | 0.85 | 1.00 | 1.08 | 1.02 |
+
+- In S mode the geometric mean of the seven older kernels falls to 0.834 of P10.0 on the SoC and 0.776 on the flat
+  SRAM; five of them now run translated within 7 % of M mode on the SoC. In M mode P10 changes only the CSR
+  markers' refill (0.997 of P10.0) and the trap kernel.
+- What is left in S mode is memcpy and mixedint on the SoC (1.43 and 1.39 of M): their loads and stores come
+  back to back, and the second op of a pair enters the LSU only as the first one retires, at the head at once,
+  with no cycle to look its translation up before. Looking it up in the dispatch cycle itself is the follow-up.
+- The trap kernel's seven CSR ops per trap no longer refill the pipeline: 33 % fewer cycles on the SoC in M mode,
+  41 % on the flat SRAM, 35 to 43 % in S mode. A trap still costs its own redirects (the ecall's trap and the mret).
+- S/M compares two builds as well as two modes: `crt0_s.s` is longer, so every kernel sits at other addresses.
+  sieve's inner loop (`sb` and the closing `bge`, both 32-bit) straddles two dword boundaries in the M build
+  (0x7e-0x89) and none in the S build (0x13c-0x147), which is why on the flat SRAM, where fetch shares the bus, it
+  runs faster in S mode than in M mode (0.85).
 
 ## CPI stack
 
