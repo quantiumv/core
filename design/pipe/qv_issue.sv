@@ -27,10 +27,17 @@
  * Debug knobs: SERIALIZE=1 issues only into an empty ROB (one
  * instruction in flight); BYPASS_EN=0 drops path 3, turning a back-to-
  * back dependence into a one-cycle stall.
+ *
+ * CSR_LATE (P10c): a CSR op's rd value is made at commit (its ROB value and
+ * its writeback are only the ALU's pass of its source), so its claim is
+ * marked late: paths 3 and 4 never apply to it, and a dependent waits until
+ * the claim clears at the commit, then reads regfile0. (Without it, every CSR
+ * op serializes and nothing younger survives to read the claim.)
  */
 module qv_issue #(
     parameter bit SERIALIZE = 1'b0,
-    parameter bit BYPASS_EN = 1'b1
+    parameter bit BYPASS_EN = 1'b1,
+    parameter bit CSR_LATE  = 1'b0
 ) (
     input  logic                             clk,
     input  logic                             rst,
@@ -88,11 +95,14 @@ module qv_issue #(
     // ---------------- producer table ----------------
     logic                    prod_busy_q [0:31];
     logic [QV_ROB_TAG_W-1:0] prod_tag_q  [0:31];
+    logic                    prod_late_q [0:31];     // (CSR_LATE) the producer's value is made at its commit
 
     wire                    p1_busy = prod_busy_q[i_uop.rs1];
     wire [QV_ROB_TAG_W-1:0] p1_tag  = prod_tag_q[i_uop.rs1];
+    wire                    p1_late = prod_late_q[i_uop.rs1];
     wire                    p2_busy = prod_busy_q[i_uop.rs2];
     wire [QV_ROB_TAG_W-1:0] p2_tag  = prod_tag_q[i_uop.rs2];
+    wire                    p2_late = prod_late_q[i_uop.rs2];
 
     assign o_rs1_sel     = i_uop.rs1;
     assign o_rs2_sel     = i_uop.rs2;
@@ -108,6 +118,7 @@ module qv_issue #(
         opa     = i_uop.imm1;
         if (i_uop.rs1_used) begin
             if (!p1_busy)                                          opa = i_rs1_data;
+            else if (p1_late)                                      a_ready = 1'b0;
             else if (BYPASS_EN && i_wb.valid && i_wb.tag == p1_tag) opa = i_wb.value;
             else if (i_lookup1_complete)                           opa = i_lookup1_value;
             else                                                   a_ready = 1'b0;
@@ -117,6 +128,7 @@ module qv_issue #(
         opb     = i_uop.imm2;
         if (i_uop.rs2_used) begin
             if (!p2_busy)                                          opb = i_rs2_data;
+            else if (p2_late)                                      b_ready = 1'b0;
             else if (BYPASS_EN && i_wb.valid && i_wb.tag == p2_tag) opb = i_wb.value;
             else if (i_lookup2_complete)                           opb = i_lookup2_value;
             else                                                   b_ready = 1'b0;
@@ -208,7 +220,7 @@ module qv_issue #(
     // ---------------- producer table update ----------------
     always_ff @(posedge clk) begin
         if (rst || i_flush) begin
-            for (int r = 0; r < 32; r++) prod_busy_q[r] <= 1'b0;
+            for (int r = 0; r < 32; r++) begin prod_busy_q[r] <= 1'b0; prod_late_q[r] <= 1'b0; end
         end else begin
             if (i_commit_valid && i_commit_rd_wen && i_commit_rd != 5'd0
                     && prod_busy_q[i_commit_rd] && prod_tag_q[i_commit_rd] == i_commit_tag)
@@ -216,6 +228,7 @@ module qv_issue #(
             if (o_issue && i_uop.rd_wen && i_uop.rd != 5'd0) begin
                 prod_busy_q[i_uop.rd] <= 1'b1;
                 prod_tag_q[i_uop.rd]  <= i_alloc_tag;
+                prod_late_q[i_uop.rd] <= CSR_LATE && (i_uop.fu == QV_FU_CSR);
             end
         end
     end

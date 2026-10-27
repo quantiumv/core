@@ -140,6 +140,12 @@
 `define QV_PIPE_FETCH_PAGE_REUSE 1
 `endif
 
+// CSR ops that cannot change what a younger instruction does -- the read-only forms, and writes to the trap CSRs
+// (m/s scratch, epc, cause, tval) -- do not serialize (P10c). 0: every CSR op flushes and refetches after it.
+`ifndef QV_PIPE_CSR_NOSER
+`define QV_PIPE_CSR_NOSER 1
+`endif
+
 // The data side looks its translation up before the op is the head, so a TLB hit costs no cycle at the head (P10b).
 // 0: looked up at the head only.
 `ifndef QV_PIPE_DTLB_PROBE
@@ -170,6 +176,7 @@ module core
     parameter int TLB_ENTRIES = `QV_PIPE_TLB_ENTRIES, // entries in each of the two TLBs
     parameter bit FETCH_PAGE_REUSE = `QV_PIPE_FETCH_PAGE_REUSE,   // a translated request reuses the last page
     parameter bit DTLB_PROBE = `QV_PIPE_DTLB_PROBE,   // the data side looks up its translation before the head
+    parameter bit CSR_NOSER  = `QV_PIPE_CSR_NOSER,    // CSR ops that change nothing a younger one sees do not serialize
     parameter int SB_DEPTH  = `QV_PIPE_SB_DEPTH,     // store buffer entries, 0: none
     parameter logic [63:0] PMA_RAM_BASE = `QV_PIPE_PMA_RAM_BASE,   // physical window of RAM: stores into it are posted
     parameter logic [63:0] PMA_RAM_SIZE = `QV_PIPE_PMA_RAM_SIZE
@@ -471,7 +478,7 @@ module core
     logic uop_valid, issue_fire;
     uop_t uop;
 
-    qv_decode decode0 (
+    qv_decode #(.CSR_NOSER(CSR_NOSER)) decode0 (
         .clk(clk), .rst(rst), .i_flush(flush),
         .i_priv(priv), .i_tsr(mstatus_tsr_w), .i_tvm(mstatus_tvm_w), .i_in_debug(dbg_in_debug), .i_pb_active(pb_active),
         .i_tdata1_0(tdata1_0_w), .i_tdata2_0(tdata2_0_w), .i_tdata1_1(tdata1_1_w), .i_tdata2_1(tdata2_1_w),
@@ -502,7 +509,7 @@ module core
     logic [4:0]              c_rd;
     logic [QV_ROB_TAG_W-1:0] c_tag;
 
-    qv_issue #(.SERIALIZE(SERIALIZE), .BYPASS_EN(BYPASS_EN)) issue0 (
+    qv_issue #(.SERIALIZE(SERIALIZE), .BYPASS_EN(BYPASS_EN), .CSR_LATE(CSR_NOSER)) issue0 (
         .clk(clk), .rst(rst), .i_flush(flush),
         .i_uop_valid(uop_valid), .i_uop(uop), .o_issue(issue_fire),
         .o_rs1_sel(rs1_sel), .o_rs2_sel(rs2_sel), .i_rs1_data(rs1_data), .i_rs2_data(rs2_data),

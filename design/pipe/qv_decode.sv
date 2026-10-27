@@ -65,8 +65,16 @@
  *
  * Output is registered (a real D/I split): one uop held until issue
  * takes it.
+ *
+ * CSR_NOSER (P10c): a CSR op serializes (flush and refetch at commit) only if
+ * it can change what a younger instruction does. One that writes nothing (the
+ * read-only forms, csr_wsup) or writes a trap CSR (m/s scratch, epc, cause,
+ * tval: only commit and CSR ops read those, both at the head) does not; issue
+ * makes its dependents wait for its commit, where its rd value is made.
  */
-module qv_decode (
+module qv_decode #(
+    parameter bit CSR_NOSER = 1'b0
+) (
     input  logic              clk,
     input  logic              rst,
     input  logic              i_flush,
@@ -377,6 +385,8 @@ module qv_decode (
                           || csr_addr[11:2] == 10'h1E8 || csr_addr == 12'h7A4;
     wire csr_illegal = is_csr && ((!csr_wsup && csr_addr[11:10] == 2'b11)
                                   || (csr_debug_addr && !i_in_debug));
+    // the trap CSRs: mscratch, mepc, mcause, mtval (0x340-0x343) and sscratch, sepc, scause, stval (0x140-0x143)
+    wire csr_trap_wr = (csr_addr[11:2] == 10'h0D0) || (csr_addr[11:2] == 10'h050);
 
     // Privilege rules, literally ref_core.sv's (its comments say why each is so):
     // a CSR above the current privilege (addr[9:8] is the lowest privilege
@@ -444,10 +454,12 @@ module qv_decode (
         uop_d.csr_op   = csr_op;
         uop_d.csr_addr = csr_addr;
         uop_d.csr_wsup = csr_wsup;
-        // a CSR's rd value exists only at commit, so nothing younger may
-        // run ahead on it -- flushing after every CSR op covers that too.
+        // a CSR op that may change what anything younger does flushes and
+        // refetches after it (with CSR_NOSER the others do not: see the header;
+        // their rd value exists only at commit, and issue waits for it).
         // FENCE.I refetches everything after it.
-        uop_d.serialize = is_csr || (sys_op == QV_SYS_FENCE_I) || is_sfence;
+        uop_d.serialize = (is_csr && !(CSR_NOSER && (csr_wsup || csr_trap_wr)))
+                          || (sys_op == QV_SYS_FENCE_I) || is_sfence;
         uop_d.pred_taken = i_iq_data.pred_taken;
         uop_d.pred_tgt   = i_iq_data.pred_tgt;
         uop_d.mem_size   = is_atomic ? (atomic_word ? 2'd2 : 2'd3) : mem_size;
