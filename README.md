@@ -11,6 +11,8 @@ load-store units, and in-order commit, which owns every architectural effect (re
 writes, CSRs, traps, privilege changes, interrupts and debug entry). Single issue; fetch runs back to
 back and predicts branches (a target buffer, a history table, a return-address stack); loads execute at
 the head of the ROB, and stores to RAM retire into a store buffer that writes them out behind it.
+Translated code runs at nearly untranslated speed (fetch reuses its last page, the data side looks up its
+TLB before the head), and CSR reads and trap-CSR writes do not flush the pipeline.
 
 - RV64IMAC, Zicsr, Zifencei
 - M, S and U modes, with trap delegation

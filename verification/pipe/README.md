@@ -179,13 +179,22 @@ mtvals per instruction):
   and its SFENCE.VMA runs code that depends on it: the FSM re-walks a page whose A bit differs between the two table
   sets, the pipe still holds the old entry, and both are legal), and no non-leaf PTE and no executable leaf
   leads to a device (R2: the tables and the code are in RAM; the deliberate far pointers and leaves go to an
-  address above 2^32 that the PMP always denies, or to the bus-error region). There is no hardware limit or
-  attribute check on a PTE read (the FSM has none; a speculative walk through a junk pointer could read a device
-  register, a hardening item for a Linux build).
+  address above 2^32 that the PMP always denies, or to the bus-error region). Where the core is given a RAM window
+  (the SoC, the SRAM harness, lockstep), an instruction-side PTE read outside it waits until the fetch is on the
+  architectural path (P10d, `qv_ptw.sv`), so a speculative walk through a junk pointer never reads a device
+  register; the FSM, walking only for what it executes, reads such a PTE at the same point. Only the timing
+  differs, and R2 stays (the two cores still walk different numbers of times).
   `lockstep/smc_hazard.py` also triages a divergence that follows a violation of either rule.
 - A redirect that changes what translation depends on (a trap, an xRET, an interrupt, a serializing instruction)
   makes fetch wait one cycle before it issues from the target, so the request is translated against the new
   privilege, satp and TLB. It is skipped while satp is Bare and the retiring instruction is not a satp access.
+- Fetch keeps the physical page of its last translation and reuses it for the next request in the same virtual page
+  (P10a) until a context-changing redirect, an SFENCE.VMA or a halt; like any TLB entry it may outlive an ITLB
+  eviction. The data side looks its translation up in the TLB before the op is the ROB head (P10b; a lookup only,
+  never a walk), so a hit costs no cycle at the head.
+- CSR ops that cannot change what a younger instruction does -- the read-only forms, and writes to m/s scratch, epc,
+  cause and tval -- do not serialize (P10c); the FSM never overlaps anything. A dependent of such an op waits for its
+  commit (its value is made there). Retirement order and every value are the same; only the timing differs.
 - The walker and the LSU share the memory port: the LSU wins every gap between two PTE reads, a PTE read is never
   abandoned (a cancelled walk's beat completes and its result is dropped), and a data walk can wait for a whole
   instruction-side walk. PTE reads are PMP-checked at S privilege, read only, and a denial or a bus error is an
