@@ -1,0 +1,77 @@
+{
+ "dut": "design/pipe/qv_fetch.sv",
+ "tb": "design/pipe/qv_fetch_xl_tb.sv",
+ "files": [
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_fetch.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench",
+  "-Pqv_fetch_xl_tb.REUSE=1"
+ ],
+ "cwd": "design",
+ "timeout": 900,
+ "mutants": [
+  {
+   "name": "the page compare misses VA bit 12 (reuse across a page edge)",
+   "old": "wire        issue_reuse = PAGE_REUSE && i_xl_on && lp_valid_q && (issue_pc[63:12] == lp_vpn_q);",
+   "new": "wire        issue_reuse = PAGE_REUSE && i_xl_on && lp_valid_q && (issue_pc[63:13] == lp_vpn_q[51:1]);"
+  },
+  {
+   "name": "reuse with translation off",
+   "old": "wire        issue_reuse = PAGE_REUSE && i_xl_on && lp_valid_q && (issue_pc[63:12] == lp_vpn_q);",
+   "new": "wire        issue_reuse = PAGE_REUSE && lp_valid_q && (issue_pc[63:12] == lp_vpn_q);"
+  },
+  {
+   "name": "reuse of a page that is not kept",
+   "old": "wire        issue_reuse = PAGE_REUSE && i_xl_on && lp_valid_q && (issue_pc[63:12] == lp_vpn_q);",
+   "new": "wire        issue_reuse = PAGE_REUSE && i_xl_on && (issue_pc[63:12] == lp_vpn_q);"
+  },
+  {
+   "name": "a reused request still translates",
+   "old": "req_xl_q    <= i_xl_on && !issue_reuse;",
+   "new": "req_xl_q    <= i_xl_on;"
+  },
+  {
+   "name": "not forgotten on a context-changing redirect",
+   "old": "if (i_xl_flush || (i_redirect_valid && i_redirect_ctx)) lp_valid_q <= 1'b0;",
+   "new": "if (i_xl_flush) lp_valid_q <= 1'b0;"
+  },
+  {
+   "name": "not forgotten on i_xl_flush",
+   "old": "if (i_xl_flush || (i_redirect_valid && i_redirect_ctx)) lp_valid_q <= 1'b0;",
+   "new": "if (i_redirect_valid && i_redirect_ctx) lp_valid_q <= 1'b0;"
+  },
+  {
+   "name": "forgotten on every redirect",
+   "old": "if (i_xl_flush || (i_redirect_valid && i_redirect_ctx)) lp_valid_q <= 1'b0;",
+   "new": "if (i_xl_flush || i_redirect_valid) lp_valid_q <= 1'b0;"
+  },
+  {
+   "name": "a fill beats a flush in the same cycle",
+   "old": "if (i_xl_flush || (i_redirect_valid && i_redirect_ctx)) lp_valid_q <= 1'b0;",
+   "new": "if ((i_xl_flush || (i_redirect_valid && i_redirect_ctx)) && !(req_valid_q && req_xl_q && i_xl_done)) lp_valid_q <= 1'b0;"
+  },
+  {
+   "name": "a fault is kept",
+   "old": "                        req_pf_q  <= i_xl_pf;",
+   "new": "                        req_pf_q  <= i_xl_pf;\n                        lp_valid_q <= PAGE_REUSE; lp_vpn_q <= req_pc_q[63:12]; lp_ppn_q <= i_xl_ppn;"
+  },
+  {
+   "name": "kept from the wrong page",
+   "old": "                            lp_vpn_q   <= req_pc_q[63:12];",
+   "new": "                            lp_vpn_q   <= req_pc_q[63:12] + 52'd1;"
+  },
+  {
+   "name": "kept under hold (before the beat starts)",
+   "old": "                    end else if (!i_hold) begin             // a held fetch starts no bus beat",
+   "new": "                    end else begin\n                        if (PAGE_REUSE) lp_valid_q <= 1'b1;\n                        if (PAGE_REUSE) lp_vpn_q <= req_pc_q[63:12];\n                        if (PAGE_REUSE) lp_ppn_q <= i_xl_ppn;\n                    end\n                    if (!(i_xl_pf || i_xl_af) && !i_hold) begin"
+  }
+ ]
+}

@@ -19,35 +19,35 @@
  "mutants": [
   {
    "name": "stream through a redirect",
-   "old": "wire stream_go = STREAM && can_issue && bus_resp && !i_redirect_valid && !i_xl_on && !i_yield;",
-   "new": "wire stream_go = STREAM && can_issue && bus_resp && !i_xl_on && !i_yield;"
+   "old": "wire stream_go = STREAM && can_issue && bus_resp && !i_redirect_valid && (!i_xl_on || stream_reuse) && !i_yield;",
+   "new": "wire stream_go = STREAM && can_issue && bus_resp && (!i_xl_on || stream_reuse) && !i_yield;"
   },
   {
    "name": "stream with translation on",
-   "old": "wire stream_go = STREAM && can_issue && bus_resp && !i_redirect_valid && !i_xl_on && !i_yield;",
+   "old": "wire stream_go = STREAM && can_issue && bus_resp && !i_redirect_valid && (!i_xl_on || stream_reuse) && !i_yield;",
    "new": "wire stream_go = STREAM && can_issue && bus_resp && !i_redirect_valid && !i_yield;"
   },
   {
    "name": "stream through a yield",
-   "old": "wire stream_go = STREAM && can_issue && bus_resp && !i_redirect_valid && !i_xl_on && !i_yield;",
-   "new": "wire stream_go = STREAM && can_issue && bus_resp && !i_redirect_valid && !i_xl_on;"
+   "old": "wire stream_go = STREAM && can_issue && bus_resp && !i_redirect_valid && (!i_xl_on || stream_reuse) && !i_yield;",
+   "new": "wire stream_go = STREAM && can_issue && bus_resp && !i_redirect_valid && (!i_xl_on || stream_reuse);"
   },
   {
    "name": "stream without the room and hold check",
-   "old": "wire stream_go = STREAM && can_issue && bus_resp && !i_redirect_valid && !i_xl_on && !i_yield;",
-   "new": "wire stream_go = STREAM && bus_resp && !i_redirect_valid && !i_xl_on && !i_yield;"
+   "old": "wire stream_go = STREAM && can_issue && bus_resp && !i_redirect_valid && (!i_xl_on || stream_reuse) && !i_yield;",
+   "new": "wire stream_go = STREAM && bus_resp && !i_redirect_valid && (!i_xl_on || stream_reuse) && !i_yield;"
   },
   {
    "name": "stream only on an ack, not on an error",
-   "old": "wire stream_go = STREAM && can_issue && bus_resp && !i_redirect_valid && !i_xl_on && !i_yield;",
-   "new": "wire stream_go = STREAM && can_issue && wb_fetch_ack_i && !wb_fetch_err_i && !i_redirect_valid && !i_xl_on && !i_yield;",
+   "old": "wire stream_go = STREAM && can_issue && bus_resp && !i_redirect_valid && (!i_xl_on || stream_reuse) && !i_yield;",
+   "new": "wire stream_go = STREAM && can_issue && wb_fetch_ack_i && !wb_fetch_err_i && !i_redirect_valid && (!i_xl_on || stream_reuse) && !i_yield;",
    "equivalent": true,
    "note": "unobservable: only the rate after an error answer differs"
   },
   {
    "name": "the stream presents the old address",
-   "old": "assign wb_fetch_addr_o = stream_go  ? {fpc_q[31:3], 3'b000}",
-   "new": "assign wb_fetch_addr_o = stream_go  ? {req_pc_q[31:3], 3'b000}"
+   "old": ": {fpc_q[31:3], 3'b000})",
+   "new": ": {req_pc_q[31:3], 3'b000})"
   },
   {
    "name": "cyc dropped in the answer's cycle",

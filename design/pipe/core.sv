@@ -1001,6 +1001,23 @@ module core
             assert (x_va == g_x_va && x_wr == g_x_wr && x_priv == g_x_priv && mstatus_sum_w == g_sum
                     && mstatus_mxr_w == g_mxr && satp_w == g_satp);
     end
+    // Fetch's last translated page (P10a) is reused only in the context it was found in: a request that skips its
+    // translation sees the satp and privilege of the translation that filled the page, with no SFENCE.VMA and no
+    // halt since.
+    reg        g_lp_valid = 1'b0;
+    reg [63:0] g_lp_satp = '0;
+    reg [1:0]  g_lp_priv = '0;
+    always @(posedge clk) begin
+        if (rst || fetch_xl_flush)
+            g_lp_valid <= 1'b0;
+        else if (f_xl_req && f_xl_done && !f_xl_pf && !f_xl_af && !fetch_hold && !fetch_redirect) begin
+            g_lp_valid <= 1'b1;
+            g_lp_satp  <= satp_w;
+            g_lp_priv  <= priv;
+        end
+    end
+    always @* if (!rst && fetch0.can_issue && fetch0.issue_reuse)
+        assert (g_lp_valid && satp_w == g_lp_satp && priv == g_lp_priv);
 
     assign rvfi_any_debug_entry    = debug_ebreak_entry || debug_halt_req_entry || trigger_debug_entry
                                      || dm_access_active;

@@ -1,0 +1,44 @@
+{
+ "dut": "design/pipe/qv_fetch.sv",
+ "tb": "design/pipe/qv_fetch_stream_tb.sv",
+ "files": [
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_fetch.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench",
+  "-Pqv_fetch_stream_tb.REUSE=1"
+ ],
+ "cwd": "design",
+ "timeout": 900,
+ "mutants": [
+  {
+   "name": "the stream presents the virtual page of a reused request",
+   "old": "assign wb_fetch_addr_o = stream_go  ? (stream_reuse ? {lp_ppn_q[19:0], fpc_q[11:3], 3'b000} : {fpc_q[31:3], 3'b000})",
+   "new": "assign wb_fetch_addr_o = stream_go  ? {fpc_q[31:3], 3'b000}"
+  },
+  {
+   "name": "a reused request on the bus uses the stale physical page register",
+   "old": "                if (issue_reuse) req_pa_q <= lp_ppn_q;",
+   "new": "",
+   "equivalent": true,
+   "note": "req_pa_q and lp_ppn_q are written together by every translation that fills the page, and nothing else writes req_pa_q, so a reused request's register already holds the kept page"
+  },
+  {
+   "name": "streamed with translation on although the page is not kept",
+   "old": "wire stream_reuse = PAGE_REUSE && i_xl_on && lp_valid_q && (fpc_q[63:12] == lp_vpn_q);",
+   "new": "wire stream_reuse = PAGE_REUSE && i_xl_on;"
+  },
+  {
+   "name": "never streamed translated (the reuse ignored by the stream)",
+   "old": "wire stream_reuse = PAGE_REUSE && i_xl_on && lp_valid_q && (fpc_q[63:12] == lp_vpn_q);",
+   "new": "wire stream_reuse = 1'b0;"
+  }
+ ]
+}

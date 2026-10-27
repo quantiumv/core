@@ -75,7 +75,7 @@
   },
   {
    "name": "no request is translated (it goes to the bus at once)",
-   "old": "req_xl_q    <= i_xl_on;",
+   "old": "req_xl_q    <= i_xl_on && !issue_reuse;",
    "new": "req_xl_q    <= 1'b0;"
   },
   {
