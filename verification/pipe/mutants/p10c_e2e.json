@@ -1,0 +1,31 @@
+{
+ "seeds": 30,
+ "first": 1,
+ "jobs": 5,
+ "mutants": [
+  {
+   "name": "a CSR op's claim is not late (a dependent takes the ALU pass of its source)",
+   "file": "qv_issue.sv",
+   "old": "prod_late_q[i_uop.rd] <= CSR_LATE && (i_uop.fu == QV_FU_CSR);",
+   "new": "prod_late_q[i_uop.rd] <= 1'b0;"
+  },
+  {
+   "name": "a late claim is bypassed through rs1",
+   "file": "qv_issue.sv",
+   "old": "            else if (p1_late)                                      a_ready = 1'b0;\n",
+   "new": ""
+  },
+  {
+   "name": "a late claim is bypassed through rs2",
+   "file": "qv_issue.sv",
+   "old": "            else if (p2_late)                                      b_ready = 1'b0;\n",
+   "new": ""
+  },
+  {
+   "name": "mstatus writes do not serialize either",
+   "file": "qv_decode.sv",
+   "old": "(csr_addr[11:2] == 10'h0D0)",
+   "new": "(csr_addr[11:6] == 6'h0C)"
+  }
+ ]
+}
