@@ -19,8 +19,9 @@
  * overflows (the scoreboard sees every response).
  *
  * Translation: fetch is asked to translate at random (i_xl_on, sampled when a request issues) by a translator that
- * answers after 0 to 2 cycles with the identity (a fault beyond the memory) and keeps the answer until the request
- * drops; a request is never streamed while translation is on.
+ * answers after 0 to 2 cycles with the page after the virtual one (VA + 0x1000; a fault beyond the memory) and keeps
+ * the answer until the request drops; the slave has memory at both, so a translated dword fetched at its virtual
+ * address shows up in its data; a request is never streamed while translation is on.
  *
  * Branch target buffer: a random BTB model answers every lookup (a hit at a halfword at or after the request's first,
  * crossing flag and target random); after a dword that carries a hint the next one expected is the hinted target, as
@@ -28,8 +29,14 @@
  *
  * Rate (no redirect, hold or yield; the consumer pops every cycle): one dword per cycle on a zero-wait slave; with
  * a slave that ignores the streamed request, or with yield held high, one per two.
+ *
+ * REUSE (PAGE_REUSE, P10a; tests.list runs both): a translated request in the page of the last translation needs
+ * none and may be streamed, so the rule above becomes "never streamed while translation is on, unless fetch keeps
+ * its page", and translated fetch inside one page streams at the untranslated rate.
  */
-module qv_fetch_stream_tb;
+module qv_fetch_stream_tb #(
+    parameter bit REUSE = 1'b0
+);
     int   pass_count = 0;
     int   fail_count = 0;
     logic quiet_on_pass = 1'b1;
@@ -66,7 +73,7 @@ module qv_fetch_stream_tb;
     logic [1:0]  btb_off, buf_hoff;
     logic [63:0] btb_tgt, buf_htgt;
 
-    qv_fetch #(.FB_DEPTH(FBD), .STREAM(1'b1), .BTB_EN(1'b1)) dut (
+    qv_fetch #(.FB_DEPTH(FBD), .STREAM(1'b1), .BTB_EN(1'b1), .PAGE_REUSE(REUSE)) dut (
         .clk(clk), .rst(rst),
         .wb_fetch_addr_o(addr), .wb_fetch_cyc_o(cyc), .wb_fetch_stb_o(stb),
         .wb_fetch_dat_i(dat), .wb_fetch_ack_i(ack), .wb_fetch_err_i(err),
@@ -154,7 +161,7 @@ module qv_fetch_stream_tb;
     assign xl_done = xl_req && !xl_cancel && (xl_cnt >= xl_lat);
     assign xl_pf   = xl_done && (xl_va[31:0] >= MEM_WORDS * 8);
     assign xl_af   = 1'b0;
-    assign xl_ppn  = xl_va[55:12];
+    assign xl_ppn  = xl_va[55:12] + 44'd1;
 
     // ---------------- slave ----------------
     int   wait_max = 0;                             // extra wait states, 0..wait_max
@@ -168,7 +175,7 @@ module qv_fetch_stream_tb;
     endfunction
 
     task automatic respond(input logic [31:0] a);
-        if (a < MEM_WORDS * 8) begin ack <= 1'b1; dat <= mem_word(a); end
+        if (a < MEM_WORDS * 8 || (a >= 32'h1000 && a < 32'h1000 + MEM_WORDS * 8)) begin ack <= 1'b1; dat <= mem_word(a); end
         else                   begin err <= 1'b1; end
     endtask
 
@@ -202,7 +209,7 @@ module qv_fetch_stream_tb;
             if (cyc && (ack || err) && (redirect_valid || hold || yield)) begin
                 proto_errs++; $display("PROTO: request shown in an answer's cycle with redirect/hold/yield at t=%0t", $time);
             end
-            if (cyc && (ack || err) && xl_on) begin
+            if (cyc && (ack || err) && xl_on && !(REUSE && dut.stream_reuse)) begin
                 proto_errs++; $display("PROTO: request shown in an answer's cycle with translation on at t=%0t", $time);
             end
             if (idle && cyc) begin proto_errs++; $display("PROTO: idle with cyc at t=%0t", $time); end
@@ -226,13 +233,13 @@ module qv_fetch_stream_tb;
             if (buf_pc !== exp_pc) begin
                 sb_errs++; $display("SCOREBOARD: popped pc %h expected %h at t=%0t", buf_pc, exp_pc, $time);
             end else if (buf_pc[31:0] < MEM_WORDS * 8) begin
-                if (buf_err || buf_data !== mem_word(buf_pc[31:0])) begin
+                if (buf_err || buf_data !== mem_word(buf_xl ? buf_pc[31:0] + 32'h1000 : buf_pc[31:0])) begin
                     sb_errs++; $display("SCOREBOARD: pc %h wrong data/err (err=%b data=%h) at t=%0t", buf_pc, buf_err, buf_data, $time);
                 end
             end else if (!buf_err) begin
                 sb_errs++; $display("SCOREBOARD: pc %h beyond memory without err at t=%0t", buf_pc, $time);
             end
-            if (buf_xl && !buf_err && buf_pg !== buf_pc[55:12]) begin
+            if (buf_xl && !buf_err && buf_pg !== buf_pc[55:12] + 44'd1) begin
                 sb_errs++; $display("SCOREBOARD: pc %h translated to page %h at t=%0t", buf_pc, buf_pg, $time);
             end
             if (buf_err && buf_cause !== 4'd1 && buf_cause !== 4'd12) begin
@@ -278,10 +285,11 @@ module qv_fetch_stream_tb;
     endtask
 
     // the rate: dwords popped over a window
-    task automatic rate_run(input int wmax, input bit swl, input bit yl, output int per_100_cycles);
+    task automatic rate_run(input int wmax, input bit swl, input bit yl, output int per_100_cycles, input bit xl = 1'b0);
         int n0, n1;
         wait_max = wmax; swallow = swl;
         do_reset();
+        xl_on = xl; xl_lat = 0;
         @(negedge clk);
         redirect_valid = 1'b1; redirect_pc = 64'h0;
         @(negedge clk);
@@ -312,6 +320,14 @@ module qv_fetch_stream_tb;
         rate_run(0, 1'b0, 1'b1, r2);
         check("yield held high: about one dword per two cycles", 64'(r2 > 25 && r2 < 55), 64'd1);
         $display("qv_fetch_stream_tb: dwords per 100 cycles: stream %0d, swallowing slave %0d, yielding %0d", r0, r1, r2);
+        if (REUSE) begin
+            rate_run(0, 1'b0, 1'b0, r2, 1'b1);
+            check("translated, inside one page: streams like untranslated fetch", 64'(r2 > 75), 64'd1);
+            $display("qv_fetch_stream_tb: translated, one page: %0d dwords per 100 cycles", r2);
+        end else begin
+            rate_run(0, 1'b0, 1'b0, r2, 1'b1);
+            check("translated (no page reuse): at most one dword per three cycles", 64'(r2 < 40), 64'd1);
+        end
         check("rate runs: protocol", 64'(proto_errs), 64'd0);
         check("rate runs: scoreboard", 64'(sb_errs), 64'd0);
 

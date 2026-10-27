@@ -546,10 +546,11 @@ module core_sv39_irq_tb;
         // do, done directly since no instruction can execute while halted.
         dut_d2.sram0.memory[1536 + 3] = 64'h0000_0000_0000_1CCF;
 `ifndef QV_REF_AS_CORE
-        // the pipelined core: the commit stage's SFENCE.VMA strobe empties both TLBs at the next edge
-        force dut_d2.core0.c_sfence = 1'b1;
+        // the pipelined core: both TLBs emptied directly, with no SFENCE.VMA strobe, so fetch's own copy of the
+        // loop's page (P10a) is forgotten only because the hart halted -- what a debugger rewriting satp relies on
+        dut_d2.core0.g_sv39.xlate_f.tlb0.valid_q = '0;
+        dut_d2.core0.g_sv39.xlate_d.tlb0.valid_q = '0;
         @(posedge clk); #1;
-        release dut_d2.core0.c_sfence;
 `else
         dut_d2.core0.tlb0_valid_q = 1'b0;
         dut_d2.core0.tlb1_valid_q = 1'b0;

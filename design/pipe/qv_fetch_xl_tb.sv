@@ -20,8 +20,15 @@
  *   - i_redirect_ctx: the target is not requested in the redirect's cycle but in the next, so the request is
  *     translated (or not) against the context the redirect brought in
  *   - the bus protocol, as in qv_fetch_tb: cyc low in a response cycle, never abandoned or moved
+ *
+ * REUSE (PAGE_REUSE, P10a; tests.list runs both): every case above, plus the last translated page -- a request in
+ * it asks for no translation and goes to the bus at once, a request in another page does; a context-changing
+ * redirect and i_xl_flush forget the page (a flush wins over a fill in the same cycle), a plain redirect does not;
+ * a fault is never kept; translation off never uses it.
  */
-module qv_fetch_xl_tb;
+module qv_fetch_xl_tb #(
+    parameter bit REUSE = 1'b0
+);
     int   pass_count = 0;
     int   fail_count = 0;
     logic quiet_on_pass = 1'b1;
@@ -47,6 +54,7 @@ module qv_fetch_xl_tb;
     wire         buf_pop = pop_en && buf_valid;
     logic        hold = 1'b0;
     logic        idle;
+    logic        xl_flush = 1'b0;
 
     // translation port
     logic        xl_on = 1'b1;
@@ -55,14 +63,14 @@ module qv_fetch_xl_tb;
     logic        x_done, x_pf, x_af;
     logic [43:0] x_ppn;
 
-    qv_fetch dut (
+    qv_fetch #(.PAGE_REUSE(REUSE)) dut (
         .clk(clk), .rst(rst),
         .wb_fetch_addr_o(addr), .wb_fetch_cyc_o(cyc), .wb_fetch_stb_o(stb),
         .wb_fetch_dat_i(dat), .wb_fetch_ack_i(ack), .wb_fetch_err_i(err),
         .i_redirect_valid(redirect_valid), .i_redirect_pc(redirect_pc), .i_redirect_ctx(redirect_ctx),
         .i_hold(hold), .o_idle(idle),
         .i_xl_on(xl_on), .o_xl_req(x_req), .o_xl_va(x_va), .o_xl_cancel(x_cancel),
-        .i_xl_done(x_done), .i_xl_pf(x_pf), .i_xl_af(x_af), .i_xl_ppn(x_ppn),
+        .i_xl_done(x_done), .i_xl_pf(x_pf), .i_xl_af(x_af), .i_xl_ppn(x_ppn), .i_xl_flush(xl_flush),
         .o_buf_valid(buf_valid), .o_buf_pc(buf_pc), .o_buf_data(buf_data), .o_buf_err(buf_err),
         .o_buf_cause(buf_cause), .o_buf_xl(buf_xl), .o_buf_pg(buf_pg),
         .i_buf_pop(buf_pop)
@@ -177,7 +185,7 @@ module qv_fetch_xl_tb;
 
     // ---------------- helpers ----------------
     task automatic do_reset();
-        pop_en = 1'b0; redirect_valid = 1'b0; redirect_ctx = 1'b0; hold = 1'b0; xl_on = 1'b1;
+        pop_en = 1'b0; redirect_valid = 1'b0; redirect_ctx = 1'b0; hold = 1'b0; xl_on = 1'b1; xl_flush = 1'b0;
         rst = 1'b1;
         repeat (3) @(posedge clk);
         #1;
@@ -433,6 +441,122 @@ module qv_fetch_xl_tb;
         wait_log(mark + 2, 600);
         check_xl_entry("X13", mark, VBASE + 64'h1500);
         wait_cfg = 0;
+
+        // ---- R: the last translated page (REUSE only) ----
+        if (REUSE) begin
+            // R1: a run inside one page asks for one translation; every dword is fetched from the physical page
+            wait_cfg = 0; xl_latency = 0;
+            do_reset();
+            pop_en = 1'b1;
+            pulse_redirect(VBASE + 64'h040, 1'b0);
+            wait_log(8, 300);
+            for (int k = 0; k < 8; k++) check_xl_entry("R1", k, VBASE + 64'h040 + 64'(8 * k));
+            check("R1: one translation for the whole run", 64'(xl_reqs), 64'd1);
+            check("R1: the bus saw physical addresses", {32'b0, beat_addrs[3]}, 64'h2058);
+
+            // R2: across a page edge: one more translation, for the new page
+            do_reset();
+            pop_en = 1'b1;
+            pulse_redirect(VBASE + 64'hFE0, 1'b0);
+            wait_log(8, 300);
+            for (int k = 0; k < 8; k++) check_xl_entry("R2", k, VBASE + 64'hFE0 + 64'(8 * k));
+            check("R2: two translations, one per page", 64'(xl_reqs), 64'd2);
+
+            // R3: a plain redirect into the kept page asks for nothing; one into another page does
+            do_reset();
+            pop_en = 1'b1;
+            pulse_redirect(VBASE + 64'h100, 1'b0);
+            wait_log(2, 300);
+            c0 = xl_reqs; mark = log_n;
+            pulse_redirect(VBASE + 64'h800, 1'b0);
+            wait_log(mark + 2, 300);
+            check("R3: a plain redirect inside the page: no translation", 64'(xl_reqs - c0), 64'd0);
+            check_xl_entry("R3", mark, VBASE + 64'h800);
+            c0 = xl_reqs; mark = log_n;
+            pulse_redirect(VBASE + 64'h1100, 1'b0);
+            wait_log(mark + 2, 300);
+            check("R3: a redirect to another page: a translation", 64'(xl_reqs - c0), 64'd1);
+            check_xl_entry("R3 other page", mark, VBASE + 64'h1100);
+
+            // R4: a context-changing redirect forgets the page, even back into it
+            c0 = xl_reqs; mark = log_n;
+            pulse_redirect(VBASE + 64'h1180, 1'b1);
+            wait_log(mark + 2, 300);
+            check("R4: a ctx redirect into the kept page: translated again", 64'(xl_reqs - c0), 64'd1);
+            check_xl_entry("R4", mark, VBASE + 64'h1180);
+
+            // R5: i_xl_flush forgets it (an SFENCE.VMA, a halt)
+            pop_en = 1'b0;
+            repeat (20) @(posedge clk);
+            #1;
+            xl_flush = 1'b1;
+            @(posedge clk); #1;
+            xl_flush = 1'b0;
+            pop_en = 1'b1;
+            c0 = xl_reqs; mark = log_n;
+            pulse_redirect(VBASE + 64'h11C0, 1'b0);
+            wait_log(mark + 2, 300);
+            check("R5: after i_xl_flush, a plain redirect into the page is translated again", 64'(xl_reqs - c0), 64'd1);
+            check_xl_entry("R5", mark, VBASE + 64'h11C0);
+
+            // R6: a flush in the very cycle a translation answers beats the fill
+            do_reset();
+            xl_latency = 4;
+            pop_en = 1'b1;
+            pulse_redirect(VBASE + 64'h1200, 1'b0);
+            while (!x_done) begin @(negedge clk); end
+            xl_flush = 1'b1;                                  // in the answer's cycle
+            @(posedge clk); #1;
+            xl_flush = 1'b0;
+            xl_latency = 0;
+            wait_log(2, 300);
+            check_xl_entry("R6", 0, VBASE + 64'h1200);
+            check_xl_entry("R6", 1, VBASE + 64'h1208);
+            check("R6: the next dword of the page was translated again (the flush won)", 64'(xl_reqs), 64'd2);
+
+            // R7: a fault is never kept: every dword of a faulting page asks again, and none reaches the bus
+            do_reset();
+            pop_en = 1'b1;
+            pulse_redirect(VBASE + 64'h3000, 1'b0);
+            wait_log(3, 300);
+            check("R7: three fault entries", b(log_err[0] && log_err[1] && log_err[2]), 64'd1);
+            check("R7: a translation for each", 64'(xl_reqs >= 3), 64'd1);
+            check("R7: no bus beat", 64'(bus_beats), 64'd0);
+
+            // R8: translation off never uses the kept page
+            do_reset();
+            pop_en = 1'b1;
+            pulse_redirect(VBASE + 64'h040, 1'b0);
+            wait_log(2, 300);
+            pop_en = 1'b0;
+            repeat (20) @(posedge clk);
+            #1;
+            xl_on = 1'b0;
+            pop_en = 1'b1;
+            mark = log_n;
+            pulse_redirect(VBASE + 64'h080, 1'b0);            // in the kept page
+            wait_log(mark + 1, 300);
+            check("R8: translation off: an untranslated entry", b(log_xl[mark]), 64'd0);
+            // the virtual address itself went to the bus (beyond the memory: an error), not the kept physical page
+            check("R8: ... fetched at the virtual address", b(log_err[mark]), 64'd1);
+            xl_on = 1'b1;
+
+            // R9: under hold a translation that answers is not kept (it starts no beat); it is once the hold drops
+            do_reset();
+            xl_latency = 3;
+            pop_en = 1'b1;
+            pulse_redirect(VBASE + 64'h1300, 1'b0);
+            hold = 1'b1;
+            repeat (10) @(posedge clk);
+            #1;
+            check("R9: held: nothing kept yet", b(dut.lp_valid_q), 64'd0);
+            hold = 1'b0;
+            wait_log(3, 300);
+            check("R9: kept once the beat starts", b(dut.lp_valid_q), 64'd1);
+            check_xl_entry("R9", 0, VBASE + 64'h1300);
+            check("R9: one translation", 64'(xl_reqs), 64'd1);
+            xl_latency = 0;
+        end
 
         check("protocol monitor: no violations across all tests", 64'(proto_errs), 64'd0);
 

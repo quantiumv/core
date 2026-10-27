@@ -126,6 +126,8 @@ tb_core_trigger_tb|testbench/core_trigger_tb.sv|testbench/dm_core_harness.sv|des
 pipe_fetch_tb|design/pipe/qv_fetch_tb.sv||design|pipe|pass|
 pipe_fetch_xl_tb|design/pipe/qv_fetch_xl_tb.sv||design|pipe|pass|
 pipe_fetch_stream_tb|design/pipe/qv_fetch_stream_tb.sv||design|pipe|pass|
+pipe_fetch_xl_reuse_tb|design/pipe/qv_fetch_xl_tb.sv||design|pipe|pass||-Pqv_fetch_xl_tb.REUSE=1
+pipe_fetch_stream_reuse_tb|design/pipe/qv_fetch_stream_tb.sv||design|pipe|pass||-Pqv_fetch_stream_tb.REUSE=1
 pipe_align_fifo_tb|design/pipe/qv_align_fifo_tb.sv||design|pipe|pass|600
 pipe_align_fifo_one_tb|design/pipe/qv_align_fifo_tb.sv||design|pipe|pass|600|-Pqv_align_fifo_tb.ONE_OK=1
 pipe_align_hint_tb|design/pipe/qv_align_hint_tb.sv||design|pipe|pass|600

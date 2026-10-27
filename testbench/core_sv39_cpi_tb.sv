@@ -147,6 +147,10 @@ module core_sv39_cpi_tb;
         // before the store buffer this loop took 5113 cycles under Sv39 on the shared bus; the store buffer alone made it
         // 5404, because a load reached the ROB head in the very cycle fetch's translated request began its bus beat
         check("the store buffer does not slow the translated loop (5113 cycles before it)", 64'((end_b - start_b) <= 5200), 64'd1);
+        // P10a: fetch keeps the page of its last translation, so the loop's dwords skip their translation phase (5106
+        // cycles before, 4216 with it)
+        if (`QV_PIPE_FETCH_PAGE_REUSE)
+            check("fetch reuses its translated page (5106 cycles without)", 64'((end_b - start_b) <= 4300), 64'd1);
 `endif
 
         $display("");
