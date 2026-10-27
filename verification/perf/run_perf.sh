@@ -65,7 +65,7 @@ done
 
 mkdir -p "$OUTDIR"
 
-KERNELS="memcpy crc32 qsort matmul sieve listchase mixedint"
+KERNELS="memcpy crc32 qsort matmul sieve listchase mixedint trap"
 
 case "$MODE" in
     m) SFX=""; MAKE_TARGET=all; SMODE=0 ;;

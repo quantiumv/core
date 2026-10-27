@@ -20,7 +20,7 @@
 CFLAGS  = -march=rv64imac_zicsr -mabi=lp64 -mno-relax -mno-div -ffreestanding -nostdlib -fno-builtin -O2 -Wall
 ASFLAGS = -march=rv64imac_zicsr -mabi=lp64 -mno-relax
 
-KERNELS = memcpy crc32 qsort matmul sieve listchase mixedint
+KERNELS = memcpy crc32 qsort matmul sieve listchase mixedint trap
 
 all: $(addsuffix .hex,$(KERNELS))
 
