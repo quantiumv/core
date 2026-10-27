@@ -16,7 +16,9 @@
  * serves other addresses in the same megapage; the data and fetch TLBs are
  * separate; the TLB has four entries and fills round robin; a flush empties
  * it; and a cancel or a flush at any cycle of a walk leaves nothing behind
- * (including in the very cycle the walker reports the leaf: no fill).
+ * (including in the very cycle the walker reports the leaf: no fill). A lookup
+ * only (i_nowalk, P10b) answers a hit as usual and leaves a miss unanswered with
+ * no PTE read; the same request without it then walks.
  *
  * Then a random sweep of requests of both kinds in random contexts, flushes,
  * cancels and memory changes (always with a flush), every answered request
@@ -46,6 +48,7 @@ module qv_xlate_tb;
 
     // data client
     logic        xd_req = 1'b0, xd_wr = 1'b0, xd_active = 1'b1, xd_sum = 1'b0, xd_mxr = 1'b0, xd_cancel = 1'b0, xd_flush = 1'b0;
+    logic        xd_nowalk = 1'b0;
     logic [63:0] xd_va = '0;
     logic [1:0]  xd_priv = 2'b01;
     wire         xd_done, xd_pf, xd_af, xd_wreq, xd_wcancel;
@@ -77,7 +80,7 @@ module qv_xlate_tb;
     qv_xlate #(.TLB_ENTRIES(4)) xd (
         .clk(clk), .rst(rst),
         .i_req(xd_req), .i_va(xd_va), .i_is_mem(1'b1), .i_wr(xd_wr), .i_active(xd_active), .i_priv(xd_priv),
-        .i_sum(xd_sum), .i_mxr(xd_mxr), .i_cancel(xd_cancel), .i_flush_tlb(xd_flush),
+        .i_sum(xd_sum), .i_mxr(xd_mxr), .i_cancel(xd_cancel), .i_flush_tlb(xd_flush), .i_nowalk(xd_nowalk),
         .o_done(xd_done), .o_pf(xd_pf), .o_af(xd_af), .o_ppn(xd_ppn),
         .o_w_req(xd_wreq), .o_w_cancel(xd_wcancel),
         .i_w_done(w_d_done), .i_w_ok(w_ok), .i_w_pf(w_pf), .i_w_af(w_af), .i_w_vpn(w_vpn), .i_w_level(w_level), .i_w_ppn(w_ppn),
@@ -414,6 +417,41 @@ module qv_xlate_tb;
         check("hit: PA page is the same", {20'b0, r_ppn}, 64'h12345);
         ask_d(va_pg(9'd3) + 64'h10, 1'b1, 2'b01, 1'b0, 1'b0, 100);
         check("hit by another address in the page, a store to a page with D set: ok, no read", 64'(r_beats) + b(r_pf) + b(r_af), 64'd0);
+
+        // ---------------- a lookup only: a hit answers, a miss asks the walker nothing ----------------
+        std_map(V|R|W|A|D);
+        flush_all();
+        xd_nowalk = 1'b1;
+        xd_va = va_pg(9'd3); xd_wr = 1'b0; xd_priv = 2'b01; xd_sum = 1'b0; xd_mxr = 1'b0;
+        beat_log_n = 0;
+        xd_req = 1'b1;
+        begin : nowalk_miss
+            int asked;
+            asked = 0;
+            repeat (20) begin @(posedge clk); #1; if (xd_done) asked += 100; if (xd_wreq) asked++; end
+            check("lookup only, a miss: never answered, the walker never asked", 64'(asked), 64'd0);
+            check("lookup only, a miss: no PTE read", 64'(beat_log_n), 64'd0);
+        end
+        xd_nowalk = 1'b0;                                      // the same request goes on, and walks now
+        begin : nowalk_then_walk
+            int c;
+            c = 0;
+            while (!xd_done && c < 100) begin @(posedge clk); #1; c++; end
+            check("then without it: answered after a walk", b(xd_done), 64'd1);
+            check("then without it: three PTE reads", 64'(beat_log_n), 64'd3);
+            check("then without it: the leaf's page", {20'b0, xd_ppn}, 64'h12345);
+        end
+        @(posedge clk); #1;
+        xd_req = 1'b0;
+        repeat (3) begin @(posedge clk); #1; end
+        xd_nowalk = 1'b1;
+        ask_d(va_pg(9'd3), 1'b0, 2'b01, 1'b0, 1'b0, 20);
+        check("lookup only, a hit: answered in the cycle it is presented", {32'b0, r_cycles[31:0]}, 64'd0);
+        check("lookup only, a hit: no PTE read", 64'(r_beats), 64'd0);
+        check("lookup only, a hit: the page", {20'b0, r_ppn}, 64'h12345);
+        ask_d(va_pg(9'd3), 1'b0, 2'b01, 1'b1, 1'b0, 20);
+        check("lookup only, a hit judged again: still answered", b(r_done), 64'd1);
+        xd_nowalk = 1'b0;
 
         // ---------------- a hit is judged again ----------------
         // D clear: a load fills, a store then faults on the hit (nothing walked), and stays faulting until a flush

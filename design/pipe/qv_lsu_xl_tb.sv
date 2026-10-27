@@ -26,8 +26,18 @@
  * and a second client (fetch-side walks) competing for the walker, every op
  * compared with the model: its outcome, rd, memory afterwards, the number of
  * PTE reads and of data accesses.
+ *
+ * PROBE (P10b; tests.list runs both): the op looks its translation up before it
+ * is the head -- a lookup only, so still nothing on the bus before the head, PTE
+ * reads included. Every op checks that the lookup was asked before the head
+ * exactly when it may be (translated, aligned, not an SC); a TLB hit then starts
+ * the access in the op's first head cycle (one cycle later without PROBE); a hit
+ * that faults is still reported at the head; a flush after a taken lookup drops
+ * the op cleanly.
  */
-module qv_lsu_xl_tb;
+module qv_lsu_xl_tb #(
+    parameter bit PROBE = 1'b0
+);
     import qv_pkg::*;
 
     int   pass_count = 0;
@@ -63,7 +73,7 @@ module qv_lsu_xl_tb;
     wb_t         wb;
     lsu_res_t    res;
     wire         started, lsu_busy_w;
-    wire         x_req, x_wr, x_active, x_cancel, x_done, x_pf, x_af;
+    wire         x_req, x_wr, x_active, x_cancel, x_done, x_pf, x_af, x_nowalk;
     wire  [63:0] x_va;
     wire  [1:0]  x_priv;
     wire  [43:0] x_ppn;
@@ -80,7 +90,7 @@ module qv_lsu_xl_tb;
     wire         beat     = ptw_beat;
     wire         lsu_busy = lsu_busy_w;
 
-    qv_lsu dut (
+    qv_lsu #(.PROBE(PROBE)) dut (
         .clk(clk), .rst(rst), .i_flush(flush),
         .i_req(req), .o_free(free),
         .i_head_valid(head_valid), .i_head_tag(head_tag),
@@ -93,6 +103,7 @@ module qv_lsu_xl_tb;
         .o_wb(wb), .o_res(res), .o_head_started(started),
         .i_satp_on(satp_on),
         .o_xl_req(x_req), .o_xl_va(x_va), .o_xl_wr(x_wr), .o_xl_active(x_active), .o_xl_priv(x_priv), .o_xl_cancel(x_cancel),
+        .o_xl_nowalk(x_nowalk),
         .i_xl_done(x_done), .i_xl_pf(x_pf), .i_xl_af(x_af), .i_xl_ppn(x_ppn),
         .i_ptw_beat(ptw_beat), .o_bus_busy(lsu_busy_w)
     );
@@ -122,7 +133,7 @@ module qv_lsu_xl_tb;
     qv_xlate #(.TLB_ENTRIES(4)) xd (
         .clk(clk), .rst(rst),
         .i_req(x_req), .i_va(x_va), .i_is_mem(1'b1), .i_wr(x_wr), .i_active(x_active), .i_priv(x_priv),
-        .i_sum(sum), .i_mxr(mxr), .i_cancel(x_cancel), .i_flush_tlb(sfence),
+        .i_sum(sum), .i_mxr(mxr), .i_cancel(x_cancel), .i_flush_tlb(sfence), .i_nowalk(x_nowalk),
         .o_done(x_done), .o_pf(x_pf), .o_af(x_af), .o_ppn(x_ppn),
         .o_w_req(w_d_req), .o_w_cancel(w_d_cancel),
         .i_w_done(w_d_done), .i_w_ok(w_ok), .i_w_pf(w_pf), .i_w_af(w_af), .i_w_vpn(w_vpn), .i_w_level(w_level),
@@ -217,6 +228,9 @@ module qv_lsu_xl_tb;
     logic [3:0]  t_cause;
     logic [63:0] t_tval, t_rd, t_vaddr, t_mem_addr;
     bit          t_done;
+    int          t_first;                          // the head cycle the op's data access started in (0: the first; -1: none)
+    int          pre_cnt = 0;                      // cycles the held op's translation was asked before it was the head
+    always @(posedge clk) if (!rst && dut.state_q == 2'd1 && !dut.at_head && x_req) pre_cnt++;
 
     task automatic run_xl(input string name, input int kind, input logic [1:0] size, input logic sgn, input logic [63:0] va,
                           input logic [63:0] data, input logic sc_res_ok, input int delay, input bit check_pte_reads,
@@ -230,6 +244,7 @@ module qv_lsu_xl_tb;
         bit          exp_xcpt, exp_deny;
         logic [3:0]  exp_cause;
         logic [63:0] old, newv;
+        bit          exp_pre;
         begin
             fault_st = (kind != 0);
             kind_wr  = (kind == 1) || (kind == 3) || (kind == 4);
@@ -284,6 +299,7 @@ module qv_lsu_xl_tb;
             @(negedge clk); #1;
             tg = next_tag; next_tag = next_tag + 1'b1;
             req = '0; req.valid = 1'b1; req.tag = tg;
+            pre_cnt = 0;
             case (kind)
                 0: begin req.op = {1'b0, 1'b0, sgn, size}; req.a = va; req.b = 64'd0; req.imm = 64'hDEAD; end
                 1: begin req.op = {1'b0, 1'b1, 1'b0, size}; req.a = va; req.b = data; req.imm = 64'd0; end
@@ -303,8 +319,10 @@ module qv_lsu_xl_tb;
             @(negedge clk);
             head_tag = tg;
             got_wb = 1'b0;
+            t_first = -1;
             for (c = 0; c < 400 && !got_wb; c++) begin
                 #1;
+                if (t_first < 0 && bus_cyc && !ptw_beat && bus_addr >= DATA_BASE) t_first = c;
                 if (wb.valid) begin
                     got_wb = 1'b1; wb_value = wb.value;
                     check({name, ": wb tag"}, {60'b0, wb.tag}, {60'b0, tg});
@@ -319,6 +337,10 @@ module qv_lsu_xl_tb;
 
             // ---- the checks ----
             check({name, ": completed"}, b(got_wb), 64'd1);
+            // a lookup before the head (the op waits at least the cycle after its dispatch): only with PROBE, only for a
+            // translated access that needs one (not an SC)
+            exp_pre = PROBE && xl_on && !mis && kind != 3;
+            check({name, ": a lookup before the head exactly when it may be made"}, b(pre_cnt > 0), b(exp_pre));
             check({name, ": slot free again"}, b(free), 64'd1);
             check({name, ": exception"}, b(res.xcpt), b(exp_xcpt));
             if (exp_xcpt) begin
@@ -641,6 +663,46 @@ module qv_lsu_xl_tb;
             for (int i = 0; i < 400; i++) random_op();
         end
         priv = 2'b01; mprv = 1'b0; satp_on = 1'b1; pmp_bypass = 1'b0;
+
+        // ---------------- a TLB hit at the head (P10b: looked up before it, with PROBE) ----------------
+        data_map(V|R|W|A|D);
+        put(L0T, 7, pte_of(44'h17, V|R|A));                     // a read-only page
+        priv = 2'b01; mprv = 1'b0; satp_on = 1'b1; pmp_bypass = 1'b0; sum = 1'b0; mxr = 1'b0;
+        err_addr = '1; deny_ppn = '1; set_pmp();
+        lat_min = 0; lat_max = 1;
+        run_xl("hit: a load that warms the TLB", 0, 2'd3, 1'b0, vpg(3, 12'h140), 64'd0, 1'b0, 0, 1'b1, 1'b1);
+        run_xl("hit: a load of the same page, waiting before the head", 0, 2'd3, 1'b0, vpg(3, 12'h148), 64'd0, 1'b0, 3, 1'b1, 1'b0);
+        check("hit: the load's access starts in its first head cycle with PROBE, the second without", 64'(t_first), PROBE ? 64'd0 : 64'd1);
+        run_xl("hit: a store that warms page 4", 1, 2'd3, 1'b0, vpg(4, 12'h150), 64'h1111, 1'b0, 0, 1'b1, 1'b0);
+        run_xl("hit: a store to page 4, waiting before the head", 1, 2'd3, 1'b0, vpg(4, 12'h158), 64'h2222, 1'b0, 2, 1'b1, 1'b0);
+        check("hit: the store's access starts in its first head cycle with PROBE, the second without", 64'(t_first), PROBE ? 64'd0 : 64'd1);
+        run_xl("hit: a load with only the dispatch cycle before its head", 0, 2'd3, 1'b0, vpg(4, 12'h160), 64'd0, 1'b0, 0, 1'b1, 1'b0);
+        check("hit: ... that one cycle is enough for the lookup (PROBE)", 64'(t_first), PROBE ? 64'd0 : 64'd1);
+        // a hit that faults: the lookup before the head takes nothing, the head reports it
+        run_xl("hit: a load that warms the read-only page", 0, 2'd3, 1'b0, vpg(7, 12'h8), 64'd0, 1'b0, 0, 1'b1, 1'b1);
+        run_xl("hit: a store to the read-only page, waiting: cause 15 at the head", 1, 2'd3, 1'b0, vpg(7, 12'h10), 64'd5, 1'b0, 3, 1'b1, 1'b0);
+        run_xl("hit: an AMO to it: cause 15", 4, 2'd3, 1'b0, vpg(7, 12'h18), 64'd5, 1'b0, 3, 1'b1, 1'b0);
+        run_xl("hit: an LR from it, waiting: fine", 2, 2'd3, 1'b0, vpg(7, 12'h20), 64'd0, 1'b0, 3, 1'b1, 1'b0);
+        run_xl("hit: an SC to page 3, waiting (never looked up before the head)", 3, 2'd3, 1'b0, vpg(3, 12'h28), 64'h33, 1'b1, 3, 1'b1, 1'b0);
+        // a flush after the lookup before the head was taken: the op is gone, the next one is fine
+        begin : flush_probe
+            logic [QV_ROB_TAG_W-1:0] tg;
+            @(negedge clk); #1;
+            tg = next_tag; next_tag = next_tag + 1'b1;
+            data_accs = 0;
+            req = '0; req.valid = 1'b1; req.tag = tg; req.op = {1'b0, 1'b0, 1'b0, 2'd3}; req.a = vpg(3, 12'h170); req.b = 64'd0;
+            @(posedge clk); #1; req = '0;
+            @(negedge clk); head_valid = 1'b1; head_tag = tg + 1'b1;
+            repeat (3) begin @(posedge clk); #1; end
+            check("flush after the lookup: it was taken (PROBE) or not made", b(dut.xlated_q), b(PROBE));
+            @(negedge clk); flush = 1'b1; head_valid = 1'b0;
+            @(posedge clk); #1; flush = 1'b0;
+            check("flush after the lookup: the slot is free", b(free), 64'd1);
+            check("flush after the lookup: nothing reached the bus", 64'(data_accs), 64'd0);
+        end
+        run_xl("after the flushed op: the next one is fine", 0, 2'd3, 1'b0, vpg(3, 12'h178), 64'd0, 1'b0, 2, 1'b1, 1'b0);
+        put(L0T, 7, pte_of(44'h17, V|R|W|A|D));
+        sfence = 1'b1; @(posedge clk); #1; sfence = 1'b0;
 
         check("the LSU and the walker never drove the port together", 64'(port_overlaps), 64'd0);
         $display("");
