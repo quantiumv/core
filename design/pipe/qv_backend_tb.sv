@@ -337,6 +337,12 @@ module qv_backend_tb #(
             run_script("C1", 200);
             check("C1: the dependent waits for the CSR op's commit (no bypass, no ROB read)",
                   64'(issue_cyc[2] - issue_cyc[1] >= 3), 64'd1);
+            // the same through rs2 alone, right behind the CSR op
+            begin_script();
+            push(mk_csrr(5), 0);                                  // x5 = the CSR
+            push(mk(`SUB, 7, 0, 0, 64'd0, 5, 1, 0), 0);           // x7 = 0 - x5   (rs2)
+            run_script("C1b", 200);
+            check("C1b: the rs2 dependent waits for the CSR op's commit", 64'(issue_cyc[1] - issue_cyc[0] >= 3), 64'd1);
             // a younger writer of the same register replaces the late claim
             begin_script();
             push(mk_csrr(5), 0);
