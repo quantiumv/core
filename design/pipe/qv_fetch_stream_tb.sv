@@ -19,7 +19,8 @@
  * overflows (the scoreboard sees every response).
  *
  * Translation: fetch is asked to translate at random (i_xl_on, sampled when a request issues) by a translator that
- * answers after 0 to 2 cycles with the page after the virtual one (VA + 0x1000; a fault beyond the memory) and keeps
+ * answers after 0 to 2 cycles with a page far from the virtual one (VA + 0x1000_0000, which an untranslated run never
+ * reaches; a fault beyond the memory) and keeps
  * the answer until the request drops; the slave has memory at both, so a translated dword fetched at its virtual
  * address shows up in its data; a request is never streamed while translation is on.
  *
@@ -161,7 +162,7 @@ module qv_fetch_stream_tb #(
     assign xl_done = xl_req && !xl_cancel && (xl_cnt >= xl_lat);
     assign xl_pf   = xl_done && (xl_va[31:0] >= MEM_WORDS * 8);
     assign xl_af   = 1'b0;
-    assign xl_ppn  = xl_va[55:12] + 44'd1;
+    assign xl_ppn  = xl_va[55:12] + 44'h10000;
 
     // ---------------- slave ----------------
     int   wait_max = 0;                             // extra wait states, 0..wait_max
@@ -175,7 +176,7 @@ module qv_fetch_stream_tb #(
     endfunction
 
     task automatic respond(input logic [31:0] a);
-        if (a < MEM_WORDS * 8 || (a >= 32'h1000 && a < 32'h1000 + MEM_WORDS * 8)) begin ack <= 1'b1; dat <= mem_word(a); end
+        if (a < MEM_WORDS * 8 || (a >= 32'h1000_0000 && a < 32'h1000_0000 + MEM_WORDS * 8)) begin ack <= 1'b1; dat <= mem_word(a); end
         else                   begin err <= 1'b1; end
     endtask
 
@@ -233,13 +234,13 @@ module qv_fetch_stream_tb #(
             if (buf_pc !== exp_pc) begin
                 sb_errs++; $display("SCOREBOARD: popped pc %h expected %h at t=%0t", buf_pc, exp_pc, $time);
             end else if (buf_pc[31:0] < MEM_WORDS * 8) begin
-                if (buf_err || buf_data !== mem_word(buf_xl ? buf_pc[31:0] + 32'h1000 : buf_pc[31:0])) begin
+                if (buf_err || buf_data !== mem_word(buf_xl ? buf_pc[31:0] + 32'h1000_0000 : buf_pc[31:0])) begin
                     sb_errs++; $display("SCOREBOARD: pc %h wrong data/err (err=%b data=%h) at t=%0t", buf_pc, buf_err, buf_data, $time);
                 end
             end else if (!buf_err) begin
                 sb_errs++; $display("SCOREBOARD: pc %h beyond memory without err at t=%0t", buf_pc, $time);
             end
-            if (buf_xl && !buf_err && buf_pg !== buf_pc[55:12] + 44'd1) begin
+            if (buf_xl && !buf_err && buf_pg !== buf_pc[55:12] + 44'h10000) begin
                 sb_errs++; $display("SCOREBOARD: pc %h translated to page %h at t=%0t", buf_pc, buf_pg, $time);
             end
             if (buf_err && buf_cause !== 4'd1 && buf_cause !== 4'd12) begin
