@@ -140,6 +140,7 @@ pipe_decode_noser_tb|design/pipe/qv_decode_tb.sv||design|pipe|pass||-Pqv_decode_
 pipe_pmp_tb|design/pipe/qv_pmp_tb.sv||design|pipe|pass||
 pipe_pte_tb|design/pipe/qv_pte_tb.sv||design|pipe|pass|
 pipe_tlb_tb|design/pipe/qv_tlb_tb.sv||design|pipe|pass|
+pipe_ptw_window_tb|design/pipe/qv_ptw_tb.sv||design|pipe|pass||-Pqv_ptw_tb.WINDOW=1
 pipe_ptw_tb|design/pipe/qv_ptw_tb.sv||design|pipe|pass|
 pipe_xlate_tb|design/pipe/qv_xlate_tb.sv||design|pipe|pass||
 pipe_exu_bru_tb|design/pipe/qv_exu_bru_tb.sv||design|pipe|pass|

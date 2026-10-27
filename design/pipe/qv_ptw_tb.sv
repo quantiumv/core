@@ -23,8 +23,19 @@
  * The bus protocol is monitored throughout: a beat is never dropped before
  * its response, its address is stable, it never starts while the LSU is
  * busy, and o_beat covers it.
+ *
+ * WINDOW (P10d; tests.list runs both): a RAM window [0, 64 KB) is set, and an F
+ * beat whose PTE address is outside it may go out only while i_f_nonspec is
+ * high (the monitor checks every beat). Directed: such a walk waits before that
+ * beat and finishes once the fetch is on the real path; a D request meanwhile
+ * takes the walker (F is given up, accepted again afterwards, and walks from
+ * the root); D's own walks outside the window never wait; a PMP-denied read
+ * outside it is reported without waiting; a walk inside the window never waits.
+ * The sweep runs with i_f_nonspec random every cycle.
  */
-module qv_ptw_tb;
+module qv_ptw_tb #(
+    parameter bit WINDOW = 1'b0
+);
     int   pass_count = 0;
     int   fail_count = 0;
     logic quiet_on_pass = 1'b1;
@@ -51,6 +62,9 @@ module qv_ptw_tb;
     logic [63:0] f_va = '0;
     logic [1:0]  f_priv = 2'b01;
     logic [43:0] f_root = '0;
+    logic        f_nonspec = 1'b1;
+    bit          nonspec_random = 1'b0;
+    always @(negedge clk) if (nonspec_random) f_nonspec = ($urandom % 2) == 0;
     wire         d_done, f_done;
     wire         res_ok, res_pf, res_af;
     wire  [26:0] res_vpn;
@@ -58,7 +72,7 @@ module qv_ptw_tb;
     wire  [43:0] res_ppn;
     wire         res_r, res_w, res_x, res_u, res_d;
 
-    qv_ptw dut (
+    qv_ptw #(.PMA_RAM_BASE(64'h0), .PMA_RAM_SIZE(WINDOW ? 64'h1_0000 : 64'h0)) dut (
         .clk(clk), .rst(rst),
         .o_bus_addr(bus_addr), .o_bus_cyc(bus_cyc), .i_bus_dat(bus_dat), .i_bus_ack(bus_ack), .i_bus_err(bus_err),
         .i_lsu_busy(lsu_busy), .o_beat(beat),
@@ -66,6 +80,7 @@ module qv_ptw_tb;
         .i_d_req(d_req), .i_d_va(d_va), .i_d_wr(d_wr), .i_d_priv(d_priv), .i_d_sum(d_sum), .i_d_mxr(d_mxr),
         .i_d_root(d_root), .i_d_cancel(d_cancel), .o_d_done(d_done),
         .i_f_req(f_req), .i_f_va(f_va), .i_f_priv(f_priv), .i_f_root(f_root), .i_f_cancel(f_cancel), .o_f_done(f_done),
+        .i_f_nonspec(f_nonspec),
         .o_res_ok(res_ok), .o_res_pf(res_pf), .o_res_af(res_af), .o_res_vpn(res_vpn), .o_res_level(res_level),
         .o_res_ppn(res_ppn), .o_res_r(res_r), .o_res_w(res_w), .o_res_x(res_x), .o_res_u(res_u), .o_res_d(res_d)
     );
@@ -77,6 +92,19 @@ module qv_ptw_tb;
     wire  [7:0]  bus_sel = 8'hFF;
     wire  [63:0] bus_dato = 64'b0;
     `include "qv_pt_env.svh"
+
+    // an F beat outside the window starts only on the real path (the beat flag rises at the edge after the decision,
+    // so the f_nonspec of the decision's cycle is what counts)
+    int window_errs = 0;
+    logic prev_beat = 1'b0;
+    logic f_nonspec_at_start = 1'b1;
+    always @(posedge clk) begin
+        if (!rst && WINDOW && beat && !prev_beat && dut.cl_q && ({32'b0, bus_addr} >= 64'h1_0000 || dut.pte_addr[55:32] != 0)
+            && !f_nonspec_at_start)
+            window_errs++;
+        prev_beat <= beat;
+        f_nonspec_at_start <= f_nonspec;
+    end
 
     // ---------------- driving a client ----------------
     int  t_to = 0;
@@ -564,6 +592,66 @@ module qv_ptw_tb;
         check("stray ack/err with no request: no done pulse and no beat", 64'(d_done) + 64'(f_done) + 64'(bus_cyc), 64'd0);
         bus_ack = 1'b0; bus_err = 1'b0;
 
+        // ---------------- the RAM window: F's reads outside it wait for the real path (WINDOW only) ----------------
+        if (WINDOW) begin : window
+            localparam logic [43:0] FAR = 44'h18;              // a table page at 96 KB: in the memory, outside the window
+            int c, d_t, f_t;
+            clear_mem();
+            put(ROOT, 1, pte_of(L1T, V));
+            put(L1T, 2, pte_of(L0T, V));                       // vpn1 = 2: tables inside the window
+            put(L0T, 3, pte_of(44'h12345, V|R|W|X|A|D));
+            put(L1T, 5, pte_of(FAR, V));                       // vpn1 = 5: the level-0 table outside it
+            put(FAR, 3, pte_of(44'h23456, V|R|W|X|A|D));
+            lat_min = 0; lat_max = 1; err_addr = '1; deny_ppn = '1; set_pmp();
+            // a walk outside the window waits before its third read until the fetch is on the real path
+            f_nonspec = 1'b0;
+            f_va = va_of(9'd1, 9'd5, 9'd3, 12'h0); f_priv = 2'b01; f_root = ROOT; f_req = 1'b1;
+            beat_log_n = 0; got_done = 1'b0;
+            for (c = 0; c < 60; c++) begin @(posedge clk); #1; if (f_done) got_done = 1'b1; end
+            check("window: F waits before the read outside the window", b(got_done), 64'd0);
+            check("window: ... after its two reads inside it", 64'(beat_log_n), 64'd2);
+            f_nonspec = 1'b1;
+            for (c = 0; c < 60 && !got_done; c++) begin @(posedge clk); #1; if (f_done) begin got_done = 1'b1; capture_result(); end end
+            f_req = 1'b0; @(posedge clk); #1;
+            check("window: on the real path it reads and finishes", b(got_done) + b(got_ok), 64'd2);
+            check("window: three reads", 64'(beat_log_n), 64'd3);
+            check("window: the last one outside the window", {32'b0, beat_log[2]}, 64'h1_8018);
+            check("window: the leaf's page", {20'b0, got_ppn}, 64'h23456);
+            // D asks while F waits: D's walk goes first, F walks again from the root and waits again
+            f_nonspec = 1'b0;
+            f_req = 1'b1; beat_log_n = 0;
+            repeat (30) begin @(posedge clk); #1; end
+            d_va = va_of(9'd1, 9'd2, 9'd3, 12'h0); d_wr = 1'b0; d_priv = 2'b01; d_sum = 1'b0; d_mxr = 1'b0; d_root = ROOT;
+            d_req = 1'b1; d_t = -1; f_t = -1;
+            for (c = 0; c < 80; c++) begin
+                @(posedge clk); #1;
+                if (d_done && d_t < 0) begin d_t = c; d_req = 1'b0; end
+                if (f_done && f_t < 0) f_t = c;
+            end
+            check("window: a D request while F waits is served", b(d_t >= 0), 64'd1);
+            check("window: ... and F still waits", b(f_t < 0), 64'd1);
+            check("window: F's two reads, D's three, F's two again", 64'(beat_log_n), 64'd7);
+            f_nonspec = 1'b1;
+            for (c = 0; c < 60 && f_t < 0; c++) begin @(posedge clk); #1; if (f_done) f_t = c; end
+            f_req = 1'b0; @(posedge clk); #1;
+            check("window: F finishes once on the real path", b(f_t >= 0), 64'd1);
+            // D never waits, outside the window or not
+            f_nonspec = 1'b0;
+            walk_d(va_of(9'd1, 9'd5, 9'd3, 12'h0), 1'b0, 2'b01, 1'b0, 1'b0, ROOT, 100);
+            check("window: D's walk outside the window does not wait", b(got_done) + b(got_ok) + 64'(beat_log_n), 64'd5);
+            // an F walk inside the window does not wait
+            walk_f(va_of(9'd1, 9'd2, 9'd3, 12'h0), 2'b01, ROOT, 100);
+            check("window: F's walk inside the window does not wait", b(got_done) + b(got_ok) + 64'(beat_log_n), 64'd5);
+            // a PMP-denied read outside the window: the access fault comes at once, no wait and no read
+            deny_ppn = FAR; set_pmp();
+            walk_f(va_of(9'd1, 9'd5, 9'd3, 12'h0), 2'b01, ROOT, 60);
+            check("window: a denied read outside it is an access fault without waiting", b(got_done) + b(got_af), 64'd2);
+            check("window: ... after the two reads inside", 64'(beat_log_n), 64'd2);
+            deny_ppn = '1; set_pmp();
+            f_nonspec = 1'b1;
+            nonspec_random = 1'b1;                             // the sweep, with the real path coming and going
+        end
+
         // ---------------- random sweep ----------------
         for (int m = 0; m < 6; m++) begin
             random_map();
@@ -572,6 +660,7 @@ module qv_ptw_tb;
                 random_walk();
             end
         end
+        nonspec_random = 1'b0; f_nonspec = 1'b1;
         check("random sweep: no mismatches against the model", 64'(sweep_mismatch), 64'd0);
         check("random sweep: some walks ended ok", b(sweep_ok > 100), 64'd1);
         check("random sweep: some page faults", b(sweep_pf > 100), 64'd1);
@@ -579,6 +668,7 @@ module qv_ptw_tb;
         check("random sweep: many multi-read walks", b(sweep_multi > 500), 64'd1);
 
         check("bus protocol: no violations", 64'(proto_errors), 64'd0);
+        check("window: no F read outside it off the real path", 64'(window_errs), 64'd0);
         $display("");
         $display("qv_ptw_tb: %0d passed, %0d failed (%0d walks in the sweep: %0d ok, %0d page faults, %0d access faults)",
                  pass_count, fail_count, sweep_walks, sweep_ok, sweep_pf, sweep_af);
