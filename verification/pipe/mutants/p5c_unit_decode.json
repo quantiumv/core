@@ -21,7 +21,7 @@
   {"name": "TVM ignored", "old": "wire tvm_violation       = i_tvm && (i_priv == QV_PRIV_S) &&", "new": "wire tvm_violation       = 1'b0 && (i_priv == QV_PRIV_S) &&"},
   {"name": "SFENCE.VMA illegal from U", "old": "wire priv_illegal = csr_priv_violation || mret_priv_violation || sret_priv_violation || tvm_violation;", "new": "wire priv_illegal = csr_priv_violation || mret_priv_violation || sret_priv_violation || tvm_violation || (is_sfence && i_priv == QV_PRIV_U);"},
   {"name": "WFI illegal from U", "old": "wire priv_illegal = csr_priv_violation || mret_priv_violation || sret_priv_violation || tvm_violation;", "new": "wire priv_illegal = csr_priv_violation || mret_priv_violation || sret_priv_violation || tvm_violation || ((sys_op == QV_SYS_WFI) && i_priv == QV_PRIV_U);"},
-  {"name": "SFENCE.VMA does not serialize", "old": "uop_d.serialize = is_csr || (sys_op == QV_SYS_FENCE_I) || is_sfence;", "new": "uop_d.serialize = is_csr || (sys_op == QV_SYS_FENCE_I);"},
+  {"name": "SFENCE.VMA does not serialize", "old": "                          || (sys_op == QV_SYS_FENCE_I) || is_sfence;", "new": "                          || (sys_op == QV_SYS_FENCE_I);"},
   {"name": "SRET decoded as MRET", "old": "`INSTR_CODE(SRET):   sys_op = QV_SYS_SRET;", "new": "`INSTR_CODE(SRET):   sys_op = QV_SYS_MRET;"},
   {"name": "privilege rules left out of the fault", "old": "csr_illegal || priv_illegal) begin", "new": "csr_illegal) begin"}
  ]

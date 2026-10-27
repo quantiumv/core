@@ -1,0 +1,61 @@
+{
+ "dut": "design/pipe/qv_decode.sv",
+ "tb": "design/pipe/qv_decode_tb.sv",
+ "files": [
+  "design/decoder.sv",
+  "design/c_expand.sv",
+  "design/alu.sv",
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_pmp.sv",
+  "design/pipe/qv_decode.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench",
+  "-Pqv_decode_tb.CSR_NOSER=1"
+ ],
+ "cwd": "design",
+ "timeout": 600,
+ "mutants": [
+  {
+   "name": "every CSR write goes without a flush",
+   "old": "!(CSR_NOSER && (csr_wsup || csr_trap_wr))",
+   "new": "!(CSR_NOSER)"
+  },
+  {
+   "name": "the trap-CSR writes still flush",
+   "old": "!(CSR_NOSER && (csr_wsup || csr_trap_wr))",
+   "new": "!(CSR_NOSER && csr_wsup)"
+  },
+  {
+   "name": "the reads still flush",
+   "old": "!(CSR_NOSER && (csr_wsup || csr_trap_wr))",
+   "new": "!(CSR_NOSER && csr_trap_wr)"
+  },
+  {
+   "name": "mstatus among the trap CSRs (0x300-0x343)",
+   "old": "(csr_addr[11:2] == 10'h0D0)",
+   "new": "(csr_addr[11:6] == 6'h0C)"
+  },
+  {
+   "name": "the trap CSRs a block too wide (0x340-0x347)",
+   "old": "(csr_addr[11:2] == 10'h0D0)",
+   "new": "(csr_addr[11:3] == 9'h068)"
+  },
+  {
+   "name": "sstatus and satp among the trap CSRs (0x100-0x1FF)",
+   "old": "(csr_addr[11:2] == 10'h050)",
+   "new": "(csr_addr[11:7] == 5'h02 || csr_addr[11:7] == 5'h03)"
+  },
+  {
+   "name": "FENCE.I does not flush",
+   "old": "                          || (sys_op == QV_SYS_FENCE_I) || is_sfence;",
+   "new": "                          || is_sfence;"
+  }
+ ]
+}
