@@ -884,6 +884,8 @@ def emit_fp_op(p: Program, recent: list[int]):
     elif r < 0.43:
         op = p.rng.choice(_FP_FMA)
         a, b, c = freg(p), freg(p), freg(p)
+        if p.recent_f and p.rng.random() < 0.35:
+            c = p.recent_f[-1]                             # the third source still in flight (issue's third operand)
         p.e(f"    {op + '.' + fmt:<8} f{fdest(p)}, f{a}, f{b}, f{c}{fp_rm(p)}")
     elif r < 0.54:
         op = p.rng.choice(_FP_SIGN_MINMAX)
@@ -954,16 +956,36 @@ def emit_fs_window(p: Program, recent: list[int]):
     del recent[:-8]
 
 
+def emit_fp_collide(p: Program, recent: list[int]):
+    """An FP register and an integer register of the same number, both written while a divide holds the ROB: the FP
+    op commits first, and xN's claim must survive it until its own writer commits; the consumer of xN issues in
+    between (issue keeps one producer table per register file)."""
+    n = p.rng.choice(FREE_POOL)
+    others = [r for r in FREE_POOL if r != n]
+    d, m = p.rng.sample(others, 2)
+    p.e(f"    fadd.d  f{n}, f{freg(p)}, f{freg(p)}")
+    p.e(f"    divu    x{d}, x{p.rng.choice(others)}, x{p.rng.choice(others)}")
+    p.e(f"    add     x{n}, x{p.rng.choice(others)}, x{p.rng.choice(others)}")
+    for _ in range(p.rng.randint(1, 3)):
+        r = p.rng.choice([x for x in others if x not in (d, m)])
+        p.e(f"    addi    x{r}, x{r}, {p.rng.randint(-50, 50)}")
+    p.e(f"    add     x{m}, x{n}, x{p.rng.choice(others)}")
+    recent += [d, n, m]
+    del recent[:-8]
+
+
 def emit_fp(p: Program, recent: list[int]):
     r = p.rng.random()
-    if r < 0.72:
+    if r < 0.70:
         emit_fp_op(p, recent)
-    elif r < 0.86:
+    elif r < 0.84:
         emit_fp_mem(p, recent)
-    elif r < 0.93:
+    elif r < 0.91:
         emit_fcsr(p, recent)
-    elif r < 0.97:
+    elif r < 0.95:
         emit_fs_window(p, recent)
+    elif r < 0.97 and "m" in p.args.isa and not p.args.no_div:
+        emit_fp_collide(p, recent)
     else:
         emit_fp_illegal(p)
 
