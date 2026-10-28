@@ -15,3 +15,7 @@ mixedint,sram,8440,4393,1.921
 mixedint,cache,9619,4393,2.190
 trap,sram,13015,5605,2.322
 trap,cache,13846,5605,2.470
+fmatmul,sram,8124,3773,2.153
+fmatmul,cache,8268,3773,2.191
+fpmix,sram,801,402,1.993
+fpmix,cache,842,402,2.095
