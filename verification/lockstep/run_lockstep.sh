@@ -132,7 +132,8 @@ Usage: run_lockstep.sh --mode selfproof|mutant|corrupt [options]
                         128 hold the halt request across a resume
   --dbg-density N       halts are about 8*N retirements apart (default 0 = auto: 4, 8, ..., 256, by program)
   --dbg-late            the script's halt level is visible one cycle later
-  --corpus WHICH        act, fw, random, irq, smc, dbg, or all (default all -- dbg is the directed
+  --corpus WHICH        act, act-fd, fw, random, irq, smc, dbg, or all (default all -- act-fd is the F/D
+                        ACT config's ELFs, act_fd.list, not part of all; dbg is the directed
                         straight-line program for action-0 triggers, needs --dbg-mode 1 --
                         irq/smc are NOT part of all, since each needs a
                         non-default flag passed explicitly -- --irq-mode 2
@@ -295,12 +296,13 @@ esac
 ENTRIES_FILE="$OUTDIR/.entries_${CORPUS}_${MODE}_${DUT}_m${MUTANT}"
 : > "$ENTRIES_FILE"
 
-build_act_entries() {
+build_act_entries() {   # [list file] [tag prefix]: act.list and act_ by default
+    local list="${1:-act.list}" pfx="${2:-act}"
     while IFS= read -r line; do
         line="${line%%#*}"; line="$(echo "$line" | xargs)"
         [ -n "$line" ] || continue
         local elf="$REPO_ROOT/$line"
-        local tag; tag="act_$(basename "$line" .elf)"
+        local tag; tag="${pfx}_$(basename "$line" .elf)"
         local hex="$OUTDIR/hex_${tag}.hex"
         if [ ! -e "$hex" ] || [ "$FORCE" == "1" ]; then
             riscv64-unknown-elf-objcopy -O verilog --verilog-data-width=8 \
@@ -311,7 +313,7 @@ build_act_entries() {
         tohost=$(riscv64-unknown-elf-nm "$elf" 2>/dev/null | awk '$3 == "tohost" { print $1 }')
         [ -n "$tohost" ] || continue
         echo "${tag}|${hex}|${tohost}|" >> "$ENTRIES_FILE"
-    done < "$REPO_ROOT/verification/lockstep/act.list"
+    done < "$REPO_ROOT/verification/lockstep/$list"
 }
 
 build_fw_entries() {
@@ -438,13 +440,14 @@ build_dbg_entries() {
 
 case "$CORPUS" in
     act) build_act_entries ;;
+    act-fd) build_act_entries act_fd.list actfd ;;
     fw) build_fw_entries ;;
     random) build_random_entries ;;
     irq) build_irq_entries ;;
     smc) build_smc_entries ;;
     dbg) build_dbg_entries ;;
     all) build_act_entries; build_fw_entries; build_random_entries ;;
-    *) echo "Unknown --corpus: $CORPUS (expected act, fw, random, irq, smc, dbg, or all)" >&2; exit 1 ;;
+    *) echo "Unknown --corpus: $CORPUS (expected act, act-fd, fw, random, irq, smc, dbg, or all)" >&2; exit 1 ;;
 esac
 
 if [ -n "$ONLY" ]; then
