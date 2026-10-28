@@ -282,7 +282,7 @@ module lockstep_cmp #(
                          a_mstatus_mprv, a_mstatus_sum, a_mstatus_mxr, a_mstatus_tvm);
                 $display("                mpp=%0d spp=%0d tsr=%0d mie=%0d sie=%0d mprv=%0d sum=%0d mxr=%0d tvm=%0d",
                          b_mstatus_mpp, b_mstatus_spp, b_mstatus_tsr, cb_mstatus_mie, b_mstatus_sie,
-                         b_mstatus_mprv, b_mstatus_mxr, b_mstatus_sum, b_mstatus_tvm);
+                         b_mstatus_mprv, b_mstatus_sum, b_mstatus_mxr, b_mstatus_tvm);
                 $display("  frd           %0d f%0d=%016h       %0d f%0d=%016h", a_fp_word[15], a_fp_word[14:10],
                          a_fp_wdata, cb_fp_word[15], cb_fp_word[14:10], cb_fp_wdata);
                 $display("  fs/frm/fflags %0d/%0d/%02h                %0d/%0d/%02h", a_fp_word[9:8], a_fp_word[7:5],

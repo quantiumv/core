@@ -18,7 +18,8 @@
  *     immediate representation.
  */
 module qv_decode_tb #(
-    parameter bit CSR_NOSER = 1'b0      // P10c: tests.list runs both
+    parameter bit CSR_NOSER = 1'b0,     // P10c: tests.list runs both
+    parameter bit FPU_EN    = 1'b0      // F/D: tests.list runs both; the FP section needs it
 );
     import qv_pkg::*;
 
@@ -49,9 +50,11 @@ module qv_decode_tb #(
     // where the fetched instruction really is (translated fetch), and a fault marker for the second dword of a crossing one
     logic        feed_xl = 1'b0, feed_hi = 1'b0;
     logic [43:0] feed_pg_lo = '0, feed_pg_hi = '0;
+    logic [1:0]  fs  = 2'b01;          // F/D: mstatus.FS (Initial) and frm
+    logic [2:0]  frm = 3'd0;
 
-    qv_decode #(.CSR_NOSER(CSR_NOSER)) dut (
-        .clk(clk), .rst(rst), .i_flush(flush),
+    qv_decode #(.CSR_NOSER(CSR_NOSER), .FPU_EN(FPU_EN)) dut (
+        .clk(clk), .rst(rst), .i_flush(flush), .i_fs(fs), .i_frm(frm),
         .i_priv(priv), .i_tsr(tsr), .i_tvm(tvm), .i_in_debug(in_debug), .i_pb_active(pb_active),
         .i_tdata1_0(tdata1_0), .i_tdata2_0(tdata2_0), .i_tdata1_1(tdata1_1), .i_tdata2_1(tdata2_1),
         .i_pmpcfg0(pmpcfg0), .i_pmpaddr0(pmpaddr0), .i_pmpaddr1(pmpaddr1),
@@ -1099,11 +1102,98 @@ module qv_decode_tb #(
         flush = 1'b0;
         check("flush: slot cleared", {63'b0, valid}, 64'd0);
 
+        if (FPU_EN) fp_section();
+
         $display("");
         $display("qv_decode_tb: %0d passed, %0d failed", pass_count, fail_count);
         if (fail_count > 0) $display("qv_decode_tb: FAILURES PRESENT");
         $finish;
     end
+
+    // ---------------- F/D (FPU_EN) ----------------
+    function automatic logic [31:0] fpr(input logic [6:0] f7, input logic [4:0] rs2, input logic [4:0] rs1,
+                                        input logic [2:0] f3, input logic [4:0] rd);
+        return {f7, rs2, rs1, f3, rd, 7'b1010011};
+    endfunction
+
+    // the uop of one FP instruction: unit, operands (number, used, FP), destination, FPU op/fmt/rm
+    task automatic expect_fp(input string name, input logic [31:0] instr, input qv_fu_e exp_fu,
+                             input logic [4:0] r1, input logic u1, input logic f1,
+                             input logic [4:0] r2, input logic u2, input logic f2, input logic u3,
+                             input logic [4:0] rd, input logic wen, input logic rdf,
+                             input qv_fp_op_e op, input logic fmt, input logic [2:0] rm, input logic rvc = 1'b0);
+        feed(instr, 1'b0, 4'd0, rvc);
+        check({name, ": no fault"}, {63'b0, uop.xcpt}, 64'd0);
+        check({name, ": unit"}, 64'(uop.fu), 64'(exp_fu));
+        check({name, ": rs1"}, {57'b0, uop.rs1, uop.rs1_used, uop.rs1_fp}, {57'b0, r1, u1, f1});
+        check({name, ": rs2"}, {57'b0, uop.rs2, uop.rs2_used, uop.rs2_fp}, {57'b0, r2, u2, f2});
+        check({name, ": rs3 used"}, {63'b0, uop.rs3_used}, {63'b0, u3});
+        check({name, ": rd"}, {57'b0, uop.rd, uop.rd_wen, uop.rd_fp}, {57'b0, rd, wen, rdf});
+        if (exp_fu == QV_FU_FPU)
+            check({name, ": op/fmt/rm"}, {55'b0, uop.fp_op, uop.fp_fmt, uop.fp_rm}, {55'b0, 5'(op), fmt, rm});
+    endtask
+
+    task automatic expect_fp_illegal(input string name, input logic [31:0] instr);
+        feed(instr);
+        check({name, ": illegal"}, {59'b0, uop.xcpt, uop.xcpt_cause}, {59'b0, 1'b1, 4'd2});
+        check({name, ": reads nothing, writes nothing"},
+              {60'b0, uop.rs1_used, uop.rs2_used, uop.rd_wen, uop.rd_fp}, 64'd0);
+    endtask
+
+    task automatic fp_section();
+        priv = 2'b11; in_debug = 1'b0; tdata1_0 = '0; tdata1_1 = '0; feed_xl = 1'b0; feed_hi = 1'b0;
+        fs = 2'b01; frm = 3'd2;
+        expect_fp("fadd.d f3,f1,f2,rtz", fpr(7'b0000001, 2, 1, 3'b001, 3), QV_FU_FPU,
+                  1, 1, 1, 2, 1, 1, 0, 3, 1, 1, QV_FP_ADD, 1'b1, 3'd1);
+        expect_fp("fmadd.s f4,f1,f2,f3,dyn (frm 2)", {5'd3, 2'b00, 5'd2, 5'd1, 3'b111, 5'd4, 7'b1000011}, QV_FU_FPU,
+                  1, 1, 1, 2, 1, 1, 1, 4, 1, 1, QV_FP_MADD, 1'b0, 3'd2);
+        expect_fp("feq.d x5,f1,f2: an integer rd", fpr(7'b1010001, 2, 1, 3'b010, 5), QV_FU_FPU,
+                  1, 1, 1, 2, 1, 1, 0, 5, 1, 0, QV_FP_EQ, 1'b1, 3'd2);
+        expect_fp("fcvt.d.w f6,x7: an integer source, rs2 holds the type", fpr(7'b1101001, 0, 7, 3'b000, 6),
+                  QV_FU_FPU, 7, 1, 0, 0, 0, 0, 0, 6, 1, 1, QV_FP_I2F, 1'b1, 3'd0);
+        expect_fp("fcvt.lu.d x8,f9,rdn: rs2 (type 3) is not a register", fpr(7'b1100001, 3, 9, 3'b010, 8),
+                  QV_FU_FPU, 9, 1, 1, 0, 0, 0, 0, 8, 1, 0, QV_FP_F2I, 1'b1, 3'd2);
+        expect_fp("fsqrt.s f0,f31: f0 is a destination", fpr(7'b0101100, 0, 31, 3'b000, 0), QV_FU_FPU,
+                  31, 1, 1, 0, 0, 0, 0, 0, 1, 1, QV_FP_SQRT, 1'b0, 3'd0);
+        expect_fp("flw f10,8(x11): the LSU", {12'd8, 5'd11, 3'b010, 5'd10, 7'b0000111}, QV_FU_LSU,
+                  11, 1, 0, 0, 0, 0, 0, 10, 1, 1, QV_FP_ADD, 1'b0, 3'd0);
+        check("flw: a word load, offset as operand b", {59'b0, uop.is_load, uop.mem_size, uop.is_store, 1'b0},
+              {59'b0, 1'b1, 2'd2, 1'b0, 1'b0});
+        check("flw: offset", uop.imm2, 64'd8);
+        expect_fp("fsd f12,-16(x13): an FP store source", {7'h7F, 5'd12, 5'd13, 3'b011, 5'b10000, 7'b0100111},
+                  QV_FU_LSU, 13, 1, 0, 12, 1, 1, 0, 16, 0, 0, QV_FP_ADD, 1'b0, 3'd0);   // (rd: offset bits, no write)
+        check("fsd: store offset", uop.imm3, -64'sd16);
+        expect_fp("c.fld f8,8(x9) expands to fld", {16'b0, 3'b001, 3'b001, 3'b001, 2'b00, 3'b000, 2'b00}, QV_FU_LSU,
+                  9, 1, 0, 0, 0, 0, 0, 8, 1, 1, QV_FP_ADD, 1'b0, 3'd0, 1'b1);
+        expect_fp_illegal("fadd.d, rm 5 (reserved)", fpr(7'b0000001, 2, 1, 3'b101, 3));
+        expect_fp_illegal("fadd.h (no Zfh)", fpr(7'b0000010, 2, 1, 3'b000, 3));
+        frm = 3'd5;
+        expect_fp_illegal("fadd.d, dyn with frm 5", fpr(7'b0000001, 2, 1, 3'b111, 3));
+        frm = 3'd4;
+        expect_fp("fadd.d, dyn with frm 4", fpr(7'b0000001, 2, 1, 3'b111, 3), QV_FU_FPU,
+                  1, 1, 1, 2, 1, 1, 0, 3, 1, 1, QV_FP_ADD, 1'b1, 3'd4);
+        fs = 2'b00;
+        expect_fp_illegal("FS Off: fadd.d", fpr(7'b0000001, 2, 1, 3'b000, 3));
+        expect_fp_illegal("FS Off: flw", {12'd8, 5'd11, 3'b010, 5'd10, 7'b0000111});
+        feed({12'h001, 5'd0, 3'b010, 5'd14, 7'b1110011});          // csrr x14, fflags
+        check("FS Off: csrr fflags is illegal", {59'b0, uop.xcpt, uop.xcpt_cause}, {59'b0, 1'b1, 4'd2});
+        feed({12'h003, 5'd0, 3'b010, 5'd14, 7'b1110011});          // frcsr x14
+        check("FS Off: frcsr is illegal", {59'b0, uop.xcpt, uop.xcpt_cause}, {59'b0, 1'b1, 4'd2});
+        fs = 2'b10;
+        feed({12'h002, 5'd0, 3'b010, 5'd14, 7'b1110011});          // frrm x14
+        check("FS Clean: frrm is legal", {63'b0, uop.xcpt}, 64'd0);
+        // an action-1 trigger on an FP op: neutralised, no FP destination either
+        feed_pc = 64'h2000;
+        tdata2_0 = 64'h2000;
+        tdata1_0 = (64'd2 << 60) | (64'd1 << 12) | (64'd1 << 6) | 64'd4;   // mcontrol6, action 1, M, execute
+        feed(fpr(7'b0000001, 2, 1, 3'b000, 3));
+        check("trigger on fadd.d: debug entry", {63'b0, uop.trig_debug}, 64'd1);
+        check("trigger on fadd.d: ALU, no rd, no FP rd", {61'b0, uop.fu == QV_FU_ALU, uop.rd_wen, uop.rd_fp},
+              {61'b0, 1'b1, 1'b0, 1'b0});
+        tdata1_0 = '0;
+        feed_pc = 64'h1000;
+        fs = 2'b01;
+    endtask
 
     initial begin
         #100000;
