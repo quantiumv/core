@@ -106,10 +106,10 @@ exists.
   refresh attempts to read the current privilege level, which is
   legitimately unavailable while not halted. Doesn't affect the actual test
   outcome.
-- **`misa` reads `0x8000000000000100`** during `examine` (only the `I` bit
-  set) — this project's own ACT4/riscv-formal suites already validate
-  `misa` correctness at length elsewhere; not part of this milestone's own
-  acceptance criteria, not investigated further here.
+- **`misa`** read `0x8000000000000100` during `examine` (only the `I` bit
+  set) when this was written. That was a bug, erratum E3
+  (`verification/reference/README.md`): misa reads `0x8000000000141105`
+  (A C I M S U) since 2026-10-28.
 
 ## Scope boundary
 

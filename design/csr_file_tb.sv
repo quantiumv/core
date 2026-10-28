@@ -142,7 +142,7 @@ module csr_file_tb;
     localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_MINSTRET  = 12'hB02;
     localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_UNMAPPED  = 12'h000;
 
-    localparam logic [(`WORD_SIZE - 1):0] MISA_VALUE = 64'h8000_0000_0000_0100;
+    localparam logic [(`WORD_SIZE - 1):0] MISA_VALUE = 64'h8000_0000_0014_1105;
 
     /* U/S/M privilege-mode milestone additions -- independently
      * transcribed from the spec (not read from csr_file.sv's own

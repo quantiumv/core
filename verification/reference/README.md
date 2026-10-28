@@ -155,6 +155,16 @@ it is cited with its directory.
   Tests: `core_trigger_tb` scenarios `dut_trig_pbmem` and `dut_trig_misal`
   (both failed before the fix). Behavior change on the mainline paths:
   none; ACT, lockstep and the regression are unchanged.
+- **E3 (2026-10-28, found while planning F/D; fixed together in
+  `design/csr_file.sv` and `ref_csr_file.sv`).** `misa` read
+  `0x8000000000000100`, the `I` letter only, although A, C, M, S and U are
+  all implemented. OpenSBI decides from misa whether S-mode exists (it
+  skips trap delegation without the `S` letter). misa is now
+  `0x8000000000141105` (A C I M S U, the value Sail reports for this ISA,
+  `verification/fpu/README.md` probe 10). The three tests that pinned the
+  old value (`csr_file_tb`, `csr_file_random_tb`, `core_zicsr_tb`) pin the
+  new one. Both cores share the constant and no generated program reads
+  misa, so lockstep and ACT cannot see the change.
 
 ## Running the reference as `core`
 

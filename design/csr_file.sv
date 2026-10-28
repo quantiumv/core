@@ -341,14 +341,17 @@ module csr_file (
     /*
      * Read-only CSRs with no backing storage at all -- fixed values
      * returned directly by the read mux below, nothing to reset. misa's
-     * value: MXL = 2 in bits[63:62] (selects XLEN=64) plus bit 8 set
-     * (the 'I' extension letter, where A=0, B=1, ... Z=25). Writes are
+     * value: MXL = 2 in bits[63:62] (selects XLEN=64) plus one bit per
+     * implemented extension letter (A=0, B=1, ... Z=25): A, C, I, M, S
+     * and U (erratum E3: until 2026-10-28 only I was set, although the
+     * others were all implemented; OpenSBI decides from misa whether
+     * S-mode exists before it delegates traps). Writes are
      * accepted on the Zicsr write path (see mscratch_q's block below --
      * that path is shared, but misa has no write-reacting arm of its
      * own) yet have no effect, which is spec-legal for a WARL field
      * with exactly one legal value.
      */
-    localparam logic [(`WORD_SIZE - 1):0] MISA_VALUE      = 64'h8000_0000_0000_0100;
+    localparam logic [(`WORD_SIZE - 1):0] MISA_VALUE      = 64'h8000_0000_0014_1105;
     localparam logic [(`WORD_SIZE - 1):0] MVENDORID_VALUE = `WORD_SIZE'(0);
     localparam logic [(`WORD_SIZE - 1):0] MARCHID_VALUE   = `WORD_SIZE'(0);
     localparam logic [(`WORD_SIZE - 1):0] MIMPID_VALUE    = `WORD_SIZE'(0);
