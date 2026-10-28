@@ -86,7 +86,11 @@
  * matches this project's own "the DM does not attempt to determine
  * whether more than one error occurred" reading of the spec.
  */
-module dm (
+module dm #(
+    // F/D: Access Register to the FP registers (regno 0x1020-0x103F). Without it an FPR regno is unsupported
+    // (cmderr 2) and the FPR ports are inert. soc.sv and the lockstep harness set it from QV_FPU_EN.
+    parameter bit HAS_FPR = 1'b0
+) (
     input logic clk,
     input logic rst,
 
@@ -117,6 +121,15 @@ module dm (
     output logic [4:0]  o_dm_gpr_sel,
     output logic [63:0] o_dm_gpr_wdata,
     input  logic [63:0] i_dm_gpr_rdata,
+
+    /*
+     * Access Register: FP register transfer (F/D, only with HAS_FPR), the same shape as the GPR one. FS is left as it
+     * is: the debugger reads and writes the FP registers whatever mstatus.FS says.
+     */
+    output logic        o_dm_fpr_we,
+    output logic [4:0]  o_dm_fpr_sel,
+    output logic [63:0] o_dm_fpr_wdata,
+    input  logic [63:0] i_dm_fpr_rdata = 64'b0,
 
     /*
      * Access Register: CSR transfer (Milestone 5's own new core0 ports).
@@ -434,8 +447,9 @@ module dm (
     wire        cmd_write_reg = cmd_effective_word[16];
     wire [15:0] cmd_regno     = cmd_effective_word[15:0];
 
-    // GPR range 0x1000-0x101F (x0-x31); CSR range 0x0000-0x0FFF.
+    // GPR range 0x1000-0x101F (x0-x31); FPR range 0x1020-0x103F (f0-f31, with HAS_FPR); CSR range 0x0000-0x0FFF.
     wire cmd_regno_is_gpr = (cmd_regno[15:5] == 11'h080);
+    wire cmd_regno_is_fpr = HAS_FPR && (cmd_regno[15:5] == 11'h081);
     wire cmd_regno_is_csr = !cmd_regno_is_gpr && (cmd_regno[15:12] == 4'h0);
 
     /*
@@ -456,7 +470,7 @@ module dm (
      * reason to set meaningfully.
      */
     wire cmd_aarsize_ok = (cmd_aarsize == 3'd3);
-    wire cmd_regno_ok   = !cmd_transfer || cmd_regno_is_gpr || cmd_regno_is_csr;
+    wire cmd_regno_ok   = !cmd_transfer || cmd_regno_is_gpr || cmd_regno_is_fpr || cmd_regno_is_csr;
     // postexec (Milestone 7) is now accepted for any Access Register
     // command -- see the Program Buffer section below for its own
     // execution logic.
@@ -472,6 +486,7 @@ module dm (
 
     wire cmd_do_gpr = cmd_legal && cmd_transfer && cmd_regno_is_gpr;
     wire cmd_do_csr = cmd_legal && cmd_transfer && cmd_regno_is_csr;
+    wire cmd_do_fpr = cmd_legal && cmd_transfer && cmd_regno_is_fpr;
 
     /*
      * cmderr priority mirrors the spec's own "halt/resume" > "busy" >
@@ -560,6 +575,10 @@ module dm (
     assign o_dm_gpr_sel   = cmd_regno[4:0];
     assign o_dm_gpr_wdata = {data1_q, data0_q};
 
+    assign o_dm_fpr_we    = cmd_do_fpr && cmd_write_reg;
+    assign o_dm_fpr_sel   = cmd_regno[4:0];
+    assign o_dm_fpr_wdata = {data1_q, data0_q};
+
     assign o_dm_csr_we    = cmd_do_csr && cmd_write_reg;
     assign o_dm_csr_addr  = cmd_regno[11:0];
     assign o_dm_csr_wdata = {data1_q, data0_q};
@@ -644,6 +663,8 @@ module dm (
             {data1_q, data0_q} <= i_dm_gpr_rdata;
         end else if (cmd_do_csr && !cmd_write_reg) begin
             {data1_q, data0_q} <= i_dm_csr_rdata;
+        end else if (cmd_do_fpr && !cmd_write_reg) begin
+            {data1_q, data0_q} <= i_dm_fpr_rdata;
         end else begin
             if (i_reg_we && (i_reg_addr == ADDR_DATA0)) data0_q <= i_reg_wdata;
             if (i_reg_we && (i_reg_addr == ADDR_DATA1)) data1_q <= i_reg_wdata;

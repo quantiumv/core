@@ -141,6 +141,9 @@
  * on core0 (no Debug Module instance existed at this level yet), are now
  * wired for real.
  */
+`ifndef QV_FPU_EN
+`define QV_FPU_EN 0
+`endif
 module soc (
     input logic clk,
     input logic rst,
@@ -210,6 +213,9 @@ module soc (
     logic [4:0]  dm_gpr_sel;
     logic [11:0] dm_csr_addr;
     logic [63:0] dm_gpr_wdata, dm_csr_wdata, dm_gpr_rdata, dm_csr_rdata;
+    logic        dm_fpr_we;                 // F/D: Access Register to the FP registers (dm0's HAS_FPR)
+    logic [4:0]  dm_fpr_sel;
+    logic [63:0] dm_fpr_wdata, dm_fpr_rdata;
     logic        progbuf_start, progbuf_done, progbuf_abort;
     logic [3:0]  progbuf_pc;
     logic [31:0] progbuf_data;
@@ -256,7 +262,9 @@ module soc (
         .i_dm_csr_wdata(dm_csr_wdata), .o_dm_csr_rdata(dm_csr_rdata),
         .i_progbuf_start(progbuf_start), .o_progbuf_pc(progbuf_pc),
         .i_progbuf_data(progbuf_data), .o_progbuf_done(progbuf_done),
-        .o_progbuf_abort(progbuf_abort)
+        .o_progbuf_abort(progbuf_abort),
+        .i_dm_fpr_we(dm_fpr_we), .i_dm_fpr_sel(dm_fpr_sel),
+        .i_dm_fpr_wdata(dm_fpr_wdata), .o_dm_fpr_rdata(dm_fpr_rdata)
     );
 
     /*
@@ -481,7 +489,7 @@ module soc (
         .i_reg_rdata(dmi_reg_rdata)
     );
 
-    dm dm0 (
+    dm #(.HAS_FPR(`QV_FPU_EN != 0)) dm0 (
         .clk(clk), .rst(rst),
         .i_reg_addr(dmi_reg_addr), .i_reg_wdata(dmi_reg_wdata), .i_reg_we(dmi_reg_we),
         .i_reg_re(dmi_reg_re),
@@ -492,6 +500,8 @@ module soc (
         .o_dm_gpr_wdata(dm_gpr_wdata), .i_dm_gpr_rdata(dm_gpr_rdata),
         .o_dm_csr_we(dm_csr_we), .o_dm_csr_addr(dm_csr_addr),
         .o_dm_csr_wdata(dm_csr_wdata), .i_dm_csr_rdata(dm_csr_rdata),
+        .o_dm_fpr_we(dm_fpr_we), .o_dm_fpr_sel(dm_fpr_sel),
+        .o_dm_fpr_wdata(dm_fpr_wdata), .i_dm_fpr_rdata(dm_fpr_rdata),
         .o_progbuf_start(progbuf_start), .i_progbuf_pc(progbuf_pc),
         .o_progbuf_data(progbuf_data), .i_progbuf_done(progbuf_done),
         .i_progbuf_abort(progbuf_abort),
