@@ -194,7 +194,8 @@ module core_zicsr_tb;
 
         wait_halted_or_timeout(`TIMEOUT_CYCLES_SMALL, "EBREAK trap never fired");
 
-        check("x3 (csrrs rd, misa exact bit pattern)", dut.core0.regfile0.gp_registers[3], 64'h8000_0000_0014_1105);
+        check("x3 (csrrs rd, misa exact bit pattern)", dut.core0.regfile0.gp_registers[3],
+              (`QV_FPU_EN != 0) ? 64'h8000_0000_0014_112D : 64'h8000_0000_0014_1105);   // F/D add the F and D letters
 
         check("x5 (csrrw rd, old mscratch before first write)", dut.core0.regfile0.gp_registers[5], 64'd0);
         check("x6 (mscratch read-back after csrrw)", dut.core0.regfile0.gp_registers[6], 64'h00F0);

@@ -63,7 +63,7 @@
  */
 `include "lockstep_defs.svh"
 `ifndef QV_FPU_EN
-`define QV_FPU_EN 0
+`define QV_FPU_EN 1
 `endif
 
 module lockstep_dbg (
