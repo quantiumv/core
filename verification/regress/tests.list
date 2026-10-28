@@ -147,6 +147,7 @@ pipe_ptw_tb|design/pipe/qv_ptw_tb.sv||design|pipe|pass|
 pipe_xlate_tb|design/pipe/qv_xlate_tb.sv||design|pipe|pass||
 pipe_exu_bru_tb|design/pipe/qv_exu_bru_tb.sv||design|pipe|pass|
 pipe_exu_div_tb|design/pipe/qv_exu_div_tb.sv||design|pipe|pass|
+pipe_fpu_vec_tb|design/pipe/qv_fpu_vec_tb.sv||design|pipe|pass|
 pipe_commit_tb|design/pipe/qv_commit_tb.sv||design|pipe|pass|
 pipe_dbg_tb|design/pipe/qv_dbg_tb.sv||design|pipe|pass|
 pipe_lsu_tb|design/pipe/qv_lsu_tb.sv||design|pipe|pass|

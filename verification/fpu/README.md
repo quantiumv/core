@@ -132,3 +132,31 @@ exactly those three.
 python3 verification/fpu/gen_vectors.py --level 1 --sample 2000 --unboxed -o /tmp/smoke.vec
 python3 verification/fpu/check_vectors_sail.py /tmp/smoke.vec
 ```
+
+`vectors/smoke.vec` (10,483 cases: 40 per function and rounding mode, the unboxed variants, 3,000 golden-model cases,
+checked against Sail) is what the regression row `pipe_fpu_vec_tb` runs, so the regression needs no TestFloat.
+
+## The algorithm model
+
+`fpu_model.py` is the FPU's algorithms written bit for bit as the RTL does them (`design/pipe/qv_fpu_*.sv`). It is
+not a reference: TestFloat and Sail are. It was checked against the vectors before the RTL was written from it:
+- unpacking to one 53-bit form for both precisions;
+- the 164-bit FMA window with its jamming cases;
+- the single rounder, with tininess after rounding;
+- the restoring divide and square root;
+- the conversions.
+
+```
+python3 verification/fpu/fpu_model.py /tmp/smoke.vec
+```
+
+## Results
+
+2026-10-28, with the vectors above:
+
+| Run | Vectors | Mismatches |
+|---|---|---|
+| model, the 260,511 sampled vectors | 260,511 | 0 (after one fix: FMUL of a zero keeps the product's sign) |
+| model, full level 1 except the FMA forms (all cases, all rounding modes, unboxed variants, 50,000 golden) | 2,298,258 | 0 |
+| model, FMA forms, 100,000 level-1 cases per form, precision and rounding mode | 4,155,180 | 0 |
+| RTL (`qv_fpu_vec_tb`, iverilog), the 260,511 sampled vectors | 260,511 | 0 (after one fix: an iverilog width rule in the integer-to-float magnitude) |
