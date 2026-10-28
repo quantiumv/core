@@ -53,6 +53,9 @@ There is no libc: no `printf`, no `malloc`, no file I/O. Use
 
 The build links libgcc, so 64-bit integer arithmetic works everywhere.
 Floating point also builds (in software, through libgcc), but it is slow.
+`FLOAT=hard` (`--float hard`) builds for `rv64imafdc` with the `lp64d` ABI instead, starts from
+`crt0_fp.s` (which turns `mstatus.FS` on before `main`) and builds the core with `QV_FPU_EN=1`.
+This needs a core with F and D, which is work in progress (`verification/fpu/README.md`).
 
 ## How it works
 

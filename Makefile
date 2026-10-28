@@ -14,12 +14,12 @@ CORE ?= pipe
 
 .PHONY: regress lint act openocd-smoke lockstep formal-sync run
 
-# make run PROG="prog.c [more.c ...]" [CORE=pipe|ref] [TRACE=1] [CYCLES=N]
+# make run PROG="prog.c [more.c ...]" [CORE=pipe|ref] [FLOAT=hard] [TRACE=1] [CYCLES=N]
 # -- build a bare-metal program and run it on the full SoC; see
 # verification/run/README.md.
 run:
-	@test -n "$(PROG)" || { echo 'usage: make run PROG="prog.c ..." [CORE=pipe|ref] [TRACE=1] [CYCLES=N]' >&2; exit 2; }
-	bash verification/run/run_prog.sh --core $(CORE) $(if $(TRACE),--trace) $(if $(CYCLES),--cycles $(CYCLES)) $(PROG)
+	@test -n "$(PROG)" || { echo 'usage: make run PROG="prog.c ..." [CORE=pipe|ref] [FLOAT=hard] [TRACE=1] [CYCLES=N]' >&2; exit 2; }
+	bash verification/run/run_prog.sh --core $(CORE) $(if $(FLOAT),--float $(FLOAT)) $(if $(TRACE),--trace) $(if $(CYCLES),--cycles $(CYCLES)) $(PROG)
 
 regress:
 	verification/regress/run_regress.sh --core $(CORE)
