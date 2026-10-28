@@ -19,6 +19,7 @@ SECTIONS
 
     .rodata : {
         *(.rodata*)
+        *(.srodata*)    /* the F/D kernels' double constants (.srodata.cst8): the hex takes .rodata, not orphans */
     } > RAM
 
     .data : {
