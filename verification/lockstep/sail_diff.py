@@ -40,6 +40,7 @@ REPO_ROOT = LOCKSTEP_DIR.parent.parent
 DESIGN_DIR = REPO_ROOT / "design"
 TESTBENCH_DIR = REPO_ROOT / "testbench"
 SAIL_CONFIG = LOCKSTEP_DIR / "sail_config_override.json"
+SAIL_FD_CONFIG = REPO_ROOT / "verification" / "fpu" / "sail_fd_override.json"
 SAIL_BIN = Path.home() / "sail-install" / "bin" / "sail_riscv_sim"
 
 # ---------------------------------------------------------------------
@@ -109,24 +110,32 @@ def toolchain_build_sail_safe(seed: int, args, out_base: Path):
 # ---------------------------------------------------------------------
 # Our own core, via rvfi_tracer.sv
 # ---------------------------------------------------------------------
-def _core_files():
-    """The core's own files (the pipelined core and the design/ leaves it uses) from design_files.list, relative to
-    design/ (the build runs there), plus the SRAM and the arbiter the tracer's harness needs."""
+def _core_files(core: str):
+    """The core's own files and its extra iverilog flags, plus the SRAM and the arbiter the tracer's harness needs.
+    pipe: the pipelined core and the design/ leaves it uses, from design_files.list, relative to design/ (the build
+    runs there). ref: the reference's private copies from ref_design_files.list, built as `core`."""
+    regress = REPO_ROOT / "verification" / "regress"
+    if core == "ref":
+        files = []
+        for line in (regress / "ref_design_files.list").read_text().splitlines():
+            line = line.split("#", 1)[0].strip()
+            if line.startswith("verification/reference/"):
+                files.append(str(REPO_ROOT / line))
+        ref_dir = REPO_ROOT / "verification" / "reference"
+        return files + ["wb4_sram.sv", "wb_arbiter2.sv"], ["-DQV_REF_AS_CORE", "-I", str(ref_dir)]
     keep = re.compile(r"^design/(pipe/|decoder\.sv|alu\.sv|c_expand\.sv|csr_file\.sv|register_file\.sv|divider\.sv)")
     files = []
-    for line in (REPO_ROOT / "verification" / "regress" / "design_files.list").read_text().splitlines():
+    for line in (regress / "design_files.list").read_text().splitlines():
         line = line.split("#", 1)[0].strip()
         if keep.match(line):
             files.append(line[len("design/"):])
-    return files + ["wb4_sram.sv", "wb_arbiter2.sv"]
+    return files + ["wb4_sram.sv", "wb_arbiter2.sv"], []
 
 
-CORE_FILES = _core_files()
-
-
-def build_rvfi_tracer(vvp_path: Path):
-    cmd = ["iverilog", "-g2012", "-DRISCV_FORMAL", "-I", ".", "-I", "defaults",
-           "-o", str(vvp_path)] + CORE_FILES + [str(TESTBENCH_DIR / "rvfi_tracer.sv")]
+def build_rvfi_tracer(vvp_path: Path, core: str, defines: list[str]):
+    files, flags = _core_files(core)
+    cmd = ["iverilog", "-g2012", "-DRISCV_FORMAL", "-I", ".", "-I", "defaults"] + flags + \
+          [f"-D{d}" for d in defines] + ["-o", str(vvp_path)] + files + [str(TESTBENCH_DIR / "rvfi_tracer.sv")]
     subprocess.run(cmd, cwd=DESIGN_DIR, check=True, capture_output=True, text=True)
 
 
@@ -141,6 +150,8 @@ _RVFI_RE = re.compile(
     r"mem_addr=(?P<mem_addr>[0-9a-f]+) mem_rmask=(?P<mem_rmask>[0-9a-f]+) "
     r"mem_wmask=(?P<mem_wmask>[0-9a-f]+) mem_rdata=(?P<mem_rdata>[0-9a-f]+) "
     r"mem_wdata=(?P<mem_wdata>[0-9a-f]+)"
+    # an FP register write, printed by the tracer only for a core with F/D
+    r"(?: frd_addr=(?P<frd_addr>\d+) frd_wdata=(?P<frd_wdata>[0-9a-f]+))?"
 )
 
 
@@ -166,7 +177,7 @@ def run_our_core(vvp_path: Path, hexf: Path, tohost_hex: str, timeout_cycles: in
             mask = mem_rmask or mem_wmask
             if mask:
                 mem_addr += (mask & -mask).bit_length() - 1
-            records.append({
+            rec = {
                 "pc": int(d["pc_rdata"], 16),
                 "insn": int(d["insn"], 16),
                 "trap": d["trap"] == "1",
@@ -177,7 +188,11 @@ def run_our_core(vvp_path: Path, hexf: Path, tohost_hex: str, timeout_cycles: in
                 "mem_addr": mem_addr,
                 "mem_rmask": mem_rmask,
                 "mem_wmask": mem_wmask,
-            })
+            }
+            if d["frd_addr"] is not None:
+                rec["frd_addr"] = int(d["frd_addr"])
+                rec["frd_wdata"] = int(d["frd_wdata"], 16)
+            records.append(rec)
     # The pipelined core writes the bus a cycle before the store retires, so the tracer keeps printing for
     # +DRAIN cycles after tohost goes nonzero (the store's own record would be lost otherwise). Sail stops
     # at that store: drop whatever retired after it.
@@ -201,6 +216,7 @@ _SAIL_INSTR_RE = re.compile(
     r"\(0x(?P<insn>[0-9A-Fa-f]+)\)"
 )
 _SAIL_REG_RE = re.compile(r"^x(?P<reg>\d+) <- 0x(?P<val>[0-9A-Fa-f]+)$")
+_SAIL_FREG_RE = re.compile(r"^f(?P<reg>\d+) <- 0x(?P<val>[0-9A-Fa-f]+)$")
 _SAIL_MEM_RE = re.compile(
     # Reads/fetches print "-> 0xVAL" (data flowing out of memory);
     # writes print "<- 0xVAL" (data flowing in) -- same line shape,
@@ -213,10 +229,13 @@ _SAIL_EXC_RE = re.compile(
 )
 
 
-def run_sail(elf: Path, timeout_cycles: int):
+def run_sail(elf: Path, timeout_cycles: int, fd: bool = False):
+    overrides = ["--config-override", str(SAIL_CONFIG)]
+    if fd:                                  # F, D and Zcd on (verification/fpu/sail_fd_override.json)
+        overrides += ["--config-override", str(SAIL_FD_CONFIG)]
     proc = subprocess.run(
-        [str(SAIL_BIN), "--config-override", str(SAIL_CONFIG),
-         f"--inst-limit={timeout_cycles}", "--trace-instr", "--trace-reg",
+        [str(SAIL_BIN)] + overrides +
+        [f"--inst-limit={timeout_cycles}", "--trace-instr", "--trace-reg",
          "--trace-mem", "--trace-exception", "--trace-htif", str(elf)],
         check=True, capture_output=True, text=True,
     )
@@ -245,6 +264,12 @@ def run_sail(elf: Path, timeout_cycles: int):
             if reg != 0:
                 cur["rd_addr"] = reg
                 cur["rd_wdata"] = int(m.group("val"), 16)
+            i += 1
+            continue
+        m = _SAIL_FREG_RE.match(line)
+        if m and cur is not None:
+            cur["frd_addr"] = int(m.group("reg"))
+            cur["frd_wdata"] = int(m.group("val"), 16)
             i += 1
             continue
         m = _SAIL_MEM_RE.match(line)
@@ -334,6 +359,13 @@ def diff_one(ours: dict, sail: dict) -> list[str]:
     elif ours["rd_addr"] != 0 and ours["rd_wdata"] != sail["rd_wdata"]:
         problems.append(f"rd_wdata (x{ours['rd_addr']}): "
                          f"ours={ours['rd_wdata']:#x} sail={sail['rd_wdata']:#x}")
+    # An FP register write: compared once the tracer prints frd fields (a core with F/D); Sail always reports one.
+    if "frd_addr" in ours or "frd_addr" in sail:
+        if ours.get("frd_addr") != sail.get("frd_addr"):
+            problems.append(f"frd_addr: ours={ours.get('frd_addr')} sail={sail.get('frd_addr')}")
+        elif ours.get("frd_wdata") != sail.get("frd_wdata"):
+            problems.append(f"frd_wdata (f{ours['frd_addr']}): "
+                             f"ours={ours['frd_wdata']:#x} sail={sail['frd_wdata']:#x}")
     # Memory-access fields are only meaningfully comparable for a
     # retirement that genuinely reached memory. A trapping instruction
     # never does (the fault is detected before any bus access) -- but
@@ -361,7 +393,7 @@ def diff_seed(seed: int, args, vvp_path: Path, out_dir: Path, verbose: bool) -> 
     base = out_dir / f"sail_diff_{seed}"
     elf, hexf, tohost_hex = toolchain_build_sail_safe(seed, args, base)
     ours, ours_done = run_our_core(vvp_path, hexf, tohost_hex, args.timeout)
-    sail, sail_done = run_sail(elf, args.timeout)
+    sail, sail_done = run_sail(elf, args.timeout, fd="f" in args.isa)
 
     n = min(len(ours), len(sail))
     for i in range(n):
@@ -414,6 +446,10 @@ def main():
     ap.add_argument("--timeout", type=int, default=20000,
                      help="instruction/cycle bound for BOTH sides")
     ap.add_argument("--out-dir", type=Path, default=None)
+    ap.add_argument("--core", choices=["pipe", "ref"], default="pipe",
+                     help="the core under test: the pipelined core or the reference (built as `core`)")
+    ap.add_argument("--defines", default="",
+                     help="extra defines for the core build, space-separated NAME or NAME=VALUE (e.g. QV_FPU_EN=1)")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
 
@@ -427,9 +463,9 @@ def main():
 
     out_dir = args.out_dir or (LOCKSTEP_DIR / "gen" / "_sail_diff_scratch")
     out_dir.mkdir(parents=True, exist_ok=True)
-    vvp_path = out_dir / "rvfi_tracer.vvp"
-    print(f"building {vvp_path.name}...")
-    build_rvfi_tracer(vvp_path)
+    vvp_path = out_dir / f"rvfi_tracer_{args.core}.vvp"
+    print(f"building {vvp_path.name} ({args.core})...")
+    build_rvfi_tracer(vvp_path, args.core, args.defines.split())
 
     failed = []
     for seed in seeds:
