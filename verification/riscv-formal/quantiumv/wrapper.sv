@@ -132,6 +132,8 @@ module rvfi_wrapper (
     // that one doesn't define this.)
 `ifndef QV_REF_AS_CORE
     always @* assume (!uut.div_req.valid);
+    // and (the pipe-fpu model) no FP divide or square root: its side unit is a multi-cycle FSM too
+    always @* assume (!(uut.fpu_req.valid && (uut.fpu_req.op == qv_pkg::QV_FP_DIV || uut.fpu_req.op == qv_pkg::QV_FP_SQRT)));
 `else
     always @* assume (!uut.is_div_family);
 `endif
