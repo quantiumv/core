@@ -20,7 +20,12 @@
 CFLAGS  = -march=rv64imac_zicsr -mabi=lp64 -mno-relax -mno-div -ffreestanding -nostdlib -fno-builtin -O2 -Wall
 ASFLAGS = -march=rv64imac_zicsr -mabi=lp64 -mno-relax
 
-KERNELS = memcpy crc32 qsort matmul sieve listchase mixedint trap
+KERNELS = memcpy crc32 qsort matmul sieve listchase mixedint trap fmatmul fpmix
+
+# F/D kernels: F and D instructions inline (the lp64 ABI, as crt0 and libgcc), no errno for sqrt. The integer
+# kernels keep their flags, so their code (and their CPI) does not move.
+FP_KERNEL_OBJS = fmatmul.o fpmix.o fmatmul_s.o fpmix_s.o
+$(FP_KERNEL_OBJS): CFLAGS := $(subst rv64imac_zicsr,rv64imafdc_zicsr,$(CFLAGS)) -fno-math-errno
 
 all: $(addsuffix .hex,$(KERNELS))
 

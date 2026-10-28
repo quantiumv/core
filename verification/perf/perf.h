@@ -40,6 +40,15 @@ static inline uint64_t rdinstret(void) {
 }
 #endif
 
+/* F/D kernels: mstatus.FS (sstatus.FS in the S build) on, before the window. FS resets Off. */
+static inline void perf_fp_on(void) {
+#ifdef PERF_SMODE
+    asm volatile("csrs sstatus, %0" :: "r"(0x6000ul));
+#else
+    asm volatile("csrs mstatus, %0" :: "r"(0x6000ul));
+#endif
+}
+
 /*
  * link.ld places this (letting the linker pick the real address rather
  * than a hardcoded guess that some kernel's .bss/stack could grow into)

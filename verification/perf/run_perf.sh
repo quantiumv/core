@@ -65,7 +65,7 @@ done
 
 mkdir -p "$OUTDIR"
 
-KERNELS="memcpy crc32 qsort matmul sieve listchase mixedint trap"
+KERNELS="memcpy crc32 qsort matmul sieve listchase mixedint trap fmatmul fpmix"
 
 case "$MODE" in
     m) SFX=""; MAKE_TARGET=all; SMODE=0 ;;
@@ -143,7 +143,7 @@ echo "kernel,config,cycles,instret,cpi" > "$CSV"
 # The CPI stack of the pipelined core (perf_stack.sv): where the window's cycles go, and the side counters. The
 # columns are the keys of the PERF_STACK and PERF_SIDE lines, in this order.
 STACK_CSV="$SCRIPT_DIR/baseline_${CORE}${SFX}${LABEL:+_$LABEL}_stack.csv"
-STACK_KEYS="window retire blk_lsu blk_div blk_alu blk_sys ear_align ear_mispred ear_serial ear_other empty_front"
+STACK_KEYS="window retire blk_lsu blk_div blk_alu blk_sys ear_align ear_mispred ear_serial ear_other empty_front blk_fpu"
 SIDE_KEYS="iq_empty fb_empty no_uop is_rob is_oper is_lsu is_div re_align re_mispred re_serial re_other mp_cond mp_jal mp_jalr mp_wait bus_wait"
 SIDE_KEYS="$SIDE_KEYS xl_req xl_reuse xl_cyc dx_n dx_hit dx_save re_ser_ro re_ser_trapw re_ser_csr re_ser_sys"
 SIDE_KEYS="$SIDE_KEYS ear_ser_ro ear_ser_trapw ear_ser_csr ear_ser_sys"
