@@ -137,6 +137,8 @@ endfunction
 `define OPC_BRANCH    7'b1100011
 `define OPC_SYSTEM    7'b1110011
 `define OPC_FENCE     7'b0001111
+`define OPC_LOAD_FP   7'b0000111
+`define OPC_STORE_FP  7'b0100111
 
 /* SYSTEM-opcode funct3 encodings for the 6 Zicsr instructions, for readability at call sites. */
 `define FUNCT3_CSRRW  3'b001

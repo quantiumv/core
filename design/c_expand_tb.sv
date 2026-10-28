@@ -262,11 +262,41 @@ module c_expand_tb;
             {3'b111, 6'b011001, 5'b11011, 2'b10},
             encode_s(88, 5'd27, 5'd2, 3'b011, `OPC_STORE), 1'b0);
 
-        check_expand("op=10 funct3=001 (C.FLDSP, no F/D, illegal)",
-            {3'b001, 13'b0}, 32'hx, 1'b1);
+        /* Zcd: the four forms expand to FLD/FSD (their legality is decode's call). The two cases here before
+         * F/D, {3'b001, 13'b0} and {3'b101, 13'b0}, were quadrant 0 (C.FLD/C.FSD), not the SP forms their
+         * names said: both appear below. */
+        check_expand("C.FLD (rs1'=x8, rd'=f8, off=0)",
+            {3'b001, 13'b0}, encode_i(0, 5'd8, 3'b011, 5'd8, `OPC_LOAD_FP), 1'b0);
 
-        check_expand("op=10 funct3=101 (C.FSDSP, no F/D, illegal)",
-            {3'b101, 13'b0}, 32'hx, 1'b1);
+        check_expand("C.FLD (rs1'=x9, rd'=f15, off=216)",
+            {3'b001, 3'b011, 3'b001, 2'b11, 3'b111, 2'b00},
+            encode_i(216, 5'd9, 3'b011, 5'd15, `OPC_LOAD_FP), 1'b0);
+
+        check_expand("C.FSD (rs1'=x8, rs2'=f8, off=0)",
+            {3'b101, 13'b0}, encode_s(0, 5'd8, 5'd8, 3'b011, `OPC_STORE_FP), 1'b0);
+
+        check_expand("C.FSD (rs1'=x11, rs2'=f14, off=16)",
+            {3'b101, 3'b010, 3'b011, 2'b00, 3'b110, 2'b00},
+            encode_s(16, 5'd14, 5'd11, 3'b011, `OPC_STORE_FP), 1'b0);
+
+        check_expand("C.FLDSP (rd=f22, off=136)",
+            {3'b001, 1'b0, 5'b10110, 5'b01010, 2'b10},
+            encode_i(136, 5'd2, 3'b011, 5'd22, `OPC_LOAD_FP), 1'b0);
+
+        check_expand("C.FLDSP (rd=f0: legal, unlike C.LDSP rd=x0; off=504)",
+            {3'b001, 1'b1, 5'b00000, 5'b11111, 2'b10},
+            encode_i(504, 5'd2, 3'b011, 5'd0, `OPC_LOAD_FP), 1'b0);
+
+        check_expand("C.FSDSP (rs2=f27, off=88)",
+            {3'b101, 6'b011001, 5'b11011, 2'b10},
+            encode_s(88, 5'd27, 5'd2, 3'b011, `OPC_STORE_FP), 1'b0);
+
+        check_expand("C.FSDSP (rs2=f0, off=504)",
+            {3'b101, 6'b111111, 5'b00000, 2'b10},
+            encode_s(504, 5'd0, 5'd2, 3'b011, `OPC_STORE_FP), 1'b0);
+
+        check_expand("op=00 funct3=100 (reserved, illegal)",
+            {3'b100, 13'b0}, 32'hx, 1'b1);
 
         check_expand("op=11 (not compressed at all -- structurally unreachable, safe illegal)",
             {14'b0, 2'b11}, 32'hx, 1'b1);
