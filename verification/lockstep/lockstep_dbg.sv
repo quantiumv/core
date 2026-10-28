@@ -62,6 +62,9 @@
  * the handler stay out of reach.
  */
 `include "lockstep_defs.svh"
+`ifndef QV_FPU_EN
+`define QV_FPU_EN 0
+`endif
 
 module lockstep_dbg (
     input  logic        clk,
@@ -93,6 +96,11 @@ module lockstep_dbg (
     output logic [63:0] o_ev_a,
     output logic [63:0] o_ev_b
 );
+    // F/D: with the FPU built in, the Access Register reads and read-back writes also pick FP registers (event payload
+    // a = 32 + the register number) and Program Buffer snippet 15 reads them (choices and streams are unchanged
+    // without it)
+    localparam bit FPR = (`QV_FPU_EN != 0);
+
     localparam [3:0] EV_HALT = 4'd1, EV_MINSTRET = 4'd2, EV_GPR = 4'd3, EV_CSR = 4'd4, EV_WRITE = 4'd5,
                      EV_PB = 4'd6, EV_CMDERR = 4'd7, EV_RESUME = 4'd8;
 
@@ -279,6 +287,7 @@ module lockstep_dbg (
         end
     endtask
 
+    // 0-31: x0-x31; 32-63: f0-f31 (regno 0x1020-0x103F, only with FPR)
     function automatic [15:0] gpr_regno(input integer k);
         gpr_regno = 16'h1000 + 16'(k);
     endfunction
@@ -429,6 +438,16 @@ module lockstep_dbg (
                     pbw[0] = enc_csr(12'hF14, rb, 3'b001, ra);                            // csrrw ra, mhartid, rb
                     pbw[1] = EBREAK; pbn = 2;
                 end
+                15: begin  // F/D: FP registers and fcsr read into the script's registers; feq raises NV on an sNaN
+                           // (fflags and FS change the same way in both cores); with FS Off an illegal-instruction abort
+                    k = rnd(32);
+                    i = rnd(32);
+                    pbw[0] = enc_r(7'b1110001, 5'd0, 5'(k), 3'b000, ra, 7'b1010011);      // fmv.x.d ra, fk
+                    pbw[1] = enc_r(7'b1110001, 5'd0, 5'(i), 3'b001, rb, 7'b1010011);      // fclass.d rb, fi
+                    pbw[2] = enc_r(7'b1010001, 5'(i), 5'(k), 3'b010, ra, 7'b1010011);     // feq.d ra, fk, fi
+                    pbw[3] = enc_csr(12'h003, 5'd0, 3'b010, rb);                          // frcsr rb
+                    pbw[4] = EBREAK; pbn = 5;
+                end
                 14: begin  // memory through x27 + 0x1000, qvgen --sv39's remapped page (VA 0x11000 -> PA 0x31000): a
                            // Program Buffer access is not translated, so it must land at PA 0x11000 + k. The data
                            // read back is the same either way; what tells them apart is the address (RVFI mem_addr,
@@ -499,8 +518,8 @@ module lockstep_dbg (
             for (k = 0; k < nops; k = k + 1) begin
                 choice = rnd(8);
                 case (choice)
-                    0, 1: if (feat_i[2]) begin                     // a GPR read
-                        r = rnd(32);
+                    0, 1: if (feat_i[2]) begin                     // a GPR read (or, with FPR, an FP register)
+                        r = rnd(FPR ? 64 : 32);
                         ar_read(gpr_regno(r), v);
                         ev(EV_GPR, 64'(r), v);
                     end
@@ -509,8 +528,8 @@ module lockstep_dbg (
                         ar_read({4'b0, csr_read_addr(r)}, v);
                         ev(EV_CSR, {52'b0, csr_read_addr(r)}, v);
                     end
-                    3: if (feat_i[2]) begin                         // read a GPR and write the same value back
-                        r = 1 + rnd(31);
+                    3: if (feat_i[2]) begin                         // read a GPR (or FP register) and write it back
+                        r = 1 + rnd(FPR ? 63 : 31);
                         ar_read(gpr_regno(r), v);
                         ar_write(gpr_regno(r), v);
                         ev(EV_WRITE, 64'(r), v);
@@ -532,7 +551,7 @@ module lockstep_dbg (
                         ev(EV_WRITE, 64'(r), back);
                     end
                     6: if (feat_i[5]) begin                         // a Program Buffer run
-                        pb_run(rnd(15), reserved);
+                        pb_run(rnd(FPR ? 16 : 15), reserved);
                     end
                     default: if (feat_i[2]) begin
                         ar_read({4'b0, CSR_MINSTRET}, v);

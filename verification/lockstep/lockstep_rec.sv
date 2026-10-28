@@ -68,6 +68,8 @@ module lockstep_rec #(
     input logic [1:0]   o_mstatus_mpp,
     input logic         o_mstatus_spp, o_mstatus_tsr, o_mstatus_mie, o_mstatus_sie,
     input logic         o_mstatus_mprv, o_mstatus_sum, o_mstatus_mxr, o_mstatus_tvm,
+    input logic [15:0]  o_fp_word,      // F/D: {frd valid, frd, mstatus.FS, frm, fflags} (lockstep_side.sv)
+    input logic [63:0]  o_fp_wdata,
 
     input logic         wr_valid_i,
     input logic [31:0]  wr_addr_i,
@@ -114,6 +116,8 @@ module lockstep_rec #(
     output logic [1:0]   rp_mstatus_mpp,
     output logic         rp_mstatus_spp, rp_mstatus_tsr, rp_mstatus_mie, rp_mstatus_sie,
     output logic         rp_mstatus_mprv, rp_mstatus_sum, rp_mstatus_mxr, rp_mstatus_tvm,
+    output logic [15:0]  rp_fp_word,
+    output logic [63:0]  rp_fp_wdata,
 
     output logic         wr_avail,
     input  logic         wr_pop,
@@ -210,6 +214,8 @@ module lockstep_rec #(
     logic        ring_mstatus_sum  [0:REC_DEPTH-1];
     logic        ring_mstatus_mxr  [0:REC_DEPTH-1];
     logic        ring_mstatus_tvm  [0:REC_DEPTH-1];
+    logic [15:0] ring_fp_word      [0:REC_DEPTH-1];
+    logic [63:0] ring_fp_wdata     [0:REC_DEPTH-1];
 
     // Occupancy/avail derived combinationally from the two independently
     // clocked pointers -- see the header comment on why this can't be a
@@ -275,6 +281,8 @@ module lockstep_rec #(
             ring_mstatus_sum[rec_wp_q]  <= o_mstatus_sum;
             ring_mstatus_mxr[rec_wp_q]  <= o_mstatus_mxr;
             ring_mstatus_tvm[rec_wp_q]  <= o_mstatus_tvm;
+            ring_fp_word[rec_wp_q]      <= o_fp_word;
+            ring_fp_wdata[rec_wp_q]     <= o_fp_wdata;
             rec_wp_q    <= rec_wp_q + 1'b1;
             rec_total_q <= rec_total_q + 1'b1;
         end
@@ -341,6 +349,8 @@ module lockstep_rec #(
     assign rp_mstatus_sum  = ring_mstatus_sum[rec_rp_q];
     assign rp_mstatus_mxr  = ring_mstatus_mxr[rec_rp_q];
     assign rp_mstatus_tvm  = ring_mstatus_tvm[rec_rp_q];
+    assign rp_fp_word      = ring_fp_word[rec_rp_q];
+    assign rp_fp_wdata     = ring_fp_wdata[rec_rp_q];
 
     // -------------------- bus-write log ring --------------------
     // One more bit of pointer than the index needs, so a full ring is told apart from an empty one and an

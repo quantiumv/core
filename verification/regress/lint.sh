@@ -9,10 +9,12 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$REPO_ROOT" || exit 1
 
 CORE=pipe
+EXTRA_DEFINES=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --core) CORE="$2"; shift 2 ;;
-        -h|--help) echo "Usage: lint.sh [--core pipe|ref]"; exit 0 ;;
+        --defines) for d in $2; do EXTRA_DEFINES="$EXTRA_DEFINES -D$d"; done; shift 2 ;;   # e.g. "QV_FPU_EN=1"
+        -h|--help) echo "Usage: lint.sh [--core pipe|ref] [--defines \"A=1 B=0\"]"; exit 0 ;;
         *) echo "Unknown argument: $1" >&2; exit 1 ;;
     esac
 done
@@ -40,5 +42,5 @@ while IFS= read -r line; do
     DESIGN_FILES="$DESIGN_FILES $line"
 done < "$DESIGN_LIST"
 
-verilator --lint-only -Wall $CORE_DEFINE -Idesign -Idesign/defaults -Iverification/reference \
+verilator --lint-only -Wall $CORE_DEFINE $EXTRA_DEFINES -Idesign -Idesign/defaults -Iverification/reference \
     --top-module "$TOP" $DESIGN_FILES

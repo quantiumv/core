@@ -23,7 +23,8 @@ import sys
 
 FIELDS = ["order", "pc_rdata", "pc_wdata", "insn", "mode", "trap", "intr", "cause",
           "tval", "rd_addr", "rd_wdata", "rs1_addr", "rs1_rdata", "rs2_addr",
-          "rs2_rdata", "mem_addr", "mem_rmask", "mem_wmask", "mem_rdata", "mem_wdata"]
+          "rs2_rdata", "mem_addr", "mem_rmask", "mem_wmask", "mem_rdata", "mem_wdata",
+          "frd_addr", "frd_wdata"]   # F/D: present only on an FP register write
 
 
 def unused(mask):

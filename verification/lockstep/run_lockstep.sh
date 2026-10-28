@@ -57,7 +57,7 @@ DUT=ref
 PIPE_DIR=design/pipe
 SIM=${QV_LOCKSTEP_SIM:-iverilog}
 MUTANT=0
-# extra preprocessor defines for the pipelined core ("QV_PIPE_X=0 QV_PIPE_Y=1"): the P9 feature knobs
+# extra preprocessor defines ("QV_PIPE_X=0 QV_FPU_EN=1"): the P9 feature knobs, and QV_FPU_EN, which both cores read
 DEFINES=""
 MEMCFG_B=sram
 # 0: no delay injection. --delay-max N perturbs each side's bus timing;
@@ -109,9 +109,9 @@ Usage: run_lockstep.sh --mode selfproof|mutant|corrupt [options]
   --sim iverilog|verilator  the simulator the harness is built for (default iverilog)
   --dut ref|pipe       side B's core (default ref; pipe = the pipelined core, not with --mode mutant)
   --pipe-dir DIR       design/pipe/ replacement for --dut pipe (default design/pipe)
-  --defines "A=1 B=0"  preprocessor defines for the build (the QV_PIPE_* feature knobs); part of the cache key
-  --defines "A=1 B=0"  preprocessor defines for the build (the QV_PIPE_* feature knobs); part of the cache key
-  --mutant N           QV_MUTANT_B value, 1-13 (--mode mutant only)
+  --defines "A=1 B=0"  preprocessor defines for the build, both sides (the QV_PIPE_* feature knobs, QV_FPU_EN);
+                        part of the cache key
+  --mutant N           QV_MUTANT_B value, 1-17 (--mode mutant only)
   --memcfg-b sram|cache  side B's memory config (default sram -- also applies
                         under --mode mutant, e.g. --mutant 9 needs cache)
   --delay-max N        max bus-delay wait states (default 0 = disabled)
@@ -186,8 +186,8 @@ case "$MODE" in
     selfproof|mutant|corrupt) ;;
     *) echo "Unknown --mode: $MODE (expected selfproof, mutant or corrupt)" >&2; exit 1 ;;
 esac
-if [ "$MODE" == "mutant" ] && { [ "$MUTANT" -lt 1 ] || [ "$MUTANT" -gt 13 ]; }; then
-    echo "ERROR: --mode mutant needs --mutant N with N in 1..13" >&2; exit 1
+if [ "$MODE" == "mutant" ] && { [ "$MUTANT" -lt 1 ] || [ "$MUTANT" -gt 17 ]; }; then
+    echo "ERROR: --mode mutant needs --mutant N with N in 1..17" >&2; exit 1
 fi
 case "$DUT" in
     ref) ;;
@@ -534,7 +534,11 @@ if [ "$MODE" == "corrupt" ]; then
     fi
     target_order=$((clean_matched / 2))
     all_ok=1
-    for field in 1 2 3 4 5 6 7 8; do
+    # 13: the F/D word (FS, frm, fflags: compared at every retirement); 14: an FP register's write data, which exists
+    # only where an FP register is written, so only in a build with the FPU (and a corpus with FP instructions)
+    fields="1 2 3 4 5 6 7 8 13"
+    echo " $DEFINES " | grep -q " QV_FPU_EN=1 " && fields="$fields 14"
+    for field in $fields; do
         # A field is only compared where it means something (rd data when rd != x0, the memory address of a memory
         # access, ...), so a corruption of a retirement that has none of it passes by design. Try the next
         # retirement then; a field the comparator really does not look at passes at all 16 of them.

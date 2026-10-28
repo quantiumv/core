@@ -53,6 +53,8 @@ module lockstep_cmp #(
     input  logic [1:0]   a_mstatus_mpp,
     input  logic         a_mstatus_spp, a_mstatus_tsr, a_mstatus_mie, a_mstatus_sie,
     input  logic         a_mstatus_mprv, a_mstatus_sum, a_mstatus_mxr, a_mstatus_tvm,
+    input  logic [15:0]  a_fp_word,      // F/D: {frd valid, frd, mstatus.FS, frm, fflags} (lockstep_side.sv)
+    input  logic [63:0]  a_fp_wdata,
 
     // side B retirement pop interface (same shape)
     input  logic         b_rec_avail,
@@ -81,6 +83,8 @@ module lockstep_cmp #(
     input  logic [1:0]   b_mstatus_mpp,
     input  logic         b_mstatus_spp, b_mstatus_tsr, b_mstatus_mie, b_mstatus_sie,
     input  logic         b_mstatus_mprv, b_mstatus_sum, b_mstatus_mxr, b_mstatus_tvm,
+    input  logic [15:0]  b_fp_word,
+    input  logic [63:0]  b_fp_wdata,
 
     // ordered bus-write log streams
     input  logic         a_wr_avail, b_wr_avail,
@@ -142,6 +146,9 @@ module lockstep_cmp #(
     assign cb_trap        = b_trap        ^ ((do_corrupt && corrupt_field == 6) ? 1'b1  : 1'b0);
     assign cb_mstatus_mie = b_mstatus_mie ^ ((do_corrupt && corrupt_field == 7) ? 1'b1  : 1'b0);
     assign cb_cause       = b_cause       ^ ((do_corrupt && corrupt_field == 8) ? 64'h1 : 64'h0);
+    // F/D: 13 flips fflags' NX bit in the FP state word, 14 the FP register value (only compared when one is written)
+    wire [15:0] cb_fp_word  = b_fp_word  ^ ((do_corrupt && corrupt_field == 13) ? 16'h1 : 16'h0);
+    wire [63:0] cb_fp_wdata = b_fp_wdata ^ ((do_corrupt && corrupt_field == 14) ? 64'h1 : 64'h0);
 
     // -------------------- field-by-field comparison --------------------
     // insn isn't compared on a fetch-fault trap (cause 1 access fault, cause
@@ -183,7 +190,10 @@ module lockstep_cmp #(
                 || (a_mstatus_spp != b_mstatus_spp) || (a_mstatus_tsr != b_mstatus_tsr)
                 || (a_mstatus_mie != cb_mstatus_mie) || (a_mstatus_sie != b_mstatus_sie)
                 || (a_mstatus_mprv != b_mstatus_mprv) || (a_mstatus_sum != b_mstatus_sum)
-                || (a_mstatus_mxr != b_mstatus_mxr) || (a_mstatus_tvm != b_mstatus_tvm);
+                || (a_mstatus_mxr != b_mstatus_mxr) || (a_mstatus_tvm != b_mstatus_tvm)
+                // F/D: the FP register written, FS, frm and fflags; the value only when a register is written
+                || (a_fp_word != cb_fp_word)
+                || (a_fp_word[15] && (a_fp_wdata != cb_fp_wdata));
         // mem fields only compared for non-trapping instructions -- a
         // trapping instruction's RVFI mem_* shows a "would-be" access
         // shape on this core that a real trap on the reference side may
@@ -273,6 +283,10 @@ module lockstep_cmp #(
                 $display("                mpp=%0d spp=%0d tsr=%0d mie=%0d sie=%0d mprv=%0d sum=%0d mxr=%0d tvm=%0d",
                          b_mstatus_mpp, b_mstatus_spp, b_mstatus_tsr, cb_mstatus_mie, b_mstatus_sie,
                          b_mstatus_mprv, b_mstatus_mxr, b_mstatus_sum, b_mstatus_tvm);
+                $display("  frd           %0d f%0d=%016h       %0d f%0d=%016h", a_fp_word[15], a_fp_word[14:10],
+                         a_fp_wdata, cb_fp_word[15], cb_fp_word[14:10], cb_fp_wdata);
+                $display("  fs/frm/fflags %0d/%0d/%02h                %0d/%0d/%02h", a_fp_word[9:8], a_fp_word[7:5],
+                         a_fp_word[4:0], cb_fp_word[9:8], cb_fp_word[7:5], cb_fp_word[4:0]);
                 $display("  last %0d matched {pc,insn} pairs before the divergence:", HIST_DEPTH);
                 for (int k = 0; k < HIST_DEPTH; k++) begin
                     report_idx = (hist_wp_q + k) % HIST_DEPTH;

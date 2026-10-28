@@ -29,6 +29,9 @@
  * minstret) need a deeper peek into csr_file0 itself.
  */
 `include "lockstep_defs.svh"
+`ifndef QV_FPU_EN
+`define QV_FPU_EN 0
+`endif
 
 module lockstep_side #(
     parameter int QV_MUTANT        = 0,    // structural: selects a generate-gated RTL mutant (ref_core)
@@ -102,6 +105,9 @@ module lockstep_side #(
     output logic        o_mstatus_spp, o_mstatus_tsr, o_mstatus_mie, o_mstatus_sie,
     output logic        o_mstatus_mprv, o_mstatus_sum, o_mstatus_mxr, o_mstatus_tvm,
     output logic [1:0]  o_mstatus_mpp,
+    // F/D: {the FP register this retirement wrote: valid, number; mstatus.FS; frm; fflags} and the value written
+    output logic [15:0] o_fp_word,
+    output logic [63:0] o_fp_wdata,
 
     // ordered committed-write log
     output logic        o_wr_valid,
@@ -139,6 +145,9 @@ module lockstep_side #(
     logic [4:0]  dm_gpr_sel;
     logic [11:0] dm_csr_addr;
     logic [63:0] dm_gpr_wdata, dm_csr_wdata, dm_gpr_rdata, dm_csr_rdata;
+    logic        dm_fpr_we;                         // F/D: Access Register to the FP registers
+    logic [4:0]  dm_fpr_sel;
+    logic [63:0] dm_fpr_wdata, dm_fpr_rdata;
     logic        progbuf_start, progbuf_done, progbuf_abort;
     logic [3:0]  progbuf_pc;
     logic [31:0] progbuf_data;
@@ -146,6 +155,9 @@ module lockstep_side #(
     logic [31:0] dmi_wdata, dmi_rdata;
     logic        dmi_we;
     assign core_halt_req = dm_halt_req | script_halt_req | stop_i;
+    logic        rvfi_frd_wvalid;
+    logic [4:0]  rvfi_frd_addr;
+    logic [63:0] rvfi_frd_wdata;
 
     // the port list both branches share
 `define LS_CORE_PORTS \
@@ -185,9 +197,11 @@ module lockstep_side #(
         .rvfi_csr_satp_rmask(rvfi_csr_satp_rmask), .rvfi_csr_satp_wmask(rvfi_csr_satp_wmask), \
         .rvfi_csr_satp_rdata(rvfi_csr_satp_rdata), .rvfi_csr_satp_wdata(rvfi_csr_satp_wdata), \
         .rvfi_any_trap_taken(rvfi_any_trap_taken), .rvfi_any_debug_entry(rvfi_any_debug_entry), \
+        .rvfi_frd_wvalid(rvfi_frd_wvalid), .rvfi_frd_addr(rvfi_frd_addr), .rvfi_frd_wdata(rvfi_frd_wdata), \
         .o_debug_mode(dbg_halted), .i_debug_halt_req(core_halt_req), .i_debug_resume_req(dm_resume_req), \
         .i_dm_gpr_we(dm_gpr_we), .i_dm_gpr_sel(dm_gpr_sel), .i_dm_gpr_wdata(dm_gpr_wdata), .o_dm_gpr_rdata(dm_gpr_rdata), \
         .i_dm_csr_we(dm_csr_we), .i_dm_csr_addr(dm_csr_addr), .i_dm_csr_wdata(dm_csr_wdata), .o_dm_csr_rdata(dm_csr_rdata), \
+        .i_dm_fpr_we(dm_fpr_we), .i_dm_fpr_sel(dm_fpr_sel), .i_dm_fpr_wdata(dm_fpr_wdata), .o_dm_fpr_rdata(dm_fpr_rdata), \
         .i_progbuf_start(progbuf_start), .o_progbuf_pc(progbuf_pc), .i_progbuf_data(progbuf_data), \
         .o_progbuf_done(progbuf_done), .o_progbuf_abort(progbuf_abort)
 
@@ -261,7 +275,7 @@ module lockstep_side #(
     // The Debug Module itself (its System Bus Access port is unused here) and the scripted debugger in
     // front of it. With dbg_mode_i == 0 the script never acts and nothing on these wires moves.
     /* verilator lint_off PINCONNECTEMPTY */
-    dm dm0 (
+    dm #(.HAS_FPR(`QV_FPU_EN != 0)) dm0 (
         .clk(clk), .rst(rst),
         .i_reg_addr(dmi_addr), .i_reg_wdata(dmi_wdata), .i_reg_we(dmi_we && !stop_i), .i_reg_re(1'b0),
         .o_reg_rdata(dmi_rdata),
@@ -271,6 +285,8 @@ module lockstep_side #(
         .o_dm_gpr_wdata(dm_gpr_wdata), .i_dm_gpr_rdata(dm_gpr_rdata),
         .o_dm_csr_we(dm_csr_we), .o_dm_csr_addr(dm_csr_addr),
         .o_dm_csr_wdata(dm_csr_wdata), .i_dm_csr_rdata(dm_csr_rdata),
+        .o_dm_fpr_we(dm_fpr_we), .o_dm_fpr_sel(dm_fpr_sel),
+        .o_dm_fpr_wdata(dm_fpr_wdata), .i_dm_fpr_rdata(dm_fpr_rdata),
         .o_progbuf_start(progbuf_start), .i_progbuf_pc(progbuf_pc),
         .o_progbuf_data(progbuf_data), .i_progbuf_done(progbuf_done),
         .i_progbuf_abort(progbuf_abort),
@@ -353,6 +369,10 @@ module lockstep_side #(
     assign o_mstatus_sum  = g_core.core0.mstatus_sum_w;
     assign o_mstatus_mxr  = g_core.core0.mstatus_mxr_w;
     assign o_mstatus_tvm  = g_core.core0.mstatus_tvm_w;
+    // F/D: the same names in both cores (csr_file0's exports)
+    assign o_fp_word  = {rvfi_frd_wvalid, rvfi_frd_addr, g_core.core0.mstatus_fs_w, g_core.core0.frm_w,
+                         g_core.core0.fflags_w};
+    assign o_fp_wdata = rvfi_frd_wdata;
 
     // Not re-exported anywhere in csr_file0's own port list -- a true
     // peek past it.

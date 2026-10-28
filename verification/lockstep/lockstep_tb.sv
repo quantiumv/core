@@ -137,6 +137,8 @@ module lockstep_tb #(
     logic        a_ev_valid;
     logic [3:0]  a_ev_kind;
     logic [63:0] a_ev_order, a_ev_a, a_ev_b;
+    logic [15:0] a_fp_word;
+    logic [63:0] a_fp_wdata;
 
     lockstep_side #(
         .QV_MUTANT(0), .MEMCFG_CACHE(1'b0),
@@ -179,6 +181,7 @@ module lockstep_tb #(
         .o_mstatus_mie(a_mstatus_mie), .o_mstatus_sie(a_mstatus_sie),
         .o_mstatus_mprv(a_mstatus_mprv), .o_mstatus_sum(a_mstatus_sum),
         .o_mstatus_mxr(a_mstatus_mxr), .o_mstatus_tvm(a_mstatus_tvm), .o_mstatus_mpp(a_mstatus_mpp),
+        .o_fp_word(a_fp_word), .o_fp_wdata(a_fp_wdata),
         .o_wr_valid(a_wr_valid), .o_wr_addr(a_wr_addr), .o_wr_sel(a_wr_sel), .o_wr_data(a_wr_data),
         .o_mmio_rd_valid(a_mmio_rd_valid), .o_mmio_rd_addr(a_mmio_rd_addr), .o_mmio_rd_data(a_mmio_rd_data),
         .o_ev_valid(a_ev_valid), .o_ev_kind(a_ev_kind), .o_ev_order(a_ev_order),
@@ -210,6 +213,8 @@ module lockstep_tb #(
     logic        b_ev_valid;
     logic [3:0]  b_ev_kind;
     logic [63:0] b_ev_order, b_ev_a, b_ev_b;
+    logic [15:0] b_fp_word;
+    logic [63:0] b_fp_wdata;
 
     lockstep_side #(
         .QV_MUTANT(QV_MUTANT_B), .CORE_PIPE(B_PIPE), .MEMCFG_CACHE(MEMCFG_B_CACHE),
@@ -252,6 +257,7 @@ module lockstep_tb #(
         .o_mstatus_mie(b_mstatus_mie), .o_mstatus_sie(b_mstatus_sie),
         .o_mstatus_mprv(b_mstatus_mprv), .o_mstatus_sum(b_mstatus_sum),
         .o_mstatus_mxr(b_mstatus_mxr), .o_mstatus_tvm(b_mstatus_tvm), .o_mstatus_mpp(b_mstatus_mpp),
+        .o_fp_word(b_fp_word), .o_fp_wdata(b_fp_wdata),
         .o_wr_valid(b_wr_valid), .o_wr_addr(b_wr_addr), .o_wr_sel(b_wr_sel), .o_wr_data(b_wr_data),
         .o_mmio_rd_valid(b_mmio_rd_valid), .o_mmio_rd_addr(b_mmio_rd_addr), .o_mmio_rd_data(b_mmio_rd_data),
         .o_ev_valid(b_ev_valid), .o_ev_kind(b_ev_kind), .o_ev_order(b_ev_order),
@@ -283,6 +289,8 @@ module lockstep_tb #(
     logic [1:0]  a_rp_mstatus_mpp;
     logic        a_rp_mstatus_spp, a_rp_mstatus_tsr, a_rp_mstatus_mie, a_rp_mstatus_sie;
     logic        a_rp_mstatus_mprv, a_rp_mstatus_sum, a_rp_mstatus_mxr, a_rp_mstatus_tvm;
+    logic [15:0] a_rp_fp_word;
+    logic [63:0] a_rp_fp_wdata;
     logic [31:0] a_wrp_addr;
     logic [7:0]  a_wrp_sel;
     logic [63:0] a_wrp_data;
@@ -310,6 +318,8 @@ module lockstep_tb #(
     logic [1:0]  b_rp_mstatus_mpp;
     logic        b_rp_mstatus_spp, b_rp_mstatus_tsr, b_rp_mstatus_mie, b_rp_mstatus_sie;
     logic        b_rp_mstatus_mprv, b_rp_mstatus_sum, b_rp_mstatus_mxr, b_rp_mstatus_tvm;
+    logic [15:0] b_rp_fp_word;
+    logic [63:0] b_rp_fp_wdata;
     logic [31:0] b_wrp_addr;
     logic [7:0]  b_wrp_sel;
     logic [63:0] b_wrp_data;
@@ -340,6 +350,7 @@ module lockstep_tb #(
         .o_mstatus_mpp(a_mstatus_mpp), .o_mstatus_spp(a_mstatus_spp), .o_mstatus_tsr(a_mstatus_tsr),
         .o_mstatus_mie(a_mstatus_mie), .o_mstatus_sie(a_mstatus_sie), .o_mstatus_mprv(a_mstatus_mprv),
         .o_mstatus_sum(a_mstatus_sum), .o_mstatus_mxr(a_mstatus_mxr), .o_mstatus_tvm(a_mstatus_tvm),
+        .o_fp_word(a_fp_word), .o_fp_wdata(a_fp_wdata),
         .wr_valid_i(a_wr_valid), .wr_addr_i(a_wr_addr), .wr_sel_i(a_wr_sel), .wr_data_i(a_wr_data),
         .rd_valid_i(a_mmio_rd_valid), .rd_addr_i(a_mmio_rd_addr), .rd_data_i(a_mmio_rd_data),
         .ev_valid_i(a_ev_valid), .ev_kind_i(a_ev_kind), .ev_order_i(a_ev_order),
@@ -364,6 +375,7 @@ module lockstep_tb #(
         .rp_mstatus_mpp(a_rp_mstatus_mpp), .rp_mstatus_spp(a_rp_mstatus_spp), .rp_mstatus_tsr(a_rp_mstatus_tsr),
         .rp_mstatus_mie(a_rp_mstatus_mie), .rp_mstatus_sie(a_rp_mstatus_sie), .rp_mstatus_mprv(a_rp_mstatus_mprv),
         .rp_mstatus_sum(a_rp_mstatus_sum), .rp_mstatus_mxr(a_rp_mstatus_mxr), .rp_mstatus_tvm(a_rp_mstatus_tvm),
+        .rp_fp_word(a_rp_fp_word), .rp_fp_wdata(a_rp_fp_wdata),
         .wr_avail(a_wr_avail), .wr_pop(a_wr_pop), .wrp_addr(a_wrp_addr), .wrp_sel(a_wrp_sel), .wrp_data(a_wrp_data),
         .rd_avail(a_rda_avail), .rd_pop(a_rda_pop), .rdp_addr(a_rdap_addr), .rdp_data(a_rdap_data),
         .ev_avail(a_ev_avail), .ev_pop(a_ev_pop), .evp_kind(a_evp_kind), .evp_order(a_evp_order),
@@ -390,6 +402,7 @@ module lockstep_tb #(
         .o_mstatus_mpp(b_mstatus_mpp), .o_mstatus_spp(b_mstatus_spp), .o_mstatus_tsr(b_mstatus_tsr),
         .o_mstatus_mie(b_mstatus_mie), .o_mstatus_sie(b_mstatus_sie), .o_mstatus_mprv(b_mstatus_mprv),
         .o_mstatus_sum(b_mstatus_sum), .o_mstatus_mxr(b_mstatus_mxr), .o_mstatus_tvm(b_mstatus_tvm),
+        .o_fp_word(b_fp_word), .o_fp_wdata(b_fp_wdata),
         .wr_valid_i(b_wr_valid), .wr_addr_i(b_wr_addr), .wr_sel_i(b_wr_sel), .wr_data_i(b_wr_data),
         .rd_valid_i(b_mmio_rd_valid), .rd_addr_i(b_mmio_rd_addr), .rd_data_i(b_mmio_rd_data),
         .ev_valid_i(b_ev_valid), .ev_kind_i(b_ev_kind), .ev_order_i(b_ev_order),
@@ -414,6 +427,7 @@ module lockstep_tb #(
         .rp_mstatus_mpp(b_rp_mstatus_mpp), .rp_mstatus_spp(b_rp_mstatus_spp), .rp_mstatus_tsr(b_rp_mstatus_tsr),
         .rp_mstatus_mie(b_rp_mstatus_mie), .rp_mstatus_sie(b_rp_mstatus_sie), .rp_mstatus_mprv(b_rp_mstatus_mprv),
         .rp_mstatus_sum(b_rp_mstatus_sum), .rp_mstatus_mxr(b_rp_mstatus_mxr), .rp_mstatus_tvm(b_rp_mstatus_tvm),
+        .rp_fp_word(b_rp_fp_word), .rp_fp_wdata(b_rp_fp_wdata),
         .wr_avail(b_wr_avail), .wr_pop(b_wr_pop), .wrp_addr(b_wrp_addr), .wrp_sel(b_wrp_sel), .wrp_data(b_wrp_data),
         .rd_avail(b_rda_avail), .rd_pop(b_rda_pop), .rdp_addr(b_rdap_addr), .rdp_data(b_rdap_data),
         .ev_avail(b_ev_avail), .ev_pop(b_ev_pop), .evp_kind(b_evp_kind), .evp_order(b_evp_order),
@@ -448,6 +462,7 @@ module lockstep_tb #(
         .a_mstatus_mpp(a_rp_mstatus_mpp), .a_mstatus_spp(a_rp_mstatus_spp), .a_mstatus_tsr(a_rp_mstatus_tsr),
         .a_mstatus_mie(a_rp_mstatus_mie), .a_mstatus_sie(a_rp_mstatus_sie), .a_mstatus_mprv(a_rp_mstatus_mprv),
         .a_mstatus_sum(a_rp_mstatus_sum), .a_mstatus_mxr(a_rp_mstatus_mxr), .a_mstatus_tvm(a_rp_mstatus_tvm),
+        .a_fp_word(a_rp_fp_word), .a_fp_wdata(a_rp_fp_wdata),
 
         .b_rec_avail(b_rec_avail), .b_rec_total(b_rec_total), .b_rec_pop(b_rec_pop),
         .b_order(b_rp_order), .b_pc_rdata(b_rp_pc_rdata), .b_pc_wdata(b_rp_pc_wdata), .b_insn(b_rp_insn),
@@ -468,6 +483,7 @@ module lockstep_tb #(
         .b_mstatus_mpp(b_rp_mstatus_mpp), .b_mstatus_spp(b_rp_mstatus_spp), .b_mstatus_tsr(b_rp_mstatus_tsr),
         .b_mstatus_mie(b_rp_mstatus_mie), .b_mstatus_sie(b_rp_mstatus_sie), .b_mstatus_mprv(b_rp_mstatus_mprv),
         .b_mstatus_sum(b_rp_mstatus_sum), .b_mstatus_mxr(b_rp_mstatus_mxr), .b_mstatus_tvm(b_rp_mstatus_tvm),
+        .b_fp_word(b_rp_fp_word), .b_fp_wdata(b_rp_fp_wdata),
 
         .a_wr_avail(a_wr_avail), .b_wr_avail(b_wr_avail), .a_wr_pop(a_wr_pop), .b_wr_pop(b_wr_pop),
         .a_wrp_addr(a_wrp_addr), .b_wrp_addr(b_wrp_addr), .a_wrp_sel(a_wrp_sel), .b_wrp_sel(b_wrp_sel),
@@ -659,6 +675,14 @@ module lockstep_tb #(
             if (side_a.g_core.core0.regfile0.gp_registers[r] != side_b.g_core.core0.regfile0.gp_registers[r]) begin
                 $display("LOCKSTEP_DIVERGENCE: final x%0d a=%016h b=%016h",
                          r, side_a.g_core.core0.regfile0.gp_registers[r], side_b.g_core.core0.regfile0.gp_registers[r]);
+                mismatches++;
+            end
+        end
+        // F/D: the FP registers too (!==: a register only one side ever wrote reads X on the other under Icarus)
+        for (int r = 0; r < 32; r++) begin
+            if (side_a.g_core.core0.fprf0.fp_registers[r] !== side_b.g_core.core0.fprf0.fp_registers[r]) begin
+                $display("LOCKSTEP_DIVERGENCE: final f%0d a=%016h b=%016h",
+                         r, side_a.g_core.core0.fprf0.fp_registers[r], side_b.g_core.core0.fprf0.fp_registers[r]);
                 mismatches++;
             end
         end

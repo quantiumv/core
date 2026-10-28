@@ -55,6 +55,9 @@ module rvfi_tracer;
     logic [63:0] rvfi_csr_medeleg_rmask, rvfi_csr_medeleg_wmask, rvfi_csr_medeleg_rdata, rvfi_csr_medeleg_wdata;
     logic [63:0] rvfi_csr_satp_rmask, rvfi_csr_satp_wmask, rvfi_csr_satp_rdata, rvfi_csr_satp_wdata;
     logic        rvfi_any_trap_taken, rvfi_any_debug_entry;
+    logic        rvfi_frd_wvalid;               // F/D: the FP register a retirement wrote
+    logic [4:0]  rvfi_frd_addr;
+    logic [63:0] rvfi_frd_wdata;
 
     // Named connections only for wb_fetch/wb_mem + every RVFI port;
     // everything else (icache_flush_o, debug/DM/progbuf/interrupt
@@ -95,7 +98,8 @@ module rvfi_tracer;
         .rvfi_csr_medeleg_rdata(rvfi_csr_medeleg_rdata), .rvfi_csr_medeleg_wdata(rvfi_csr_medeleg_wdata),
         .rvfi_csr_satp_rmask(rvfi_csr_satp_rmask), .rvfi_csr_satp_wmask(rvfi_csr_satp_wmask),
         .rvfi_csr_satp_rdata(rvfi_csr_satp_rdata), .rvfi_csr_satp_wdata(rvfi_csr_satp_wdata),
-        .rvfi_any_trap_taken(rvfi_any_trap_taken), .rvfi_any_debug_entry(rvfi_any_debug_entry)
+        .rvfi_any_trap_taken(rvfi_any_trap_taken), .rvfi_any_debug_entry(rvfi_any_debug_entry),
+        .rvfi_frd_wvalid(rvfi_frd_wvalid), .rvfi_frd_addr(rvfi_frd_addr), .rvfi_frd_wdata(rvfi_frd_wdata)
     );
 
     wb_arbiter2 fetch_mem_arb0 (
@@ -166,7 +170,7 @@ module rvfi_tracer;
                 // value, so nothing looked "written" even though a
                 // real trap, with a real (unchanged-but-rewritten)
                 // cause, genuinely occurred.
-                $display("rvfi order=%0d pc_rdata=%h pc_wdata=%h insn=%h mode=%0d trap=%b intr=%b cause=%h tval=%h rd_addr=%0d rd_wdata=%h rs1_addr=%0d rs1_rdata=%h rs2_addr=%0d rs2_rdata=%h mem_addr=%h mem_rmask=%h mem_wmask=%h mem_rdata=%h mem_wdata=%h",
+                $write("rvfi order=%0d pc_rdata=%h pc_wdata=%h insn=%h mode=%0d trap=%b intr=%b cause=%h tval=%h rd_addr=%0d rd_wdata=%h rs1_addr=%0d rs1_rdata=%h rs2_addr=%0d rs2_rdata=%h mem_addr=%h mem_rmask=%h mem_wmask=%h mem_rdata=%h mem_wdata=%h",
                     rvfi_order, rvfi_pc_rdata, rvfi_pc_wdata, rvfi_insn, rvfi_mode,
                     rvfi_trap, rvfi_intr,
                     rvfi_trap ? (dut.route_to_s ? rvfi_csr_scause_wdata : rvfi_csr_mcause_wdata) : 64'b0,
@@ -174,6 +178,9 @@ module rvfi_tracer;
                     rvfi_rd_addr, rvfi_rd_wdata, rvfi_rs1_addr, rvfi_rs1_rdata,
                     rvfi_rs2_addr, rvfi_rs2_rdata, rvfi_mem_addr, rvfi_mem_rmask,
                     rvfi_mem_wmask, rvfi_mem_rdata, rvfi_mem_wdata);
+                // F/D: only on an FP register write (sail_diff.py and cmp_rvfi.py read it as optional)
+                if (rvfi_frd_wvalid) $write(" frd_addr=%0d frd_wdata=%h", rvfi_frd_addr, rvfi_frd_wdata);
+                $display("");
             end
             tohost_val = sram0.memory[tohost_addr[31:3]];
             if (tohost_val != 64'b0 && stop_n < 0) stop_n = n + drain;
