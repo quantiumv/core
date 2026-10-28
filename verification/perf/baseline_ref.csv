@@ -17,5 +17,5 @@ trap,sram,22416,5605,3.999
 trap,cache,24848,5605,4.433
 fmatmul,sram,17399,3773,4.611
 fmatmul,cache,17799,3773,4.717
-fpmix,sram,2484,402,6.179
-fpmix,cache,2586,402,6.433
+fpmix,sram,6132,402,15.254
+fpmix,cache,6234,402,15.507

@@ -1,7 +1,8 @@
 # CPI kernels
 
-Eight small C kernels, each timed with `mcycle`/`minstret` around its main
-loop (the eighth, `trap`, since P10.0: see "S mode under Sv39, and the trap path").
+Ten small C kernels, each timed with `mcycle`/`minstret` around its main
+loop (the eighth, `trap`, since P10.0: see "S mode under Sv39, and the trap path"; `fmatmul` and `fpmix` since F/D:
+see "F/D kernels").
 They run on two configurations:
 
 - **sram:** the core alone on flat SRAM (`core_wb4_sram_harness`).
@@ -38,6 +39,29 @@ CPI (cycles per retired instruction), M mode:
 
 The core is 2 to 3.5 times faster than the reference on every kernel, and 1.8 times on `trap` (an OS trap path)
 since P10c stopped CSR reads and trap-CSR writes from flushing the pipeline (it was 3.58 on the SoC at P10.0).
+
+## F/D kernels
+
+`fmatmul` is an 8x8 double matrix multiply (its inner loop an FMADD.D, `-ffp-contract` contracting the multiply and
+add); `fpmix` runs divide, square root and conversions in both precisions over 32 values. They are built with F and D
+(`-march=rv64imafdc`, the lp64 ABI of crt0 and libgcc) and turn `mstatus.FS` on before the window (`perf_fp_on()` in
+`perf.h`); the other eight kernels keep their flags and code. With F/D built in (`QV_FPU_EN`, the default) the eight
+older kernels' rows are byte-for-byte what they were before, in all three CSVs.
+
+| Kernel | reference, sram | core, sram | reference, cache | core, cache | core, S mode, cache |
+|---|---|---|---|---|---|
+| fmatmul | 4.61 | 2.02 | 4.72 | 2.05 | 2.19 |
+| fpmix | 15.25 | 10.91 | 15.51 | 11.01 | 11.01 |
+
+Where the core's cycles go (the CPI stack, sram): `fmatmul` retires in half of its 7,612 cycles; the head waits for a
+load 29 % of the time (two loads per FMA, at the head of the ROB) and for the FPU 15 % (each FMADD.D needs the sum of
+the one before, four cycles in the FPU's pipeline). `fpmix` waits for the FPU 88 % of its 4,386 cycles: 64 divides
+and square roots, one at a time beside the pipeline, about 60 cycles each. The reference runs every FP operation one
+at a time; the divide and square root cost the two cores the same, so `fpmix` gains least.
+
+The link scripts place `.srodata` in `.rodata`: GCC keeps double constants there (`.srodata.cst8`), and the hex holds
+`.text`, `.rodata` and `.data` only. (The first F/D numbers ran without the constants: every value 0, the divide and
+square root on their fast path for zero.) No integer kernel has a `.srodata` section, so their images are unchanged.
 The geometric means below are of the seven older kernels. P9 took the geometric mean of the
 cycles down by 20 % on the SoC (21 % on the flat SRAM); P10 changes the M-mode kernels by under 1 % (their CSR
 window markers) and is about S mode, below. Single issue puts the floor at CPI 1.0; crc32 is within 12 % of it.
