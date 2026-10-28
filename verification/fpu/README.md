@@ -133,8 +133,19 @@ python3 verification/fpu/gen_vectors.py --level 1 --sample 2000 --unboxed -o /tm
 python3 verification/fpu/check_vectors_sail.py /tmp/smoke.vec
 ```
 
-`vectors/smoke.vec` (10,483 cases: 40 per function and rounding mode, the unboxed variants, 3,000 golden-model cases,
-checked against Sail) is what the regression row `pipe_fpu_vec_tb` runs, so the regression needs no TestFloat.
+`vectors/smoke.vec` is what the regression row `pipe_fpu_vec_tb` runs, so the regression needs no TestFloat. It holds
+38,088 cases, all checked against Sail:
+- 40 TestFloat cases per function and rounding mode, plus up to 30 at the rounder's boundaries (`--edge 30`: UF or
+  OF raised, subnormal or smallest-normal results, a carry into a power of two);
+- the unboxed variants;
+- 3,000 golden-model cases;
+- the 23,948-case special-value set (`--specials`);
+- 400 FMA cases decided by the addend's jammed bits (`--jam 400 --seed 13`: an addend just below the product's
+  window whose bits inside it cancel the product's below the rounding point, so only the bits below the window make
+  the result inexact; half have them zero). No sampled or special case reaches that.
+
+The unit mutation specs (`verification/pipe/mutants/f2_unit_*.json`) run on it: the even TestFloat sample alone
+missed most special-value mutants.
 
 ## The algorithm model
 
@@ -160,3 +171,7 @@ python3 verification/fpu/fpu_model.py /tmp/smoke.vec
 | model, full level 1 except the FMA forms (all cases, all rounding modes, unboxed variants, 50,000 golden) | 2,298,258 | 0 |
 | model, FMA forms, 100,000 level-1 cases per form, precision and rounding mode | 4,155,180 | 0 |
 | RTL (`qv_fpu_vec_tb`, iverilog), the 260,511 sampled vectors | 260,511 | 0 (after one fix: an iverilog width rule in the integer-to-float magnitude) |
+| RTL, full level 1 except the FMA forms | 2,298,258 | 0 |
+| RTL, the FMA sample | 4,155,180 | 0 |
+| Sail, the special-value set (`--specials`: every op crossed with a pool of zeros, infinities, NaNs, +-1, subnormal and boundary values; expected values from the model) | 23,948 | 0 |
+| Sail and the model, the jammed-addend set (`--jam 400`) | 400 | 0 |
