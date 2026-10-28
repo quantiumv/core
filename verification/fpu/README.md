@@ -98,3 +98,37 @@ Case counts per function and rounding mode (`testfloat_gen -level N <function> |
 What TestFloat doesn't generate gets its own golden model (`gen_vectors.py`), checked against Sail: sign injection,
 min/max (with -0 < +0 and the NaN rules), classify, the moves, NaN-boxing of single-precision inputs, and the RV64
 sign extension of 32-bit integer results.
+
+## Vectors
+
+`gen_vectors.py` writes architectural vectors, one case per line, all fields hex:
+
+```
+insn frm a b c result flags
+```
+
+- `insn` is the instruction itself: rd = 4, rs1 = 1, rs2 = 2, rs3 = 3, and its rm field (7 means dynamic).
+- `frm` is the dynamic rounding mode.
+- `a`, `b`, `c` are the 64-bit register values of the sources: singles NaN-boxed, an integer source in x1 with junk in
+  the upper half for the 32-bit conversions.
+- `result` is the 64-bit value written to rd; `flags` is what the instruction raises.
+
+A testbench decodes `insn` with the same decoder the core uses, so the vectors don't depend on how the FPU encodes
+its ops internally.
+
+Sources:
+- TestFloat cases for every function TestFloat has: add, sub, mul, div, sqrt; the four FMA forms, with inputs
+  negated as Sail and Spike do (FNMADD is `mulAdd(-a, b, -c)`); eq, lt, le; every conversion. They come in all five
+  rounding modes, and a quarter of them through rm = dyn.
+- `--unboxed`: each such case again with every single-precision quiet-NaN operand replaced by an unboxed pattern.
+- The golden-model cases for the rest.
+
+`check_vectors_sail.py` replays a vector file on Sail: a table of operands and one stub per vector. A sampled set of
+260,511 vectors (`--level 1 --sample 2000 --unboxed --golden 20000`, every function and rounding mode) matches Sail
+exactly. As a negative control, a copy with three corrupted vectors (a result bit, a flag, a golden result) reports
+exactly those three.
+
+```
+python3 verification/fpu/gen_vectors.py --level 1 --sample 2000 --unboxed -o /tmp/smoke.vec
+python3 verification/fpu/check_vectors_sail.py /tmp/smoke.vec
+```
