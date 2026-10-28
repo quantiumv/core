@@ -109,7 +109,10 @@ exists.
 - **`misa`** read `0x8000000000000100` during `examine` (only the `I` bit
   set) when this was written. That was a bug, erratum E3
   (`verification/reference/README.md`): misa reads `0x8000000000141105`
-  (A C I M S U) since 2026-10-28.
+  (A C I M S U) since 2026-10-28, and `0x800000000014112D` (A C D F I M S
+  U) since F/D is built in. OpenOCD then lists the FP registers; item 4b
+  writes two of them and reads them back through the Debug Module's
+  abstract access (regno 0x1020 + n): 29 checks in all.
 
 ## Scope boundary
 

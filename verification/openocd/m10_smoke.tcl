@@ -69,6 +69,14 @@ check "GPR read: ra (x1) == 10 (set by main's own setup)" [regval ra] 10
 reg t3 0x123456789a
 check "GPR write+readback: t3 == 0x123456789a" [regval t3] 0x123456789a
 
+# ---- F/D: an FP register through the debugger (misa says F and D; the Debug Module's abstract
+# access, regno 0x1020 + n, whatever mstatus.FS is) ----
+puts "=== Item 4b: Read/write an FP register ==="
+reg ft1 0x400921fb54442d18
+check "FPR write+readback: ft1 == 0x400921fb54442d18 (pi)" [regval ft1] 0x400921fb54442d18
+reg fs0 0xffffffff3f800000
+check "FPR write+readback: fs0 == a NaN-boxed 1.0f" [regval fs0] 0xffffffff3f800000
+
 # ---- Item 5: Read/write CSRs including dcsr/dpc ----
 puts "=== Item 5: Read/write CSRs (dcsr/dpc) ==="
 check "CSR read: dpc == pc (both read the same halted-PC state)" [regval dpc] [regval pc]
