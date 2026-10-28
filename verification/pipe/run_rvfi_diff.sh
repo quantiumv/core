@@ -12,8 +12,8 @@
 #                    [--serialize 0|1] [--bypass 0|1] [--no-div] [--no-amo] [--pipe-dir DIR] [--defines "A=1 B=0"]
 #
 # --pipe-dir builds the pipelined core from a copy of design/pipe/ (for mutants);
-# --defines passes preprocessor defines to the pipelined core only (the QV_PIPE_* feature knobs),
-# and puts a hash of them in the build name;
+# --defines passes preprocessor defines to both builds (the QV_PIPE_* feature knobs, which the reference ignores,
+# and QV_FPU_EN, which both cores read), and puts a hash of them in the build name;
 # --outdir keeps concurrent runs apart.
 #
 # Prints one PASS/FAIL line per seed, then RVFI_DIFF_SUMMARY. Logs for
@@ -47,11 +47,13 @@ esac
 mkdir -p "$OUT"
 TAG="s${SER}b${BYP}"
 DEF_FLAGS=""
+DTAG=""
 if [ -n "$DEFS" ]; then
     for d in $DEFS; do DEF_FLAGS="$DEF_FLAGS -D$d"; done
-    TAG="${TAG}_$(echo "$DEFS" | sha1sum | cut -c1-6)"
+    DTAG="_$(echo "$DEFS" | sha1sum | cut -c1-6)"
+    TAG="${TAG}${DTAG}"
 fi
-REF_VVP="$OUT/ref.vvp"
+REF_VVP="$OUT/ref${DTAG}.vvp"
 DUT_VVP="$OUT/pipe_$TAG.vvp"
 
 # the reference: its seven files (ref_macros.svh is found through the include path), absolute paths, since the build runs from design/
@@ -73,7 +75,7 @@ build() {
     fi
 }
 # shellcheck disable=SC2086
-build "$REF_VVP" -DQV_REF_AS_CORE -I "$REF_DIR" $REF_FILES
+build "$REF_VVP" -DQV_REF_AS_CORE -I "$REF_DIR" $DEF_FLAGS $REF_FILES
 # shellcheck disable=SC2086
 build "$DUT_VVP" -DQV_PIPE_SERIALIZE=$SER -DQV_PIPE_BYPASS_EN=$BYP $DEF_FLAGS $PIPE_FILES
 
