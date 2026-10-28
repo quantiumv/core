@@ -12,8 +12,7 @@
  */
 package qv_pkg;
 
-    // Functional-unit routing. All six kinds are named so the enum never
-    // needs to grow. ALU is also where CSR/SYS operands and faulting uops
+    // Functional-unit routing. ALU is also where CSR/SYS operands and faulting uops
     // are resolved, so a unit not listed in issue's dispatch (DIV included)
     // would silently execute on the ALU.
     typedef enum logic [2:0] {
@@ -22,7 +21,8 @@ package qv_pkg;
         QV_FU_DIV,
         QV_FU_LSU,
         QV_FU_CSR,
-        QV_FU_SYS
+        QV_FU_SYS,
+        QV_FU_FPU                  // F/D: qv_exu_fpu (FP loads and stores go to the LSU)
     } qv_fu_e;
 
     // Branch-unit operations (fu_req_t.op for QV_FU_BRU).
@@ -144,6 +144,18 @@ package qv_pkg;
         logic        xcpt_hi;      // a fetch fault in the second dword of a crossing instruction (tval of a page fault is pc + 8)
         logic        trig_debug;   // an action-1 execute trigger matched its pc: Debug Mode entry instead of executing
         logic        trig_exc;     // an action-0 one did (and no fetch/illegal fault came first): a breakpoint exception
+        // F/D (qv_fp_dec): rs1/rs2 are FP registers (rs*_fp), rs3 is the FMA's third source (always FP), rd is an FP
+        // register (rd_fp; f0 is a register like the others); the FPU op (a qv_fp_op_e), precision, integer type of
+        // a conversion and the rounding mode resolved at decode
+        logic        rs1_fp;
+        logic        rs2_fp;
+        logic [4:0]  rs3;
+        logic        rs3_used;
+        logic        rd_fp;
+        logic [4:0]  fp_op;
+        logic        fp_fmt;
+        logic [1:0]  fp_ityp;
+        logic [2:0]  fp_rm;
     } uop_t;
 
     // One reorder-buffer entry.
@@ -157,6 +169,7 @@ package qv_pkg;
         logic [63:0] value;
         logic [63:0] next_pc;      // the predicted next pc until the result overrides it
         logic        mispredict;   // next_pc differs from the prediction: redirect at commit
+        logic [4:0]  fflags;       // F/D: the exception flags an FPU op raised, accrued into fflags at commit
     } rob_entry_t;
 
     // RVFI source-operand capture, taken at issue: regfile0 has only two
@@ -206,6 +219,7 @@ package qv_pkg;
         logic        xcpt_hi;      // see uop_t
         logic        trig_debug;   // see uop_t
         logic        trig_exc;
+        logic        rd_fp;        // F/D: rd is an FP register (fprf0, the FP producer table)
     } rob_ctrl_t;
 
     // Issue -> functional unit.
@@ -220,6 +234,7 @@ package qv_pkg;
         logic [63:0]             imm;      // uop_t.imm3
         logic                    rvc;
         logic [63:0]             pred_next; // where the frontend went after this
+        logic                    fp;       // LSU: an FP load (FLW is NaN-boxed, not sign-extended)
     } fu_req_t;
 
     // Functional unit -> ROB and bypass (the writeback bus).

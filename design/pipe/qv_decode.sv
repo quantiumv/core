@@ -73,6 +73,7 @@
  * makes its dependents wait for its commit, where its rd value is made.
  */
 module qv_decode #(
+    parameter bit FPU_EN = 1'b0,          // F/D: the FP encodings are instructions (else illegal, as before)
     parameter bit CSR_NOSER = 1'b0
 ) (
     input  logic              clk,
@@ -86,6 +87,10 @@ module qv_decode #(
     input  logic [1:0]        i_priv,
     input  logic              i_tsr,
     input  logic              i_tvm,
+    // F/D: mstatus.FS (Off makes every FP instruction and fcsr access illegal) and frm (rm = 7). Live values are
+    // exact: writes to them serialize, and a commit's step to Dirty never changes what is legal.
+    input  logic [1:0]        i_fs  = 2'b00,
+    input  logic [2:0]        i_frm = 3'b000,
     // Debug Mode: the debug and trigger CSRs exist only there (outside it they are illegal for every
     // privilege level), and the usual privilege rule still applies inside it
     input  logic              i_in_debug = 1'b0,
@@ -186,6 +191,22 @@ module qv_decode #(
         .o_imm_2(imm_2),
         .o_imm_3_or_dest_addr(imm_3_or_dest_addr)
     );
+
+    // F/D: the FP encodings keep decoder.sv's INVALID code; qv_fp_dec classifies them from the same bits (after RVC
+    // expansion and the fault placeholder, so a faulted fetch is never one)
+    logic        fp_is, fp_ill, fp_fmt, fp_ld, fp_st, fp_r1u, fp_r1f, fp_r2u, fp_r2f, fp_r3u, fp_rdw, fp_rdf;
+    qv_fp_op_e   fp_op;
+    logic [1:0]  fp_ityp, fp_msz;
+    logic [2:0]  fp_rm;
+    logic [63:0] fp_imm;
+    qv_fp_dec fpdec0 (
+        .i_instr(instr), .i_fs(i_fs), .i_frm(i_frm),
+        .o_is_fp(fp_is), .o_illegal(fp_ill), .o_op(fp_op), .o_fmt(fp_fmt), .o_ityp(fp_ityp), .o_rm(fp_rm),
+        .o_is_load(fp_ld), .o_is_store(fp_st), .o_mem_size(fp_msz), .o_imm(fp_imm),
+        .o_rs1_used(fp_r1u), .o_rs1_fp(fp_r1f), .o_rs2_used(fp_r2u), .o_rs2_fp(fp_r2f), .o_rs3_used(fp_r3u),
+        .o_rd_wen(fp_rdw), .o_rd_fp(fp_rdf)
+    );
+    wire is_fp = FPU_EN && fp_is;
 
     logic [(`ALU_OPSIZE - 1):0] alu_op;
     logic                       is_alu;
@@ -370,7 +391,7 @@ module qv_decode #(
         endcase
     end: div_control
 
-    wire implemented = is_alu || is_bru || is_csr || is_sys || is_mem || is_fence || is_div;
+    wire implemented = is_alu || is_bru || is_csr || is_sys || is_mem || is_fence || is_div || is_fp;
 
     // The CSR address arrives on imm_2. Write suppression and illegality
     // mirror ref_core.sv's csr_write_suppress / is_illegal_instr for M-mode:
@@ -401,6 +422,11 @@ module qv_decode #(
     wire sret_priv_violation = is_sret_op && ((i_priv == QV_PRIV_U) || (i_priv == QV_PRIV_S && i_tsr));
     wire tvm_violation       = i_tvm && (i_priv == QV_PRIV_S) && ((is_csr && csr_addr == 12'h180) || is_sfence);
     wire priv_illegal = csr_priv_violation || mret_priv_violation || sret_priv_violation || tvm_violation;
+    // F/D: a reserved FP encoding or rounding mode, FS Off; fflags/frm/fcsr with FS Off (without the FPU they are
+    // unmapped, as before)
+    wire fp_illegal = (is_fp && fp_ill)
+                      || (FPU_EN && is_csr && (csr_addr == 12'h001 || csr_addr == 12'h002 || csr_addr == 12'h003)
+                          && i_fs == 2'b00);
 
     logic reg_write_ctrl;
     always_comb begin: reg_write_control
@@ -471,17 +497,45 @@ module qv_decode #(
         uop_d.div_signed = div_signed;
         uop_d.div_quot   = div_quot;
         uop_d.xcpt_hi    = i_iq_data.xcpt_hi;
+        if (is_fp && !fp_ill) begin                     // F/D: operands and destination from the bits (an illegal one has none, as in ref_core.sv)
+            uop_d.rs1        = fp_r1u ? instr[19:15] : 5'd0;     // unused: 0, as decoder.sv gives
+            uop_d.rs1_used   = fp_r1u;
+            uop_d.rs1_fp     = fp_r1f;
+            uop_d.rs2        = fp_r2u ? instr[24:20] : 5'd0;     // (FCVT and FSQRT keep a type there)
+            uop_d.rs2_used   = fp_r2u;
+            uop_d.rs2_fp     = fp_r2f;
+            uop_d.rs3        = fp_r3u ? instr[31:27] : 5'd0;
+            uop_d.rs3_used   = fp_r3u;
+            uop_d.rd         = instr[11:7];
+            uop_d.rd_fp      = fp_rdf;
+            uop_d.fp_op      = 5'(fp_op);
+            uop_d.fp_fmt     = fp_fmt;
+            uop_d.fp_ityp    = fp_ityp;
+            uop_d.fp_rm      = fp_rm;
+            uop_d.is_load    = fp_ld;
+            uop_d.is_store   = fp_st;
+            uop_d.mem_size   = fp_msz;
+            uop_d.mem_signed = 1'b0;
+            uop_d.imm2       = fp_imm;                   // a load's offset: the LSU's operand b
+            uop_d.imm3       = fp_imm;                   // a store's
+        end else if (is_fp) begin                        // an illegal one reads nothing (ref_core.sv decodes it as 0)
+            uop_d.rs1      = 5'd0;
+            uop_d.rs1_used = 1'b0;
+            uop_d.rs2      = 5'd0;
+            uop_d.rs2_used = 1'b0;
+        end
         if (i_iq_data.xcpt && !marker_lo_denied) begin
             uop_d.xcpt       = 1'b1;
             uop_d.xcpt_cause = i_iq_data.xcpt_cause;
         end else if (pmp_fault) begin
             uop_d.xcpt       = 1'b1;
             uop_d.xcpt_cause = 4'd1;
-        end else if (c_illegal || !implemented || csr_illegal || priv_illegal) begin
+        end else if (c_illegal || !implemented || csr_illegal || priv_illegal || fp_illegal) begin
             uop_d.xcpt       = 1'b1;
             uop_d.xcpt_cause = 4'd2;
         end
         uop_d.rd_wen   = reg_write_ctrl && !uop_d.xcpt;
+        if (is_fp) uop_d.rd_wen = fp_rdw && !uop_d.xcpt;
         // a faulting uop goes through the ALU as a no-op for commit to
         // trap on; it must never redirect or touch a CSR
         if (uop_d.xcpt)  uop_d.fu = QV_FU_ALU;
@@ -491,6 +545,7 @@ module qv_decode #(
         else if (is_div) uop_d.fu = QV_FU_DIV;
         else if (is_sys) uop_d.fu = QV_FU_SYS;
         else             uop_d.fu = QV_FU_ALU;
+        if (is_fp && !uop_d.xcpt) uop_d.fu = qv_fu_e'((fp_ld || fp_st) ? QV_FU_LSU : QV_FU_FPU);
         // a trigger match: Debug Mode entry or breakpoint exception at the head. An action-0 match gives way
         // to a fault marker (fetch fault, illegal instruction), an action-1 one does not.
         uop_d.trig_debug = trig_debug_c;
@@ -498,6 +553,7 @@ module qv_decode #(
         if ((uop_d.trig_debug || uop_d.trig_exc) && !(uop_d.fu == QV_FU_SYS && sys_op == QV_SYS_EBREAK)) begin
             uop_d.fu     = QV_FU_ALU;
             uop_d.rd_wen = 1'b0;
+            uop_d.rd_fp  = 1'b0;
         end
     end
 

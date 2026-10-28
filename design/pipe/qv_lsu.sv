@@ -196,6 +196,7 @@ module qv_lsu #(
     logic [7:0]              sel_q;
     logic [1:0]              size_q;
     logic                    store_q, signed_q, misaligned_q;
+    logic                    fp_q;              // F/D: an FP load: FLW is NaN-boxed
     logic                    atomic_q, phase_wr_q;      // phase_wr_q: an AMO's write has begun
     qv_amo_op_e              aop_q;
 
@@ -324,7 +325,8 @@ module qv_lsu #(
         case (size_q)
             2'd0:    load_value = signed_q ? {{56{shifted[7]}},  shifted[7:0]}  : {56'b0, shifted[7:0]};
             2'd1:    load_value = signed_q ? {{48{shifted[15]}}, shifted[15:0]} : {48'b0, shifted[15:0]};
-            2'd2:    load_value = signed_q ? {{32{shifted[31]}}, shifted[31:0]} : {32'b0, shifted[31:0]};
+            2'd2:    load_value = fp_q     ? {32'hFFFF_FFFF, shifted[31:0]}
+                                  : signed_q ? {{32{shifted[31]}}, shifted[31:0]} : {32'b0, shifted[31:0]};
             default: load_value = shifted;
         endcase
     end
@@ -378,6 +380,7 @@ module qv_lsu #(
                     size_q       <= req_size;
                     store_q      <= req_store;
                     signed_q     <= req_signed;
+                    fp_q         <= i_req.fp;
                     misaligned_q <= req_misaligned;
                     atomic_q     <= req_atomic;
                     aop_q        <= qv_amo_op_e'(i_req.op[3:0]);

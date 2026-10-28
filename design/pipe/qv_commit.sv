@@ -111,6 +111,13 @@ module qv_commit #(
     output logic                             o_commit_valid,
     output logic [4:0]                       o_commit_rd,
     output logic                             o_commit_rd_wen,
+    output logic                             o_commit_rd_fp,
+    // F/D: the FP register write (fprf0), and csr_file0's side channels: an FP register written (FS Dirty) and the
+    // flags an FPU op raised (accrued into fflags)
+    output logic                             o_fprf_we,
+    output logic [4:0]                       o_fprf_sel,
+    output logic [63:0]                      o_fprf_data,
+    output logic [4:0]                       o_fp_accrue,
     output logic [qv_pkg::QV_ROB_TAG_W-1:0]  o_commit_tag,
 
     // csr_file0
@@ -231,7 +238,11 @@ module qv_commit #(
     output logic [7:0]                       o_rvfi_mem_rmask,
     output logic [7:0]                       o_rvfi_mem_wmask,
     output logic [63:0]                      o_rvfi_mem_rdata,
-    output logic [63:0]                      o_rvfi_mem_wdata
+    output logic [63:0]                      o_rvfi_mem_wdata,
+    // F/D, not standard RVFI: the FP register this retirement wrote
+    output logic                             o_rvfi_frd_wvalid,
+    output logic [4:0]                       o_rvfi_frd_addr,
+    output logic [63:0]                      o_rvfi_frd_wdata
 );
     import qv_pkg::*;
 
@@ -431,13 +442,20 @@ module qv_commit #(
 
     // a memory op that faults while executing still has rd_wen set
     wire writes_rd = i_head_entry.rd_wen && !is_trap;
-    assign o_regfile_we   = commit && writes_rd;
+    wire rd_fp     = i_head_ctrl.rd_fp;
+    assign o_regfile_we   = commit && writes_rd && !rd_fp;
     assign o_regfile_sel  = i_head_entry.rd;
     assign o_regfile_data = rd_value;
 
     assign o_commit_valid  = commit;
     assign o_commit_rd     = i_head_entry.rd;
     assign o_commit_rd_wen = i_head_entry.rd_wen;
+    assign o_commit_rd_fp  = rd_fp;
+
+    assign o_fprf_we   = commit && writes_rd && rd_fp;
+    assign o_fprf_sel  = i_head_entry.rd;
+    assign o_fprf_data = i_head_entry.value;
+    assign o_fp_accrue = (commit && !faulted && i_head_ctrl.cls == QV_FU_FPU) ? i_head_entry.fflags : 5'b0;
     assign o_commit_tag    = i_head_tag;
 
     // ---------------- next pc / redirect ----------------
@@ -503,8 +521,11 @@ module qv_commit #(
     assign o_rvfi_rs2_addr  = i_head_shadow.rs2_addr;
     assign o_rvfi_rs1_rdata = i_head_shadow.rs1_rdata;
     assign o_rvfi_rs2_rdata = i_head_shadow.rs2_rdata;
-    assign o_rvfi_rd_addr   = writes_rd ? i_head_entry.rd : 5'b0;
-    assign o_rvfi_rd_wdata  = (writes_rd && i_head_entry.rd != 5'b0) ? rd_value : 64'b0;
+    assign o_rvfi_rd_addr   = (writes_rd && !rd_fp) ? i_head_entry.rd : 5'b0;
+    assign o_rvfi_rd_wdata  = (writes_rd && !rd_fp && i_head_entry.rd != 5'b0) ? rd_value : 64'b0;
+    assign o_rvfi_frd_wvalid = commit && writes_rd && rd_fp;
+    assign o_rvfi_frd_addr   = (writes_rd && rd_fp) ? i_head_entry.rd : 5'b0;
+    assign o_rvfi_frd_wdata  = (writes_rd && rd_fp) ? i_head_entry.value : 64'b0;
     assign o_rvfi_pc_rdata  = i_head_entry.pc;
     assign o_rvfi_pc_wdata  = actual_next_pc;
     // a trapping access still reports its would-be fields, as ref_core.sv does

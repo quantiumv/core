@@ -160,6 +160,12 @@
 `define QV_PIPE_SV39_EN 1'b1
 `endif
 
+// F/D: QV_FPU_EN builds the FP unit in (the reference reads the same define); QV_FORMAL_NO_FPU forces it off for
+// the riscv-formal models, which have no FP checks.
+`ifndef QV_FPU_EN
+`define QV_FPU_EN 0
+`endif
+
 module core
 #(
     parameter bit SERIALIZE = `QV_PIPE_SERIALIZE,
@@ -296,11 +302,10 @@ module core
 );
     import qv_pkg::*;
 
-    // F/D is not built into this core yet: only the Debug Module writes an FP register (fprf0, below)
-`ifdef RISCV_FORMAL
-    assign rvfi_frd_wvalid = 1'b0;
-    assign rvfi_frd_addr   = 5'b0;
-    assign rvfi_frd_wdata  = 64'b0;
+`ifdef QV_FORMAL_NO_FPU
+    localparam bit FPU_EN = 1'b0;
+`else
+    localparam bit FPU_EN = (`QV_FPU_EN != 0);
 `endif
 
     localparam logic [63:0] RESET_PC = 64'h0;   // ref_core.sv's own reset pc
@@ -499,8 +504,9 @@ module core
     logic uop_valid, issue_fire;
     uop_t uop;
 
-    qv_decode #(.CSR_NOSER(CSR_NOSER)) decode0 (
+    qv_decode #(.CSR_NOSER(CSR_NOSER), .FPU_EN(FPU_EN)) decode0 (
         .clk(clk), .rst(rst), .i_flush(flush),
+        .i_fs(mstatus_fs_w), .i_frm(frm_w),
         .i_priv(priv), .i_tsr(mstatus_tsr_w), .i_tvm(mstatus_tvm_w), .i_in_debug(dbg_in_debug), .i_pb_active(pb_active),
         .i_tdata1_0(tdata1_0_w), .i_tdata2_0(tdata2_0_w), .i_tdata1_1(tdata1_1_w), .i_tdata2_1(tdata2_1_w),
         .i_pmpcfg0(pmpcfg0_w), .i_pmpaddr0(pmpaddr0_w), .i_pmpaddr1(pmpaddr1_w),
@@ -526,9 +532,20 @@ module core
     logic                    lsu_free, div_free;
     logic                    res_valid;      // the LR/SC reservation, kept by commit
     logic [63:0]             res_addr;
-    logic                    c_valid, c_rd_wen;
+    logic                    c_valid, c_rd_wen, c_rd_fp;
     logic [4:0]              c_rd;
     logic [QV_ROB_TAG_W-1:0] c_tag;
+    // F/D: the FP register file's read ports (issue), the third ROB lookup, the FPU's request and writeback
+    logic [4:0]              frs1_sel, frs2_sel, frs3_sel;
+    logic [63:0]             frs1_data, frs2_data, frs3_data;
+    logic [QV_ROB_TAG_W-1:0] l3_tag;
+    logic                    l3_complete;
+    logic [63:0]             l3_value;
+    /* verilator lint_off UNUSEDSIGNAL */
+    fpu_req_t                fpu_req;        // (unused without the FPU)
+    /* verilator lint_on UNUSEDSIGNAL */
+    wb_fp_t                  fpu_wb;
+    logic                    fpu_ds_free;
 
     qv_issue #(.SERIALIZE(SERIALIZE), .BYPASS_EN(BYPASS_EN), .CSR_LATE(CSR_NOSER)) issue0 (
         .clk(clk), .rst(rst), .i_flush(flush),
@@ -544,7 +561,12 @@ module core
         .i_wb(wb_bus), .o_alu_req(alu_req), .o_bru_req(bru_req),
         .o_lsu_req(lsu_req), .i_lsu_free(lsu_free),
         .o_div_req(div_req), .i_div_free(div_free),
-        .i_commit_valid(c_valid), .i_commit_rd(c_rd), .i_commit_rd_wen(c_rd_wen), .i_commit_tag(c_tag)
+        .o_lookup3_tag(l3_tag), .i_lookup3_complete(l3_complete), .i_lookup3_value(l3_value),
+        .o_frs1_sel(frs1_sel), .o_frs2_sel(frs2_sel), .o_frs3_sel(frs3_sel),
+        .i_frs1_data(frs1_data), .i_frs2_data(frs2_data), .i_frs3_data(frs3_data),
+        .i_wbf(fpu_wb), .o_fpu_req(fpu_req), .i_fpu_ds_free(fpu_ds_free),
+        .i_commit_valid(c_valid), .i_commit_rd(c_rd), .i_commit_rd_wen(c_rd_wen), .i_commit_rd_fp(c_rd_fp),
+        .i_commit_tag(c_tag)
     );
 
     // slow-unit outputs, declared ahead of the ROB and commit, which take them
@@ -568,6 +590,8 @@ module core
         .o_empty(rob_empty), .i_wb(wb_bus), .i_wb2(lsu_wb), .i_wb3(div_wb),
         .i_lookup1_tag(l1_tag), .o_lookup1_complete(l1_complete), .o_lookup1_value(l1_value),
         .i_lookup2_tag(l2_tag), .o_lookup2_complete(l2_complete), .o_lookup2_value(l2_value),
+        .i_wb4(fpu_wb),
+        .i_lookup3_tag(l3_tag), .o_lookup3_complete(l3_complete), .o_lookup3_value(l3_value),
         .o_head_valid(head_valid), .o_head_entry(head_entry), .o_head_tag(head_tag),
         .o_head_shadow(head_shadow), .o_head_ctrl(head_ctrl), .i_commit_pop(commit_pop)
     );
@@ -587,6 +611,19 @@ module core
     // Like the LSU, no bypass: a dependent reads the ROB the next cycle.
     // Every flush kills a divide in flight.
     qv_exu_div exu_div0 (.clk(clk), .rst(rst), .i_flush(flush), .i_req(div_req), .o_free(div_free), .o_wb(div_wb));
+
+    // ---------------- X: FPU -> its own writeback port and the bypass ----------------
+    // A 4-cycle pipeline for everything but divide and square root, which run one at a time beside it (issue waits
+    // for fpu_ds_free). Every flush kills both.
+    generate
+        if (FPU_EN) begin : g_fpu
+            qv_exu_fpu fpu0 (.clk(clk), .rst(rst), .i_flush(flush), .i_req(fpu_req), .o_ds_free(fpu_ds_free),
+                             .o_wb(fpu_wb));
+        end else begin : g_no_fpu
+            assign fpu_ds_free = 1'b1;
+            assign fpu_wb      = '0;
+        end
+    endgenerate
 
     // ---------------- X: LSU -> slow writeback port ----------------
     // read only by the interrupt check below
@@ -770,6 +807,14 @@ module core
     logic        rf_we;
     logic [4:0]  rf_sel;
     logic [63:0] rf_data;
+    logic        c_fprf_we;                  // F/D: the FP register write, and fflags' accrual
+    logic [4:0]  c_fprf_sel, c_fp_accrue;
+    logic [63:0] c_fprf_data;
+    /* verilator lint_off UNUSEDSIGNAL */
+    logic        c_frd_wvalid;               // read only by the RISCV_FORMAL port block
+    logic [4:0]  c_frd_addr;
+    logic [63:0] c_frd_wdata;
+    /* verilator lint_on UNUSEDSIGNAL */
     logic        commit_now_w;
     logic [63:0] retire_next_pc;
     logic [4:0]  c_rs1_addr, c_rs2_addr;
@@ -837,7 +882,10 @@ module core
         .o_rvfi_rd_addr(c_rd_addr), .o_rvfi_rd_wdata(c_rd_wdata),
         .o_rvfi_pc_rdata(c_pc_rdata), .o_rvfi_pc_wdata(c_pc_wdata),
         .o_rvfi_mem_addr(c_mem_addr), .o_rvfi_mem_rmask(c_mem_rmask), .o_rvfi_mem_wmask(c_mem_wmask),
-        .o_rvfi_mem_rdata(c_mem_rdata), .o_rvfi_mem_wdata(c_mem_wdata)
+        .o_rvfi_mem_rdata(c_mem_rdata), .o_rvfi_mem_wdata(c_mem_wdata),
+        .o_rvfi_frd_wvalid(c_frd_wvalid), .o_rvfi_frd_addr(c_frd_addr), .o_rvfi_frd_wdata(c_frd_wdata),
+        .o_commit_rd_fp(c_rd_fp), .o_fprf_we(c_fprf_we), .o_fprf_sel(c_fprf_sel), .o_fprf_data(c_fprf_data),
+        .o_fp_accrue(c_fp_accrue)
     );
 
     qv_dbg dbg0 (
@@ -864,24 +912,26 @@ module core
         .i_load_gpr_data(dm_access_active ? i_dm_gpr_wdata : rf_data)
     );
 
-    // F/D: the FP register file (its array fp_registers is a name the lockstep harness reads in both cores). The
-    // Debug Module's FPR access takes read port 3 and the write port while the hart is halted, as for regfile0.
-    /* verilator lint_off UNUSEDSIGNAL */
-    logic [63:0] fprs1_data, fprs2_data;
-    /* verilator lint_on UNUSEDSIGNAL */
+    // F/D: the FP register file (its array fp_registers is a name the lockstep harness reads in both cores), read by
+    // issue and written at commit. The Debug Module's FPR access takes read port 3 and the write port while the hart
+    // is halted (dm_access_active: nothing issues or retires then), as for regfile0.
     qv_fprf fprf0 (
         .clk(clk),
-        .i_rs1(5'b0), .i_rs2(5'b0), .i_rs3(i_dm_fpr_sel),
-        .o_rs1_data(fprs1_data), .o_rs2_data(fprs2_data), .o_rs3_data(o_dm_fpr_rdata),
-        .i_we(dm_access_active && i_dm_fpr_we), .i_wsel(i_dm_fpr_sel), .i_wdata(i_dm_fpr_wdata)
+        .i_rs1(frs1_sel), .i_rs2(frs2_sel), .i_rs3(dm_access_active ? i_dm_fpr_sel : frs3_sel),
+        .o_rs1_data(frs1_data), .o_rs2_data(frs2_data), .o_rs3_data(frs3_data),
+        .i_we(dm_access_active ? i_dm_fpr_we : c_fprf_we),
+        .i_wsel(dm_access_active ? i_dm_fpr_sel : c_fprf_sel),
+        .i_wdata(dm_access_active ? i_dm_fpr_wdata : c_fprf_data)
     );
+    assign o_dm_fpr_rdata = frs3_data;
 
 `ifdef RISCV_FORMAL
     logic [63:0] mcause_w, scause_w, mepc_next_w, sepc_next_w, mcause_next_w, scause_next_w;
 `endif
 
-    csr_file csr_file0 (
+    csr_file #(.FP_EN(FPU_EN)) csr_file0 (
         .i_clk(clk), .i_rst(rst),
+        .i_fp_frd_we(c_fprf_we), .i_fp_accrue(c_fp_accrue),
         .i_csr_addr(dm_access_active ? i_dm_csr_addr : c_csr_addr), .o_csr_rdata(csr_rdata),
         .i_csr_we(dm_access_active ? i_dm_csr_we : c_csr_we),
         .i_csr_wdata(dm_access_active ? i_dm_csr_wdata : c_csr_wdata),
@@ -974,6 +1024,9 @@ module core
     assign rvfi_rs2_rdata = c_rs2_rdata;
     assign rvfi_rd_addr   = c_rd_addr;
     assign rvfi_rd_wdata  = c_rd_wdata;
+    assign rvfi_frd_wvalid = c_frd_wvalid;
+    assign rvfi_frd_addr   = c_frd_addr;
+    assign rvfi_frd_wdata  = c_frd_wdata;
     assign rvfi_pc_rdata  = c_pc_rdata;
     assign rvfi_pc_wdata  = c_pc_wdata;
     assign rvfi_mem_addr  = c_mem_addr;

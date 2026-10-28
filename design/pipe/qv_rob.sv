@@ -54,6 +54,8 @@ module qv_rob #(
     input  qv_pkg::wb_t                      i_wb2,
     input  qv_pkg::wb_t                      i_wb3,
     /* verilator lint_on UNUSEDSIGNAL */
+    // F/D: the FPU's writeback (value and exception flags)
+    input  qv_pkg::wb_fp_t                   i_wb4 = '0,
 
     // operand lookups (issue) -- indexing only needs the low bits; the
     // wrap bit matters for tag equality elsewhere, not here
@@ -65,6 +67,11 @@ module qv_rob #(
     /* verilator lint_on UNUSEDSIGNAL */
     output logic                             o_lookup2_complete,
     output logic [63:0]                      o_lookup2_value,
+    /* verilator lint_off UNUSEDSIGNAL */
+    input  logic [qv_pkg::QV_ROB_TAG_W-1:0]  i_lookup3_tag = '0,     // F/D: the FMA's third source
+    /* verilator lint_on UNUSEDSIGNAL */
+    output logic                             o_lookup3_complete,
+    output logic [63:0]                      o_lookup3_value,
 
     // head (commit)
     output logic                             o_head_valid,
@@ -87,6 +94,7 @@ module qv_rob #(
     logic [63:0]        next_pc_q [0:ROB_DEPTH-1];
     logic               mispredict_q[0:ROB_DEPTH-1];
     logic               complete_q[0:ROB_DEPTH-1];
+    logic [4:0]         fflags_q  [0:ROB_DEPTH-1];
     rvfi_shadow_t       shadow_q  [0:ROB_DEPTH-1];
     rob_ctrl_t          ctrl_q    [0:ROB_DEPTH-1];
 
@@ -109,6 +117,9 @@ module qv_rob #(
     assign o_lookup1_value    = value_q[l1_idx];
     assign o_lookup2_complete = complete_q[l2_idx];
     assign o_lookup2_value    = value_q[l2_idx];
+    wire [IDX_W-1:0] l3_idx = i_lookup3_tag[IDX_W-1:0];
+    assign o_lookup3_complete = complete_q[l3_idx];
+    assign o_lookup3_value    = value_q[l3_idx];
 
     // head
     assign o_head_valid = !o_empty;
@@ -124,6 +135,7 @@ module qv_rob #(
         o_head_entry.value      = value_q[head_idx];
         o_head_entry.next_pc    = next_pc_q[head_idx];
         o_head_entry.mispredict = mispredict_q[head_idx];
+        o_head_entry.fflags     = fflags_q[head_idx];
     end
     assign o_head_shadow = shadow_q[head_idx];
     assign o_head_ctrl   = ctrl_q[head_idx];
@@ -132,6 +144,7 @@ module qv_rob #(
     wire [IDX_W-1:0] wb_idx    = i_wb.tag[IDX_W-1:0];
     wire [IDX_W-1:0] wb2_idx   = i_wb2.tag[IDX_W-1:0];
     wire [IDX_W-1:0] wb3_idx   = i_wb3.tag[IDX_W-1:0];
+    wire [IDX_W-1:0] wb4_idx   = i_wb4.tag[IDX_W-1:0];
 
     always_ff @(posedge clk) begin
         if (rst) begin
@@ -153,6 +166,7 @@ module qv_rob #(
                 ctrl_q[tail_idx]       <= i_alloc_ctrl;
                 complete_q[tail_idx]   <= 1'b0;
                 mispredict_q[tail_idx] <= 1'b0;
+                fflags_q[tail_idx]     <= 5'b0;
             end
             if (i_wb.valid && !i_flush) begin
                 value_q[wb_idx]    <= i_wb.value;
@@ -169,6 +183,11 @@ module qv_rob #(
             if (i_wb3.valid && !i_flush) begin
                 value_q[wb3_idx]    <= i_wb3.value;
                 complete_q[wb3_idx] <= 1'b1;
+            end
+            if (i_wb4.valid && !i_flush) begin
+                value_q[wb4_idx]    <= i_wb4.value;
+                fflags_q[wb4_idx]   <= i_wb4.flags;
+                complete_q[wb4_idx] <= 1'b1;
             end
         end
     end
