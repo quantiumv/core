@@ -421,11 +421,21 @@ module qv_fpu_pipe (
         .o_res(d_res), .o_flags(d_flags)
     );
 
+`ifdef QV_FORMAL_FPU_ABSTRACT
+    // formal: the control above stays, the value and flags are free (the datapath then drives nothing and is removed)
+    (* anyseq *) logic [63:0] abs_value;
+    (* anyseq *) logic [4:0]  abs_flags;
+`endif
     always_comb begin
         o_wb       = '0;
         o_wb.valid = r3_valid && !i_flush;
         o_wb.tag   = r3_tag;
+`ifdef QV_FORMAL_FPU_ABSTRACT
+        o_wb.value = abs_value;
+        o_wb.flags = abs_flags;
+`else
         o_wb.value = r3_done ? r3_res : boxv(r3_fmt, d_res);
         o_wb.flags = r3_done ? r3_flags : d_flags;
+`endif
     end
 endmodule

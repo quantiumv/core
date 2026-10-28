@@ -37,6 +37,7 @@ design/pipe/qv_fp_dec.sv
 design/pipe/qv_fpu_round.sv
 design/pipe/qv_fpu_pipe.sv
 design/pipe/qv_fpu_divsqrt.sv
+design/pipe/qv_exu_fpu.sv
 design/pipe/qv_lsu.sv
 design/pipe/qv_sb.sv
 design/pipe/qv_commit.sv

@@ -27,6 +27,12 @@ module qv_fpu_divsqrt (
 );
     import qv_pkg::*;
 
+`ifdef QV_FORMAL_FPU_ABSTRACT
+    localparam logic [5:0] ITERS = 6'd3;       // formal: the result is free anyway; a short latency keeps proofs shallow
+`else
+    localparam logic [5:0] ITERS = 6'd56;
+`endif
+
     typedef enum logic [2:0] { S_IDLE, S_PREP, S_ITER, S_FIN, S_DONE } st_e;
     st_e                st_q;
     logic [QV_ROB_TAG_W-1:0] tag_q;
@@ -110,7 +116,7 @@ module qv_fpu_divsqrt (
                             rem_q  <= {2'b0, ua.m};
                             div_q  <= {2'b0, ub.m};
                             qr_q   <= '0;
-                            cnt_q  <= 6'd56;
+                            cnt_q  <= ITERS;
                             eacc_q <= ua.q - ub.q - 14'sd55;
                         end
                     end else begin
@@ -131,7 +137,7 @@ module qv_fpu_divsqrt (
                             rad_q  <= {ma, 58'b0};
                             srem_q <= '0;
                             qr_q   <= '0;
-                            cnt_q  <= 6'd56;
+                            cnt_q  <= ITERS;
                             eacc_q <= (qa - 14'sd58) >>> 1;
                         end
                     end
@@ -173,11 +179,22 @@ module qv_fpu_divsqrt (
 
     assign o_busy = st_q != S_IDLE;
     assign o_done = st_q == S_DONE;
+`ifdef QV_FORMAL_FPU_ABSTRACT
+    // formal: the FSM stays (3 steps instead of 56, ITERS above; riscv-formal's liveness and hang assume no divide or
+    // square root, as they do for the integer divider), the value and flags are free
+    (* anyseq *) logic [63:0] abs_value;
+    (* anyseq *) logic [4:0]  abs_flags;
+`endif
     always_comb begin
         o_res       = '0;
         o_res.valid = o_done && !i_flush;
         o_res.tag   = tag_q;
+`ifdef QV_FORMAL_FPU_ABSTRACT
+        o_res.value = abs_value;
+        o_res.flags = abs_flags;
+`else
         o_res.value = res_q;
         o_res.flags = flags_q;
+`endif
     end
 endmodule
