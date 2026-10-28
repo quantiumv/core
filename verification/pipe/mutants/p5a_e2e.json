@@ -18,8 +18,8 @@
   {
    "name": "DIV also runs on the ALU (not excluded)",
    "file": "qv_issue.sv",
-   "old": "o_alu_req.valid = o_issue && !to_bru && !to_lsu && !to_div;",
-   "new": "o_alu_req.valid = o_issue && !to_bru && !to_lsu;"
+   "old": "o_alu_req.valid = o_issue && !to_bru && !to_lsu && !to_div && !to_fpu;",
+   "new": "o_alu_req.valid = o_issue && !to_bru && !to_lsu && !to_fpu;"
   },
   {
    "name": "issue ignores div_free",

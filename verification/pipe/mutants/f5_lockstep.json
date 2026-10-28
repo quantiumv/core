@@ -1,0 +1,122 @@
+{
+ "counts": [8, 24, 64],
+ "memcfg": "sram",
+ "delay": 0,
+ "jobs": 3,
+ "inner_jobs": 2,
+ "sim": "verilator",
+ "profile": "--isa imafdc --priv msu --pmp --irq --smc --sv39",
+ "extra": ["--defines", "QV_FPU_EN=1", "--irq-mode", "2", "--irq-density", "1", "--dbg-mode", "1"],
+ "mutants": [
+  {
+   "name": "decode: an FP destination is taken for an integer one",
+   "file": "qv_decode.sv",
+   "old": "            uop_d.rd_fp      = fp_rdf;",
+   "new": "            uop_d.rd_fp      = 1'b0;"
+  },
+  {
+   "name": "decode: fcsr with FS Off is legal",
+   "file": "qv_decode.sv",
+   "old": "                          && i_fs == 2'b00);",
+   "new": "                          && 1'b0);"
+  },
+  {
+   "name": "decode: an FP load or store goes to the FPU",
+   "file": "qv_decode.sv",
+   "old": "QV_FU_LSU : QV_FU_FPU);",
+   "new": "QV_FU_FPU : QV_FU_FPU);"
+  },
+  {
+   "name": "decode: a reserved FP encoding or FS Off is not illegal",
+   "file": "qv_decode.sv",
+   "old": "csr_illegal || priv_illegal || fp_illegal) begin",
+   "new": "csr_illegal || priv_illegal) begin"
+  },
+  {
+   "name": "decode: the FMA's third source is never read",
+   "file": "qv_decode.sv",
+   "old": "            uop_d.rs3_used   = fp_r3u;",
+   "new": "            uop_d.rs3_used   = 1'b0;"
+  },
+  {
+   "name": "issue: an FP rs1 looks in the integer producer table",
+   "file": "qv_issue.sv",
+   "old": "    wire                    p1_busy = i_uop.rs1_fp ? fprod_busy_q[i_uop.rs1] : prod_busy_q[i_uop.rs1];",
+   "new": "    wire                    p1_busy = prod_busy_q[i_uop.rs1];"
+  },
+  {
+   "name": "issue: the FPU bypass of rs2 takes the ALU bus's value",
+   "file": "qv_issue.sv",
+   "old": "            else if (BYPASS_EN && i_wbf.valid && i_wbf.tag == p2_tag) opb = i_wbf.value;",
+   "new": "            else if (BYPASS_EN && i_wbf.valid && i_wbf.tag == p2_tag) opb = i_wb.value;"
+  },
+  {
+   "name": "issue: rs3 ignores its producer",
+   "file": "qv_issue.sv",
+   "old": "            if (!p3_busy)                                            opc = i_frs3_data;",
+   "new": "            if (1'b1)                                                opc = i_frs3_data;"
+  },
+  {
+   "name": "issue: a second divide or square root does not wait for the side unit",
+   "file": "qv_issue.sv",
+   "old": "|| i_fpu_ds_free);",
+   "new": "|| 1'b1);"
+  },
+  {
+   "name": "issue: an FP destination is never claimed",
+   "file": "qv_issue.sv",
+   "old": "            if (o_issue && i_uop.rd_wen && i_uop.rd_fp) begin",
+   "new": "            if (1'b0) begin"
+  },
+  {
+   "name": "issue: an FP commit clears the integer register of the same number",
+   "equivalent": true,
+   "why": "the clear also compares the claim's tag, and an instruction with an FP rd never holds an integer claim: no FP commit can match one (qvgen's FP/integer collision idiom exercises the case)",
+   "file": "qv_issue.sv",
+   "old": "            if (i_commit_valid && i_commit_rd_wen && i_commit_rd != 5'd0 && !i_commit_rd_fp",
+   "new": "            if (i_commit_valid && i_commit_rd_wen && i_commit_rd != 5'd0"
+  },
+  {
+   "name": "rob: the FPU's flags are not recorded",
+   "file": "qv_rob.sv",
+   "old": "                fflags_q[wb4_idx]   <= i_wb4.flags;",
+   "new": "                fflags_q[wb4_idx]   <= 5'b0;"
+  },
+  {
+   "name": "rob: the third lookup reads the first's entry",
+   "file": "qv_rob.sv",
+   "old": "    wire [IDX_W-1:0] l3_idx = i_lookup3_tag[IDX_W-1:0];",
+   "new": "    wire [IDX_W-1:0] l3_idx = i_lookup1_tag[IDX_W-1:0];"
+  },
+  {
+   "name": "commit: an FP result also goes to regfile0",
+   "file": "qv_commit.sv",
+   "old": "    assign o_regfile_we   = commit && writes_rd && !rd_fp;",
+   "new": "    assign o_regfile_we   = commit && writes_rd;"
+  },
+  {
+   "name": "commit: an FPU op's flags are never accrued",
+   "file": "qv_commit.sv",
+   "old": "? i_head_entry.fflags : 5'b0;",
+   "new": "? 5'b0 : 5'b0;"
+  },
+  {
+   "name": "core: an FP register write does not set FS Dirty",
+   "file": "core.sv",
+   "old": ".i_fp_frd_we(c_fprf_we),",
+   "new": ".i_fp_frd_we(1'b0),"
+  },
+  {
+   "name": "lsu: FLW sign-extends instead of NaN-boxing",
+   "file": "qv_lsu.sv",
+   "old": "            2'd2:    load_value = fp_q     ? {32'hFFFF_FFFF, shifted[31:0]}",
+   "new": "            2'd2:    load_value = fp_q     ? {{32{shifted[31]}}, shifted[31:0]}"
+  },
+  {
+   "name": "core: the FMA's third source always reads the Debug Module's register",
+   "file": "core.sv",
+   "old": ".i_rs3(dm_access_active ? i_dm_fpr_sel : frs3_sel),",
+   "new": ".i_rs3(i_dm_fpr_sel),"
+  }
+ ]
+}

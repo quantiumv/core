@@ -108,13 +108,13 @@
   },
   {
    "name": "a matched uop is not neutralised (unit)",
-   "old": "            uop_d.fu     = QV_FU_ALU;\n            uop_d.rd_wen = 1'b0;\n        end\n    end",
-   "new": "            uop_d.rd_wen = 1'b0;\n        end\n    end"
+   "old": "            uop_d.fu     = QV_FU_ALU;\n            uop_d.rd_wen = 1'b0;\n            uop_d.rd_fp  = 1'b0;\n        end\n    end",
+   "new": "            uop_d.rd_wen = 1'b0;\n            uop_d.rd_fp  = 1'b0;\n        end\n    end"
   },
   {
    "name": "a matched uop still writes rd",
-   "old": "            uop_d.fu     = QV_FU_ALU;\n            uop_d.rd_wen = 1'b0;\n        end\n    end",
-   "new": "            uop_d.fu     = QV_FU_ALU;\n        end\n    end"
+   "old": "            uop_d.fu     = QV_FU_ALU;\n            uop_d.rd_wen = 1'b0;\n            uop_d.rd_fp  = 1'b0;\n        end\n    end",
+   "new": "            uop_d.fu     = QV_FU_ALU;\n            uop_d.rd_fp  = 1'b0;\n        end\n    end"
   },
   {
    "name": "an EBREAK loses its identity",
@@ -133,18 +133,18 @@
   },
   {
    "name": "neutralising also drops the operands",
-   "old": "            uop_d.fu     = QV_FU_ALU;\n            uop_d.rd_wen = 1'b0;\n        end\n    end",
-   "new": "            uop_d.fu     = QV_FU_ALU;\n            uop_d.rd_wen = 1'b0;\n            uop_d.rs1_used = 1'b0;\n        end\n    end"
+   "old": "            uop_d.fu     = QV_FU_ALU;\n            uop_d.rd_wen = 1'b0;\n            uop_d.rd_fp  = 1'b0;\n        end\n    end",
+   "new": "            uop_d.fu     = QV_FU_ALU;\n            uop_d.rd_wen = 1'b0;\n            uop_d.rd_fp  = 1'b0;\n            uop_d.rs1_used = 1'b0;\n        end\n    end"
   },
   {
    "name": "neutralising also drops the store flag (reservation)",
-   "old": "            uop_d.fu     = QV_FU_ALU;\n            uop_d.rd_wen = 1'b0;\n        end\n    end",
-   "new": "            uop_d.fu     = QV_FU_ALU;\n            uop_d.rd_wen = 1'b0;\n            uop_d.is_store = 1'b0;\n        end\n    end"
+   "old": "            uop_d.fu     = QV_FU_ALU;\n            uop_d.rd_wen = 1'b0;\n            uop_d.rd_fp  = 1'b0;\n        end\n    end",
+   "new": "            uop_d.fu     = QV_FU_ALU;\n            uop_d.rd_wen = 1'b0;\n            uop_d.rd_fp  = 1'b0;\n            uop_d.is_store = 1'b0;\n        end\n    end"
   },
   {
    "name": "neutralising also drops the atomic flag (reservation)",
-   "old": "            uop_d.fu     = QV_FU_ALU;\n            uop_d.rd_wen = 1'b0;\n        end\n    end",
-   "new": "            uop_d.fu     = QV_FU_ALU;\n            uop_d.rd_wen = 1'b0;\n            uop_d.is_atomic = 1'b0;\n        end\n    end"
+   "old": "            uop_d.fu     = QV_FU_ALU;\n            uop_d.rd_wen = 1'b0;\n            uop_d.rd_fp  = 1'b0;\n        end\n    end",
+   "new": "            uop_d.fu     = QV_FU_ALU;\n            uop_d.rd_wen = 1'b0;\n            uop_d.rd_fp  = 1'b0;\n            uop_d.is_atomic = 1'b0;\n        end\n    end"
   }
  ]
 }

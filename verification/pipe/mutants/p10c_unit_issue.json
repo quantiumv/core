@@ -45,8 +45,8 @@
   },
   {
    "name": "the late bit of rs1 read from rs2's entry",
-   "old": "    wire                    p1_late = prod_late_q[i_uop.rs1];",
-   "new": "    wire                    p1_late = prod_late_q[i_uop.rs2];"
+   "old": "    wire                    p1_late = !i_uop.rs1_fp && prod_late_q[i_uop.rs1];",
+   "new": "    wire                    p1_late = !i_uop.rs1_fp && prod_late_q[i_uop.rs2];"
   }
  ]
 }
