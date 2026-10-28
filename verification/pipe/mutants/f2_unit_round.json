@@ -1,0 +1,25 @@
+{
+ "dut": "design/pipe/qv_fpu_round.sv",
+ "tb": "design/pipe/qv_fpu_vec_tb.sv",
+ "files": ["design/pipe/qv_pkg.sv", "design/pipe/qv_fp_dec.sv", "design/pipe/qv_fpu_round.sv",
+           "design/pipe/qv_fpu_pipe.sv", "design/pipe/qv_fpu_divsqrt.sv"],
+ "flags": ["-g2012", "-I", ".", "-I", "defaults"],
+ "cwd": "design",
+ "plusargs": ["+VEC=../verification/fpu/vectors/smoke.vec"],
+ "timeout": 900,
+ "mutants": [
+  {"name": "tininess before rounding", "old": "tiny    = e_u < 15'sd1;", "new": "tiny    = 15'(i_exp) < 15'sd1;"},
+  {"name": "RNE rounds ties away", "old": "3'd0:    return g && (st || lsb);", "new": "3'd0:    return g;"},
+  {"name": "RDN rounds like RUP", "old": "3'd2:    return s && (g || st);", "new": "3'd2:    return !s && (g || st);"},
+  {"name": "RMM rounds like RNE", "old": "3'd4:    return g;", "new": "3'd4:    return g && (st || lsb);"},
+  {"name": "overflow under RNE gives the largest finite value", "old": "to_inf = (i_rm == 3'd0) ||", "new": "to_inf = (i_rm == 3'd1) ||"},
+  {"name": "the subnormal shift loses its sticky bits", "old": "st = st || ((v & lostmask) != 55'b0);", "new": "st = st;"},
+  {"name": "a subnormal rounding up to the smallest normal keeps exponent 0", "old": "e_field = (i_fmt ? sig[52] : sig[23]) ? 15'sd1 : 15'sd0;", "new": "e_field = 15'sd0;"},
+  {"name": "a carry out of the significand is not shifted back", "old": "sig     = sig >> 1;", "new": "sig     = sig;",
+   "equivalent": true,
+   "why": "a carry leaves the significand at exactly 2^p, so its fraction field (bits p-2..0) is 0 shifted or not; only the exponent bump, which stays, matters"},
+  {"name": "UF without inexact", "old": "tiny && inexact", "new": "tiny"},
+  {"name": "a single loses the sticky bits below its 26", "old": "st = i_sticky || (!i_fmt && (i_m[28:0] != 29'b0));", "new": "st = i_sticky;"},
+  {"name": "tininess ignores the rounding carry", "old": "all1_u  = i_fmt ? (v[54:2] == '1) : (v[25:2] == '1);", "new": "all1_u  = 1'b0;"}
+ ]
+}

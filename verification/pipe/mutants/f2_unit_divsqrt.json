@@ -1,0 +1,24 @@
+{
+ "dut": "design/pipe/qv_fpu_divsqrt.sv",
+ "tb": "design/pipe/qv_fpu_vec_tb.sv",
+ "files": ["design/pipe/qv_pkg.sv", "design/pipe/qv_fp_dec.sv", "design/pipe/qv_fpu_round.sv",
+           "design/pipe/qv_fpu_pipe.sv", "design/pipe/qv_fpu_divsqrt.sv"],
+ "flags": ["-g2012", "-I", ".", "-I", "defaults"],
+ "cwd": "design",
+ "plusargs": ["+VEC=../verification/fpu/vectors/smoke.vec"],
+ "timeout": 900,
+ "mutants": [
+  {"name": "division by zero raises no DZ", "old": "? 5'h08 : 5'h00;", "new": "? 5'h00 : 5'h00;"},
+  {"name": "0 / 0 is not invalid", "old": "(ua.cls == QV_FPC_ZERO && ub.cls == QV_FPC_ZERO))", "new": "1'b0)"},
+  {"name": "sqrt(-0) is +0", "old": "res_q <= zerov(fmt_q, ua.s);", "new": "res_q <= zerov(fmt_q, 1'b0);"},
+  {"name": "the square root of a negative is not invalid", "old": "end else if (ua.s) begin", "new": "end else if (1'b0) begin"},
+  {"name": "an odd exponent is not made even", "old": "ma = ua.q[0] ? {ua.m, 1'b0} : {1'b0, ua.m};", "new": "ma = {1'b0, ua.m};"},
+  {"name": "the divide and the square root stop a step short", "old": "localparam logic [5:0] ITERS = 6'd56;", "new": "localparam logic [5:0] ITERS = 6'd55;"},
+  {"name": "the divide remainder is not sticky", "old": ": (rem_q != '0))", "new": ": 1'b0)"},
+  {"name": "the quotient exponent off by one", "old": "eacc_q <= ua.q - ub.q - 14'sd55;", "new": "eacc_q <= ua.q - ub.q - 14'sd54;"},
+  {"name": "a quotient below 2^55 is not normalized", "old": "(hi ? 14'sd55 : 14'sd54)", "new": "(hi ? 14'sd54 : 14'sd54)"},
+  {"name": "a remainder equal to the divisor does not subtract", "old": "if (rem_q >= div_q) begin", "new": "if (rem_q > div_q) begin"},
+  {"name": "a square-root step equal to its trial does not subtract", "old": "if (r2 >= t) begin", "new": "if (r2 > t) begin"},
+  {"name": "the root exponent off by one", "old": "eacc_q <= (qa - 14'sd58) >>> 1;", "new": "eacc_q <= (qa - 14'sd56) >>> 1;"}
+ ]
+}

@@ -1,0 +1,22 @@
+{
+ "dut": "design/pipe/qv_fp_dec.sv",
+ "tb": "design/pipe/qv_fp_dec_tb.sv",
+ "files": ["design/pipe/qv_pkg.sv", "design/pipe/qv_fp_dec.sv"],
+ "flags": ["-g2012", "-I", ".", "-I", "defaults"],
+ "cwd": "design",
+ "timeout": 120,
+ "mutants": [
+  {"name": "FS Off is not checked", "old": "o_illegal = o_is_fp && (i_fs == 2'b00 ||", "new": "o_illegal = o_is_fp && (1'b0 ||"},
+  {"name": "a dynamic rm with frm = 7 is legal", "old": "wire       rm_bad = (rm_eff == 3'b101) || (rm_eff == 3'b110) || (rm_eff == 3'b111);", "new": "wire       rm_bad = (rm_eff == 3'b101) || (rm_eff == 3'b110);"},
+  {"name": "rm = dyn is not resolved to frm", "old": "wire [2:0] rm_eff = (f3 == 3'b111) ? i_frm : f3;", "new": "wire [2:0] rm_eff = f3;"},
+  {"name": "FCVT between precisions accepts any rs2", "old": "reserved  = reserved || rs2f != {4'b0, ~fmtf[0]};", "new": "reserved  = reserved;"},
+  {"name": "FSGNJ funct3 3 is legal", "old": "reserved   = reserved || f3 > 3'b010;", "new": "reserved   = reserved || f3 > 3'b011;"},
+  {"name": "FMV.X / FCLASS accept a non-zero rs2", "old": "reserved  = reserved || f3 > 3'b001 || rs2f != 5'd0;", "new": "reserved  = reserved || f3 > 3'b001;"},
+  {"name": "an FMA in H or Q is legal", "old": "reserved   = fmtf[1];                                // H or Q", "new": "reserved   = 1'b0;"},
+  {"name": "every LOAD-FP/STORE-FP width is legal", "old": "reserved   = !(f3 == 3'b010 || f3 == 3'b011);", "new": "reserved   = 1'b0;"},
+  {"name": "FEQ and FLE swapped", "old": "o_op = qv_fp_op_e'((f3 == 3'b010) ? QV_FP_EQ : (f3 == 3'b001) ? QV_FP_LT : QV_FP_LE);", "new": "o_op = qv_fp_op_e'((f3 == 3'b010) ? QV_FP_LE : (f3 == 3'b001) ? QV_FP_LT : QV_FP_EQ);"},
+  {"name": "FCVT from an integer reads an FP rs1", "old": "o_rs1_fp  = 1'b0;", "new": "o_rs1_fp  = 1'b1;"},
+  {"name": "a store's immediate is the I-immediate", "old": ": {{52{i_instr[31]}}, i_instr[31:25], i_instr[11:7]};", "new": ": {{52{i_instr[31]}}, i_instr[31:20]};"},
+  {"name": "FSQRT accepts a non-zero rs2", "old": "reserved  = reserved || rs2f != 5'd0;\n", "new": "reserved  = reserved;\n"}
+ ]
+}
