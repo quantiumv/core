@@ -138,7 +138,16 @@
  *    below); o_mstatus_sum/o_mstatus_mxr/o_mstatus_tvm are single-bit
  *    taps of already-existing storage, same precedent as o_mstatus_mprv.
  */
-module csr_file (
+module csr_file #(
+    /*
+     * F/D state (the F/D track; the cores pass QV_FPU_EN): mstatus.FS with
+     * all four values, SD, fflags/frm/fcsr, misa's F and D letters, and
+     * the commit side channels i_fp_frd_we/i_fp_accrue that mark FS Dirty
+     * and accrue fflags. 0 (the default) leaves FS read-only 0 and the FP
+     * CSRs unmapped, exactly as before.
+     */
+    parameter bit FP_EN = 1'b0
+) (
     input  logic i_clk,
     input  logic i_rst,
     input  logic [(`CSR_ADDR_SIZE - 1):0] i_csr_addr,
@@ -222,7 +231,20 @@ module csr_file (
     output logic [(`WORD_SIZE - 1):0]     o_satp,
     output logic                          o_mstatus_sum,
     output logic                          o_mstatus_mxr,
-    output logic                          o_mstatus_tvm
+    output logic                          o_mstatus_tvm,
+
+    /*
+     * F/D (FP_EN): side channels from commit, gated there like
+     * i_instr_retired (a retiring, non-faulting instruction): it wrote an
+     * FP register, and the exception flags it raised (accrued into
+     * fflags). The exports feed decode (FS for FP legality, frm for the
+     * dynamic rounding mode) and the lockstep snapshot. All 0 without FP_EN.
+     */
+    input  logic                          i_fp_frd_we = 1'b0,
+    input  logic [4:0]                    i_fp_accrue = 5'b0,
+    output logic [1:0]                    o_mstatus_fs,
+    output logic [2:0]                    o_frm,
+    output logic [4:0]                    o_fflags
 `ifdef RISCV_FORMAL
     /*
      * mcause/scause: no real core.sv control logic needs these today (unlike
@@ -258,6 +280,11 @@ module csr_file (
     localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_MSCRATCH  = 12'h340;
     localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_MCYCLE    = 12'hB00;
     localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_MINSTRET  = 12'hB02;
+
+    /* F/D: the unprivileged FP CSRs (mapped only when FP_EN). */
+    localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_FFLAGS    = 12'h001;
+    localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_FRM       = 12'h002;
+    localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_FCSR      = 12'h003;
 
     /*
      * U/S/M privilege-mode milestone additions. S-mode CSRs first (per
@@ -352,6 +379,8 @@ module csr_file (
      * with exactly one legal value.
      */
     localparam logic [(`WORD_SIZE - 1):0] MISA_VALUE      = 64'h8000_0000_0014_1105;
+    /* F/D: the F (bit 5) and D (bit 3) letters, with FP_EN. */
+    localparam logic [(`WORD_SIZE - 1):0] MISA_FD         = FP_EN ? 64'h28 : 64'h0;
     localparam logic [(`WORD_SIZE - 1):0] MVENDORID_VALUE = `WORD_SIZE'(0);
     localparam logic [(`WORD_SIZE - 1):0] MARCHID_VALUE   = `WORD_SIZE'(0);
     localparam logic [(`WORD_SIZE - 1):0] MIMPID_VALUE    = `WORD_SIZE'(0);
@@ -629,10 +658,11 @@ module csr_file (
      * spec sstatus is a masked VIEW/alias of mstatus, not independent
      * storage, so there is exactly one flip-flop group here, not two.
      * Bit positions below match the RISC-V privileged spec exactly;
-     * everything not named here (FS/XS/VS/SD, the FP/vector-extension
+     * everything not named here (XS/VS, the vector/custom-extension
      * fields this core doesn't have, etc.) stays hardwired 0 -- there's
      * no storage for them at all, so a write can't set them regardless
-     * of what i_csr_wdata contains.
+     * of what i_csr_wdata contains. FS (14:13) is stored only with FP_EN;
+     * SD (63) is never stored, it reads as FS == Dirty.
      *
      * FOUR possible writers: trap-entry (pushes IE into PIE and sets
      * PP to the pre-trap privilege), MRET/SRET (pops PIE back into IE,
@@ -657,13 +687,19 @@ module csr_file (
     localparam int MSTATUS_TVM_BIT  = 20;   // real storage; core.sv's tvm_violation check (Sv39 Milestone 2) is its first consumer
     localparam int MSTATUS_TW_BIT   = 21;   // real storage, not enforced
     localparam int MSTATUS_TSR_BIT  = 22;   // real storage, not enforced
+    localparam int MSTATUS_FS_LSB   = 13;   // F/D: real storage only with FP_EN (0 Off, 1 Initial, 2 Clean, 3 Dirty)
+    localparam int MSTATUS_FS_MSB   = 14;
+    localparam int MSTATUS_SD_BIT   = 63;   // F/D: no storage, reads as FS == Dirty
 
     /* sstatus's visible/writable subset of mstatus's bits, per spec --
-     * MIE/MPIE/MPP/MPRV/TVM/TW/TSR never leak through the sstatus address. */
+     * MIE/MPIE/MPP/MPRV/TVM/TW/TSR never leak through the sstatus address.
+     * FS and SD are part of the view with FP_EN. */
+    localparam logic [(`WORD_SIZE - 1):0] SSTATUS_FP_MASK = FP_EN ?
+        ((`WORD_SIZE'(3) << MSTATUS_FS_LSB) | (`WORD_SIZE'(1) << MSTATUS_SD_BIT)) : `WORD_SIZE'(0);
     localparam logic [(`WORD_SIZE - 1):0] SSTATUS_VIEW_MASK =
         (`WORD_SIZE'(1) << MSTATUS_SIE_BIT)  | (`WORD_SIZE'(1) << MSTATUS_SPIE_BIT) |
         (`WORD_SIZE'(1) << MSTATUS_SPP_BIT)  | (`WORD_SIZE'(1) << MSTATUS_SUM_BIT)  |
-        (`WORD_SIZE'(1) << MSTATUS_MXR_BIT);
+        (`WORD_SIZE'(1) << MSTATUS_MXR_BIT)  | SSTATUS_FP_MASK;
 
     /* UXL/SXL: WARL fields fixed at 2 (XLEN=64 for U-mode/S-mode), same
      * single-legal-value treatment misa's own fixed bits already use. */
@@ -671,6 +707,14 @@ module csr_file (
     localparam logic [(`WORD_SIZE - 1):0] MSTATUS_SXL_FIXED = (`WORD_SIZE'(2) << 34);
 
     logic [(`WORD_SIZE - 1):0] mstatus_q;
+
+    /* F/D state, see the fflags/frm block below the mstatus block. */
+    logic [4:0] fflags_q;
+    logic [2:0] frm_q;
+    wire fcsr_write = i_csr_we && (i_csr_addr == CSR_ADDR_FFLAGS || i_csr_addr == CSR_ADDR_FRM ||
+                                   i_csr_addr == CSR_ADDR_FCSR);
+    wire fs_dirty   = FP_EN && (mstatus_q[MSTATUS_FS_MSB:MSTATUS_FS_LSB] != 2'b00)
+                      && (i_fp_frd_we || ((fflags_q | i_fp_accrue) != fflags_q) || fcsr_write);
 
     always_ff @(posedge i_clk) begin
         if (i_rst) begin
@@ -714,15 +758,49 @@ module csr_file (
             mstatus_q[MSTATUS_TVM_BIT]  <= i_csr_wdata[MSTATUS_TVM_BIT];
             mstatus_q[MSTATUS_TW_BIT]   <= i_csr_wdata[MSTATUS_TW_BIT];
             mstatus_q[MSTATUS_TSR_BIT]  <= i_csr_wdata[MSTATUS_TSR_BIT];
+            if (FP_EN) mstatus_q[MSTATUS_FS_MSB:MSTATUS_FS_LSB] <= i_csr_wdata[MSTATUS_FS_MSB:MSTATUS_FS_LSB];
         end else if (i_csr_we && (i_csr_addr == CSR_ADDR_SSTATUS)) begin
             mstatus_q[MSTATUS_SIE_BIT]  <= i_csr_wdata[MSTATUS_SIE_BIT];
             mstatus_q[MSTATUS_SPIE_BIT] <= i_csr_wdata[MSTATUS_SPIE_BIT];
             mstatus_q[MSTATUS_SPP_BIT]  <= i_csr_wdata[MSTATUS_SPP_BIT];
             mstatus_q[MSTATUS_SUM_BIT]  <= i_csr_wdata[MSTATUS_SUM_BIT];
             mstatus_q[MSTATUS_MXR_BIT]  <= i_csr_wdata[MSTATUS_MXR_BIT];
+            if (FP_EN) mstatus_q[MSTATUS_FS_MSB:MSTATUS_FS_LSB] <= i_csr_wdata[MSTATUS_FS_MSB:MSTATUS_FS_LSB];
             // MIE/MPIE/MPP/MPRV/TVM/TW/TSR deliberately untouched -- not visible/writable via sstatus.
         end
+        // F/D: Dirty is set on top of whatever the chain above did. It never meets an mstatus/sstatus write or
+        // a trap in the same cycle (it comes from a committing, non-faulting FP instruction or an fcsr write).
+        if (!i_rst && fs_dirty) mstatus_q[MSTATUS_FS_MSB:MSTATUS_FS_LSB] <= 2'b11;
     end
+
+    /*
+     * F/D: fflags and frm (fcsr is {frm, fflags}; its other bits read 0). A CSR write wins over accrual (the
+     * two never meet: accrual comes from a committing FP instruction, which is not a CSR instruction).
+     * mstatus.FS becomes Dirty (precise, the rule probed on Sail, verification/fpu/README.md) when, with FS
+     * not Off, an instruction writes an FP register, the flags it raises change fflags (raising a flag that is
+     * already set does not count), or a CSR write targets fflags/frm/fcsr whatever its value. The FS != Off
+     * term only matters for a Debug Module write (decode makes the rest illegal while FS is Off): it does not
+     * turn FS on. (fflags_q, frm_q and fs_dirty are declared next to mstatus_q, above.)
+     */
+    always_ff @(posedge i_clk) begin
+        if (i_rst || !FP_EN) begin
+            fflags_q <= 5'b0;
+            frm_q    <= 3'b0;
+        end else if (i_csr_we && (i_csr_addr == CSR_ADDR_FFLAGS)) begin
+            fflags_q <= i_csr_wdata[4:0];
+        end else if (i_csr_we && (i_csr_addr == CSR_ADDR_FRM)) begin
+            frm_q    <= i_csr_wdata[2:0];
+        end else if (i_csr_we && (i_csr_addr == CSR_ADDR_FCSR)) begin
+            frm_q    <= i_csr_wdata[7:5];
+            fflags_q <= i_csr_wdata[4:0];
+        end else begin
+            fflags_q <= fflags_q | i_fp_accrue;
+        end
+    end
+
+    /* mstatus as read: the stored bits plus SD (F/D: FS == Dirty) and the fixed UXL. */
+    wire [(`WORD_SIZE - 1):0] mstatus_sd = (FP_EN && mstatus_q[MSTATUS_FS_MSB:MSTATUS_FS_LSB] == 2'b11)
+                                           ? (`WORD_SIZE'(1) << MSTATUS_SD_BIT) : `WORD_SIZE'(0);
 
     /*
      * Debug-mode CSRs (Milestone 3 of the EBREAK/JTAG staged plan). No
@@ -1068,6 +1146,9 @@ module csr_file (
     assign o_mstatus_sum   = mstatus_q[MSTATUS_SUM_BIT];
     assign o_mstatus_mxr   = mstatus_q[MSTATUS_MXR_BIT];
     assign o_mstatus_tvm   = mstatus_q[MSTATUS_TVM_BIT];
+    assign o_mstatus_fs    = mstatus_q[MSTATUS_FS_MSB:MSTATUS_FS_LSB];   // 0 without FP_EN: never written
+    assign o_frm           = frm_q;
+    assign o_fflags        = fflags_q;
 `ifdef RISCV_FORMAL
     assign o_mcause      = mcause_q;
     assign o_scause      = scause_q;
@@ -1082,7 +1163,7 @@ module csr_file (
      */
     always_comb begin: csr_read
         case (i_csr_addr)
-            CSR_ADDR_MISA:      o_csr_rdata = MISA_VALUE;
+            CSR_ADDR_MISA:      o_csr_rdata = MISA_VALUE | MISA_FD;
             CSR_ADDR_MVENDORID: o_csr_rdata = MVENDORID_VALUE;
             CSR_ADDR_MARCHID:   o_csr_rdata = MARCHID_VALUE;
             CSR_ADDR_MIMPID:    o_csr_rdata = MIMPID_VALUE;
@@ -1092,7 +1173,7 @@ module csr_file (
             CSR_ADDR_MINSTRET:  o_csr_rdata = minstret_q;
 
             /* S-mode CSRs -- sstatus/sie/sip are masked VIEWS, not plain reads. */
-            CSR_ADDR_SSTATUS:    o_csr_rdata = (mstatus_q & SSTATUS_VIEW_MASK) | MSTATUS_UXL_FIXED;
+            CSR_ADDR_SSTATUS:    o_csr_rdata = ((mstatus_q | mstatus_sd) & SSTATUS_VIEW_MASK) | MSTATUS_UXL_FIXED;
             CSR_ADDR_SIE:        o_csr_rdata = mie_q & mideleg_q;
             CSR_ADDR_STVEC:      o_csr_rdata = stvec_q;
             CSR_ADDR_SCOUNTEREN: o_csr_rdata = scounteren_q;
@@ -1104,7 +1185,7 @@ module csr_file (
             CSR_ADDR_SATP:       o_csr_rdata = satp_q;
 
             /* M-mode trap-control CSRs. */
-            CSR_ADDR_MSTATUS:    o_csr_rdata = mstatus_q | MSTATUS_UXL_FIXED | MSTATUS_SXL_FIXED;
+            CSR_ADDR_MSTATUS:    o_csr_rdata = mstatus_q | mstatus_sd | MSTATUS_UXL_FIXED | MSTATUS_SXL_FIXED;
             CSR_ADDR_MEDELEG:    o_csr_rdata = medeleg_q;
             CSR_ADDR_MIDELEG:    o_csr_rdata = mideleg_q;
             CSR_ADDR_MIE:        o_csr_rdata = mie_q;
@@ -1134,6 +1215,11 @@ module csr_file (
             CSR_ADDR_PMPADDR1: o_csr_rdata = pmpaddr1_q;
             CSR_ADDR_PMPADDR2: o_csr_rdata = pmpaddr2_q;
             CSR_ADDR_PMPADDR3: o_csr_rdata = pmpaddr3_q;
+
+            /* F/D: the FP CSRs, unmapped (read 0) without FP_EN. */
+            CSR_ADDR_FFLAGS:   o_csr_rdata = FP_EN ? `WORD_SIZE'(fflags_q) : `WORD_SIZE'(0);
+            CSR_ADDR_FRM:      o_csr_rdata = FP_EN ? `WORD_SIZE'(frm_q) : `WORD_SIZE'(0);
+            CSR_ADDR_FCSR:     o_csr_rdata = FP_EN ? `WORD_SIZE'({frm_q, fflags_q}) : `WORD_SIZE'(0);
 
             default:            o_csr_rdata = `WORD_SIZE'(0);
         endcase

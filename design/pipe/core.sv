@@ -297,6 +297,10 @@ module core
     logic [1:0]  mstatus_mpp_w;
     logic        mstatus_spp_w, mstatus_tsr_w, mstatus_mie_w, mstatus_sie_w;
     logic        mstatus_mprv_w, mstatus_sum_w, mstatus_mxr_w, mstatus_tvm_w;
+    // the F/D state: these three names are read by the lockstep harness, the same in both cores
+    logic [1:0]  mstatus_fs_w;
+    logic [2:0]  frm_w;
+    logic [4:0]  fflags_w;
     /* verilator lint_on UNUSEDSIGNAL */
 
     logic [1:0]  priv;                       // the privilege commit keeps
@@ -870,7 +874,8 @@ module core
         .o_pmpcfg0(pmpcfg0_w), .o_pmpaddr0(pmpaddr0_w), .o_pmpaddr1(pmpaddr1_w),
         .o_pmpaddr2(pmpaddr2_w), .o_pmpaddr3(pmpaddr3_w), .o_mstatus_mprv(mstatus_mprv_w),
         .o_satp(satp_w), .o_mstatus_sum(mstatus_sum_w), .o_mstatus_mxr(mstatus_mxr_w),
-        .o_mstatus_tvm(mstatus_tvm_w)
+        .o_mstatus_tvm(mstatus_tvm_w),
+        .o_mstatus_fs(mstatus_fs_w), .o_frm(frm_w), .o_fflags(fflags_w)
 `ifdef RISCV_FORMAL
         , .o_mcause(mcause_w), .o_scause(scause_w),
         .o_mepc_next(mepc_next_w), .o_sepc_next(sepc_next_w),
