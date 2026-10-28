@@ -33,6 +33,7 @@ design_clint_tb|design/clint_tb.sv||design|ref,pipe|pass|
 design_csr_file_priv_random_tb|design/csr_file_priv_random_tb.sv||design|pipe|pass|
 design_csr_file_random_tb|design/csr_file_random_tb.sv||design|pipe|pass|
 design_csr_file_tb|design/csr_file_tb.sv||design|pipe|pass|
+design_csr_file_fp_tb|design/csr_file_fp_tb.sv||design|pipe|pass|
 design_dcache_random_tb|design/dcache_random_tb.sv||design|ref,pipe|pass|
 design_dcache_tb|design/dcache_tb.sv||design|ref,pipe|pass|
 design_divider_random_tb|design/divider_random_tb.sv||design|pipe|pass|
