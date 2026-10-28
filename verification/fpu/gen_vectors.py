@@ -130,6 +130,8 @@ def is_edge(line, rkind):
 
 def run_testfloat(fn, level, rm, sample, seed, edge=0, rkind=None):
     args = [str(TESTFLOAT_GEN), "-level", str(level), "-seed", str(seed), RM_OPT[rm], "-exact", fn]
+    if not sample:                        # every case: stream them (level 2 runs to tens of millions)
+        return _stream(args)
     out = subprocess.run(args, capture_output=True, text=True, check=True).stdout.split("\n")
     lines = [l for l in out if l.strip()]
     if sample and len(lines) > sample:
@@ -145,9 +147,20 @@ def run_testfloat(fn, level, rm, sample, seed, edge=0, rkind=None):
     return lines
 
 
-def tf_vectors(entry, level, sample, rng, unboxed, dyn_frac, seed, edge=0):
+def _stream(args):
+    p = subprocess.Popen(args, stdout=subprocess.PIPE, text=True)
+    for line in p.stdout:
+        if line.strip():
+            yield line
+    if p.wait() != 0:
+        raise subprocess.CalledProcessError(p.returncode, args)
+
+
+def tf_vectors(entry, level, sample, rng, unboxed, dyn_frac, seed, edge=0, only_rm=None):
     name, fn, kinds, rkind, encoder, rounds, neg = entry
     rms = range(5) if rounds else [0]
+    if only_rm is not None:
+        rms = [rm for rm in rms if rm == only_rm]
     for rm in rms:
         for line in run_testfloat(fn, level, rm, sample, seed, edge, rkind):
             fields = [int(x, 16) for x in line.split()]
@@ -406,6 +419,9 @@ def main():
     ap.add_argument("--jam", type=int, default=0,
                     help="add this many FMA cases decided by the addend's jammed bits (expected values from "
                          "fpu_model.py; check them against Sail with check_vectors_sail.py)")
+    ap.add_argument("--rm", type=int, default=None, choices=range(5),
+                    help="only this rounding mode (0..4: RNE RTZ RDN RUP RMM) of the TestFloat cases; functions that "
+                         "do not round have only rm 0")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("-o", "--out", default="-")
     a = ap.parse_args()
@@ -417,7 +433,7 @@ def main():
         if only and not only.search(entry[0]):
             continue
         for insn, frm, regs, res, flags in tf_vectors(entry, a.level, a.sample, rng, a.unboxed, a.dyn_frac, a.seed,
-                                                      a.edge):
+                                                      a.edge, a.rm):
             out.write(f"{insn:08x} {frm:x} {regs[0]:016x} {regs[1]:016x} {regs[2]:016x} {res:016x} {flags:02x}\n")
             n += 1
     if not only or only.search("fsgnj|fmin|fmax|fclass|fmv"):
