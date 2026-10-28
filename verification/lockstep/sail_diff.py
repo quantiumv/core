@@ -438,7 +438,8 @@ def main():
                                   formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--seeds", required=True,
                      help="comma/range list, e.g. '1-20' or '1,2,3' or '1-5,9,20-22'")
-    ap.add_argument("--isa", choices=["i", "im", "imc", "imac"], default="imac")
+    ap.add_argument("--isa", choices=["i", "im", "imc", "imac", "imafdc"], default="imac",
+                     help="imafdc: F, D and Zcd (Sail with sail_fd_override.json; build the core with QV_FPU_EN=1)")
     ap.add_argument("--priv", choices=["m", "msu"], default="msu")
     ap.add_argument("--len", type=int, default=200)
     ap.add_argument("--illegal-rate", type=float, default=0.02)
@@ -463,7 +464,8 @@ def main():
 
     out_dir = args.out_dir or (LOCKSTEP_DIR / "gen" / "_sail_diff_scratch")
     out_dir.mkdir(parents=True, exist_ok=True)
-    vvp_path = out_dir / f"rvfi_tracer_{args.core}.vvp"
+    dtag = ("_" + "_".join(d.replace("=", "") for d in args.defines.split())) if args.defines else ""
+    vvp_path = out_dir / f"rvfi_tracer_{args.core}{dtag}.vvp"
     print(f"building {vvp_path.name} ({args.core})...")
     build_rvfi_tracer(vvp_path, args.core, args.defines.split())
 

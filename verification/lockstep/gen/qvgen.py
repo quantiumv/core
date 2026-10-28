@@ -51,6 +51,17 @@ no non-leaf PTE and no executable leaf leads to a device: tables and code are in
 pointers and leaves, a probe page now and then) goes to an address above 2^38 that the PMP always denies, or to
 FAR_BASE, where the harness answers with a bus error.
 
+--isa imafdc (F/D): the preamble turns mstatus.FS on, gives all 32 FP registers a value (a pool of hard values:
+signed zeros, infinities, quiet and signaling NaNs, singles that are not NaN-boxed, subnormals, the largest and
+smallest normals, halfway cases, integer boundaries, random), picks a valid frm, clears fflags and leaves FS Initial,
+Clean or Dirty. The body then mixes in every F/D instruction with static and dynamic rounding modes (frm now and then
+invalid, so a dynamic one traps), FP loads and stores through the sandbox (the compressed C.FLD/C.FSD forms through
+x13-x15, C.FLDSP/C.FSDSP through sp outside a depth-2 call, whose link register sp is), fcsr/frm/fflags accesses,
+windows with FS set Initial, Clean or Off around a few FP instructions and a read of sstatus (so Sail's trace shows the
+step to Dirty; from U the sstatus accesses trap and are skipped), and reserved encodings (rm 5/6, half and quad
+formats, bad funct3 or rs2 fields). The trap handlers use no FP. The epilogue dumps the FP registers next to the
+integer ones.
+
 Register allocation (never overlapping -- the trap handlers and the
 random body touch disjoint sets, so no save/restore dance is needed
 around a trap; see the handler-design comment above _emit_handlers for
@@ -186,6 +197,7 @@ class Program:
         self.sv_swap = False      # set B of the page tables exists and the body may switch satp to it
         self.body_sie = False     # S-mode body: sstatus.SIE is set, so delegated interrupts are taken
         self.tsr = False          # mstatus.TSR is set: SRET always traps
+        self.recent_f: list[int] = []   # --isa imafdc: the last FP destinations (--dep-bias reuses them)
 
     # -- tiny emission helpers -----------------------------------------
     def e(self, line: str):
@@ -676,6 +688,286 @@ def emit_csr(p: Program, recent: list[int]):
     del recent[:-8]
 
 
+# ---------------------------------------------------------------------
+# F/D (--isa imafdc)
+# ---------------------------------------------------------------------
+# Hard values: doubles, and singles (NaN-boxed by fp_value): signed zeros, infinities, a quiet and a signaling NaN,
+# +-1, the smallest subnormal, the largest subnormal, the smallest and largest normal, 0.5, halfway cases (2.5, -3.5),
+# the integer boundaries of the conversions (+-2^31, 2^31 - 0.5, 2^32, +-2^63), 1 + 1 ulp, 2^52 + 1 (doubles) /
+# 2^23 + 1 (singles).
+_FP_D_CONST = [0x0, 1 << 63, 0x7FF0000000000000, 0xFFF0000000000000, 0x7FF8000000000000, 0x7FF4000000000000,
+               0x3FF0000000000000, 0xBFF0000000000000, 0x1, 0x000FFFFFFFFFFFFF, 0x0010000000000000,
+               0x7FEFFFFFFFFFFFFF, 0x3FE0000000000000, 0x4004000000000000, 0xC00C000000000000,
+               0x41E0000000000000, 0xC1E0000000000000, 0x41DFFFFFFFE00000, 0x41F0000000000000,
+               0x43E0000000000000, 0xC3E0000000000000, 0x3FF0000000000001, 0x4330000000000001]
+_FP_S_CONST = [0x0, 0x80000000, 0x7F800000, 0xFF800000, 0x7FC00000, 0x7FA00000, 0x3F800000, 0xBF800000,
+               0x1, 0x007FFFFF, 0x00800000, 0x7F7FFFFF, 0x3F000000, 0x40200000, 0xC0600000,
+               0x4F000000, 0xCF000000, 0x4F800000, 0x5F000000, 0xDF000000, 0x3F800001, 0x4B000001]
+_FP_RM = ["rne", "rtz", "rdn", "rup", "rmm", "dyn"]
+_FP_ROUND2 = ["fadd", "fsub", "fmul", "fdiv"]
+_FP_SIGN_MINMAX = ["fsgnj", "fsgnjn", "fsgnjx", "fmin", "fmax"]
+_FP_FMA = ["fmadd", "fmsub", "fnmsub", "fnmadd"]
+_FP_CMP = ["feq", "flt", "fle"]
+_FP_ITYP = ["w", "wu", "l", "lu"]
+FS_MASK = 0x6000                 # mstatus/sstatus.FS
+
+
+def s64(v: int) -> int:
+    """A 64-bit pattern as the signed value `li` takes."""
+    v &= (1 << 64) - 1
+    return v - (1 << 64) if v >> 63 else v
+
+
+def fp_value(p: Program) -> int:
+    """A 64-bit FP register value: a hard double or single, a single that is not NaN-boxed (an FP single op reads it
+    as the canonical NaN), a random double or single near 1, or random bits."""
+    r = p.rng.random()
+    if r < 0.35:
+        return p.rng.choice(_FP_D_CONST)
+    if r < 0.70:
+        return 0xFFFFFFFF00000000 | p.rng.choice(_FP_S_CONST)
+    if r < 0.75:
+        return (p.rng.choice([0, 0xFFFFFFFE, 0x7FFFFFFF]) << 32) | p.rng.choice(_FP_S_CONST)
+    if r < 0.88:
+        return (p.rng.getrandbits(1) << 63) | (p.rng.randint(1013, 1033) << 52) | p.rng.getrandbits(52)
+    if r < 0.98:
+        return 0xFFFFFFFF00000000 | (p.rng.getrandbits(1) << 31) | (p.rng.randint(117, 137) << 23) \
+            | p.rng.getrandbits(23)
+    return p.rng.getrandbits(64)
+
+
+def freg(p: Program) -> int:
+    if p.recent_f and p.rng.random() < p.args.dep_bias:
+        return p.rng.choice(p.recent_f)
+    return p.rng.randrange(32)
+
+
+def fdest(p: Program) -> int:
+    rd = freg(p)
+    p.recent_f.append(rd)
+    del p.recent_f[:-8]
+    return rd
+
+
+def fp_rm(p: Program) -> str:
+    """A static rounding mode, or dyn (frm), written out or left to the assembler's default (dyn)."""
+    rm = p.rng.choice(_FP_RM)
+    return "" if rm == "dyn" and p.rng.random() < 0.5 else f", {rm}"
+
+
+def frm_value(p: Program) -> int:
+    """An frm value: valid mostly; 5-7 make every dynamic-rounding instruction illegal until the next write."""
+    return p.rng.randrange(5) if p.rng.random() < 0.85 else p.rng.choice([5, 6, 7])
+
+
+def emit_fp_setup(p: Program):
+    """In M mode, before the body: FS on, a value in every FP register (the lockstep harness compares them all at the
+    end), a valid frm, fflags clear, then FS left Initial, Clean or Dirty, so that in the first two cases the body's
+    first FP write or flag change is visible as the step to Dirty."""
+    p.li(6, FS_MASK)
+    p.e("    csrs    mstatus, x6")
+    for i in range(32):
+        p.li(6, s64(fp_value(p)))
+        p.e(f"    fmv.d.x f{i}, x6")
+    p.e(f"    fsrmi   x0, {p.rng.randrange(5)}")
+    p.e("    fsflagsi x0, 0")
+    p.li(6, FS_MASK)
+    p.e("    csrc    mstatus, x6")
+    p.li(6, p.rng.choice([1, 2, 3]) << 13)
+    p.e("    csrs    mstatus, x6")
+
+
+def emit_fp_mem(p: Program, recent: list[int]):
+    """FLW/FLD/FSW/FSD: in the sandbox (sometimes misaligned), at the bad-address base or the bus-error region, as
+    emit_mem does, or in the compressed forms (C.FLD/C.FSD through x13-x15, C.FLDSP/C.FSDSP through sp)."""
+    store = p.rng.random() < 0.5
+    if p.rng.random() < 0.25:
+        if p.call_depth < 2 and p.rng.random() < 0.4:
+            base, off = 2, p.rng.randrange(0, 512, 8)      # sp: the link register of a depth-2 call only
+        else:
+            base, off = p.rng.choice([13, 14, 15]), p.rng.randrange(0, 256, 8)
+        p.e(f"    addi    x{base}, x27, {p.rng.randrange(0, 1536, 8)}")
+        fr = p.rng.randrange(8, 16)
+        if store:
+            p.e(f"    fsd     f{fr}, {off}(x{base})")
+        else:
+            p.e(f"    fld     f{fr}, {off}(x{base})")
+            p.recent_f.append(fr)
+            del p.recent_f[:-8]
+        return
+    width = p.rng.choice([4, 8])
+    addr_r = p.reg()
+    r = p.rng.random()
+    if r < p.args.badaddr_rate:
+        p.e(f"    addi    x{addr_r}, x26, {sign12(p.rng.randrange(0, 0x1000, 8))}")
+    elif r < p.args.badaddr_rate * 1.5:
+        p.li(addr_r, FAR_BASE + p.rng.randrange(0, 0x1000, 8))
+    else:
+        _sandbox_addr(p, addr_r, misaligned=p.rng.random() < p.args.misalign_rate, width=width)
+    if store:
+        p.e(f"    {'fsw' if width == 4 else 'fsd':<7} f{freg(p)}, 0(x{addr_r})")
+    else:
+        p.e(f"    {'flw' if width == 4 else 'fld':<7} f{fdest(p)}, 0(x{addr_r})")
+    del recent[:-8]
+
+
+def emit_fcsr(p: Program, recent: list[int]):
+    rd = p.reg_biased(recent)
+    r = p.rng.random()
+    if r < 0.12:
+        p.e(f"    frflags x{rd}")
+    elif r < 0.27:
+        p.e(f"    fsflagsi x{rd}, {p.rng.randrange(32)}")
+    elif r < 0.37:
+        p.e(f"    fsflags x{rd}, x{p.reg_biased(recent)}")
+    elif r < 0.45:
+        p.e(f"    frrm    x{rd}")
+    elif r < 0.60:
+        p.e(f"    fsrmi   x{rd}, {frm_value(p)}")
+    elif r < 0.68:
+        t = p.reg()
+        p.li(t, s64((p.rng.getrandbits(61) << 3) | frm_value(p)))     # the upper bits are ignored
+        p.e(f"    fsrm    x{rd}, x{t}")
+    elif r < 0.76:
+        p.e(f"    frcsr   x{rd}")
+    elif r < 0.88:
+        t = p.reg()
+        p.li(t, s64((p.rng.getrandbits(56) << 8) | (frm_value(p) << 5) | p.rng.randrange(32)))
+        p.e(f"    fscsr   x{rd}, x{t}")
+    else:
+        csr = p.rng.choice(["fflags", "frm", "fcsr"])
+        form = p.rng.choice(["csrrs", "csrrc", "csrrsi", "csrrci"])
+        if form.endswith("i"):
+            p.e(f"    {form:<7} x{rd}, {csr}, {p.rng.randrange(32) if csr != 'frm' else p.rng.randrange(8)}")
+        else:
+            p.e(f"    {form:<7} x{rd}, {csr}, x{p.reg_biased(recent)}")
+    recent.append(rd)
+    del recent[:-8]
+
+
+def emit_fp_illegal(p: Program):
+    """Reserved F/D encodings: rm 5 or 6, the half and quad formats (no Zfh, no Q), a bad funct3, a bad conversion
+    type in rs2; and the exact conversions with an arbitrary rm field (legal or not by the rm rules)."""
+    d, a, b, c = (p.rng.randrange(32) for _ in range(4))
+    r = p.rng.random()
+    if r < 0.30:
+        p.e(f"    .insn r 0x53, {p.rng.choice([5, 6])}, {p.rng.choice([0x00, 0x01, 0x05, 0x09, 0x0D])}, "
+            f"f{d}, f{a}, f{b}")
+    elif r < 0.45:
+        p.e(f"    .insn r 0x53, {p.rng.randrange(5)}, {p.rng.choice([0x02, 0x03, 0x0A, 0x0F])}, f{d}, f{a}, f{b}")
+    elif r < 0.55:
+        p.e(f"    .insn r4 {p.rng.choice([0x43, 0x47, 0x4B, 0x4F])}, {p.rng.randrange(5)}, {p.rng.choice([2, 3])}, "
+            f"f{d}, f{a}, f{b}, f{c}")
+    elif r < 0.70:
+        f3, f7 = p.rng.choice([(3, 0x11), (3, 0x10), (2, 0x15), (3, 0x51), (3, 0x50)])
+        p.e(f"    .insn r 0x53, {f3}, {f7}, f{d}, f{a}, f{b}")
+    elif r < 0.82:
+        p.e(f"    .insn r 0x53, 0, {p.rng.choice([0x60, 0x61, 0x68, 0x69])}, f{d}, f{a}, x{p.rng.randrange(4, 32)}")
+    else:
+        # FCVT.D.W/WU (rs1 an integer), FCVT.D.S: exact, with whatever rm
+        f7, rs2 = p.rng.choice([(0x69, 0), (0x69, 1), (0x21, 0)])
+        src = f"x{p.reg()}" if f7 == 0x69 else f"f{a}"
+        p.e(f"    .insn r 0x53, {p.rng.randrange(8)}, {f7}, f{fdest(p)}, {src}, x{rs2}")
+
+
+def emit_fp_op(p: Program, recent: list[int]):
+    """One F/D instruction (not a load or store, not an FS window)."""
+    fmt = p.rng.choice("sd")
+    r = p.rng.random()
+    if r < 0.24:
+        op = p.rng.choice(_FP_ROUND2)
+        a, b = freg(p), freg(p)
+        p.e(f"    {op + '.' + fmt:<8} f{fdest(p)}, f{a}, f{b}{fp_rm(p)}")
+    elif r < 0.29:
+        a = freg(p)
+        p.e(f"    {'fsqrt.' + fmt:<8} f{fdest(p)}, f{a}{fp_rm(p)}")
+    elif r < 0.43:
+        op = p.rng.choice(_FP_FMA)
+        a, b, c = freg(p), freg(p), freg(p)
+        p.e(f"    {op + '.' + fmt:<8} f{fdest(p)}, f{a}, f{b}, f{c}{fp_rm(p)}")
+    elif r < 0.54:
+        op = p.rng.choice(_FP_SIGN_MINMAX)
+        a, b = freg(p), freg(p)
+        p.e(f"    {op + '.' + fmt:<8} f{fdest(p)}, f{a}, f{b}")
+    elif r < 0.64:
+        rd = p.reg_biased(recent)
+        if p.rng.random() < 0.8:
+            p.e(f"    {p.rng.choice(_FP_CMP) + '.' + fmt:<8} x{rd}, f{freg(p)}, f{freg(p)}")
+        else:
+            p.e(f"    {'fclass.' + fmt:<8} x{rd}, f{freg(p)}")
+        recent.append(rd)
+    elif r < 0.73:
+        rd = p.reg_biased(recent)
+        p.e(f"    fcvt.{p.rng.choice(_FP_ITYP)}.{fmt} x{rd}, f{freg(p)}{fp_rm(p)}")
+        recent.append(rd)
+    elif r < 0.81:
+        it = p.rng.choice(_FP_ITYP)
+        src = p.reg_biased(recent)
+        if p.rng.random() < 0.3:
+            p.li(src, p.rng.choice(_EDGE_VALUES + [0x7FFFFFFF, -0x80000000, 0xFFFFFFFF, (1 << 53) + 1]))
+        exact = fmt == "d" and it in ("w", "wu")             # no rounding: the assembler takes no rm
+        p.e(f"    fcvt.{fmt}.{it} f{fdest(p)}, x{src}{'' if exact else fp_rm(p)}")
+    elif r < 0.86:
+        a = freg(p)
+        if fmt == "s":
+            p.e(f"    fcvt.s.d f{fdest(p)}, f{a}{fp_rm(p)}")
+        else:
+            p.e(f"    fcvt.d.s f{fdest(p)}, f{a}")
+    elif r < 0.93:
+        w = "w" if fmt == "s" else "d"
+        if p.rng.random() < 0.5:
+            rd = p.reg_biased(recent)
+            p.e(f"    fmv.x.{w} x{rd}, f{freg(p)}")
+            recent.append(rd)
+        else:
+            p.e(f"    fmv.{w}.x f{fdest(p)}, x{p.reg_biased(recent)}")
+    else:
+        t = p.reg()                                         # a hard value into an FP register
+        p.li(t, s64(fp_value(p)))
+        p.e(f"    fmv.d.x f{fdest(p)}, x{t}")
+    del recent[:-8]
+
+
+def emit_fs_window(p: Program, recent: list[int]):
+    """FS set Initial, Clean or Off around a few FP instructions, then sstatus read back (Sail's trace shows no FS
+    change by itself; the lockstep harness compares FS at every retirement anyway). With FS Off they trap as illegal;
+    FS is then set on again. sstatus is legal in M and S; from U these accesses trap and are skipped."""
+    p.li(6, FS_MASK)
+    p.e("    csrc    sstatus, x6")
+    off = p.rng.random() < 0.3
+    if not off:
+        p.li(6, p.rng.choice([1, 2]) << 13)
+        p.e("    csrs    sstatus, x6")
+    for _ in range(p.rng.randint(1, 3)):
+        if p.rng.random() < 0.2:
+            emit_fcsr(p, recent)
+        elif p.rng.random() < 0.2:
+            emit_fp_mem(p, recent)
+        else:
+            emit_fp_op(p, recent)
+    rd = p.reg_biased(recent)
+    p.e(f"    csrr    x{rd}, sstatus")
+    recent.append(rd)
+    if off:
+        p.li(6, p.rng.choice([1, 2, 3]) << 13)
+        p.e("    csrs    sstatus, x6")
+    del recent[:-8]
+
+
+def emit_fp(p: Program, recent: list[int]):
+    r = p.rng.random()
+    if r < 0.72:
+        emit_fp_op(p, recent)
+    elif r < 0.86:
+        emit_fp_mem(p, recent)
+    elif r < 0.93:
+        emit_fcsr(p, recent)
+    elif r < 0.97:
+        emit_fs_window(p, recent)
+    else:
+        emit_fp_illegal(p)
+
+
 def emit_fault(p: Program, kind: str):
     if kind == "illegal":
         p.e("    .word   0xFFFFFFFF")   # guaranteed-illegal (all-ones)
@@ -848,6 +1140,11 @@ def _emit_epilogue_body(p: Program):
     for i, r in enumerate(FREE_POOL):
         p.handlers.append(f"    la      x6, regdump")
         p.handlers.append(f"    sd      x{r}, {8*i}(x6)")
+    if "f" in p.args.isa:
+        # FS may be Off here (an FS window the epilogue's ecall interrupted): on first
+        p.misc_data += ["fregdump:", "    .zero   256"]
+        p.handlers += [f"    li      x7, {FS_MASK}", "    csrs    mstatus, x7", "    la      x6, fregdump"]
+        p.handlers += [f"    fsd     f{i}, {8 * i}(x6)" for i in range(32)]
     p.handlers += [
         "    la      x6, tohost",
         "    li      x7, 1",
@@ -1861,6 +2158,8 @@ def emit_entry_preamble(p: Program):
             p.li(6, 1)
             p.e("    slli    x6, x6, 11")
             p.e("    csrw    mstatus, x6")   # MPP = S
+        if "f" in a.isa:
+            emit_fp_setup(p)
         p.e("    la      x6, s_mode_entry")
         if p.reloc:
             p.li(7, ALIAS_VA)
@@ -1875,6 +2174,8 @@ def emit_entry_preamble(p: Program):
             if p.body_sie:
                 p.e("    csrsi   sstatus, 2")      # SIE: delegated interrupts are taken in S
     else:
+        if "f" in a.isa:
+            emit_fp_setup(p)
         if a.pmp and p.rng.random() < 0.5:
             # M-mode data accesses run at MPP while MPRV is set: the PMP pockets then bind them too
             mpp = p.rng.choice([0, 1, 3])
@@ -1895,10 +2196,14 @@ def emit_main_body(p: Program):
     have_amo = "a" in a.isa
     have_m = "m" in a.isa
     have_c = "c" in a.isa
+    have_f = "f" in a.isa
 
     def one_instr():
         if getattr(a, "mem_dense", False) and p.rng.random() < 0.30:
             emit_mem_pair(p, recent)
+            return
+        if have_f and p.rng.random() < 0.25:
+            emit_fp(p, recent)
             return
         if a.sv39 and p.rng.random() < 0.06:
             emit_sv39_op(p, recent)
@@ -2067,7 +2372,8 @@ def toolchain_build(asm_path: Path, out_base: Path, isa: str, has_pagetables: bo
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                   formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--isa", choices=["i", "im", "imc", "imac"], default="imac")
+    ap.add_argument("--isa", choices=["i", "im", "imc", "imac", "imafdc"], default="imac",
+                    help="imafdc adds F, D and Zcd (see the module docstring)")
     ap.add_argument("--priv", choices=["m", "msu"], default="m")
     ap.add_argument("--pmp", action="store_true")
     ap.add_argument("--sv39", action="store_true",
