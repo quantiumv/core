@@ -1,0 +1,10 @@
+name: quantiumv-rv64imafdc
+# The F/D config: quantiumv-rv64im plus A, F, D, Zcd and Zifencei (see quantiumv-rv64imafdc.yaml).
+# compiler_exe must be an absolute path or a bare name on $PATH (see quantiumv-rv64im/test_config.yaml).
+# gcc-wrapper.sh adds -mno-relax and maps the zaamo/zalrsc -march names GCC 13 lacks onto `a`.
+compiler_exe: /mnt/c/Users/Potato/Desktop/core/verification/riscv-arch-test/quantiumv-rv64imafdc/gcc-wrapper.sh
+objdump_exe: riscv64-unknown-elf-objdump
+ref_model_exe: sail_riscv_sim
+udb_config: quantiumv-rv64imafdc.yaml
+linker_script: link.ld
+dut_include_dir: .
