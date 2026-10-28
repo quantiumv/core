@@ -166,6 +166,41 @@ it is cited with its directory.
   new one. Both cores share the constant and no generated program reads
   misa, so lockstep and ACT cannot see the change.
 
+## Feature additions
+
+The errata rule keeps the reference fixed except for bugs. A feature the
+pipelined core gains that the reference must also model, so the lockstep
+harness can check it, is a *feature addition*: a labelled commit series
+that adds the feature here behind a define whose default leaves the
+reference exactly as it was, verified on the reference alone (ACT and the
+Sail diff) before the pipelined core is lockstepped against it. As for
+errata, `MANIFEST.sha256` is regenerated and an entry goes below.
+
+Where the feature's logic is shared with the pipelined core, the reference
+gets private copies of those `design/` files, renamed and otherwise
+identical (`gen_copies.sh` makes them, `check_copies.sh` checks that each
+still equals its original): a later change to `design/` reaches the
+reference only when the copies are regenerated on purpose. That logic is
+then common to both cores, so lockstep cannot see a bug in it; it is
+verified on its own (for the FPU: TestFloat, Sail and ACT).
+
+**Feature log:**
+
+- **F/D (2026-10-28): F, D and Zcd, behind `QV_FPU_EN` (default 0).**
+  Copies: `ref_fpu_pkg.sv` (the F/D section of `qv_pkg.sv`),
+  `ref_fp_dec.sv`, `ref_fpu_round.sv`, `ref_fpu_pipe.sv`,
+  `ref_fpu_divsqrt.sv`, `ref_exu_fpu.sv`, `ref_fprf.sv`, and
+  `ref_csr_file.sv` (`FP_EN`: mstatus.FS/SD and fcsr). `ref_c_expand.sv`
+  got the Zcd arms by hand (it carries mutant 8). An FP instruction is
+  shown to `ref_decoder` as an integer instruction of the same shape (an
+  FP load as LD/LWU, a store as SD/SW of x0, anything else as an ADD), so
+  addressing, faults, PMP, translation, triggers and RVFI take the
+  integer paths; the FPU runs one op at a time in S_EXEC like the divider,
+  its start guarded as the divider's is. RVFI gains `rvfi_frd_*` (an FP
+  register write) and reports FP sources and destinations as register 0.
+  Mutants 14-17 below. With `QV_FPU_EN` 0 the reference behaves as before
+  (FP encodings are illegal, FS reads 0).
+
 ## Running the reference as `core`
 
 Any existing harness works unedited: add `-DQV_REF_AS_CORE` to the
@@ -214,6 +249,10 @@ never the register indices mutant 1 needs).
 | 11 | A TLB hit skips the permission / U / A / D re-check (P7) | ref_core.sv, `ptw_pte_fault` |
 | 12 | SFENCE.VMA does not flush the TLB (P7) | ref_core.sv, the SFENCE.VMA flush |
 | 13 | A PMP-denied PTE read (data walk) is a page fault, not an access fault (P7) | ref_core.sv, the `ptw_pmp_fault` capture for the mem reason |
+| 14 | FLW does not NaN-box the loaded single (F/D) | ref_core.sv, `fp_reg_wdata` |
+| 15 | FP exception flags are not accrued into fflags (F/D) | ref_core.sv, `csr_file0`'s `i_fp_accrue` |
+| 16 | An FP register write does not set mstatus.FS Dirty (F/D) | ref_core.sv, `csr_file0`'s `i_fp_frd_we` |
+| 17 | A dynamic rounding mode (rm = 7) ignores frm and rounds to nearest (F/D) | ref_core.sv, `fpdec0`'s `i_frm` |
 
 All 13 are caught (a REF-vs-REF run reports `LOCKSTEP_RESULT: FAIL`):
 `verification/lockstep/run_kill_matrix.sh` runs each against `#(0)`

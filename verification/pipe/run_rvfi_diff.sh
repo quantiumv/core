@@ -56,10 +56,11 @@ fi
 REF_VVP="$OUT/ref${DTAG}.vvp"
 DUT_VVP="$OUT/pipe_$TAG.vvp"
 
-# the reference: its seven files (ref_macros.svh is found through the include path), absolute paths, since the build runs from design/
+# the reference: its own files from ref_design_files.list (ref_macros.svh is found through the include path),
+# absolute paths, since the build runs from design/
 REF_DIR=$REPO/verification/reference
-REF_FILES="$REF_DIR/ref_alu.sv $REF_DIR/ref_decoder.sv $REF_DIR/ref_register_file.sv $REF_DIR/ref_csr_file.sv \
-$REF_DIR/ref_divider.sv $REF_DIR/ref_c_expand.sv $REF_DIR/ref_core.sv $REPO/design/wb4_sram.sv $REPO/design/wb_arbiter2.sv"
+REF_FILES="$(grep -E '^verification/reference/' verification/regress/ref_design_files.list | sed "s#^#$REPO/#" | tr '\n' ' ') \
+$REPO/design/wb4_sram.sv $REPO/design/wb_arbiter2.sv"
 # the pipelined core's own files come from the shared list (so a new module is added
 # in one place); absolute paths, since the build runs from design/
 PIPE_FILES="$(grep -E '^design/(pipe/|decoder\.sv|alu\.sv|c_expand\.sv|csr_file\.sv|register_file\.sv|divider\.sv)' \

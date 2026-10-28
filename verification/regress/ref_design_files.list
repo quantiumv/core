@@ -14,6 +14,15 @@
 verification/reference/ref_decoder.sv
 verification/reference/ref_alu.sv
 verification/reference/ref_c_expand.sv
+# F/D (a feature addition, verification/reference/README.md): renamed copies of the pipelined core's FPU,
+# made by verification/reference/gen_copies.sh; the package before the modules that import it
+verification/reference/ref_fpu_pkg.sv
+verification/reference/ref_fp_dec.sv
+verification/reference/ref_fpu_round.sv
+verification/reference/ref_fpu_pipe.sv
+verification/reference/ref_fpu_divsqrt.sv
+verification/reference/ref_exu_fpu.sv
+verification/reference/ref_fprf.sv
 design/cache_complex.sv
 design/clint.sv
 verification/reference/ref_core.sv

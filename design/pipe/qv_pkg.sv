@@ -237,6 +237,9 @@ package qv_pkg;
         logic [QV_ROB_TAG_W-1:0] tag;
     } prod_entry_t;
 
+    // ---- F/D section begin: from here to the end marker, verification/reference/gen_copies.sh copies these lines into
+    // ref_fpu_pkg.sv for the reference's FPU (keep them self-contained: they may use QV_ROB_TAG_W only) ----
+
     // F/D: what the FPU does (fpu_req_t.op). The precision is fmt (0 single, 1 double: for the conversions between
     // the two, the destination's), the integer type of a conversion ityp (0 W, 1 WU, 2 L, 3 LU: FCVT's rs2 field).
     // FADD/FSUB/FMUL are the FMA with b = 1.0 or no addend (qv_fpu_pipe.sv); DIV and SQRT run in qv_fpu_divsqrt.sv.
@@ -345,6 +348,8 @@ package qv_pkg;
         end
         return u;
     endfunction
+
+    // ---- F/D section end ----
 
     // What kind of control-flow instruction an encoding is (32-bit, or RVC with raw[31:16] = 0), for the branch
     // predictors: 0 none, 1 direct (conditional branch, JAL, C.J, C.BEQZ/C.BNEZ: the target is in the encoding),

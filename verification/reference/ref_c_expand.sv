@@ -18,8 +18,9 @@
  * one design/decoder.sv ALREADY recognizes, byte-for-byte, via its
  * existing IS_INSTR masks. This is the entire reason decoder.sv needs
  * ZERO changes for the C extension: every RV64 Zca instruction (integer
- * compressed instructions only -- no Zcf/Zcd, since this core has no F/D)
- * is a compressed encoding of an operation the decoder already handles.
+ * compressed instructions) is a compressed encoding of an operation the
+ * decoder already handles. The four Zcd forms (the F/D feature addition)
+ * expand to FLD/FSD, which ref_core.sv's F/D block classifies.
  *
  * design/core.sv is the only caller. It feeds this module the live
  * 16-bit halfword at the current fetch position and, when o_illegal is
@@ -138,6 +139,8 @@ module ref_c_expand #(
     localparam logic [6:0] OPC_JAL     = 7'b1101111;
     localparam logic [6:0] OPC_JALR    = 7'b1100111;
     localparam logic [6:0] OPC_BRANCH  = 7'b1100011;
+    localparam logic [6:0] OPC_LOAD_FP = 7'b0000111;   // Zcd targets (FLD/FSD)
+    localparam logic [6:0] OPC_STORE_FP= 7'b0100111;
     localparam logic [31:0] INSTR_EBREAK = 32'h00100073;
 
     /* Raw field extraction -- fixed bit positions, same idiom decoder.sv's
@@ -204,8 +207,21 @@ module ref_c_expand #(
                     o_instr32 = mk_s({4'b0000, off}, rs2_p, rs1_p, 3'b011, OPC_STORE);
                 end: c_sd
 
-                /* funct3=001 (C.FLD/Zcd), 100 (spec-reserved, unassigned),
-                 * 101 (C.FSD/Zcd) -- all illegal on this no-F/D core. */
+                /* Zcd (the F/D feature addition, copied from c_expand.sv): the
+                 * same shapes as C.LD/C.SD, into FLD/FSD; legality is decode's. */
+                3'b001: begin: c_fld
+                    logic [7:0] off;
+                    off = {i_instr16[6:5], i_instr16[12:10], 3'b000};
+                    o_instr32 = mk_i({4'b0000, off}, rs1_p, 3'b011, rd_p, OPC_LOAD_FP);
+                end: c_fld
+
+                3'b101: begin: c_fsd
+                    logic [7:0] off;
+                    off = {i_instr16[6:5], i_instr16[12:10], 3'b000};
+                    o_instr32 = mk_s({4'b0000, off}, rs2_p, rs1_p, 3'b011, OPC_STORE_FP);
+                end: c_fsd
+
+                /* funct3=100: spec-reserved, unassigned. */
                 default: o_illegal = 1'b1;
             endcase
         end
@@ -429,8 +445,20 @@ module ref_c_expand #(
                     o_instr32 = mk_s({3'b000, off}, rs2_full, 5'd2, 3'b011, OPC_STORE);
                 end: c_sdsp
 
-                /* funct3=001 (C.FLDSP/Zcd), 101 (C.FSDSP/Zcd) -- illegal
-                 * on this no-F/D core. */
+                /* Zcd: the same shapes as C.LDSP/C.SDSP, into FLD/FSD. Unlike
+                 * C.LDSP, rd = 0 is legal (f0 is a real register). */
+                3'b001: begin: c_fldsp
+                    logic [8:0] off;
+                    off = {i_instr16[4:2], i_instr16[12], i_instr16[6:5], 3'b000};
+                    o_instr32 = mk_i({3'b000, off}, 5'd2, 3'b011, rd_rs1_full, OPC_LOAD_FP);
+                end: c_fldsp
+
+                3'b101: begin: c_fsdsp
+                    logic [8:0] off;
+                    off = {i_instr16[9:7], i_instr16[12:10], 3'b000};
+                    o_instr32 = mk_s({3'b000, off}, rs2_full, 5'd2, 3'b011, OPC_STORE_FP);
+                end: c_fsdsp
+
                 default: o_illegal = 1'b1;
             endcase
         end

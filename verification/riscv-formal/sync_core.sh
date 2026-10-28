@@ -36,11 +36,8 @@ case "${1:-}" in
     ref)
         NAME=quantiumv
         REF=1
-        # the reference's seven files and its macros header, flat in design/ (the cfg lists them there)
-        FILES="verification/reference/ref_alu.sv verification/reference/ref_decoder.sv
-               verification/reference/ref_register_file.sv verification/reference/ref_csr_file.sv
-               verification/reference/ref_divider.sv verification/reference/ref_c_expand.sv
-               verification/reference/ref_core.sv verification/reference/ref_macros.svh" ;;
+        # the reference's own files (ref_design_files.list) and its macros header, flat in design/ (the cfg lists them)
+        FILES="$(grep -E '^verification/reference/' verification/regress/ref_design_files.list) verification/reference/ref_macros.svh" ;;
     pipe|pipe-full|pipe-amo|pipe-sv39|pipe-sb)
         NAME=quantiumv_pipe
         [ "$1" == "pipe-full" ] && SUFFIX=_full

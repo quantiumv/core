@@ -232,7 +232,16 @@
  * until that plan's own Milestone 6), spliced into mip bits 11/9 inside
  * csr_file0, consumed by the same Interrupts section's now-generalized
  * MEI>MTI>SEI priority mux. Same ANSI-defaulted-0 reasoning as i_mtip.
+ *
+ * F/D (a feature addition, README.md): with QV_FPU_EN the reference runs F, D and Zcd through private copies of the
+ * pipelined core's FPU (ref_fpu_*.sv, ref_exu_fpu.sv, ref_fp_dec.sv, ref_fprf.sv: gen_copies.sh). An FP instruction is
+ * shown to ref_decoder as an integer one of the same shape (see "F/D" below the decoder), so addressing, faults, PMP,
+ * translation, triggers and RVFI reuse the integer paths; the FPU runs in S_EXEC like the divider. Without QV_FPU_EN
+ * (the default) the reference is what it was: FP encodings are illegal, FS reads 0.
  */
+`ifndef QV_FPU_EN
+`define QV_FPU_EN 0
+`endif
 /* verilator lint_off DECLFILENAME */
 // Under -DQV_REF_AS_CORE this module is named `core`, deliberately not
 // matching this file's own name (ref_core.sv) -- the whole point of the
@@ -349,7 +358,14 @@ module ref_core
     output logic [3:0]   o_progbuf_pc,
     input  logic [31:0]  i_progbuf_data = 32'b0,
     output logic         o_progbuf_done,
-    output logic         o_progbuf_abort
+    output logic         o_progbuf_abort,
+
+    // F/D: the Debug Module's abstract FPR access, muxed onto fprf0's third read port and its write port while
+    // dm_access_active, like the GPR access above (inert without QV_FPU_EN)
+    input  logic         i_dm_fpr_we = 1'b0,
+    input  logic [4:0]   i_dm_fpr_sel = 5'b0,
+    input  logic [63:0]  i_dm_fpr_wdata = 64'b0,
+    output logic [63:0]  o_dm_fpr_rdata
 
     /*
      * RVFI (RISC-V Formal Interface) -- only present when compiled for
@@ -524,9 +540,19 @@ module ref_core
      * debug_halt_req_entry firing and the registered in_debug_mode flop
      * (which drives dm_access_active) actually rising.
      */
-    output logic rvfi_any_debug_entry
+    output logic rvfi_any_debug_entry,
+    // F/D, not standard RVFI (the names of riscv-formal's FP proposal): an FP register written by this retirement
+    output logic        rvfi_frd_wvalid,
+    output logic [4:0]  rvfi_frd_addr,
+    output logic [63:0] rvfi_frd_wdata
 `endif
 );
+
+`ifdef QV_FORMAL_NO_FPU
+    localparam bit FPU_EN = 1'b0;
+`else
+    localparam bit FPU_EN = (`QV_FPU_EN != 0);
+`endif
 
     /* --------------------------------------------------------------- *
      * FSM state
@@ -600,6 +626,7 @@ module ref_core
      */
     logic is_load, is_store;
     logic div_stall;
+    logic fpu_stall;            // F/D: an FP op waits for the FPU in S_EXEC, as a divide waits for the divider
     logic is_amo_rmw;
     logic mem_load_misaligned, mem_store_misaligned;
     logic mem_load_access_fault, mem_store_access_fault;
@@ -1306,7 +1333,7 @@ module ref_core
     // so for THOSE classes state never even reaches the S_MEM/S_AMO_WRITE
     // arms this same edge, and debug_ebreak_entry structurally requires
     // is_ebreak, which is neither a memory nor a divide instruction.
-    wire commit_now = (state == S_EXEC && !mem_phase_needed && !div_stall
+    wire commit_now = (state == S_EXEC && !mem_phase_needed && !div_stall && !fpu_stall
                         && !debug_ebreak_entry && !trigger_debug_entry)
                     // !pmp_load_fault && !pmp_store_fault: formal-only gap
                     // (unreachable in real simulation -- mem_phase_needed's
@@ -1733,7 +1760,7 @@ module ref_core
                  */
                 S_EXEC:      state <= state_t'((progbuf_ebreak_done || progbuf_abort) ? S_DEBUG_HALTED
                                     : (debug_ebreak_entry || trigger_debug_entry) ? S_DEBUG_HALTED
-                                    : (mem_phase_needed ? S_MEM : (div_stall ? S_EXEC : S_FETCH)));
+                                    : (mem_phase_needed ? S_MEM : ((div_stall || fpu_stall) ? S_EXEC : S_FETCH)));
                 /*
                  * progbuf_abort can also fire from S_MEM/S_AMO_WRITE --
                  * a faulting memory access executed from the Program
@@ -3150,8 +3177,58 @@ module ref_core
      * and since `instruction` is latched (stable for the whole
      * instruction), so is everything downstream of it here.
      */
+
+    /*
+     * F/D: how ref_decoder sees an FP instruction. ref_fp_dec (the pipelined core's qv_fp_dec, renamed) classifies
+     * it and decides its legality from mstatus.FS and frm; ref_decoder is then given an integer instruction of the
+     * same shape, so the rest of this file treats it as one:
+     *   FLD, FLW -> LD, LWU rd, imm(rs1): the load path (address, misalignment, PMP, translation, triggers, faults,
+     *               RVFI's memory fields); the loaded value goes to fprf0 (FLW NaN-boxed), not to regfile0.
+     *   FSD, FSW -> SD, SW x0, imm(rs1): the store path; the data comes from fprf0 at mem_wdata, and rs2 reads as x0,
+     *               which is what RVFI reports for an FP source.
+     *   the rest -> ADD rd, rs1 or x0, x0: rs1 only where it is an integer source (FMV.W.X, FCVT from an integer);
+     *               the FPU does the work (fpu_stall, below); an integer rd (FEQ, FCLASS, FMV.X, FCVT to an integer)
+     *               is written with its result, an FP rd goes to fprf0 instead of regfile0.
+     *   illegal  -> 0x00000000, which decodes as INVALID: the illegal-instruction trap (mtval is `instruction`).
+     * Without FPU_EN ref_decoder sees `instruction`, and FP encodings stay INVALID as before.
+     */
+    logic [1:0]  mstatus_fs_w;           // csr_file0's F/D exports (the lockstep harness reads these names)
+    logic [2:0]  frm_w;
+    /* verilator lint_off UNUSEDSIGNAL */
+    logic [4:0]  fflags_w;               // read by name only (the lockstep harness); fcsr reads go through csr_rdata
+    logic        fp_r2u, fp_r2f, fp_r3u;  // the FP sources are read by register number whether used or not
+    /* verilator lint_on UNUSEDSIGNAL */
+    logic        fp_is, fp_ill, fp_fmt, fp_ld, fp_st, fp_r1u, fp_r1f, fp_rdw, fp_rdf;
+    ref_fpu_pkg::qv_fp_op_e fp_op;
+    logic [1:0]  fp_ityp, fp_msz;
+    logic [2:0]  fp_rm;
+    /* verilator lint_off UNUSEDSIGNAL */
+    logic [63:0] fp_imm;                 // the load/store offset: ref_decoder computes it from the rewritten word
+    /* verilator lint_on UNUSEDSIGNAL */
+    // QV_MUTANT==17 (F/D kill-matrix mutant): a dynamic rounding mode ignores frm (rounds to nearest)
+    ref_fp_dec fpdec0 (
+        .i_instr(instruction), .i_fs(mstatus_fs_w), .i_frm((QV_MUTANT == 17) ? 3'd0 : frm_w),
+        .o_is_fp(fp_is), .o_illegal(fp_ill), .o_op(fp_op), .o_fmt(fp_fmt), .o_ityp(fp_ityp), .o_rm(fp_rm),
+        .o_is_load(fp_ld), .o_is_store(fp_st), .o_mem_size(fp_msz), .o_imm(fp_imm),
+        .o_rs1_used(fp_r1u), .o_rs1_fp(fp_r1f), .o_rs2_used(fp_r2u), .o_rs2_fp(fp_r2f), .o_rs3_used(fp_r3u),
+        .o_rd_wen(fp_rdw), .o_rd_fp(fp_rdf)
+    );
+    wire fp_any   = FPU_EN && fp_is;                       // an F/D encoding, legal or not
+    wire fp_legal = fp_any && !fp_ill;
+    wire fp_load  = fp_legal && fp_ld;
+    wire fp_store = fp_legal && fp_st;
+    wire fp_arith = fp_legal && !fp_ld && !fp_st;          // runs on the FPU
+    wire fp_rd    = fp_legal && fp_rdw && fp_rdf;          // writes an FP register (regfile0 is not written)
+    wire [31:0] fp_subst =
+        fp_ill ? 32'h0000_0000 :
+        fp_ld  ? {instruction[31:20], instruction[19:15], (fp_msz == 2'd3) ? 3'b011 : 3'b110, instruction[11:7], 7'b0000011} :
+        fp_st  ? {instruction[31:25], 5'd0, instruction[19:15], (fp_msz == 2'd3) ? 3'b011 : 3'b010, instruction[11:7],
+                  7'b0100011} :
+                 {7'b0, 5'd0, (fp_r1u && !fp_r1f) ? instruction[19:15] : 5'd0, 3'b000, instruction[11:7], 7'b0110011};
+    wire [31:0] dec_instr = fp_any ? fp_subst : instruction;
+
     ref_decoder decoder0 (
-        .i_instruction(instruction),
+        .i_instruction(dec_instr),
         .i_instruction_address(pc),
         /*
          * Explicitly connected to nothing (not omitted) -- it's just a
@@ -3220,6 +3297,25 @@ module ref_core
     );
 
     assign o_dm_gpr_rdata = read_gpr_B_data;
+
+    /*
+     * F/D: the FP register file (fprf0, its array fp_registers: the names the lockstep harness reads). rs1, rs2 and
+     * rs3 come straight from the instruction; the Debug Module's FPR access takes the third read port and the write
+     * port while dm_access_active, like regfile0's GPR access above (and only with FPU_EN).
+     */
+    logic [63:0] fprs1_data, fprs2_data, fprs3_data;
+    logic        fp_reg_write;
+    logic [63:0] fp_reg_wdata;
+    ref_fprf fprf0 (
+        .clk(clk),
+        .i_rs1(instruction[19:15]), .i_rs2(instruction[24:20]),
+        .i_rs3(dm_access_active ? i_dm_fpr_sel : instruction[31:27]),
+        .o_rs1_data(fprs1_data), .o_rs2_data(fprs2_data), .o_rs3_data(fprs3_data),
+        .i_we(dm_access_active ? (FPU_EN && i_dm_fpr_we) : fp_reg_write),
+        .i_wsel(dm_access_active ? i_dm_fpr_sel : instruction[11:7]),
+        .i_wdata(dm_access_active ? i_dm_fpr_wdata : fp_reg_wdata)
+    );
+    assign o_dm_fpr_rdata = fprs3_data;
 
     /* Sign-extended S/B-type offset -- see the comment above. */
     wire [(`WORD_SIZE - 1):0] imm3_sext =
@@ -3765,10 +3861,14 @@ module ref_core
      * is_compressed guard here rather than trusting c_expand_illegal
      * alone.
      */
+    // F/D: fflags, frm and fcsr (0x001-0x003) are illegal while mstatus.FS is Off (an FP instruction then reaches
+    // ref_decoder as INVALID, see the F/D block below the decoder)
+    wire fp_csr_off = FPU_EN && is_csr && (imm_2[11:0] == 12'h001 || imm_2[11:0] == 12'h002 || imm_2[11:0] == 12'h003)
+                      && (mstatus_fs_w == 2'b00);
     wire is_illegal_instr = is_invalid_instr || csr_priv_violation || csr_readonly_violation
                           || debug_csr_violation || trigger_csr_violation
                           || mret_priv_violation || sret_priv_violation || tvm_violation
-                          || (is_compressed && c_expand_illegal);
+                          || (is_compressed && c_expand_illegal) || fp_csr_off;
     wire is_ecall = (decoded_instruction == `REF_INSTR_CODE(ECALL));
     /*
      * Zifencei: is_fence_i drives icache_flush_o below (see that port's
@@ -3986,7 +4086,8 @@ module ref_core
      * whatever reg_write_ctrl computed) are entirely overridden by
      * trap-entry (ordinary execution) or a Program Buffer abort.
      */
-    assign reg_write = reg_write_ctrl && commit_now && !instr_faulted;
+    // (F/D: an instruction with an FP rd writes fprf0 instead)
+    assign reg_write = reg_write_ctrl && commit_now && !instr_faulted && !fp_rd;
 
     /*
      * M extension: divide. DIV/DIVU/REM/REMU (and their W variants)
@@ -4071,6 +4172,52 @@ module ref_core
     );
 
     assign div_stall = is_div_family && !divider_o_done;
+
+    /*
+     * F/D: the FPU (the pipelined core's qv_exu_fpu, renamed: ref_exu_fpu), driven one instruction at a time in
+     * S_EXEC like the divider. It starts once, in the instruction's first S_EXEC cycle, and only for a legal FP op that
+     * a trigger, a fetch fault or an illegal-instruction trap does not stop (those leave S_EXEC without waiting for
+     * it: fpu_needed is low for them, so fpu_stall cannot hold them). It is flushed in every cycle the FSM is not in
+     * S_EXEC, so nothing it started can deliver into a later instruction (the divider's stale-result lesson, above).
+     * The result and flags are held until the instruction commits.
+     */
+    logic        fpu_started_q, fpu_done_q;
+    logic [63:0] fpu_res_q;
+    logic [4:0]  fpu_flags_q;
+    ref_fpu_pkg::fpu_req_t fpu_req;
+    /* verilator lint_off UNUSEDSIGNAL */
+    ref_fpu_pkg::wb_fp_t   fpu_wb;              // its tag: one op at a time here, nothing to match it against
+    logic                  fpu_ds_free;         // one op at a time here: always free when one starts
+    /* verilator lint_on UNUSEDSIGNAL */
+    wire fpu_needed = FPU_EN && fp_arith && !trigger_debug_entry && !is_illegal_instr && !fetch_fault_q[cur_slot];
+    wire fpu_start  = fpu_needed && (state == S_EXEC) && !fpu_started_q;
+    always_comb begin
+        fpu_req       = '0;
+        fpu_req.valid = fpu_start;
+        fpu_req.op    = fp_op;
+        fpu_req.fmt   = fp_fmt;
+        fpu_req.ityp  = fp_ityp;
+        fpu_req.rm    = fp_rm;
+        fpu_req.a     = fp_r1f ? fprs1_data : read_gpr_A_data;   // an integer rs1 is on regfile0's port A (the ADD)
+        fpu_req.b     = fprs2_data;
+        fpu_req.c     = fprs3_data;
+    end
+    ref_exu_fpu fpu0 (.clk(clk), .rst(rst), .i_flush(state != S_EXEC), .i_req(fpu_req), .o_ds_free(fpu_ds_free),
+                      .o_wb(fpu_wb));
+    always_ff @(posedge clk) begin
+        if (rst || state != S_EXEC || commit_now) begin
+            fpu_started_q <= 1'b0;
+            fpu_done_q    <= 1'b0;
+        end else begin
+            if (fpu_start) fpu_started_q <= 1'b1;
+            if (fpu_wb.valid) begin
+                fpu_done_q  <= 1'b1;
+                fpu_res_q   <= fpu_wb.value;
+                fpu_flags_q <= fpu_wb.flags;
+            end
+        end
+    end
+    assign fpu_stall = fpu_needed && !fpu_done_q;
     wire [(`WORD_SIZE - 1):0] div_result_raw = is_div_wants_quotient ? divider_o_quotient : divider_o_remainder;
     wire [(`WORD_SIZE - 1):0] div_result = is_div_w_family
                                             ? {{32{div_result_raw[31]}}, div_result_raw[31:0]}
@@ -4256,7 +4403,7 @@ module ref_core
      * combinational and unconditional -- csr_rdata already reflects
      * whichever address is currently muxed in, for both consumers.
      */
-    ref_csr_file csr_file0 (
+    ref_csr_file #(.FP_EN(FPU_EN)) csr_file0 (
         .i_clk(clk),
         .i_rst(rst),
         .i_csr_addr(dm_access_active ? i_dm_csr_addr : imm_2[(`CSR_ADDR_SIZE - 1):0]),
@@ -4351,7 +4498,16 @@ module ref_core
          * above already established.
          */
         .o_satp(satp_w),
-        .o_mstatus_sum(mstatus_sum_w), .o_mstatus_mxr(mstatus_mxr_w), .o_mstatus_tvm(mstatus_tvm_w)
+        .o_mstatus_sum(mstatus_sum_w), .o_mstatus_mxr(mstatus_mxr_w), .o_mstatus_tvm(mstatus_tvm_w),
+
+        /*
+         * F/D: an FP register write and the flags an FP op raised, for the retiring instruction (csr_file0 marks
+         * mstatus.FS Dirty and accrues fflags from them), and the FP state decode reads. QV_MUTANT==15 (F/D
+         * kill-matrix mutant): flags are not accrued; QV_MUTANT==16: an FP register write does not dirty FS.
+         */
+        .i_fp_frd_we(fp_reg_write && !(QV_MUTANT == 16)),
+        .i_fp_accrue((fp_arith && commit_now && !instr_faulted && !(QV_MUTANT == 15)) ? fpu_flags_q : 5'b0),
+        .o_mstatus_fs(mstatus_fs_w), .o_frm(frm_w), .o_fflags(fflags_w)
 `ifdef RISCV_FORMAL
         ,
         .o_mcause(mcause_w),
@@ -5050,7 +5206,8 @@ module ref_core
         : `WORD_SIZE'(0);
 
     /* Store data, pre-shifted into the byte lane(s) it'll land in. */
-    wire [(`WORD_SIZE - 1):0] mem_wdata = imm_2 << (mem_paddr[2:0] * 8);
+    // (F/D: an FP store's data comes from fprf0; ref_decoder saw it as a store of x0)
+    wire [(`WORD_SIZE - 1):0] mem_wdata = (fp_store ? fprs2_data : imm_2) << (mem_paddr[2:0] * 8);
 
     /* Read response, shifted back down so the wanted byte(s) start at bit 0. */
     wire [(`WORD_SIZE - 1):0] mem_rdata_shifted = wb_mem_dat_i >> (mem_paddr[2:0] * 8);
@@ -5441,7 +5598,9 @@ module ref_core
      * commit edge. is_sc's arm produces the success(0)/failure(1) flag
      * -- no existing arm could ever produce this.
      */
-    assign reg_write_data = is_amo_rmw            ? amo_rdata_q[cur_slot] :
+    // (F/D: an FP op with an integer rd -- FEQ, FCLASS, FMV.X, FCVT to an integer -- writes the FPU's result)
+    assign reg_write_data = fp_arith              ? fpu_res_q :
+                             is_amo_rmw            ? amo_rdata_q[cur_slot] :
                              is_sc                 ? sc_result :
                              is_load                ? load_data :
                              (is_jal || is_jalr)     ? pc_plus_len :
@@ -5449,6 +5608,13 @@ module ref_core
                              is_csr                    ? csr_rdata :
                              is_div_family               ? div_result :
                                                             alu_result; // ALU ops, LUI, AUIPC, *W shifts
+
+    // F/D: what fprf0 is written with at commit: the loaded value (ref_decoder saw an LD, or an LWU for an FLW, which is
+    // NaN-boxed here) or the FPU's result. QV_MUTANT==14 (F/D kill-matrix mutant): FLW does not NaN-box.
+    assign fp_reg_write = fp_rd && commit_now && !instr_faulted;
+    assign fp_reg_wdata = !fp_load         ? fpu_res_q :
+                          (fp_msz == 2'd3) ? load_data :
+                                             {((QV_MUTANT == 14) ? 32'h0 : 32'hFFFF_FFFF), load_data[31:0]};
 
     /* --------------------------------------------------------------- *
      * Next PC
@@ -5766,6 +5932,10 @@ module ref_core
      * Mode section), not new state. */
     assign rvfi_any_debug_entry    = debug_ebreak_entry || debug_halt_req_entry
                                     || trigger_debug_entry || dm_access_active;
+    // F/D: the FP register written by this retirement (rvfi_rd_* report integer registers only)
+    assign rvfi_frd_wvalid = fp_reg_write;
+    assign rvfi_frd_addr   = fp_reg_write ? instruction[11:7] : 5'b0;
+    assign rvfi_frd_wdata  = fp_reg_write ? fp_reg_wdata : 64'b0;
 `endif
 
 endmodule

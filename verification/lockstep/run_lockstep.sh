@@ -198,10 +198,8 @@ esac
 mkdir -p "$OUTDIR"
 
 # ---------------- build ----------------
-REF_FILES="verification/reference/ref_alu.sv verification/reference/ref_decoder.sv \
-verification/reference/ref_register_file.sv verification/reference/ref_csr_file.sv \
-verification/reference/ref_divider.sv verification/reference/ref_c_expand.sv \
-verification/reference/ref_core.sv"
+# the reference's own files, in list order (the FPU package before its users), from ref_design_files.list
+REF_FILES="$(grep -E '^verification/reference/' verification/regress/ref_design_files.list | tr '\n' ' ')"
 SUPPORT_FILES="design/wb4_sram.sv design/wb_arbiter2.sv design/cache_complex.sv \
 design/icache.sv design/dcache.sv design/dm.sv"
 LOCKSTEP_FILES="verification/lockstep/lockstep_wb_delay.sv verification/lockstep/lockstep_mmio.sv \
