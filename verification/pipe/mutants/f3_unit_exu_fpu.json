@@ -1,0 +1,17 @@
+{
+ "dut": "design/pipe/qv_exu_fpu.sv",
+ "tb": "design/pipe/qv_exu_fpu_tb.sv",
+ "files": ["design/pipe/qv_pkg.sv", "design/pipe/qv_fp_dec.sv", "design/pipe/qv_fpu_round.sv",
+           "design/pipe/qv_fpu_pipe.sv", "design/pipe/qv_fpu_divsqrt.sv", "design/pipe/qv_exu_fpu.sv"],
+ "flags": ["-g2012", "-I", ".", "-I", "defaults"],
+ "cwd": "design",
+ "plusargs": ["+SEED=3", "+FLUSH=60", "+CYCLES=20000"],
+ "timeout": 900,
+ "mutants": [
+  {"name": "the writeback is not masked in a flush cycle", "old": "o_wb.valid = (pwb.valid || ds_done) && !i_flush;", "new": "o_wb.valid = (pwb.valid || ds_done);"},
+  {"name": "a finished divide is acknowledged while the pipeline has the port", "old": "assign ds_ack    = ds_done && !pwb.valid && !i_flush;", "new": "assign ds_ack    = ds_done && !i_flush;"},
+  {"name": "the divide unit always reads as free", "old": "assign o_ds_free = !ds_busy;", "new": "assign o_ds_free = 1'b1;"},
+  {"name": "the divide's result has the port before the pipeline's", "old": "o_wb = pwb.valid ? pwb : dres;", "new": "o_wb = ds_done ? dres : pwb;"},
+  {"name": "a divide request goes to the pipeline too", "old": "preq.valid = i_req.valid && !is_ds;", "new": "preq.valid = i_req.valid;"}
+ ]
+}

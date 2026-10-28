@@ -30,7 +30,7 @@ fail=0
 
 status() { grep -o 'DONE ([A-Z]*' | head -1 | sed 's/DONE (//'; }
 
-for unit in fetch lsu dbg ptw sb; do
+for unit in fetch lsu dbg ptw sb fpu; do
     for task in prove bmc cover; do
         r=$(sby -f $unit.sby $task 2>&1 | status)
         printf '%-12s %s\n' "$unit $task" "$r"
@@ -130,6 +130,35 @@ EOF
     mutant sb_beat_with_nothing sb 's/wire has_next = (cnt_q > (resp ? CNT_W'"'"'(1) : CNT_W'"'"'(0)));/wire has_next = 1'"'"'b1;/'
     mutant sb_push_when_full   sb 's/wire push = i_push \&\& o_ready;/wire push = i_push;/'
     mutant sb_idle_in_response sb 's/assign o_start_idle = !beat_q \&\& (cnt_q != .0)/assign o_start_idle = (!beat_q || resp) \&\& (cnt_q != 0)/'
+    # fpu_mutant NAME FILE SED-EXPR: the FP unit is five files (the datapath abstracted); one of them is mutated
+    fpu_mutant() {
+        local name=$1 file=$2 expr=$3
+        local d=$T/$name
+        mkdir -p "$d"
+        for f in qv_pkg qv_fpu_round qv_fpu_pipe qv_fpu_divsqrt qv_exu_fpu; do cp "$REPO/design/pipe/$f.sv" "$d/"; done
+        cp "$HERE/fpu_props.sv" "$d/"
+        sed "$expr" "$REPO/design/pipe/$file.sv" > "$d/$file.sv"
+        if cmp -s "$d/$file.sv" "$REPO/design/pipe/$file.sv"; then
+            printf '%-30s %s\n' "mutant $name" "sed changed nothing"; fail=1; return
+        fi
+        sed -e 's#^\.\./\.\./\.\./design/pipe/##' "$HERE/fpu.sby" > "$d/fpu.sby"
+        local r
+        r=$(cd "$d" && sby -f fpu.sby bmc 2>&1 | status)
+        if [ "$r" == "FAIL" ]; then
+            printf '%-30s %s\n' "mutant $name" "caught"
+        else
+            printf '%-30s %s\n' "mutant $name" "NOT CAUGHT ($r)"; fail=1
+        fi
+    }
+    fpu_mutant fpu_wb_in_flush     qv_exu_fpu 's/o_wb.valid = (pwb.valid || ds_done) \&\& !i_flush;/o_wb.valid = (pwb.valid || ds_done);/'
+    fpu_mutant fpu_ack_over_pipe   qv_exu_fpu 's/assign ds_ack    = ds_done \&\& !pwb.valid \&\& !i_flush;/assign ds_ack    = ds_done \&\& !i_flush;/'
+    fpu_mutant fpu_ds_always_free  qv_exu_fpu 's/assign o_ds_free = !ds_busy;/assign o_ds_free = 1'"'"'b1;/'
+    fpu_mutant fpu_flush_keeps_r1  qv_fpu_pipe 's/if (rst || i_flush) r1_valid <= 1'"'"'b0;/if (rst) r1_valid <= 1'"'"'b0;/'
+    fpu_mutant fpu_ds_not_killed   qv_fpu_divsqrt 's/if (rst || i_flush) begin/if (rst) begin/'
+    fpu_mutant fpu_ds_no_hold      qv_fpu_divsqrt 's/S_DONE: if (i_ack) st_q <= S_IDLE;/S_DONE: st_q <= S_IDLE;/'
+    fpu_mutant fpu_ds_busy_short   qv_fpu_divsqrt 's/assign o_busy = st_q != S_IDLE;/assign o_busy = st_q == S_ITER;/'
+    fpu_mutant fpu_tag_skips_stage qv_fpu_pipe 's/r2_tag <= r1_tag;/r2_tag <= r0.tag;/'
+    fpu_mutant fpu_stage_skipped   qv_fpu_pipe 's/r3_valid <= r2_valid;/r3_valid <= r1_valid;/'
     rm -rf "$T"
 fi
 
