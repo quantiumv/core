@@ -236,11 +236,11 @@
  * F/D (a feature addition, README.md): with QV_FPU_EN the reference runs F, D and Zcd through private copies of the
  * pipelined core's FPU (ref_fpu_*.sv, ref_exu_fpu.sv, ref_fp_dec.sv, ref_fprf.sv: gen_copies.sh). An FP instruction is
  * shown to ref_decoder as an integer one of the same shape (see "F/D" below the decoder), so addressing, faults, PMP,
- * translation, triggers and RVFI reuse the integer paths; the FPU runs in S_EXEC like the divider. Without QV_FPU_EN
- * (the default) the reference is what it was: FP encodings are illegal, FS reads 0.
+ * translation, triggers and RVFI reuse the integer paths; the FPU runs in S_EXEC like the divider. With QV_FPU_EN 0
+ * the reference is what it was before: FP encodings are illegal, FS reads 0.
  */
 `ifndef QV_FPU_EN
-`define QV_FPU_EN 0
+`define QV_FPU_EN 1
 `endif
 /* verilator lint_off DECLFILENAME */
 // Under -DQV_REF_AS_CORE this module is named `core`, deliberately not

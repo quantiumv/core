@@ -160,10 +160,10 @@
 `define QV_PIPE_SV39_EN 1'b1
 `endif
 
-// F/D: QV_FPU_EN builds the FP unit in (the reference reads the same define); QV_FORMAL_NO_FPU forces it off for
-// the riscv-formal models, which have no FP checks.
+// F/D: QV_FPU_EN builds the FP unit in (the reference reads the same define); 0 builds the core without F/D, as it
+// was before. QV_FORMAL_NO_FPU forces it off for the riscv-formal models, which have no FP checks.
 `ifndef QV_FPU_EN
-`define QV_FPU_EN 0
+`define QV_FPU_EN 1
 `endif
 
 module core

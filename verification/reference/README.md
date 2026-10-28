@@ -186,7 +186,9 @@ verified on its own (for the FPU: TestFloat, Sail and ACT).
 
 **Feature log:**
 
-- **F/D (2026-10-28): F, D and Zcd, behind `QV_FPU_EN` (default 0).**
+- **F/D (2026-10-28): F, D and Zcd, behind `QV_FPU_EN`.** It defaulted to 0
+  while the pipelined core caught up and is 1 since; `QV_FPU_EN=0` builds the
+  reference as it was before.
   Copies: `ref_fpu_pkg.sv` (the F/D section of `qv_pkg.sv`),
   `ref_fp_dec.sv`, `ref_fpu_round.sv`, `ref_fpu_pipe.sv`,
   `ref_fpu_divsqrt.sv`, `ref_exu_fpu.sv`, `ref_fprf.sv`, and

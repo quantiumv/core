@@ -142,7 +142,7 @@
  * wired for real.
  */
 `ifndef QV_FPU_EN
-`define QV_FPU_EN 0
+`define QV_FPU_EN 1
 `endif
 module soc (
     input logic clk,
