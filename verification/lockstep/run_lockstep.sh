@@ -541,10 +541,13 @@ if [ "$MODE" == "corrupt" ]; then
     for field in $fields; do
         # A field is only compared where it means something (rd data when rd != x0, the memory address of a memory
         # access, ...), so a corruption of a retirement that has none of it passes by design. Try the next
-        # retirement then; a field the comparator really does not look at passes at all 16 of them.
+        # retirement then; a field the comparator really does not look at passes at all 16 of them. Field 14 starts
+        # at order 20 instead, inside the preamble of a qvgen --isa imafdc program, which writes every FP register
+        # (the middle of a program can be a long stretch with no FP write).
         caught=0; last=""
-        for k in 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
-            tgt=$((target_order + k))
+        tries=16; base=$target_order; [ "$field" == "14" ] && { tries=64; base=20; }
+        for k in $(seq 0 $((tries - 1))); do
+            tgt=$((base + k))
             out=$(cd "$REPO_ROOT" && timeout $WALL_TIMEOUT "${SIM_CMD[@]}" +HEXFILE="$hex" +TIMEOUT=$MAX_CYCLES \
                 $([ -n "$tohost" ] && echo +TOHOST_ADDR=$tohost) $([ -n "$max_retire" ] && echo +MAX_RETIRE=$max_retire) $dargs \
                 +CORRUPT_AT=$tgt +CORRUPT_FIELD=$field 2>&1 | grep -v "Unable to open")
@@ -560,7 +563,7 @@ if [ "$MODE" == "corrupt" ]; then
             fi
         done
         if [ "$caught" != "1" ]; then
-            [ -z "$fail_at" ] && echo "field $field: NOT CAUGHT at any of 16 consecutive retirements from order=$target_order -- $last"
+            [ -z "$fail_at" ] && echo "field $field: NOT CAUGHT at any of $tries consecutive retirements from order=$base -- $last"
             all_ok=0
         fi
     done
