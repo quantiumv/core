@@ -175,3 +175,20 @@ python3 verification/fpu/fpu_model.py /tmp/smoke.vec
 | RTL, the FMA sample | 4,155,180 | 0 |
 | Sail, the special-value set (`--specials`: every op crossed with a pool of zeros, infinities, NaNs, +-1, subnormal and boundary values; expected values from the model) | 23,948 | 0 |
 | Sail and the model, the jammed-addend set (`--jam 400`) | 400 | 0 |
+| RTL (`qv_fpu_vec_tb`, Verilator), the full set below, 2026-10-29 | 1,346,913,440 | 0 |
+
+## The full set
+
+`run_testfloat_full.sh` runs the datapath against every TestFloat case that ends in practice: level 2 for every
+function except the FMA forms (all 1,101,583,520 cases, in both precisions and all five rounding modes: add, sub, mul,
+div, sqrt, the compares, and every conversion), and level 1 in full for the eight FMA forms (245,329,920 cases: 6,133,248
+per form, precision and rounding mode). Level 2 of the FMA forms is not run: it gives more than 124M cases per form and
+rounding mode and was still going when stopped at 60 s.
+```
+bash verification/fpu/run_testfloat_full.sh -j 3            # from the repo root, under WSL
+```
+It builds `qv_fpu_vec_tb` with Verilator and runs one job per function and rounding mode, `gen_vectors.py` streaming
+into the testbench (`+VEC=/dev/stdin`), so nothing is written but a short log per job; about 110,000 vectors per second
+per job. A job whose log already ends in "0 failed" is skipped, so a stopped run resumes. On 2026-10-29 the 186 jobs
+ran clean in 2 h 27 min (three jobs at a time, niced, on a machine busy with a formal sweep). About one in four cases
+of a rounding function uses the dynamic rounding mode (`rm = 7` with `frm` set), as everywhere in `gen_vectors.py`.
