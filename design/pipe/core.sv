@@ -223,7 +223,13 @@ module core
     output logic [3:0]   o_progbuf_pc,
     input  logic [31:0]  i_progbuf_data = 32'b0,
     output logic         o_progbuf_done,
-    output logic         o_progbuf_abort
+    output logic         o_progbuf_abort,
+
+    // F/D: the Debug Module's abstract FPR access (the same ports as the reference's), on fprf0's port 3
+    input  logic         i_dm_fpr_we = 1'b0,
+    input  logic [4:0]   i_dm_fpr_sel = 5'b0,
+    input  logic [63:0]  i_dm_fpr_wdata = 64'b0,
+    output logic [63:0]  o_dm_fpr_rdata
 
 `ifdef RISCV_FORMAL
     ,
@@ -281,10 +287,21 @@ module core
     output logic [63:0] rvfi_csr_satp_rdata,
     output logic [63:0] rvfi_csr_satp_wdata,
     output logic rvfi_any_trap_taken,
-    output logic rvfi_any_debug_entry
+    output logic rvfi_any_debug_entry,
+    // F/D, not standard RVFI: an FP register written by this retirement (the same ports as the reference's)
+    output logic        rvfi_frd_wvalid,
+    output logic [4:0]  rvfi_frd_addr,
+    output logic [63:0] rvfi_frd_wdata
 `endif
 );
     import qv_pkg::*;
+
+    // F/D is not built into this core yet: only the Debug Module writes an FP register (fprf0, below)
+`ifdef RISCV_FORMAL
+    assign rvfi_frd_wvalid = 1'b0;
+    assign rvfi_frd_addr   = 5'b0;
+    assign rvfi_frd_wdata  = 64'b0;
+`endif
 
     localparam logic [63:0] RESET_PC = 64'h0;   // ref_core.sv's own reset pc
 
@@ -845,6 +862,18 @@ module core
         .i_load_gpr(dm_access_active ? i_dm_gpr_we : rf_we),
         .i_load_gpr_sel(dm_access_active ? i_dm_gpr_sel : rf_sel),
         .i_load_gpr_data(dm_access_active ? i_dm_gpr_wdata : rf_data)
+    );
+
+    // F/D: the FP register file (its array fp_registers is a name the lockstep harness reads in both cores). The
+    // Debug Module's FPR access takes read port 3 and the write port while the hart is halted, as for regfile0.
+    /* verilator lint_off UNUSEDSIGNAL */
+    logic [63:0] fprs1_data, fprs2_data;
+    /* verilator lint_on UNUSEDSIGNAL */
+    qv_fprf fprf0 (
+        .clk(clk),
+        .i_rs1(5'b0), .i_rs2(5'b0), .i_rs3(i_dm_fpr_sel),
+        .o_rs1_data(fprs1_data), .o_rs2_data(fprs2_data), .o_rs3_data(o_dm_fpr_rdata),
+        .i_we(dm_access_active && i_dm_fpr_we), .i_wsel(i_dm_fpr_sel), .i_wdata(i_dm_fpr_wdata)
     );
 
 `ifdef RISCV_FORMAL
