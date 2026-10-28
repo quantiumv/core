@@ -127,6 +127,55 @@ the retried `sret` dropped to U at its own pc, where the page cannot be executed
 are on one page; the same program ends after 40,427 retirements. A fresh batch from the fixed generator (`--seed 3`, programs
 30001 to 30500, four configurations, 2,000 runs, 100 million retirements) passes in full.
 
+### F/D
+
+F, D and Zcd are in both cores (`QV_FPU_EN`, on by default; `0` builds either core without them). The arithmetic is
+common to the two: the reference runs private copies of the same FPU (`verification/reference/gen_copies.sh`), so
+lockstep cannot see a wrong result. That is checked on its own, against TestFloat and Sail vectors
+(`verification/fpu/`), by the Sail diff and by ACT. Lockstep checks everything around it:
+- decode's classification;
+- the two producer tables and the third operand;
+- the FPU's own ROB port and the bypass;
+- FP register writes and fflags accrual at commit;
+- FS;
+- NaN-boxing loads;
+- the Debug Module's FPR access.
+
+The harness compares, at every retirement, a word of {the FP register written, its number, FS, frm, fflags} and the
+value written, and all 32 FP registers at the end (corruption fields 13 and 14).
+
+What it found while the pipe was brought up, all in the pipe and none in the reference:
+- an FP instruction carried its rs2 field into RVFI even where that field is not a register (FCVT's conversion type);
+- an illegal FP word reported source registers, which the reference (it decodes such a word as `0x00000000`) does not.
+
+Elsewhere:
+- ACT's `ExceptionsZc` (F/D config) read an FP register that only a faulting C.FLD was to load: Sail resets the FP
+  registers to 0, so both cores do now (`33a2420`).
+- `qvgen --sail-safe` no longer probes `tselect`, which Sail treats as an ordinary M-mode CSR (`f3934cc`).
+- The divergence table printed SUM and MXR swapped for side B (the compare was right).
+
+Mutants: `f5_lockstep.json`, 18 on the integration, 17 killed by the FP-profile lockstep and one equivalent (an FP
+commit cannot clear an integer claim, the tag compare forbids it). One of them, the FMA's third operand read without
+waiting for its producer, survived 64 programs until `qvgen` made an FMA's rs3 the newest FP result more often.
+
+The gate, with F/D on by default (2026-10-29). Lockstep, the core against the reference, Verilator, four memory
+configurations:
+- The FP profile (`--isa imafdc --priv msu --pmp --irq --smc --sv39` with interrupts and the debug script, `--seed
+  17`): 500 x 4 = 2,000/2,000 runs, 91.5 M retirements, 2.9 M interrupt entries.
+- The integer profile with the FPU built in (ACT, the firmware and 300 random programs, `--seed 18`): 1,672/1,672.
+- The smc, irq and debug corpora: clean.
+
+Before that, with `QV_FPU_EN=1` given explicitly and the default still off:
+- the reference against itself on the FP profile: 300 x 4 = 1,200/1,200;
+- the core against the reference with the FPU off: 1,672/1,672;
+- the kill matrix: 17/17 (14-17 are the F/D mutants);
+- the corruption self-test: every field class, 13 and 14 included.
+
+Sail agrees with both cores on 45 FP programs each (30 S/U-mode, 15 M-mode) and on 25 integer ones. ACT, F/D config
+(`CONFIG=quantiumv-rv64imafdc`): 334/337 on both cores. `S-00` fails because the config does not declare Sv39, so Sail
+reads `sstatus.SUM` as 0. `Zalrsc-sc.w`/`sc.d` fail because any store between LR and SC clears the reservation. The
+rv64im config stays as tracked. Regression: core 132/132, reference 76/76.
+
 ## Where the core differs from ref_core.sv
 
 Architectural behavior is the same: the lockstep gate compares every retirement, a CSR snapshot, the bus

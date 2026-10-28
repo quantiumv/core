@@ -7,22 +7,24 @@ Join the [Discord](https://discord.gg/sQjhBvWXjF) if you want to take part.
 
 **Core** (`design/pipe/core.sv`, module `core`): a pipelined core that one hart runs on.
 Fetch, align (RVC), decode, in-order issue into a reorder buffer, ALU / branch / divide /
-load-store units, and in-order commit, which owns every architectural effect (register
+floating-point / load-store units, and in-order commit, which owns every architectural effect (register
 writes, CSRs, traps, privilege changes, interrupts and debug entry). Single issue; fetch runs back to
 back and predicts branches (a target buffer, a history table, a return-address stack); loads execute at
 the head of the ROB, and stores to RAM retire into a store buffer that writes them out behind it.
 Translated code runs at nearly untranslated speed (fetch reuses its last page, the data side looks up its
 TLB before the head), and CSR reads and trap-CSR writes do not flush the pipeline.
 
-- RV64IMAC, Zicsr, Zifencei
+- RV64IMAFDC (RV64GC: also Zicsr, Zifencei), with Zcd
+- An FPU with IEEE 754 single and double precision: a 4-stage pipeline (fused multiply-add, the other
+  arithmetic, conversions, compares) that takes one op per cycle, and divide/square root beside it
 - M, S and U modes, with trap delegation
 - Sv39 virtual memory (a 4-entry TLB each for instruction fetch and data, one page-table walker, superpages, A/D bits checked rather than updated)
 - PMP with 4 regions
 - Timer and external interrupts
 - RISC-V Debug Module over JTAG, which works with OpenOCD
 
-It doesn't have F/D, user-level counters, vectored `mtvec`, or misaligned
-access support (those trap).
+It doesn't have user-level counters, vectored `mtvec`, or misaligned
+access support (those trap). `QV_FPU_EN=0` builds it without F/D.
 
 **SoC** (`design/soc.sv`): the core, write-through L1 I/D caches, and Wishbone
 peripherals.
@@ -65,7 +67,7 @@ simulation, with UART output in your terminal. See
 |---|---|
 | `make regress [CORE=pipe\|ref]` | The unit and integration testbenches (`pipe`, the default, is the core; `ref` is the frozen reference) |
 | `make lint [CORE=...]` | Verilator lint of the full SoC |
-| `make act` | The official RISC-V architecture tests: 110/111 pass. `S-00` fails because there is no FPU (`mstatus.FS` is hardwired to 0). |
+| `make act` | The official RISC-V architecture tests: 110/111 pass, and 334/337 with `CONFIG=quantiumv-rv64imafdc` (F, D, Zcd, A, Zifencei). `S-00` fails in both: the configs don't declare Sv39, so Sail reads `sstatus.SUM` as 0 where the core keeps it. `Zalrsc-sc.w`/`sc.d` fail because any store between LR and SC clears the reservation here. |
 | `make lockstep` | Runs the core and the reference side by side and compares every retired instruction |
 | `make openocd-smoke` | OpenOCD drives the Debug Module over JTAG |
 
