@@ -3307,7 +3307,7 @@ module ref_core
     logic        fp_reg_write;
     logic [63:0] fp_reg_wdata;
     ref_fprf fprf0 (
-        .clk(clk),
+        .clk(clk), .rst(rst),
         .i_rs1(instruction[19:15]), .i_rs2(instruction[24:20]),
         .i_rs3(dm_access_active ? i_dm_fpr_sel : instruction[31:27]),
         .o_rs1_data(fprs1_data), .o_rs2_data(fprs2_data), .o_rs3_data(fprs3_data),

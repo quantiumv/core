@@ -915,8 +915,17 @@ module core
     // F/D: the FP register file (its array fp_registers is a name the lockstep harness reads in both cores), read by
     // issue and written at commit. The Debug Module's FPR access takes read port 3 and the write port while the hart
     // is halted (dm_access_active: nothing issues or retires then), as for regfile0.
+`ifdef QV_FORMAL_FPU_ABSTRACT
+    // riscv-formal's pipe-fpu model: no check looks at an FP value (the datapath is free too, qv_exu_fpu.sv), so
+    // the FP registers' reads are free and the 32 x 64 file costs nothing
+    (* anyseq *) logic [63:0] abs_frs1, abs_frs2, abs_frs3;
+    assign frs1_data      = abs_frs1;
+    assign frs2_data      = abs_frs2;
+    assign frs3_data      = abs_frs3;
+    assign o_dm_fpr_rdata = abs_frs3;
+`else
     qv_fprf fprf0 (
-        .clk(clk),
+        .clk(clk), .rst(rst),
         .i_rs1(frs1_sel), .i_rs2(frs2_sel), .i_rs3(dm_access_active ? i_dm_fpr_sel : frs3_sel),
         .o_rs1_data(frs1_data), .o_rs2_data(frs2_data), .o_rs3_data(frs3_data),
         .i_we(dm_access_active ? i_dm_fpr_we : c_fprf_we),
@@ -924,6 +933,7 @@ module core
         .i_wdata(dm_access_active ? i_dm_fpr_wdata : c_fprf_data)
     );
     assign o_dm_fpr_rdata = frs3_data;
+`endif
 
 `ifdef RISCV_FORMAL
     logic [63:0] mcause_w, scause_w, mepc_next_w, sepc_next_w, mcause_next_w, scause_next_w;

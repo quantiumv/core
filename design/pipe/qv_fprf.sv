@@ -6,11 +6,13 @@
  *
  * The array is named fp_registers in both cores (the lockstep harness compares it by that name at the end of a run).
  * The Debug Module's abstract FPR access is muxed onto read port 3 and the write port by the caller, as register_file's
- * read port B and write port are for GPRs. No reset: like the integer registers, the FPRs hold whatever is written
- * first; software initializes them (mstatus.FS resets Off, so nothing can read them before that).
+ * read port B and write port are for GPRs. Reset clears them to 0, as Sail does: the spec leaves their reset value
+ * unspecified, but an ACT test (ExceptionsZc, an FSD of a register that only a faulting C.FLD was meant to load)
+ * reads one before writing it, and its signature has Sail's 0.
  */
 module qv_fprf (
     input  logic        clk,
+    input  logic        rst,
     input  logic [4:0]  i_rs1,
     input  logic [4:0]  i_rs2,
     input  logic [4:0]  i_rs3,
@@ -28,6 +30,10 @@ module qv_fprf (
     assign o_rs3_data = fp_registers[i_rs3];
 
     always_ff @(posedge clk) begin
-        if (i_we) fp_registers[i_wsel] <= i_wdata;
+        if (rst) begin
+            for (int r = 0; r < 32; r++) fp_registers[r] <= 64'b0;
+        end else if (i_we) begin
+            fp_registers[i_wsel] <= i_wdata;
+        end
     end
 endmodule
