@@ -176,6 +176,28 @@ Sail agrees with both cores on 45 FP programs each (30 S/U-mode, 15 M-mode) and 
 reads `sstatus.SUM` as 0. `Zalrsc-sc.w`/`sc.d` fail because any store between LR and SC clears the reservation. The
 rv64im config stays as tracked. Regression: core 132/132, reference 76/76.
 
+The exit gate (2026-10-29), the core against the reference, Verilator, four memory configurations, on a snapshot of
+`0e3491a` (the RTL is the tree of `33a2420`):
+- The FP profile with interrupts and the debug script (`--seed 21`): 2,500 x 4, 9,996 pass, 460 M retirements, 14.7 M
+  interrupt entries. The other four are one program, `random_210022`, in every configuration: it never ends, and the
+  cores agree on every retirement of it (2.6 million in a 12-million-cycle run). Its `sret` idiom had a 32-bit `li`
+  crossing into a code page with A clear between `csrw sepc` and `sret`; the fetch fault went to S and overwrote `sepc`,
+  so the `sret` returned into its own window for ever. P8's fix had kept only `csrs` and `sret` together; the whole
+  window is one aligned 32-byte block now (`2235435`), and the regenerated program ends after 38,281 retirements.
+- `--mem-dense` (`--seed 22`): 1,000 x 4, 3,998 pass, 335 M retirements. The other two are `random_220742` in the two
+  8-wait-state configurations, where it reached the 12-million-cycle budget at 724,099 retirements, all matched. With
+  40 million cycles it passes at 828,337 retirements, as it does without wait states.
+- Late interrupt and halt visibility (`--irq-late --dbg-late`): 2,000/2,000 (81 M retirements). Interrupt injection off:
+  2,000/2,000. An M-mode body: 2,000/2,000. Icarus, 24 x 4: 96/96.
+- The reference against itself, 50 x 4: 200/200. The corruption self-test catches every field class (1-14) at the
+  targeted record; the kill matrix catches 17 of 17.
+- The corpora, from the fixed generator: the F/D ACT ELFs (`--corpus act-fd`, 337) x 4: 1,348/1,348; ACT, the firmware
+  and 100 random FP programs x 4: 872/872; the smc, irq and dbg corpora x 4: clean. A fresh batch (`--seed 32`, FP
+  profile, 500 x 4): 2,000/2,000 (89 M retirements, 2.8 M interrupt entries).
+
+The FPU itself: the full TestFloat set (`verification/fpu/README.md`), 1,346,913,440 vectors, 0 failures. riscv-formal
+after F/D: every model clean (`../riscv-formal/quantiumv_pipe/README.md`).
+
 ## Where the core differs from ref_core.sv
 
 Architectural behavior is the same: the lockstep gate compares every retirement, a CSR snapshot, the bus
