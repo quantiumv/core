@@ -149,13 +149,13 @@
   },
   {
    "name": "interrupt vector ignores stvec",
-   "old": "wire [63:0] irq_vector = int_to_s ? {i_stvec[63:2], 2'b00} : {i_mtvec[63:2], 2'b00};",
-   "new": "wire [63:0] irq_vector = {i_mtvec[63:2], 2'b00};"
+   "old": "wire [63:0] irq_tvec   = int_to_s ? i_stvec : i_mtvec;",
+   "new": "wire [63:0] irq_tvec   = i_mtvec;"
   },
   {
    "name": "interrupt vector keeps the MODE bits",
-   "old": "wire [63:0] irq_vector = int_to_s ? {i_stvec[63:2], 2'b00} : {i_mtvec[63:2], 2'b00};",
-   "new": "wire [63:0] irq_vector = int_to_s ? i_stvec : i_mtvec;"
+   "old": "wire [63:0] irq_vector = {irq_tvec[63:2], 2'b00} + ",
+   "new": "wire [63:0] irq_vector = irq_tvec + "
   },
   {
    "name": "no redirect on an interrupt",
@@ -181,6 +181,21 @@
    "name": "interrupt counted as a retirement",
    "old": "assign o_instr_retired = commit && !faulted && !(i_dbg_in_debug && i_dcsr[10]);",
    "new": "assign o_instr_retired = (commit && !faulted && !(i_dbg_in_debug && i_dcsr[10])) || irq;"
+  },
+  {
+   "name": "vectored mode ignored (errata E4: an interrupt always went to the base)",
+   "old": "((irq_tvec[1:0] == 2'b01) ?",
+   "new": "((1'b0) ?"
+  },
+  {
+   "name": "a vectored interrupt goes to base + cause, not base + 4 * cause",
+   "old": "{58'b0, int_cause, 2'b00}",
+   "new": "{60'b0, int_cause}"
+  },
+  {
+   "name": "vectored mode taken from the other xtvec",
+   "old": "wire [63:0] irq_vector = {irq_tvec[63:2], 2'b00} + ((irq_tvec[1:0] == 2'b01)",
+   "new": "wire [63:0] irq_vector = {irq_tvec[63:2], 2'b00} + (((int_to_s ? i_mtvec : i_stvec) & 64'h3) == 64'h1"
   }
  ]
 }

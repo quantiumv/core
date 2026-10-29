@@ -1,7 +1,7 @@
 {
  "dut": "design/pipe/qv_decode.sv",
  "tb": "design/pipe/qv_decode_tb.sv",
- "files": ["design/decoder.sv", "design/c_expand.sv", "design/alu.sv", "design/pipe/qv_pkg.sv", "design/pipe/qv_pmp.sv", "design/pipe/qv_decode.sv"],
+ "files": ["design/decoder.sv", "design/c_expand.sv", "design/alu.sv", "design/pipe/qv_pkg.sv", "design/pipe/qv_pmp.sv", "design/pipe/qv_fp_dec.sv", "design/pipe/qv_decode.sv"],
  "flags": ["-g2012", "-I", ".", "-I", "defaults", "-I", "../testbench"],
  "cwd": "design",
  "timeout": 600,
@@ -23,6 +23,21 @@
   {"name": "WFI illegal from U", "old": "wire priv_illegal = csr_priv_violation || mret_priv_violation || sret_priv_violation || tvm_violation;", "new": "wire priv_illegal = csr_priv_violation || mret_priv_violation || sret_priv_violation || tvm_violation || ((sys_op == QV_SYS_WFI) && i_priv == QV_PRIV_U);"},
   {"name": "SFENCE.VMA does not serialize", "old": "                          || (sys_op == QV_SYS_FENCE_I) || is_sfence;", "new": "                          || (sys_op == QV_SYS_FENCE_I);"},
   {"name": "SRET decoded as MRET", "old": "`INSTR_CODE(SRET):   sys_op = QV_SYS_SRET;", "new": "`INSTR_CODE(SRET):   sys_op = QV_SYS_MRET;"},
-  {"name": "privilege rules left out of the fault", "old": "csr_illegal || priv_illegal || fp_illegal) begin", "new": "csr_illegal || fp_illegal) begin"}
+  {"name": "privilege rules left out of the fault", "old": "csr_illegal || priv_illegal || fp_illegal || csr_pmp_absent) begin", "new": "csr_illegal || fp_illegal || csr_pmp_absent) begin"},
+  {
+   "name": "the PMP CSRs RV64 does not have are legal (the rule before errata E7)",
+   "old": "fp_illegal || csr_pmp_absent) begin",
+   "new": "fp_illegal) begin"
+  },
+  {
+   "name": "pmpcfg2 is taken as absent too",
+   "old": "csr_addr[3:0] != 4'h0 && csr_addr[3:0] != 4'h2",
+   "new": "csr_addr[3:0] != 4'h0"
+  },
+  {
+   "name": "pmpaddr16 is taken as present",
+   "old": "|| (csr_addr >= 12'h3C0 && csr_addr <= 12'h3EF));",
+   "new": "|| (csr_addr >= 12'h3C1 && csr_addr <= 12'h3EF));"
+  }
  ]
 }

@@ -7,6 +7,7 @@
   "design/alu.sv",
   "design/pipe/qv_pkg.sv",
   "design/pipe/qv_pmp.sv",
+  "design/pipe/qv_fp_dec.sv",
   "design/pipe/qv_decode.sv"
  ],
  "flags": [

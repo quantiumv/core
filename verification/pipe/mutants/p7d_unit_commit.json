@@ -63,24 +63,29 @@
    "new": "assign o_redirect_ctx   = 1'b0;"
   },
   {
-   "name": "a page fault in the second dword reports the pc",
-   "old": "tval = i_head_ctrl.xcpt_hi ? i_head_entry.pc + 64'd8 : i_head_entry.pc;   // ref_core.sv reports the second dword's address",
+   "name": "a fault in the second parcel reports the pc",
+   "old": "tval = i_head_ctrl.xcpt_hi ? i_head_entry.pc + 64'd2 : i_head_entry.pc;",
    "new": "tval = i_head_entry.pc;"
   },
   {
-   "name": "a page fault in the first dword reports pc + 8",
-   "old": "tval = i_head_ctrl.xcpt_hi ? i_head_entry.pc + 64'd8 : i_head_entry.pc;   // ref_core.sv reports the second dword's address",
-   "new": "tval = i_head_entry.pc + 64'd8;"
+   "name": "a fault in the first parcel reports pc + 2",
+   "old": "tval = i_head_ctrl.xcpt_hi ? i_head_entry.pc + 64'd2 : i_head_entry.pc;",
+   "new": "tval = i_head_entry.pc + 64'd2;"
   },
   {
-   "name": "an access fault in the second dword reports pc + 8",
-   "old": "else if (i_head_ctrl.xcpt && i_head_ctrl.cause == 4'd1)\n            tval = i_head_entry.pc;",
-   "new": "else if (i_head_ctrl.xcpt && i_head_ctrl.cause == 4'd1)\n            tval = i_head_ctrl.xcpt_hi ? i_head_entry.pc + 64'd8 : i_head_entry.pc;"
+   "name": "a fault in the second parcel reports pc + 8 (erratum B10)",
+   "old": "tval = i_head_ctrl.xcpt_hi ? i_head_entry.pc + 64'd2 : i_head_entry.pc;",
+   "new": "tval = i_head_ctrl.xcpt_hi ? i_head_entry.pc + 64'd8 : i_head_entry.pc;"
   },
   {
    "name": "a page fault reports no tval",
-   "old": "else if (i_head_ctrl.xcpt && i_head_ctrl.cause == 4'd12)",
-   "new": "else if (1'b0)"
+   "old": "else if (i_head_ctrl.xcpt && (i_head_ctrl.cause == 4'd1 || i_head_ctrl.cause == 4'd12))",
+   "new": "else if (i_head_ctrl.xcpt && i_head_ctrl.cause == 4'd1)"
+  },
+  {
+   "name": "an access fault reports no tval",
+   "old": "else if (i_head_ctrl.xcpt && (i_head_ctrl.cause == 4'd1 || i_head_ctrl.cause == 4'd12))",
+   "new": "else if (i_head_ctrl.xcpt && i_head_ctrl.cause == 4'd12)"
   }
  ]
 }

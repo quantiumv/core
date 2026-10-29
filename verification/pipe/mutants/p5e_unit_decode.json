@@ -7,6 +7,7 @@
   "design/alu.sv",
   "design/pipe/qv_pkg.sv",
   "design/pipe/qv_pmp.sv",
+  "design/pipe/qv_fp_dec.sv",
   "design/pipe/qv_decode.sv"
  ],
  "flags": [
@@ -22,14 +23,14 @@
  "timeout": 600,
  "mutants": [
   {
-   "name": "the second dword is never checked",
-   "old": "wire pmp_fault = lo_denied || (!i_pb_active && fetch_hi_taken && !exec_ok_hi);",
+   "name": "the second parcel is never checked",
+   "old": "wire pmp_fault = lo_denied || hi_denied;",
    "new": "wire pmp_fault = lo_denied;"
   },
   {
-   "name": "the second dword is checked for 16-bit instructions too",
-   "old": "wire        fetch_hi_taken = !i_iq_data.rvc && (i_iq_data.pc[2:1] == 2'b11);",
-   "new": "wire        fetch_hi_taken = (i_iq_data.pc[2:1] == 2'b11);"
+   "name": "the second parcel is checked for 16-bit instructions too",
+   "old": "wire hi_denied = !i_pb_active && !i_iq_data.rvc && !exec_ok_hi;",
+   "new": "wire hi_denied = !i_pb_active && !exec_ok_hi;"
   },
   {
    "name": "crossing is decided by pc[2] alone",
@@ -42,24 +43,24 @@
    "new": "(i_iq_data.pc[2:1] == 2'b01);\n    wire [11:0] pc_hi_off"
   },
   {
-   "name": "first span is 4 bytes",
-   "old": ".i_end(pa_lo + 64'd7)",
+   "name": "first parcel is 4 bytes",
+   "old": ".i_end(pa_lo + 64'd1)",
    "new": ".i_end(pa_lo + 64'd3)"
   },
   {
-   "name": "first span is dword aligned",
-   "old": ".i_addr(pa_lo), .i_end(pa_lo + 64'd7)",
-   "new": ".i_addr({pa_lo[63:3], 3'b000}), .i_end({pa_lo[63:3], 3'b111})"
+   "name": "first parcel is dword aligned",
+   "old": ".i_addr(pa_lo), .i_end(pa_lo + 64'd1)",
+   "new": ".i_addr({pa_lo[63:3], 3'b000}), .i_end({pa_lo[63:3], 3'b001})"
   },
   {
-   "name": "second span is 4 bytes",
-   "old": ".i_end(pa_hi + 64'd7)",
+   "name": "second parcel is 4 bytes",
+   "old": ".i_end(pa_hi + 64'd1)",
    "new": ".i_end(pa_hi + 64'd3)"
   },
   {
-   "name": "second span starts at pc+4",
-   "old": ".i_addr(pa_hi), .i_end(pa_hi + 64'd7)",
-   "new": ".i_addr(pa_hi - 64'd4), .i_end(pa_hi + 64'd7)"
+   "name": "second parcel starts at pc+4",
+   "old": ".i_addr(pa_hi), .i_end(pa_hi + 64'd1)",
+   "new": ".i_addr(pa_hi + 64'd2), .i_end(pa_hi + 64'd3)"
   },
   {
    "name": "a denial reports cause 2",
@@ -82,19 +83,19 @@
    "new": "(i_iq_data.xcpt || c_illegal) ? 32'h0000_0013"
   },
   {
-   "name": "the first span ignores the privilege (always M)",
-   "old": ".i_end(pa_lo + 64'd7), .i_priv(i_priv)",
-   "new": ".i_end(pa_lo + 64'd7), .i_priv(2'b11)"
+   "name": "the first parcel ignores the privilege (always M)",
+   "old": ".i_end(pa_lo + 64'd1), .i_priv(i_priv)",
+   "new": ".i_end(pa_lo + 64'd1), .i_priv(2'b11)"
   },
   {
-   "name": "the second span ignores the privilege (always M)",
-   "old": ".i_end(pa_hi + 64'd7), .i_priv(i_priv)",
-   "new": ".i_end(pa_hi + 64'd7), .i_priv(2'b11)"
+   "name": "the second parcel ignores the privilege (always M)",
+   "old": ".i_end(pa_hi + 64'd1), .i_priv(i_priv)",
+   "new": ".i_end(pa_hi + 64'd1), .i_priv(2'b11)"
   },
   {
    "name": "compressed instructions are not checked",
-   "old": "wire pmp_fault = lo_denied || (!i_pb_active && fetch_hi_taken && !exec_ok_hi);",
-   "new": "wire pmp_fault = (!i_iq_data.rvc && lo_denied) || (!i_pb_active && fetch_hi_taken && !exec_ok_hi);"
+   "old": "wire pmp_fault = lo_denied || hi_denied;",
+   "new": "wire pmp_fault = (!i_iq_data.rvc && lo_denied) || hi_denied;"
   },
   {
    "name": "pmpaddr1 not passed to the first span",
@@ -105,6 +106,16 @@
    "name": "a denial still lets the instruction write rd",
    "old": "uop_d.rd_wen   = reg_write_ctrl && !uop_d.xcpt;",
    "new": "uop_d.rd_wen   = reg_write_ctrl && !(i_iq_data.xcpt || c_illegal);"
+  },
+  {
+   "name": "a second-parcel denial is reported as the first parcel's (mtval pc)",
+   "old": "uop_d.xcpt_hi    = !lo_denied;",
+   "new": "uop_d.xcpt_hi    = 1'b0;"
+  },
+  {
+   "name": "a first-parcel denial is reported as the second parcel's (mtval pc + 2)",
+   "old": "uop_d.xcpt_hi    = !lo_denied;",
+   "new": "uop_d.xcpt_hi    = 1'b1;"
   }
  ]
 }

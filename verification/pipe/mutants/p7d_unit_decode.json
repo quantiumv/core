@@ -7,6 +7,7 @@
   "design/alu.sv",
   "design/pipe/qv_pkg.sv",
   "design/pipe/qv_pmp.sv",
+  "design/pipe/qv_fp_dec.sv",
   "design/pipe/qv_decode.sv"
  ],
  "flags": [
@@ -27,9 +28,9 @@
    "new": "wire [63:0] pa_lo = i_iq_data.pc;"
   },
   {
-   "name": "the second span ignores where the next dword really is",
-   "old": "wire [63:0] pa_hi = i_iq_data.xl ? {8'b0, i_iq_data.pg_hi, pc_hi_off}          : i_iq_data.pc + 64'd8;",
-   "new": "wire [63:0] pa_hi = i_iq_data.pc + 64'd8;"
+   "name": "the second parcel ignores where it really is (the virtual pc)",
+   "old": "wire [63:0] pa_hi = i_iq_data.xl ? {8'b0, pg_p2, pc_hi_off}                    : i_iq_data.pc + 64'd2;",
+   "new": "wire [63:0] pa_hi = i_iq_data.pc + 64'd2;"
   },
   {
    "name": "an untranslated fetch is taken for a translated one",
@@ -37,14 +38,14 @@
    "new": "wire [63:0] pa_lo = 1'b1 ? "
   },
   {
-   "name": "the second span's offset is not wrapped within the page",
-   "old": "wire [11:0] pc_hi_off = i_iq_data.pc[11:0] + 12'd8;",
+   "name": "the second parcel's page offset is the first parcel's",
+   "old": "wire [11:0] pc_hi_off = i_iq_data.pc[11:0] + 12'd2;",
    "new": "wire [11:0] pc_hi_off = i_iq_data.pc[11:0];"
   },
   {
-   "name": "the second span's offset is off",
-   "old": "wire [11:0] pc_hi_off = i_iq_data.pc[11:0] + 12'd8;",
-   "new": "wire [11:0] pc_hi_off = i_iq_data.pc[11:0] + 12'd4;"
+   "name": "the second parcel's page offset is pc + 8 (the old dword window)",
+   "old": "wire [11:0] pc_hi_off = i_iq_data.pc[11:0] + 12'd2;",
+   "new": "wire [11:0] pc_hi_off = i_iq_data.pc[11:0] + 12'd8;"
   },
   {
    "name": "the first span uses the page of the next dword",
@@ -52,9 +53,9 @@
    "new": "{8'b0, i_iq_data.pg_hi, i_iq_data.pc[11:0]}"
   },
   {
-   "name": "the second span uses the page of the first dword",
-   "old": "{8'b0, i_iq_data.pg_hi, pc_hi_off}",
-   "new": "{8'b0, i_iq_data.pg_lo, pc_hi_off}"
+   "name": "the second parcel always uses the page of the first dword",
+   "old": "wire [43:0] pg_p2     = crosses ? i_iq_data.pg_hi : i_iq_data.pg_lo;",
+   "new": "wire [43:0] pg_p2     = i_iq_data.pg_lo;"
   },
   {
    "name": "a fault marker of the high dword is never given way to a denial of the low span",
@@ -85,6 +86,11 @@
    "name": "a Program Buffer run is checked on the first span",
    "old": "wire lo_denied = !i_pb_active && !exec_ok_lo;",
    "new": "wire lo_denied = !exec_ok_lo;"
+  },
+  {
+   "name": "the second parcel always uses the page of the second dword",
+   "old": "wire [43:0] pg_p2     = crosses ? i_iq_data.pg_hi : i_iq_data.pg_lo;",
+   "new": "wire [43:0] pg_p2     = i_iq_data.pg_hi;"
   }
  ]
 }

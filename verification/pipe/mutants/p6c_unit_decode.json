@@ -7,6 +7,7 @@
   "design/c_expand.sv",
   "design/pipe/qv_pkg.sv",
   "design/pipe/qv_pmp.sv",
+  "design/pipe/qv_fp_dec.sv",
   "design/pipe/qv_decode.sv"
  ],
  "flags": [
@@ -29,13 +30,13 @@
   },
   {
    "name": "the PMP is off for everyone",
-   "old": "wire pmp_fault = lo_denied || (!i_pb_active && fetch_hi_taken && !exec_ok_hi);",
+   "old": "wire pmp_fault = lo_denied || hi_denied;",
    "new": "wire pmp_fault = 1'b0;"
   },
   {
-   "name": "only the first span is exempt in a run",
-   "old": "(!i_pb_active && fetch_hi_taken && !exec_ok_hi)",
-   "new": "(fetch_hi_taken && !exec_ok_hi)"
+   "name": "only the first parcel is exempt in a run",
+   "old": "wire hi_denied = !i_pb_active && !i_iq_data.rvc && !exec_ok_hi;",
+   "new": "wire hi_denied = !i_iq_data.rvc && !exec_ok_hi;"
   }
  ]
 }
