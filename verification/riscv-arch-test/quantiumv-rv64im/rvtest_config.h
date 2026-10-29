@@ -1,7 +1,9 @@
 // rvtest_config.h -- QuantiumV DUT capability defines
 // SPDX-License-Identifier: Apache-2.0
 //
-// Deliberately near-empty: QuantiumV implements only RV64IM+Zicsr+U/S/M.
-// None of D/Q/F/ZFA/ZFH/ZBB/ZBA/ZBS/ZAAMO/ZALRSC/ZIHPM/ZCA/ZCB/ZCD/SV39/
-// SV48/SV57/PMP apply -- leaving each of those undefined is what tells the
-// shared test env (tests/env/utils.h and friends) they aren't present.
+// This config declares RV64IM+Zca+Zicsr+U/S/M, PMP (4 entries, G=0) and Sv39. The FP, Zb*,
+// Zaamo/Zalrsc, Zihpm, Zcb/Zcd and Sv48/Sv57 defines stay undefined, which is what tells the
+// shared test env (tests/env/utils.h and friends) they aren't present here.
+#define RVMODEL_PMP_GRAIN 0
+#define RVMODEL_NUM_PMPS 16 // the PMP CSRs present (always 16 for 1-16 entries); 4 are usable, the rest read 0
+#define SV39_SUPPORTED
