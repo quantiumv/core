@@ -165,6 +165,15 @@ it is cited with its directory.
   old value (`csr_file_tb`, `csr_file_random_tb`, `core_zicsr_tb`) pin the
   new one. Both cores share the constant and no generated program reads
   misa, so lockstep and ACT cannot see the change.
+- **E7 (2026-10-29, found by ACT once the configs declared PMP: `pmpsm_csr_walk`,
+  `pmpzca_cret_napot`; fixed together in `design/pipe/qv_decode.sv` and
+  `ref_core.sv`).** Every unmapped CSR reads 0 and ignores writes, the PMP
+  ones included, but on RV64 with 16 PMP CSRs (4 of them implemented)
+  `pmpcfg1`, `pmpcfg3`-`pmpcfg15` and `pmpaddr16`-`pmpaddr63` do not exist,
+  and Sail traps on them. An access to one is now an illegal instruction;
+  `pmpcfg2` and `pmpaddr4`-`pmpaddr15` exist and still read 0. Other
+  unmapped CSRs are unchanged. Tests: `qv_decode_tb` (every address
+  0x3A0-0x3EF), `core_pmp_spec_tb` checks 1-7.
 
 ## Feature additions
 

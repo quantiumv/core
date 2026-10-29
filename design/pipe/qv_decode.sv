@@ -406,6 +406,10 @@ module qv_decode #(
                           || csr_addr[11:2] == 10'h1E8 || csr_addr == 12'h7A4;
     wire csr_illegal = is_csr && ((!csr_wsup && csr_addr[11:10] == 2'b11)
                                   || (csr_debug_addr && !i_in_debug));
+    // errata E7: with 16 PMP CSRs (4 of them implemented, the rest read 0) RV64 has pmpcfg0, pmpcfg2 and
+    // pmpaddr0-15; pmpcfg1, pmpcfg3-15 and pmpaddr16-63 do not exist, and touching one is illegal
+    wire csr_pmp_absent = is_csr && ((csr_addr[11:4] == 8'h3A && csr_addr[3:0] != 4'h0 && csr_addr[3:0] != 4'h2)
+                                     || (csr_addr >= 12'h3C0 && csr_addr <= 12'h3EF));
     // the trap CSRs: mscratch, mepc, mcause, mtval (0x340-0x343) and sscratch, sepc, scause, stval (0x140-0x143)
     wire csr_trap_wr = (csr_addr[11:2] == 10'h0D0) || (csr_addr[11:2] == 10'h050);
 
@@ -530,7 +534,7 @@ module qv_decode #(
         end else if (pmp_fault) begin
             uop_d.xcpt       = 1'b1;
             uop_d.xcpt_cause = 4'd1;
-        end else if (c_illegal || !implemented || csr_illegal || priv_illegal || fp_illegal) begin
+        end else if (c_illegal || !implemented || csr_illegal || priv_illegal || fp_illegal || csr_pmp_absent) begin
             uop_d.xcpt       = 1'b1;
             uop_d.xcpt_cause = 4'd2;
         end
