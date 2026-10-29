@@ -5639,20 +5639,17 @@ module ref_core
     wire [(`WORD_SIZE - 1):0] jalr_target = {alu_result[63:1], 1'b0};
 
     /*
-     * Trap-vector redirect (U/S/M privilege-mode milestone). Direct mode
-     * only -- mtvec/stvec's MODE bits[1:0] are stored as written (WARL)
-     * but never consulted; Vectored mode's only benefit (cause-indexed
-     * jump) is moot with no interrupt source, and even real
-     * Vectored-mode hardware jumps straight to BASE for synchronous
-     * exceptions regardless, per spec. trap_vector_base's own low 2
-     * bits (the MODE field) are structurally never read below -- masked
-     * off, not an oversight.
+     * Trap-vector redirect (U/S/M privilege-mode milestone). An exception
+     * goes to BASE; an interrupt goes to BASE + 4 * cause when that
+     * xtvec's MODE (bits[1:0], WARL 0 or 1 in csr_file0) is vectored --
+     * errata E4: MODE used to be stored as written and never consulted,
+     * so vectored mode read back as set but behaved as direct.
      */
     wire route_to_s = trap_taken ? trap_to_s : interrupt_to_s;
-    /* verilator lint_off UNUSEDSIGNAL */
     wire [(`WORD_SIZE - 1):0] trap_vector_base = route_to_s ? stvec_w : mtvec_w;
-    /* verilator lint_on UNUSEDSIGNAL */
-    assign trap_vector = {trap_vector_base[63:2], 2'b00};   // was `wire trap_vector =` -- now forward-declared
+    wire vectored_irq = !trap_taken && interrupt_taken && (trap_vector_base[1:0] == 2'b01);
+    assign trap_vector = {trap_vector_base[63:2], 2'b00}   // was `wire trap_vector =` -- now forward-declared
+                       + (vectored_irq ? {58'b0, int_cause, 2'b00} : `WORD_SIZE'(0));
 
     assign next_pc = trap_taken              ? trap_vector   :
                       mret_taken              ? mepc_w        :

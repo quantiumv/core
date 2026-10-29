@@ -12,8 +12,9 @@
  *           hit while executing (4-7, from the LSU's result), ECALL (8, 9 or
  *           11 by privilege) or EBREAK (3): nothing is written, csr_file0
  *           takes the trap, fetch restarts at the vector base of mtvec or,
- *           when the trap is delegated (medeleg, from below M), stvec (direct
- *           mode only)
+ *           when the trap is delegated (medeleg, from below M), stvec (an
+ *           exception always goes to the base; an interrupt goes to base +
+ *           4 * cause when that xtvec's MODE is vectored)
  *   MRET    csr_file0 restores mstatus, privilege becomes MPP, fetch restarts
  *           at mepc
  *   SRET    likewise: privilege becomes SPP (S or U), fetch restarts at sepc
@@ -130,18 +131,14 @@ module qv_commit #(
     output logic [63:0]                      o_trap_cause,
     output logic [63:0]                      o_trap_val,
     output logic                             o_mret_taken,
-    // MODE bits [1:0] ignored: direct mode only, as in ref_core.sv
-    /* verilator lint_off UNUSEDSIGNAL */
+    // MODE bits [1:0]: vectored (1) shifts an interrupt's target; csr_file0 keeps them 0 or 1
     input  logic [63:0]                      i_mtvec,
-    /* verilator lint_on UNUSEDSIGNAL */
     input  logic [63:0]                      i_mepc,
     output logic                             o_sret_taken,
     output logic                             o_trap_to_s,
     output logic [1:0]                       o_priv,
-    // exported by csr_file0; stvec's MODE bits are ignored like mtvec's
-    /* verilator lint_off UNUSEDSIGNAL */
+    // exported by csr_file0; MODE as for mtvec
     input  logic [63:0]                      i_stvec,
-    /* verilator lint_on UNUSEDSIGNAL */
     input  logic [63:0]                      i_sepc,
     input  logic [63:0]                      i_medeleg,
     input  logic [1:0]                       i_mstatus_mpp,
@@ -481,8 +478,10 @@ module qv_commit #(
         end
     end
 
-    // an interrupt redirects to the vector of the mode it is taken in (direct mode only)
-    wire [63:0] irq_vector = int_to_s ? {i_stvec[63:2], 2'b00} : {i_mtvec[63:2], 2'b00};
+    // an interrupt redirects to the vector of the mode it is taken in: the base, plus 4 * cause when that
+    // xtvec's MODE is vectored (errata E4; exceptions always go to the base)
+    wire [63:0] irq_tvec   = int_to_s ? i_stvec : i_mtvec;
+    wire [63:0] irq_vector = {irq_tvec[63:2], 2'b00} + ((irq_tvec[1:0] == 2'b01) ? {58'b0, int_cause, 2'b00} : 64'b0);
     // A debug entry redirects to the architectural pc (fetch is held, so it only records it and everything
     // in flight is flushed); a resume restarts at the live dpc.
     assign o_redirect_valid = irq || halt_take || head_dbg_entry || i_dbg_resume

@@ -174,6 +174,16 @@ it is cited with its directory.
   `pmpcfg2` and `pmpaddr4`-`pmpaddr15` exist and still read 0. Other
   unmapped CSRs are unchanged. Tests: `qv_decode_tb` (every address
   0x3A0-0x3EF), `core_pmp_spec_tb` checks 1-7.
+- **E4 (2026-10-29, found by ACT `S-00` once the configs declared Sv39;
+  fixed together in `design/csr_file.sv` (so `ref_csr_file.sv`),
+  `design/pipe/qv_commit.sv` and `ref_core.sv`).** `mtvec`/`stvec` stored
+  MODE as written and the cores never read it: every trap went to BASE, so
+  vectored mode read back as set but behaved as direct, and the reserved
+  modes 2 and 3 read back too. MODE is now WARL {0, 1}: a write of 2 or 3
+  keeps the old mode and takes the new base (Sail's rule), and an interrupt
+  taken with MODE 1 goes to BASE + 4 * cause (exceptions still go to BASE).
+  Tests: `core_pmp_spec_tb` checks 8-13 (WARL) and 29-32 (a vectored MTI in
+  M, a vectored, delegated SEI in S).
 
 ## Feature additions
 

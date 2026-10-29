@@ -469,13 +469,11 @@ module ref_csr_file #(
 
     /*
      * Plain full read/write registers -- same "vanilla CSR" shape as
-     * mscratch_q above, one always_ff block each. mtvec/stvec: only
-     * their BASE field (bits[63:2]) is ever consumed (by core.sv's
-     * trap-vector mux) -- the MODE field (bits[1:0]) is stored as
-     * written (WARL) but never itself changes behavior, since Vectored
-     * mode's only benefit (cause-indexed jump) is moot with no
-     * interrupt source yet, and even real Vectored-mode hardware jumps
-     * straight to BASE for synchronous exceptions regardless, per spec.
+     * mscratch_q above, one always_ff block each. mtvec/stvec: BASE
+     * (bits[63:2]) is the trap vector; MODE (bits[1:0]) is WARL, direct
+     * (0) or vectored (1), and a write of 2 or 3 keeps the old mode
+     * (errata E4). Vectored mode sends an interrupt to BASE + 4 * cause;
+     * exceptions always go to BASE (the cores' trap-vector logic).
      */
     logic [(`WORD_SIZE - 1):0] stvec_q, mtvec_q;
     logic [(`WORD_SIZE - 1):0] mcounteren_q, scounteren_q;
@@ -484,12 +482,16 @@ module ref_csr_file #(
     logic [(`WORD_SIZE - 1):0] medeleg_q, mideleg_q;
 
     always_ff @(posedge i_clk) begin
+        // errata E4: MODE (bits 1:0) is WARL, direct (0) or vectored (1); a write of 2 or 3 keeps the old mode
+        // and takes the new base, as Sail does
         if (i_rst) stvec_q <= '0;
-        else if (i_csr_we && (i_csr_addr == CSR_ADDR_STVEC)) stvec_q <= i_csr_wdata;
+        else if (i_csr_we && (i_csr_addr == CSR_ADDR_STVEC))
+            stvec_q <= {i_csr_wdata[63:2], i_csr_wdata[1] ? stvec_q[1:0] : i_csr_wdata[1:0]};
     end
     always_ff @(posedge i_clk) begin
         if (i_rst) mtvec_q <= '0;
-        else if (i_csr_we && (i_csr_addr == CSR_ADDR_MTVEC)) mtvec_q <= i_csr_wdata;
+        else if (i_csr_we && (i_csr_addr == CSR_ADDR_MTVEC))
+            mtvec_q <= {i_csr_wdata[63:2], i_csr_wdata[1] ? mtvec_q[1:0] : i_csr_wdata[1:0]};
     end
     always_ff @(posedge i_clk) begin
         if (i_rst) mcounteren_q <= '0;
