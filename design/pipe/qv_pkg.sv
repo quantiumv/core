@@ -141,7 +141,7 @@ package qv_pkg;
         logic [63:0] pred_tgt;
         logic        xcpt;
         logic [3:0]  xcpt_cause;
-        logic        xcpt_hi;      // a fetch fault in the second dword of a crossing instruction (tval of a page fault is pc + 8)
+        logic        xcpt_hi;      // a fetch fault in the second parcel (tval pc + 2): the second dword of a crossing one, or a PMP denial
         logic        trig_debug;   // an action-1 execute trigger matched its pc: Debug Mode entry instead of executing
         logic        trig_exc;     // an action-0 one did (and no fetch/illegal fault came first): a breakpoint exception
         // F/D (qv_fp_dec): rs1/rs2 are FP registers (rs*_fp), rs3 is the FMA's third source (always FP), rd is an FP

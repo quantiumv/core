@@ -14,7 +14,7 @@
 # (11, a TLB hit skipping the permission re-check, and 12, SFENCE.VMA not flushing, are Sv39 mutants the default
 # random profile catches: it translates.)
 # --entries REGEX narrows the ordinary corpus (run_lockstep.sh --only); the default is the firmware programs,
-# the random ones and a few ACT ELFs, enough for every mutant but not the whole 111-ELF ACT set.
+# the random ones and a few ACT ELFs, enough for every mutant but not the whole 200-ELF ACT set.
 # Exit status 0 only if every selected mutant was caught.
 set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

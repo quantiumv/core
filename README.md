@@ -67,7 +67,7 @@ simulation, with UART output in your terminal. See
 |---|---|
 | `make regress [CORE=pipe\|ref]` | The unit and integration testbenches (`pipe`, the default, is the core; `ref` is the frozen reference) |
 | `make lint [CORE=...]` | Verilator lint of the full SoC |
-| `make act` | The official RISC-V architecture tests: 110/111 pass, and 334/337 with `CONFIG=quantiumv-rv64imafdc` (F, D, Zcd, A, Zifencei). `S-00` fails in both: the configs don't declare Sv39, so Sail reads `sstatus.SUM` as 0 where the core keeps it. `Zalrsc-sc.w`/`sc.d` fail because any store between LR and SC clears the reservation here. |
+| `make act` | The official RISC-V architecture tests, with Sv39 (Svade) and PMP (4 entries) declared: 198/200 pass, and 422/426 with `CONFIG=quantiumv-rv64imafdc` (F, D, Zcd, A, Zifencei), the same on both cores. `sv39_satp_access_test` fails in both: Sail's `satp.ASID` has 16 bits, the core's none. `S-00` fails in both: the rv64im config leaves out letters `misa` reports, and in the F/D config `scounteren` keeps all 64 bits where Sail keeps CY, TM and IR. `Zalrsc-sc.w`/`sc.d` fail because any store between LR and SC clears the reservation here. |
 | `make lockstep` | Runs the core and the reference side by side and compares every retired instruction |
 | `make openocd-smoke` | OpenOCD drives the Debug Module over JTAG |
 
