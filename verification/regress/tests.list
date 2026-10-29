@@ -9,9 +9,9 @@
 # "cores" names the builds a test is meaningful for (run_regress.sh --core):
 #   pipe  the main build, the pipelined core in design/pipe/ -- every row
 #   ref   the frozen multi-cycle reference, verification/reference/ref_core.sv
-#         (named `core` by -DQV_REF_AS_CORE) -- 76 rows
+#         (named `core` by -DQV_REF_AS_CORE) -- 77 rows
 # run_regress.sh --core X SKIPS any row not listing X, silently, so a row that
-# names neither core would just never run: there must be 132 rows listing pipe.
+# names neither core would just never run: there must be 133 rows listing pipe.
 #
 # The rows that omit ref are the design/*_tb.sv unit tests of a leaf module
 # (alu, c_expand, csr_file, divider, register_file) and of the divider's
@@ -117,6 +117,7 @@ tb_core_interrupt_icache_miss_tb|testbench/core_interrupt_icache_miss_tb.sv|test
 tb_core_m_ext_cache_tb|testbench/core_m_ext_cache_tb.sv|testbench/core_cache_harness.sv|design|ref,pipe|pass|
 
 tb_core_pmp_tb|testbench/core_pmp_tb.sv|testbench/core_wb4_sram_harness.sv|design|ref,pipe|pass|
+tb_core_pmp_spec_tb|testbench/core_pmp_spec_tb.sv|testbench/core_wb4_sram_harness.sv|design|ref,pipe|pass|
 
 # === special harnesses ===
 tb_core_amo_write_fault_tb|testbench/core_amo_write_fault_tb.sv|testbench/core_amo_write_fault_harness.sv|design|ref,pipe|pass|

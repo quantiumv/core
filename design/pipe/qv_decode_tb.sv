@@ -39,6 +39,7 @@ module qv_decode_tb #(
     uop_t      uop;
     logic      issue_ready = 1'b1;
     logic      flush = 1'b0;
+    logic       pmp_absent;           // errata E7: the PMP CSR at hand does not exist
     logic [1:0] priv = 2'b11;         // the privilege state the illegal-instruction rules read
     logic       tsr = 1'b0, tvm = 1'b0;
     logic       in_debug = 1'b0;      // Debug Mode: the debug and trigger CSRs exist, the triggers do not fire
@@ -719,6 +720,17 @@ module qv_decode_tb #(
                 if (uop.xcpt) check($sformatf("csr %h at priv %0d: cause 2", csr_probe[i], pv), {60'b0, uop.xcpt_cause}, 64'd2);
             end
         end
+        // errata E7: of the PMP CSRs, RV64 with 16 of them has pmpcfg0, pmpcfg2 and pmpaddr0-15 (readable in M);
+        // pmpcfg1, pmpcfg3-15 and pmpaddr16-63 do not exist: illegal, also in M, read or write
+        priv = 2'b11;
+        for (int a = 12'h3A0; a <= 12'h3EF; a++) begin
+            pmp_absent = (a < 12'h3B0) ? (a != 12'h3A0 && a != 12'h3A2) : (a >= 12'h3C0);
+            feed(encode_csr(12'(a), 5'd0, `FUNCT3_CSRRS, 5'd5, `OPC_SYSTEM));
+            check($sformatf("csrr %h in M: illegal iff absent", a), {63'b0, uop.xcpt}, {63'b0, pmp_absent});
+            if (pmp_absent) check($sformatf("csrr %h in M: cause 2", a), {60'b0, uop.xcpt_cause}, 64'd2);
+            feed(encode_csr(12'(a), 5'd6, `FUNCT3_CSRRW, 5'd0, `OPC_SYSTEM));
+            check($sformatf("csrw %h in M: illegal iff absent", a), {63'b0, uop.xcpt}, {63'b0, pmp_absent});
+        end
         // MRET only in M; SRET not in U, nor in S under TSR; WFI and SFENCE.VMA (bar TVM) anywhere
         for (int pv = 0; pv < 4; pv++)
             for (int ts = 0; ts < 2; ts++)
@@ -771,39 +783,52 @@ module qv_decode_tb #(
         expect_fault("fetch fault beats illegal", 32'h0000_0000, 1'b1, 4'd1, 4'd1);
 
         // ---------------- PMP on the fetch ----------------
-        // region 0: TOR [0, 0x1010), read + execute; the other regions are off. Below M a fetch needs the whole
-        // dword span [pc, pc+7] inside it (and [pc+8, pc+15] too for a 32-bit instruction at pc[2:1] == 3),
-        // however short the instruction really is; M is never denied by an unlocked region.
+        // Per 2-byte parcel (errata E6): [pc, pc+1], and [pc+2, pc+3] for a 32-bit instruction, each judged on its
+        // own; a denial of the second parcel marks the uop xcpt_hi (mtval pc + 2). Region 0: TOR [0, 0x1010), read +
+        // execute; the other regions are off. M is never denied by an unlocked region.
         pmpcfg0 = 64'h0D; pmpaddr0 = 64'h1010 >> 2;
         priv = 2'b01;
         feed_pc = 64'h1000; feed(encode_i(1, 7, 3'b000, 5, OPI));
-        check("pmp: span inside the region", {63'b0, uop.xcpt}, 64'd0);
-        feed_pc = 64'h1008; feed(encode_i(1, 7, 3'b000, 5, OPI));
-        check("pmp: last dword of the region", {63'b0, uop.xcpt}, 64'd0);
+        check("pmp: both parcels inside the region", {63'b0, uop.xcpt}, 64'd0);
         feed_pc = 64'h100C; feed(encode_i(1, 7, 3'b000, 5, OPI));
-        check("pmp: span runs past the top", {63'b0, uop.xcpt}, 64'd1);
-        check("pmp: fetch access fault cause", {60'b0, uop.xcpt_cause}, 64'd1);
-        feed_pc = 64'h1008; feed({16'b0, 16'h0001}, 1'b0, 4'd0, 1'b1);               // c.nop
-        check("pmp: compressed, span inside", {63'b0, uop.xcpt}, 64'd0);
-        feed_pc = 64'h100E; feed({16'b0, 16'h0001}, 1'b0, 4'd0, 1'b1);
-        check("pmp: a 2-byte instruction still needs the whole 8-byte span", {63'b0, uop.xcpt}, 64'd1);
-        check("pmp: ... as a fetch access fault", {60'b0, uop.xcpt_cause}, 64'd1);
+        check("pmp: the last word of the region", {63'b0, uop.xcpt}, 64'd0);
+        feed_pc = 64'h100E; feed(encode_i(1, 7, 3'b000, 5, OPI));
+        check("pmp: the second parcel past the top: denied", {63'b0, uop.xcpt}, 64'd1);
+        check("pmp: ... a fetch access fault", {60'b0, uop.xcpt_cause}, 64'd1);
+        check("pmp: ... in the second parcel (xcpt_hi)", {63'b0, uop.xcpt_hi}, 64'd1);
+        feed_pc = 64'h100E; feed({16'b0, 16'h0001}, 1'b0, 4'd0, 1'b1);               // c.nop
+        check("pmp: a 2-byte instruction in the last parcel: fine", {63'b0, uop.xcpt}, 64'd0);
+        feed_pc = 64'h1010; feed({16'b0, 16'h0001}, 1'b0, 4'd0, 1'b1);
+        check("pmp: a 2-byte instruction just above: denied", {63'b0, uop.xcpt}, 64'd1);
+        check("pmp: ... in the first parcel", {63'b0, uop.xcpt_hi}, 64'd0);
         // crossing into the next dword: pc[2:1] == 3 and a 32-bit instruction
         feed_pc = 64'h0FFE; feed(encode_i(1, 7, 3'b000, 5, OPI));
-        check("pmp: crossing instruction, both spans inside", {63'b0, uop.xcpt}, 64'd0);
+        check("pmp: crossing instruction, both parcels inside", {63'b0, uop.xcpt}, 64'd0);
         feed_pc = 64'h1006; feed(encode_i(1, 7, 3'b000, 5, OPI));
-        check("pmp: crossing instruction, the second span runs past the top", {63'b0, uop.xcpt}, 64'd1);
+        check("pmp: crossing instruction at 0x1006, both parcels inside", {63'b0, uop.xcpt}, 64'd0);
+        pmpaddr0 = 64'h1008 >> 2;                                                    // the top now at the dword edge
+        feed_pc = 64'h1006; feed(encode_i(1, 7, 3'b000, 5, OPI));
+        check("pmp: crossing instruction, the second parcel past the top", {63'b0, uop.xcpt}, 64'd1);
         check("pmp: ... cause 1", {60'b0, uop.xcpt_cause}, 64'd1);
+        check("pmp: ... xcpt_hi", {63'b0, uop.xcpt_hi}, 64'd1);
         pb_active = 1'b1; in_debug = 1'b1;                                           // the same crossing instruction, in a Program Buffer run
         feed_pc = 64'h1006; feed(encode_i(1, 7, 3'b000, 5, OPI));
-        check("pmp: crossing instruction, second span denied, but in a Program Buffer run: no fault", {63'b0, uop.xcpt}, 64'd0);
+        check("pmp: second parcel denied, but in a Program Buffer run: no fault", {63'b0, uop.xcpt}, 64'd0);
         pb_active = 1'b0; in_debug = 1'b0;
-        feed_pc = 64'h1006; feed({16'b0, 16'h0001}, 1'b0, 4'd0, 1'b1);               // 16-bit at the same pc: no second dword
-        check("pmp: 16-bit instruction at pc[2:1] == 3 needs no second span", {63'b0, uop.xcpt}, 64'd0);
-        feed_pc = 64'h1002; feed(encode_i(1, 7, 3'b000, 5, OPI));                    // pc[2:1] == 1: no crossing
-        check("pmp: 32-bit instruction at pc[2:1] == 1 needs one span", {63'b0, uop.xcpt}, 64'd0);
+        feed_pc = 64'h1006; feed({16'b0, 16'h0001}, 1'b0, 4'd0, 1'b1);               // 16-bit at the same pc: no second parcel
+        check("pmp: 16-bit instruction at pc[2:1] == 3 has no second parcel", {63'b0, uop.xcpt}, 64'd0);
+        // a 32-bit instruction at pc[2:1] == 1: its second parcel is the next word of the same dword
+        pmpaddr0 = 64'h1004 >> 2;
+        feed_pc = 64'h1002; feed(encode_i(1, 7, 3'b000, 5, OPI));
+        check("pmp: 32-bit at pc[2:1] == 1, the second parcel past the top: denied", {63'b0, uop.xcpt}, 64'd1);
+        check("pmp: ... xcpt_hi", {63'b0, uop.xcpt_hi}, 64'd1);
+        feed_pc = 64'h1000; feed(encode_i(1, 7, 3'b000, 5, OPI));
+        check("pmp: 32-bit at pc[2:1] == 0, the last word: fine", {63'b0, uop.xcpt}, 64'd0);
+        pmpaddr0 = 64'h1010 >> 2;
+        feed_pc = 64'h1002; feed(encode_i(1, 7, 3'b000, 5, OPI));
+        check("pmp: 32-bit instruction at pc[2:1] == 1 inside", {63'b0, uop.xcpt}, 64'd0);
         // a denied fetch is inert: the real instruction's bits must not leak through
-        feed_pc = 64'h100C; feed(encode_s(0, 6, 9, 3'd3, `OPC_STORE));
+        feed_pc = 64'h1010; feed(encode_s(0, 6, 9, 3'd3, `OPC_STORE));
         check("pmp: denied store is no store", {63'b0, uop.is_store}, 64'd0);
         check("pmp: denied store goes to the ALU", {61'b0, uop.fu}, {61'b0, QV_FU_ALU});
         check("pmp: denied store: no rd write", {63'b0, uop.rd_wen}, 64'd0);
@@ -815,8 +840,8 @@ module qv_decode_tb #(
         feed(encode_i(1, 7, 3'b000, 5, OPI), 1'b1, 4'd12);
         check("pmp: a page-fault marker from the fetch keeps its cause", {60'b0, uop.xcpt_cause}, 64'd12);
         // privilege decides: M is not denied by an unlocked region, privilege 2 is checked like S
-        priv = 2'b11; feed_pc = 64'h100C; feed(encode_i(1, 7, 3'b000, 5, OPI));
-        check("pmp: M, unlocked region, no denial", {63'b0, uop.xcpt}, 64'd0);
+        priv = 2'b11; feed_pc = 64'h1010; feed(encode_i(1, 7, 3'b000, 5, OPI));
+        check("pmp: M, outside every region: no denial", {63'b0, uop.xcpt}, 64'd0);
         priv = 2'b10; feed(encode_i(1, 7, 3'b000, 5, OPI));
         check("pmp: privilege 2 is denied like S", {63'b0, uop.xcpt}, 64'd1);
         priv = 2'b00; feed_pc = 64'h1000; feed(encode_i(1, 7, 3'b000, 5, OPI));
@@ -843,38 +868,51 @@ module qv_decode_tb #(
         pb_active = 1'b0; in_debug = 1'b0;
         feed(encode_i(1, 7, 3'b000, 5, OPI));
         check("pmp: the same fetch outside the run is denied again", {63'b0, uop.xcpt}, 64'd1);
+        // the second parcel is judged against its own region: region 0 TOR [0, 0x1008), region 2 TOR [0x1008, 0x2000)
+        // (region 1 off, its address region 2's bottom)
+        pmpaddr0 = 64'h1008 >> 2; pmpaddr1 = 64'h1008 >> 2; pmpaddr2 = 64'h2000 >> 2;
+        pmpcfg0 = {32'b0, 8'h00, 8'h0D, 8'h00, 8'h0D};
+        feed_pc = 64'h1006; feed(encode_i(1, 7, 3'b000, 5, OPI));
+        check("pmp: the two parcels in two regions, both executable", {63'b0, uop.xcpt}, 64'd0);
+        pmpcfg0 = {32'b0, 8'h00, 8'h09, 8'h00, 8'h0D};                      // region 2 without X
+        feed_pc = 64'h1006; feed(encode_i(1, 7, 3'b000, 5, OPI));
+        check("pmp: the second parcel's region without X: denied", {63'b0, uop.xcpt}, 64'd1);
+        check("pmp: ... xcpt_hi", {63'b0, uop.xcpt_hi}, 64'd1);
+        // an execute-denied NA4 word under an executable NAPOT region (errata E5 + E6): the lowest region holding the
+        // parcel decides
+        pmpcfg0 = {48'b0, 8'h1F, 8'h11}; pmpaddr0 = 64'h1004 >> 2; pmpaddr1 = 64'h3FF;   // 0: NA4 0x1004, R; 1: NAPOT [0, 8 KiB)
+        feed_pc = 64'h1000; feed(encode_i(1, 7, 3'b000, 5, OPI));
+        check("pmp: a 32-bit instruction below the NA4 word: fine", {63'b0, uop.xcpt}, 64'd0);
+        feed_pc = 64'h1002; feed({16'b0, 16'h0001}, 1'b0, 4'd0, 1'b1);
+        check("pmp: a 16-bit one right below it: fine", {63'b0, uop.xcpt}, 64'd0);
+        feed_pc = 64'h1002; feed(encode_i(1, 7, 3'b000, 5, OPI));
+        check("pmp: a 32-bit one reaching into it: denied", {63'b0, uop.xcpt}, 64'd1);
+        check("pmp: ... xcpt_hi", {63'b0, uop.xcpt_hi}, 64'd1);
+        feed_pc = 64'h1004; feed({16'b0, 16'h0001}, 1'b0, 4'd0, 1'b1);
+        check("pmp: a 16-bit one in it: denied", {63'b0, uop.xcpt}, 64'd1);
+        check("pmp: ... the first parcel", {63'b0, uop.xcpt_hi}, 64'd0);
         priv = 2'b11;
-        // a 32-bit instruction at pc[2:1] == 2 (pc[2] set, pc[1] clear) does not cross: one span only
-        pmpcfg0 = 64'h0D; pmpaddr0 = 64'h1010 >> 2; priv = 2'b01;
-        feed_pc = 64'h1004; feed(encode_i(1, 7, 3'b000, 5, OPI));
-        check("pmp: 32-bit instruction at pc[2:1] == 2 does not cross", {63'b0, uop.xcpt}, 64'd0);
-        // the second span is exactly [pc+8, pc+15]: a region that starts inside the first span's tail but
-        // holds all of it, and ends past pc+11, decides it
-        pmpaddr0 = 64'h1010 >> 2; pmpaddr1 = 64'h100C >> 2; pmpaddr2 = 64'h2000 >> 2;
-        pmpcfg0 = {32'b0, 8'h00, 8'h0D, 8'h00, 8'h0D};                      // 0: TOR [0,0x1010); 1: OFF; 2: TOR [0x100C,0x2000)
-        feed_pc = 64'h1006; feed(encode_i(1, 7, 3'b000, 5, OPI));
-        check("pmp: the second span [pc+8, pc+15] fits region 2, which starts at pc+6", {63'b0, uop.xcpt}, 64'd0);
-        // a fault in the second span is judged against that span's own region, not the first one's
-        pmpaddr2 = 64'h1014 >> 2;                                          // region 2 now ends inside [pc+8, pc+15] but past pc+11
-        feed_pc = 64'h1006; feed(encode_i(1, 7, 3'b000, 5, OPI));
-        check("pmp: the second span ends past region 2's top", {63'b0, uop.xcpt}, 64'd1);
+        feed_pc = 64'h1004; feed({16'b0, 16'h0001}, 1'b0, 4'd0, 1'b1);
+        check("pmp: ... but M is not limited by the unlocked NA4 region", {63'b0, uop.xcpt}, 64'd0);
+        priv = 2'b01;
         // a reserved compressed encoding at a denied pc is still a fetch fault, not an illegal instruction
         pmpcfg0 = 64'h0D; pmpaddr0 = 64'h1010 >> 2; pmpaddr1 = '0; pmpaddr2 = '0;
-        feed_pc = 64'h100C; feed({16'b0, 16'h0000}, 1'b0, 4'd0, 1'b1);
+        feed_pc = 64'h1010; feed({16'b0, 16'h0000}, 1'b0, 4'd0, 1'b1);
         check("pmp: beats a reserved compressed encoding", {60'b0, uop.xcpt_cause}, 64'd1);
-        // the lower regions also feed the first span: region 1 alone permits this fetch
+        // the lower regions also feed the first parcel: region 1 alone permits this fetch
         pmpcfg0 = {48'b0, 8'h0D, 8'h00};                                    // 0: OFF (its address is region 1's lower bound); 1: TOR
         pmpaddr0 = 64'h1000 >> 2; pmpaddr1 = 64'h1010 >> 2;
         feed_pc = 64'h1008; feed(encode_i(1, 7, 3'b000, 5, OPI));
         check("pmp: region 1 (TOR over region 0's address) permits the fetch", {63'b0, uop.xcpt}, 64'd0);
-        feed_pc = 64'h0FF8; feed(encode_i(1, 7, 3'b000, 5, OPI));
+        feed_pc = 64'h0FFC; feed(encode_i(1, 7, 3'b000, 5, OPI));
         check("pmp: below region 1's lower bound", {63'b0, uop.xcpt}, 64'd1);
         // back to the reset state for the rest
         pmpcfg0 = 64'h1F; pmpaddr0 = 64'h003F_FFFF_FFFF_FFFF; pmpaddr1 = '0; pmpaddr2 = '0; feed_pc = 64'h1000; priv = 2'b11;
 
         // ---------------- PMP on a translated fetch ----------------
-        // the spans are physical: {pg_lo, pc[11:0]} for the dword the instruction starts in, {pg_hi, (pc + 8)[11:0]} for the
-        // next one of a crossing instruction -- the virtual pc decides nothing. Same region as above: TOR [0, 0x1010), r-x.
+        // the parcels' addresses are physical: {pg_lo, pc[11:0]} for the first, and pc + 2 on pg_hi for the second
+        // of a crossing instruction (pg_lo otherwise) -- the virtual pc decides nothing. Same region as above:
+        // TOR [0, 0x1010), r-x.
         pmpcfg0 = 64'h0D; pmpaddr0 = 64'h1010 >> 2;
         priv = 2'b01;
         feed_xl = 1'b1;
@@ -885,31 +923,34 @@ module qv_decode_tb #(
         feed(encode_i(1, 7, 3'b000, 5, OPI));
         check("xl pmp: the virtual pc is inside the region, the physical page is outside: denied", {63'b0, uop.xcpt}, 64'd1);
         check("xl pmp: ... cause 1", {60'b0, uop.xcpt_cause}, 64'd1);
-        feed_pc = 64'h4000_0008; feed_pg_lo = 44'h1;
-        feed(encode_i(1, 7, 3'b000, 5, OPI));
-        check("xl pmp: physical [0x1008, 0x100F] inside", {63'b0, uop.xcpt}, 64'd0);
         feed_pc = 64'h4000_000C; feed_pg_lo = 44'h1;
         feed(encode_i(1, 7, 3'b000, 5, OPI));
-        check("xl pmp: physical [0x100C, 0x1013] runs past the top", {63'b0, uop.xcpt}, 64'd1);
-        // a crossing instruction: the second dword is in another page; its offset wraps within the page
+        check("xl pmp: physical [0x100C, 0x100F] inside", {63'b0, uop.xcpt}, 64'd0);
+        feed_pc = 64'h4000_000E; feed_pg_lo = 44'h1; feed_pg_hi = 44'h1;
+        feed(encode_i(1, 7, 3'b000, 5, OPI));
+        check("xl pmp: physical second parcel 0x1010 above the top: denied", {63'b0, uop.xcpt}, 64'd1);
+        check("xl pmp: ... xcpt_hi", {63'b0, uop.xcpt_hi}, 64'd1);
+        // a crossing instruction: the second parcel is in another page, at its offset 0
         feed_pc = 64'h4000_0FFE; feed_pg_lo = 44'h0; feed_pg_hi = 44'h1;
         feed(encode_i(1, 7, 3'b000, 5, OPI));
-        check("xl pmp: crossing, physical [0xFFE, 0x1005] and [0x1006, 0x100D] both inside", {63'b0, uop.xcpt}, 64'd0);
-        // the second span is [(pc + 8) mod 4 KiB in the second page, +7] = [0x1006, 0x100D]: a region ending at 0x100C cuts it
-        pmpaddr0 = 64'h100C >> 2;
+        check("xl pmp: crossing, physical parcels 0xFFE and 0x1000 both inside", {63'b0, uop.xcpt}, 64'd0);
+        pmpaddr0 = 64'h1000 >> 2;                                          // the region now ends at the page edge
         feed(encode_i(1, 7, 3'b000, 5, OPI));
-        check("xl pmp: crossing, the second span [0x1006, 0x100D] runs past a region ending at 0x100C: denied", {63'b0, uop.xcpt}, 64'd1);
+        check("xl pmp: crossing, the second parcel 0x1000 above a region ending there: denied", {63'b0, uop.xcpt}, 64'd1);
+        check("xl pmp: ... xcpt_hi", {63'b0, uop.xcpt_hi}, 64'd1);
         pmpaddr0 = 64'h1010 >> 2;
         feed_pg_hi = 44'h80;
         feed(encode_i(1, 7, 3'b000, 5, OPI));
         check("xl pmp: crossing, the second page outside the region: denied", {63'b0, uop.xcpt}, 64'd1);
         check("xl pmp: ... cause 1", {60'b0, uop.xcpt_cause}, 64'd1);
+        check("xl pmp: ... xcpt_hi", {63'b0, uop.xcpt_hi}, 64'd1);
         feed_pg_lo = 44'h80; feed_pg_hi = 44'h1;
         feed(encode_i(1, 7, 3'b000, 5, OPI));
         check("xl pmp: crossing, the first page outside the region: denied", {63'b0, uop.xcpt}, 64'd1);
+        check("xl pmp: ... the first parcel", {63'b0, uop.xcpt_hi}, 64'd0);
         feed_pg_lo = 44'h0; feed_pg_hi = 44'h80;
-        feed({16'b0, 16'h0001}, 1'b0, 4'd0, 1'b1);                                    // 16-bit at the same pc: no second dword
-        check("xl pmp: a 16-bit instruction at pc[2:1] == 3 needs no second span", {63'b0, uop.xcpt}, 64'd0);
+        feed({16'b0, 16'h0001}, 1'b0, 4'd0, 1'b1);                                    // 16-bit at the same pc: no second parcel
+        check("xl pmp: a 16-bit instruction at pc[2:1] == 3 has no second parcel", {63'b0, uop.xcpt}, 64'd0);
         // a Program Buffer run is not checked at all
         pb_active = 1'b1; in_debug = 1'b1;
         feed_pc = 64'h1000; feed_pg_lo = 44'h80; feed_pg_hi = 44'h80;
@@ -922,15 +963,16 @@ module qv_decode_tb #(
         check("xl marker: a page fault in the high dword: cause 12", {60'b0, uop.xcpt_cause}, 64'd12);
         check("xl marker: ... marked as the high dword's", {63'b0, uop.xcpt_hi}, 64'd1);
         check("xl marker: ... a fault", {63'b0, uop.xcpt}, 64'd1);
-        // ... but ref_core.sv looks at the low dword first: if the PMP denies it, the fetch ends there with an access fault
+        // ... but ref_core.sv looks at the first parcel first: if the PMP denies it, the fetch ends there
         feed_pg_lo = 44'h80;
         feed(32'h0, 1'b1, 4'd12);
-        check("xl marker: the low span denied: an access fault (cause 1) instead of the page fault", {60'b0, uop.xcpt_cause}, 64'd1);
+        check("xl marker: the first parcel denied: an access fault (cause 1) instead of the page fault", {60'b0, uop.xcpt_cause}, 64'd1);
         check("xl marker: ... still a fault", {63'b0, uop.xcpt}, 64'd1);
-        // ... and the high span is not looked at for a marker of the high dword: that dword's translation failed
+        check("xl marker: ... of the first parcel", {63'b0, uop.xcpt_hi}, 64'd0);
+        // ... and the second parcel is not looked at for a marker of the high dword: that dword's translation failed
         feed_pc = 64'h4000_0FFE; feed_pg_lo = 44'h0; feed_pg_hi = 44'h80; feed_hi = 1'b1;
         feed(32'h0, 1'b1, 4'd12);
-        check("xl marker: the high span (meaningless here) is not checked: cause 12 stands", {60'b0, uop.xcpt_cause}, 64'd12);
+        check("xl marker: the second parcel (meaningless here) is not checked: cause 12 stands", {60'b0, uop.xcpt_cause}, 64'd12);
         feed_pg_hi = '0;
         // a marker for the dword the instruction starts in is not overridden: its own translation failed, nothing was fetched
         feed_hi = 1'b0; feed_pg_lo = 44'h80;

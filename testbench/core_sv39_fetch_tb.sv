@@ -1054,7 +1054,8 @@ module core_sv39_fetch_tb;
 
         check("E: crossing instr1 (denied HI half) never executed (x13==0)", dut_e.core0.regfile0.gp_registers[13], 64'd0);
         check("E: crossing instr1 produces mcause==1 (instruction access fault)", mcause_e, 64'd1);
-        check("E: mtval == crossing instr1's own PC (vpn0=7 base + 0xFFE)", mtval_e, 64'h40407FFE);
+        // errata E6: an access fault in the second parcel reports that parcel's address, pc + 2 (the page start)
+        check("E: mtval == crossing instr1's second parcel (vpn0=8 base, pc + 2)", mtval_e, 64'h40408000);
         check({"E: crossing instr2 (permitted HI half, reached via mret after instr1's ",
             "trap) executed cleanly (x14==555) -- the direct regression proof: under the ",
             "bug this fixes, instr2 would ALSO have spuriously faulted, reusing instr1's ",

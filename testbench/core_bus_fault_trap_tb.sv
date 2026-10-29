@@ -299,8 +299,9 @@ module core_bus_fault_trap_tb;
 
         // ---- Test B: dword-crossing fetch-hi fault ----
         check("B: mcause == 1 (instruction access fault)", dut.core0.regfile0.gp_registers[10], 64'd1);
-        check("B: mtval == mepc == the crossing instruction's own address (not the failed S_FETCH_HI address)",
-            dut.core0.regfile0.gp_registers[11], 64'h1FE);
+        // errata E6: a fault in the instruction's second parcel reports that parcel's address (pc + 2), mepc the pc
+        check("B: mtval == the crossing instruction's second parcel (pc + 2, the failed second dword's start)",
+            dut.core0.regfile0.gp_registers[11], 64'h200);
         check("B: resumed cleanly", dut.core0.regfile0.gp_registers[3], 64'd222);
 
         // ---- Test C: plain load fault ----

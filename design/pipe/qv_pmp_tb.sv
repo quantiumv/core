@@ -3,17 +3,18 @@
 /*
  * qv_pmp_tb -- standalone test for design/pipe/qv_pmp.sv.
  *
- * Two parts. Directed cases pin the rules ref_core.sv has, the odd ones
- * included: a span that only partly overlaps a region is no match, TOR
- * region 0 starts at 0, an 8-byte fetch span can never fit NA4, the
- * lowest matching region wins even when a later one would allow, an
- * unlocked match never denies M mode, a locked one does, privilege 2'b10
- * is not M, and no match denies everything below M.
+ * Two parts. Directed cases pin the spec's rules (errata E5): the lowest
+ * region holding any byte of the access decides, and an access it holds
+ * only part of fails, in M mode too, even when a later region would hold
+ * it whole; TOR region 0 starts at 0 and a TOR region is empty unless its
+ * bottom is below its top; an unlocked deciding region never limits M, a
+ * locked one does; privilege 2'b10 is not M; no region at all denies
+ * everything below M.
  *
  * Then a randomized sweep against a model written differently (a loop
- * over the regions, region bounds worked out as ranges) over random
- * configurations whose addresses are kept small enough that spans really
- * do fall on, across and beside the region edges.
+ * over the regions, bounds as inclusive ranges, sizes from counting
+ * trailing ones) over random configurations whose addresses are kept small
+ * enough that spans really do fall on, across and beside the region edges.
  */
 module qv_pmp_tb;
     int   pass_count = 0;
@@ -67,11 +68,10 @@ module qv_pmp_tb;
         case (a)
             A_OFF: valid = 1'b0;
             A_TOR: begin
-                if (i == 0) lo = 64'd0;
-                else begin prev = pas[i-1][53:0]; lo = {8'b0, prev, 2'b0}; end
-                if (p == 0 || {8'b0, p, 2'b0} == 64'd0) hi = 64'd0 - 64'd1;      // top 0: nothing is below it
-                else hi = {8'b0, p, 2'b0} - 64'd1;
-                if ({8'b0, p, 2'b0} == 64'd0) valid = 1'b0;
+                prev = (i == 0) ? 54'd0 : pas[i-1][53:0];
+                lo = {8'b0, prev, 2'b0};
+                hi = {8'b0, p, 2'b0} - 64'd1;
+                if (!(prev < p)) valid = 1'b0;                                    // empty
             end
             A_NA4: begin
                 lo = {8'b0, p, 2'b0};
@@ -88,31 +88,30 @@ module qv_pmp_tb;
         endcase
     endtask
 
-    task automatic in_region(input int i, input logic [63:0] a0, input logic [63:0] a1, output logic res);
+    // whether region i holds any byte of [a0, a1] (touch) and all of them (whole)
+    task automatic in_region(input int i, input logic [63:0] a0, input logic [63:0] a1, output logic touch,
+                             output logic whole);
         bit          valid;
         logic [63:0] lo, hi;
-        logic [1:0]  a;
         region_range(i, valid, lo, hi);
-        a = cfg[8*i+3 +: 2];
-        if (!valid)                  res = 1'b0;
-        else if (a == A_NA4)         res = (a0[55:2] == lo[55:2]) && (a1[55:2] == lo[55:2]);      // bits [55:2] only
-        // TOR compares the two ends separately and region 0 has no lower bound, so a span that
-        // wraps around 2^64 can "match" -- ref_core.sv's comparisons, kept as they are
-        else if (a == A_TOR)         res = (i == 0) ? (a1 <= hi) : ((a0 >= lo) && (a1 <= hi));
-        else                         res = (a0 >= lo) && (a1 <= hi) && (a0 <= hi) && (a1 >= lo);  // NAPOT: above bit 55 is never inside
+        touch = valid && !(a1 < lo || a0 > hi);
+        whole = valid && (a0 >= lo) && (a1 <= hi);
     endtask
 
     task automatic model(input logic [63:0] a0, input logic [63:0] a1, input logic [1:0] p,
                          output logic mr, output logic mw, output logic mx);
         int hit;
-        logic l, r, w, x, inr;
+        logic l, r, w, x, t, wh, hit_whole;
         hit = -1;
+        hit_whole = 1'b0;
         for (int i = 0; i < 4; i++) begin
-            in_region(i, a0, a1, inr);
-            if (hit < 0 && inr) hit = i;
+            in_region(i, a0, a1, t, wh);
+            if (hit < 0 && t) begin hit = i; hit_whole = wh; end
         end
         if (hit < 0) begin
             mr = (p == 2'b11); mw = (p == 2'b11); mx = (p == 2'b11);
+        end else if (!hit_whole) begin
+            mr = 1'b0; mw = 1'b0; mx = 1'b0;                 // the deciding region holds only part of it
         end else begin
             l = cfg[8*hit+7]; r = cfg[8*hit]; w = cfg[8*hit+1]; x = cfg[8*hit+2];
             if (p == 2'b11 && !l) begin mr = 1'b1; mw = 1'b1; mx = 1'b1; end
@@ -167,14 +166,15 @@ module qv_pmp_tb;
         acc(64'h0,   8, 2'b01);  expect_rwx("tor0: bottom", 1, 0, 1);
         acc(64'hF8,  8, 2'b01);  expect_rwx("tor0: last dword", 1, 0, 1);
         acc(64'hFC,  4, 2'b01);  expect_rwx("tor0: last word", 1, 0, 1);
-        acc(64'hFC,  8, 2'b01);  expect_rwx("tor0: spills over the top, no match", 0, 0, 0);
+        acc(64'hFC,  8, 2'b01);  expect_rwx("tor0: spills over the top: partial, fails", 0, 0, 0);
         acc(64'h100, 4, 2'b01);  expect_rwx("tor0: just above", 0, 0, 0);
-        acc(64'hFC,  8, 2'b11);  expect_rwx("tor0: partial overlap, M, no match", 1, 1, 1);
+        acc(64'hFC,  8, 2'b11);  expect_rwx("tor0: partial overlap fails in M too", 0, 0, 0);
 
         // TOR region 1 above it: [0x100, 0x200) read+write
         cfg[15:8] = cfgb(0, A_TOR, 0, 1, 1);  pa1 = 64'h200 >> 2;
         acc(64'h100, 8, 2'b01);  expect_rwx("tor1: bottom", 1, 1, 0);
-        acc(64'hFC,  8, 2'b01);  expect_rwx("tor1: straddles tor0/tor1, no match", 0, 0, 0);
+        acc(64'hFC,  8, 2'b01);  expect_rwx("tor1: straddles tor0/tor1: tor0 decides, partial", 0, 0, 0);
+        acc(64'hFC,  8, 2'b11);  expect_rwx("tor1: straddles tor0/tor1, M: fails", 0, 0, 0);
         acc(64'h1F8, 8, 2'b00);  expect_rwx("tor1: top, U", 1, 1, 0);
 
         // NA4 at 0x300: a 4-byte access fits, a fetch span of 8 never does
@@ -182,6 +182,9 @@ module qv_pmp_tb;
         acc(64'h300, 4, 2'b01);  expect_rwx("na4: the word", 1, 1, 1);
         acc(64'h300, 1, 2'b01);  expect_rwx("na4: a byte in it", 1, 1, 1);
         acc(64'h300, 8, 2'b01);  expect_rwx("na4: an 8-byte span never fits", 0, 0, 0);
+        acc(64'h300, 8, 2'b11);  expect_rwx("na4: an 8-byte span, M: fails too", 0, 0, 0);
+        acc(64'h2FC, 8, 2'b11);  expect_rwx("na4: a dword ending in it, M: fails", 0, 0, 0);
+        acc(64'h302, 2, 2'b01);  expect_rwx("na4: a parcel in it", 1, 1, 1);
         acc(64'h304, 4, 2'b01);  expect_rwx("na4: the next word", 0, 0, 0);
         acc(64'h2FE, 4, 2'b01);  expect_rwx("na4: straddling its start", 0, 0, 0);
 
@@ -189,7 +192,7 @@ module qv_pmp_tb;
         cfg[31:24] = cfgb(0, A_NAPOT, 0, 0, 1);  pa3 = (64'h400 >> 2) | 64'h7;
         acc(64'h400, 8, 2'b01);  expect_rwx("napot: start", 1, 0, 0);
         acc(64'h438, 8, 2'b01);  expect_rwx("napot: last dword", 1, 0, 0);
-        acc(64'h43C, 8, 2'b01);  expect_rwx("napot: spills over, no match", 0, 0, 0);
+        acc(64'h43C, 8, 2'b01);  expect_rwx("napot: spills over: partial, fails", 0, 0, 0);
         acc(64'h3F8, 8, 2'b01);  expect_rwx("napot: below, no match", 0, 0, 0);
         // an address above bit 55 never matches a NAPOT region
         acc(64'h0100_0000_0000_0400, 8, 2'b01);  expect_rwx("napot: bit 56 set", 0, 0, 0);
@@ -207,6 +210,22 @@ module qv_pmp_tb;
         acc(64'h10,   8, 2'b10);  expect_rwx("privilege 2 is checked like S/U", 0, 0, 0);
         cfg[7:0]  = cfgb(1, A_NAPOT, 1, 0, 1);                                // locked, read+execute
         acc(64'h10,   8, 2'b11);  expect_rwx("locked region's own permissions apply to M", 1, 0, 1);
+
+        // the lowest region touching the access decides even when a later one holds it whole
+        cfg = '0;
+        cfg[7:0]   = cfgb(0, A_NA4, 1, 1, 1);    pa0 = 64'h1004 >> 2;           // [0x1004, 0x1007] all
+        cfg[15:8]  = cfgb(0, A_NAPOT, 1, 1, 1);  pa1 = (64'h0 >> 2) | 64'h3FF;   // [0, 8 KiB) all
+        acc(64'h1000, 8, 2'b01);  expect_rwx("partial in region 0, whole in region 1: fails", 0, 0, 0);
+        acc(64'h1000, 4, 2'b01);  expect_rwx("beside region 0, whole in region 1", 1, 1, 1);
+        acc(64'h1004, 4, 2'b01);  expect_rwx("whole in region 0", 1, 1, 1);
+        // an empty TOR region (bottom not below top) holds nothing
+        cfg = '0;
+        cfg[7:0]   = cfgb(0, A_NAPOT, 1, 1, 1);  pa0 = 64'h3FF;                  // [0, 8 KiB) all
+        cfg[15:8]  = cfgb(1, A_TOR, 0, 0, 0);    pa1 = 64'h3FF;                  // [0x...1FF8, 0x...1FF8): empty
+        acc(64'h10,   8, 2'b01);  expect_rwx("region 0 decides before an empty TOR", 1, 1, 1);
+        cfg[7:0]   = cfgb(0, A_OFF, 0, 0, 0);
+        acc(64'h10,   8, 2'b01);  expect_rwx("an empty TOR region matches nothing, S", 0, 0, 0);
+        acc(64'h10,   8, 2'b11);  expect_rwx("an empty TOR region matches nothing, M", 1, 1, 1);
 
         // L only matters at M: it does not give S/U anything
         cfg = '0;

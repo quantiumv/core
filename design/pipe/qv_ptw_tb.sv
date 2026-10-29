@@ -547,14 +547,17 @@ module qv_ptw_tb #(
         end
 
         // ---------------- the PMP judges the whole dword of a PTE read ----------------
-        // The level-0 PTE of the walk below is the dword at 0x4018. A 4-byte no-permission region over its first half only
-        // overlaps it in part: that is no match, and the open region behind it decides (the walk works).
+        // The level-0 PTE of the walk below is the dword at 0x4018. A 4-byte no-permission region over its first half
+        // holds it only in part: the lowest region touching the read decides, and a partial match fails it (errata E5),
+        // whatever the open region behind it says -- an access fault, with no bus beat for that PTE.
         std_map(V|R|W|A|D);
         lat_min = 0; lat_max = 0;
         pmpaddr0 = 64'h4018 >> 2; pmpaddr1 = 64'h3FFFFFFF; pmpaddr2 = 64'd0;
         pmpcfg0  = {48'b0, 8'h1F, 8'h10};                              // region 0 NA4 --- ; region 1 NAPOT 8 GB rwx
         walk_d(va_of(9'd1, 9'd2, 9'd3, 12'h0), 1'b0, 2'b01, 1'b0, 1'b0, ROOT, 100);
-        check("PMP: a 4-byte region over half of the PTE is no match (the PTE read is allowed)", b(got_done) + b(got_ok) + 64'(beat_log_n), 64'd5);
+        check("PMP: a 4-byte region over half of the PTE: the walk ends", b(got_done), 64'd1);
+        check("PMP: ... with an access fault", {62'b0, got_ok, got_af}, {62'b0, 1'b0, 1'b1});
+        check("PMP: ... and no beat for the level-0 PTE", 64'(beat_log_n), 64'd2);
         // An 8-byte read-only region exactly over it matches, even though a no-permission page region follows it: the
         // dword read is inside region 0. (A span longer than the dword would overlap region 0 only in part and fall to region 1.)
         pmpaddr0 = 64'h4018 >> 2; pmpaddr1 = (64'h4000 >> 2) | 64'h1FF; pmpaddr2 = 64'h3FFFFFFF;

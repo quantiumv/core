@@ -246,3 +246,13 @@ m10_debug_test:
 	riscv64-unknown-elf-ld -T link.ld -o m10_debug_test.elf crt0.o m10_debug_test.o
 	riscv64-unknown-elf-objdump -d m10_debug_test.elf
 	riscv64-unknown-elf-objcopy -O verilog -j .text -j .rodata -j .data --verilog-data-width=8 m10_debug_test.elf m10_debug_test.hex
+
+# Errata E4-E7 (the ACT refresh that declared PMP and Sv39): firmware/pmp_spec_test.s checks the PMP CSR
+#   existence rule, xtvec MODE (WARL and vectored interrupts), PMP partial overlap and per-parcel fetch PMP;
+#   testbench/core_pmp_spec_tb.sv runs it on either core.
+pmp_spec_test:
+	riscv64-unknown-elf-as $(ASFLAGS) crt0.s -o crt0.o
+	riscv64-unknown-elf-as $(PRIV_ASFLAGS) pmp_spec_test.s -o pmp_spec_test.o
+	riscv64-unknown-elf-ld -T link.ld -o pmp_spec_test.elf crt0.o pmp_spec_test.o
+	riscv64-unknown-elf-objdump -d pmp_spec_test.elf
+	riscv64-unknown-elf-objcopy -O verilog -j .text -j .rodata -j .data --verilog-data-width=8 pmp_spec_test.elf pmp_spec_test.hex
