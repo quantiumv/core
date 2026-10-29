@@ -163,6 +163,7 @@ class Program:
         self.rng = random.Random(args.seed)
         self.entry: list[str] = []
         self.handlers: list[str] = []
+        self.tvec_tables: list[str] = []      # handlers entered through a vectored xtvec (MODE 1)
         self.misc_data: list[str] = []
         self.pagetable_data: list[str] = []
         self.ptpmp_data: list[str] = []       # --sv39: the L0 table at PMPT_PA
@@ -2135,18 +2136,32 @@ def emit_irq_setup(p: Program):
     p.e("    csrw    mie, x6")
 
 
+def emit_tvec(p: Program, csr: str, handler: str):
+    """Point mtvec/stvec at a handler, now and then with MODE bits: MODE 1 is vectored (an interrupt
+    enters at BASE + 4 * cause, so BASE is a table of jumps to the handler, emit_tvec_tables), 2 and
+    3 are reserved (the write keeps the old MODE, 0 from reset)."""
+    mode = p.rng.choice([1, 2, 3]) if (not p.args.sail_safe and p.rng.random() < 0.3) else 0
+    if mode == 1:
+        p.tvec_tables.append(handler)
+    p.e(f"    la      x6, {handler + '_vectors' if mode == 1 else handler}")
+    if mode:
+        p.e(f"    addi    x6, x6, {mode}")
+    p.e(f"    csrw    {csr}, x6")
+
+
+def emit_tvec_tables(p: Program):
+    # one 4-byte jump per cause: an exception enters at entry 0, an interrupt at its cause's entry
+    for h in p.tvec_tables:
+        p.handlers += ["    .balign 4", "    .option push", "    .option norvc", f"{h}_vectors:",
+                       *[f"    j       {h}" for _ in range(16)], "    .option pop"]
+
+
 def emit_entry_preamble(p: Program):
     a = p.args
     p.e("_start:")
-    p.e("    la      x6, m_trap_handler")
-    if not a.sail_safe and p.rng.random() < 0.3:
-        p.e(f"    addi    x6, x6, {p.rng.choice([1, 2, 3])}")     # MODE bits: both cores take direct mode only
-    p.e("    csrw    mtvec, x6")
+    emit_tvec(p, "mtvec", "m_trap_handler")
     if a.priv == "msu":
-        p.e("    la      x6, s_trap_handler")
-        if not a.sail_safe and p.rng.random() < 0.3:
-            p.e(f"    addi    x6, x6, {p.rng.choice([1, 2, 3])}")
-        p.e("    csrw    stvec, x6")
+        emit_tvec(p, "stvec", "s_trap_handler")
         emit_trap_delegation(p)
         if a.sv39 and p.priv_ext:
             p.body_u = not p.body_priv2 and p.rng.random() < 0.4      # the page flags follow the body's privilege
@@ -2320,6 +2335,7 @@ def build_program(args) -> Program:
     emit_main_body(p)
     emit_epilogue(p)
     emit_handlers(p)
+    emit_tvec_tables(p)
     p.entry.extend(p.subroutines)
     p.misc_data += ["trap_count:", "    .zero   8", "tohost:", "    .zero   8"]
     if p.args.pmp or (p.args.sv39 and p.args.sv39_fetch):
