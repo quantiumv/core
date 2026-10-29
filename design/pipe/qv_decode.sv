@@ -35,17 +35,19 @@
  * The privilege rules (CSR privilege, MRET/SRET, TSR, TVM) read the
  * current privilege and mstatus bits as inputs; see the port comment.
  *
- * PMP is checked here, per instruction, as ref_core.sv checks a fetch: the
- * dword the instruction starts in, as the span [pc, pc+7], and -- for a
- * 32-bit instruction at pc[2:1] == 2'b11, which crosses into the next
- * dword -- [pc+8, pc+15] too, at the raw privilege (MPRV never applies to
- * fetch). With translation on (fe_instr_t.xl) the spans are the physical
- * addresses fetch found, {pg_lo, pc[11:0]} and {pg_hi, (pc+8)[11:0]}. A
- * denial is a fetch access fault (cause 1, mtval = pc), the same
- * marker a bus error gets. Unlike ref_core.sv the bus request has already been
- * made by then; a denied fetch is just never used. The low dword goes
- * first, as in ref_core.sv: a fault marker for the high dword (a page fault)
- * gives way to a denial of the low span.
+ * PMP is checked here, per instruction and per 2-byte parcel, as Sail
+ * fetches (errata E6): the first parcel [pc, pc+1] and, for a 32-bit
+ * instruction, the second [pc+2, pc+3], at the raw privilege (MPRV never
+ * applies to fetch). With translation on (fe_instr_t.xl) they are the
+ * physical addresses fetch found: {pg_lo, pc[11:0]}, and the second
+ * parcel's page is pg_hi when the instruction crosses into the next dword
+ * (pc[2:1] == 2'b11), pg_lo otherwise. A denial is a fetch access fault
+ * (cause 1), the same marker a bus error gets; one in the second parcel
+ * marks the uop xcpt_hi, so mtval is pc + 2. Unlike ref_core.sv the bus
+ * request has already been made by then; a denied fetch is just never used.
+ * The parcels go in order, as in ref_core.sv: a denial of the first beats a
+ * fault marker of the second (a page fault in the next dword, say), which
+ * beats a denial of the second.
  *
  * Execute triggers (the two mcontrol6 slots, ref_core.sv's trig0/trig1) are
  * matched here, on the instruction's own pc and the current privilege, and
@@ -144,32 +146,34 @@ module qv_decode #(
     wire c_illegal = i_iq_data.rvc && c_expand_illegal;
 
     // ---------------- PMP on the fetch ----------------
-    // The spans are physical addresses. Fetch not translated (xl low): the pc is the address. Translated: the dword
-    // the instruction starts in is at {pg_lo, pc[11:0]}, the next one (for a 32-bit instruction that crosses into
-    // it) at {pg_hi, (pc + 8)[11:0]}, each as a window of 8 bytes from there, as ref_core.sv has it.
-    wire        fetch_hi_taken = !i_iq_data.rvc && (i_iq_data.pc[2:1] == 2'b11);
-    wire [11:0] pc_hi_off = i_iq_data.pc[11:0] + 12'd8;
+    // Per 2-byte parcel, at physical addresses. Fetch not translated (xl low): the pc is the address. Translated:
+    // the first parcel is at {pg_lo, pc[11:0]}, the second (a 32-bit instruction's) at pc + 2 on pg_hi if the
+    // instruction crosses into the next dword, pg_lo if not.
+    wire        crosses   = !i_iq_data.rvc && (i_iq_data.pc[2:1] == 2'b11);
+    wire [11:0] pc_hi_off = i_iq_data.pc[11:0] + 12'd2;
+    wire [43:0] pg_p2     = crosses ? i_iq_data.pg_hi : i_iq_data.pg_lo;
     wire [63:0] pa_lo = i_iq_data.xl ? {8'b0, i_iq_data.pg_lo, i_iq_data.pc[11:0]} : i_iq_data.pc;
-    wire [63:0] pa_hi = i_iq_data.xl ? {8'b0, i_iq_data.pg_hi, pc_hi_off}          : i_iq_data.pc + 64'd8;
+    wire [63:0] pa_hi = i_iq_data.xl ? {8'b0, pg_p2, pc_hi_off}                    : i_iq_data.pc + 64'd2;
     logic       exec_ok_lo, exec_ok_hi;
     /* verilator lint_off PINCONNECTEMPTY */
     qv_pmp pmp_lo (
         .i_pmpcfg0(i_pmpcfg0), .i_pmpaddr0(i_pmpaddr0), .i_pmpaddr1(i_pmpaddr1),
         .i_pmpaddr2(i_pmpaddr2), .i_pmpaddr3(i_pmpaddr3),
-        .i_addr(pa_lo), .i_end(pa_lo + 64'd7), .i_priv(i_priv),
+        .i_addr(pa_lo), .i_end(pa_lo + 64'd1), .i_priv(i_priv),
         .o_read_ok(), .o_write_ok(), .o_exec_ok(exec_ok_lo)
     );
     qv_pmp pmp_hi (
         .i_pmpcfg0(i_pmpcfg0), .i_pmpaddr0(i_pmpaddr0), .i_pmpaddr1(i_pmpaddr1),
         .i_pmpaddr2(i_pmpaddr2), .i_pmpaddr3(i_pmpaddr3),
-        .i_addr(pa_hi), .i_end(pa_hi + 64'd7), .i_priv(i_priv),
+        .i_addr(pa_hi), .i_end(pa_hi + 64'd1), .i_priv(i_priv),
         .o_read_ok(), .o_write_ok(), .o_exec_ok(exec_ok_hi)
     );
     /* verilator lint_on PINCONNECTEMPTY */
     wire lo_denied = !i_pb_active && !exec_ok_lo;
-    wire pmp_fault = lo_denied || (!i_pb_active && fetch_hi_taken && !exec_ok_hi);
-    // ref_core.sv fetches the low dword first and ends there when the PMP denies it: a fault found later, in the high
-    // dword (a page fault, say), never happens. The marker of such a fault gives way to the denial.
+    wire hi_denied = !i_pb_active && !i_iq_data.rvc && !exec_ok_hi;
+    wire pmp_fault = lo_denied || hi_denied;
+    // ref_core.sv fetches the first parcel first and ends there when the PMP denies it: a fault found later, in the
+    // second (a page fault in the next dword, say), never happens. The marker of such a fault gives way to the denial.
     wire marker_lo_denied = i_iq_data.xcpt && i_iq_data.xcpt_hi && lo_denied;
 
     // a denied fetch decodes as the inert placeholder too: nothing downstream may act on its bits
@@ -534,6 +538,7 @@ module qv_decode #(
         end else if (pmp_fault) begin
             uop_d.xcpt       = 1'b1;
             uop_d.xcpt_cause = 4'd1;
+            uop_d.xcpt_hi    = !lo_denied;           // the second parcel's: mtval = pc + 2
         end else if (c_illegal || !implemented || csr_illegal || priv_illegal || fp_illegal || csr_pmp_absent) begin
             uop_d.xcpt       = 1'b1;
             uop_d.xcpt_cause = 4'd2;

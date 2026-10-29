@@ -198,6 +198,21 @@ it is cited with its directory.
   logic. The fetch stream's span was still 8 bytes in this commit (E6).
   Tests: `core_pmp_spec_tb` checks 14-17, `qv_pmp_tb` (its model is the
   spec's rule now).
+- **E6 (2026-10-29, found by ACT `pmpsm_napot_legal_lxwr` and the
+  `pmpsm_*_boundary` fetch cases once the configs declared PMP; fixed
+  together in `design/pipe/qv_decode.sv`, `qv_commit.sv` and `ref_core.sv`).**
+  The fetch PMP check covered [pc, pc+7] (and [pc+8, pc+15] for a 32-bit
+  instruction crossing a dword), so an instruction next to a denied region
+  faulted although none of its bytes were in it. The spec checks the bytes
+  the instruction occupies; Sail checks each 2-byte parcel, so a 32-bit
+  instruction whose second parcel is denied reports mtval = pc + 2. Both
+  cores now check [pc, pc+1] and, for a 32-bit instruction, [pc+2, pc+3]
+  (in the next dword or the next page for a crossing one), and a fault in
+  the second parcel, PMP or translation, reports pc + 2. This also fixes B10:
+  a page fault in the second dword of a crossing instruction reported pc + 8
+  and an access fault there pc. Tests: `core_pmp_spec_tb` checks 18-28,
+  `qv_decode_tb`, `qv_commit_tb`, `core_sv39_fetch_tb` E,
+  `core_bus_fault_trap_tb` B.
 
 ## Feature additions
 

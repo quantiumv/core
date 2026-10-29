@@ -646,7 +646,7 @@ module ref_core
      * out; only the low half's own check can gate whether that first
      * request is issued at all.
      */
-    logic pmp_fetchlo_fault, pmp_fetchhi_fault;
+    logic pmp_fetchlo_fault, pmp_fetchhi_fault, pmp_fetchmid_fault;
     logic pmp_load_fault, pmp_store_fault;
     /*
      * trap_taken: forward-declared here (assigned near exc_code far
@@ -810,7 +810,9 @@ module ref_core
      * the predicted next PC while prefetching.
      */
     wire [(`WORD_SIZE - 1):0] fetch_pc = pc;
-    wire [(`WORD_SIZE - 1):0] fetch_hi_vaddr = fetch_pc + `WORD_SIZE'(8);
+    // errata E6: the second parcel of a crossing instruction, at the start of the next dword (it was pc + 8, the
+    // same dword, which the walker then reported as mtval: erratum B10)
+    wire [(`WORD_SIZE - 1):0] fetch_hi_vaddr = fetch_pc + `WORD_SIZE'(2);
     /*
      * P1 (in-order-pipeline-prep, first milestone of the OoO staging
      * plan): every register below that holds ONE INSTRUCTION's own
@@ -1379,6 +1381,8 @@ module ref_core
      */
     wire fetch_hi_needed = (fetch_pc[2:1] == 2'b11) && (wb_fetch_dat_i[49:48] == 2'b11);
     wire fetch_hi_taken  = wb_fetch_ok && fetch_hi_needed;
+    // errata E6: a 32-bit instruction at pc[2:1] == 01 has its second parcel in the next word of this dword
+    wire fetch_mid_taken = wb_fetch_ok && (fetch_pc[2:1] == 2'b01) && (wb_fetch_dat_i[17:16] == 2'b11);
 
     /*
      * Pipelining P2 step 2: fstate's own progression -- see its
@@ -1895,6 +1899,8 @@ module ref_core
      * forward).
      */
     logic        fetch_fault_q [SLOT_COUNT];
+    // errata E6: the access fault in fetch_fault_q is in the instruction's second parcel: mtval = pc + 2
+    logic        fetch_fault_hi_q [SLOT_COUNT];
     always_ff @(posedge clk) begin
         /*
          * Pipelining P2 step 2: gated on fetch_translate_active now --
@@ -1922,6 +1928,7 @@ module ref_core
             // real cause-12 record is fetch_lo_fault_q[fetch_slot], set
             // by the TLB-hit-resolve always_ff elsewhere in this file.
             fetch_fault_q[fetch_slot] <= 1'b0;
+            fetch_fault_hi_q[fetch_slot] <= 1'b0;
         end else if (state == S_FETCH && (fetch_redirect_cycle || !fetch_lo_resolved_q[fetch_slot])) begin
             // Sv39 (Milestone 3): redirecting to S_PTW this cycle --
             // fetch_paddr (hence pmp_fetchlo_fault, computed off it) is
@@ -1950,6 +1957,7 @@ module ref_core
             // written as an explicit priority arm anyway, not relying on
             // that exclusivity.
             fetch_fault_q[fetch_slot] <= 1'b1;
+            fetch_fault_hi_q[fetch_slot] <= 1'b0;
         end else if (state == S_FETCH && wb_fetch_done) begin
             instr_line_q[fetch_slot]  <= wb_fetch_dat_i;
             // pmp_fetchhi_fault is NOT consulted here while translating --
@@ -1962,7 +1970,8 @@ module ref_core
             // own S_FETCH_HI block below) capture the REAL, resolved
             // pmp_fetchhi_fault result once it's actually valid.
             crossed_q[fetch_slot]     <= fetch_hi_taken;
-            fetch_fault_q[fetch_slot] <= wb_fetch_err_i;
+            fetch_fault_q[fetch_slot] <= wb_fetch_err_i || pmp_fetchmid_fault;
+            fetch_fault_hi_q[fetch_slot] <= !wb_fetch_err_i && pmp_fetchmid_fault;
         end
         end else begin
             /*
@@ -1987,14 +1996,17 @@ module ref_core
              */
             if (fstate_lo_denied_now) begin
                 fetch_fault_q[fetch_slot] <= 1'b1;
+                fetch_fault_hi_q[fetch_slot] <= 1'b0;
             end else if (fstate_lo_done_now) begin
                 instr_line_q[fetch_slot]  <= wb_fetch_dat_i;
                 crossed_q[fetch_slot]     <= fetch_hi_taken && !pmp_fetchhi_fault;
-                fetch_fault_q[fetch_slot] <= wb_fetch_err_i || (fetch_hi_taken && pmp_fetchhi_fault);
+                fetch_fault_q[fetch_slot] <= wb_fetch_err_i || (fetch_hi_taken && pmp_fetchhi_fault) || pmp_fetchmid_fault;
+                fetch_fault_hi_q[fetch_slot] <= !wb_fetch_err_i && ((fetch_hi_taken && pmp_fetchhi_fault) || pmp_fetchmid_fault);
             end
             if (fstate_hi_done_now) begin
                 instr_hi_q[fetch_slot]    <= wb_fetch_dat_i[15:0];
                 fetch_fault_q[fetch_slot] <= wb_fetch_err_i;
+                fetch_fault_hi_q[fetch_slot] <= wb_fetch_err_i;
             end
         end
         /*
@@ -2020,6 +2032,7 @@ module ref_core
             // by an earlier fetch on this slot was never cleared here
             // either.
             fetch_fault_q[fetch_slot] <= 1'b0;
+            fetch_fault_hi_q[fetch_slot] <= 1'b0;
         end else if (state == S_FETCH_HI && fetch_translate_active && fetch_hi_resolved_q[fetch_slot] && pmp_fetchhi_fault) begin
             // The real, resolved HI-half PMP check, denied -- checked
             // ahead of wb_fetch_done below, mirroring pmp_fetchlo_fault's own
@@ -2027,9 +2040,11 @@ module ref_core
             // for it (wb_fetch_master_drive's own suppression), so there's no
             // wb_fetch_dat_i to capture.
             fetch_fault_q[fetch_slot] <= 1'b1;
+            fetch_fault_hi_q[fetch_slot] <= 1'b1;
         end else if (state == S_FETCH_HI && wb_fetch_done) begin
             instr_hi_q[fetch_slot]    <= wb_fetch_dat_i[15:0];
             fetch_fault_q[fetch_slot] <= wb_fetch_err_i;
+            fetch_fault_hi_q[fetch_slot] <= wb_fetch_err_i;
         end
         /*
          * Sv39 (Milestone 3): a PMP-denied or bus-errored PTE read is an
@@ -2047,8 +2062,10 @@ module ref_core
         // DESTINATION register here is fetch-named (ptw_is_mem==0).
         if (state == S_PTW && ptw_pmp_fault && !ptw_is_mem) begin
             fetch_fault_q[fetch_slot] <= 1'b1;
+            fetch_fault_hi_q[fetch_slot] <= (ptw_reason_q[cur_slot] == PTW_REASON_HI);
         end else if (state == S_PTW && wb_mem_done && !ptw_is_mem) begin
             fetch_fault_q[fetch_slot] <= wb_mem_err_i;
+            fetch_fault_hi_q[fetch_slot] <= wb_mem_err_i && (ptw_reason_q[cur_slot] == PTW_REASON_HI);
         end
     end
 
@@ -2267,7 +2284,7 @@ module ref_core
     /* verilator lint_off UNUSEDSIGNAL */
     // Pipelining P2 step 3a: [fetch_slot] -- see tlb_hit_active's own
     // matching comment.
-    wire [(`WORD_SIZE - 1):0] fetch_paddr_hi = fetch_translate_active ? fetch_hi_paddr_q[fetch_slot] : (fetch_paddr + `WORD_SIZE'(8));
+    wire [(`WORD_SIZE - 1):0] fetch_paddr_hi = fetch_translate_active ? fetch_hi_paddr_q[fetch_slot] : (fetch_paddr + `WORD_SIZE'(2));
     /* verilator lint_on UNUSEDSIGNAL */
     wire [31:0] fetch_addr_hi = {fetch_paddr_hi[31:3], 3'b0};
 
@@ -2363,32 +2380,34 @@ module ref_core
     endfunction
 
     /*
-     * Fetch-side access span: this core issues one 8-byte (dword) bus
-     * read per fetch beat (S_FETCH/S_FETCH_HI or fstate's F_REQ_LO/
-     * F_REQ_HI; the fetch port has no sel_o, every beat returns a full
-     * dword) --
-     * PMP is checked against that WHOLE dword, not just the 2-4 bytes
-     * the eventual instruction turns out to need (which isn't even
-     * known yet at this point -- decode hasn't run). This is
-     * deliberately conservative (per the real spec's own "must cover
-     * ALL bytes or the whole access faults" rule, a region smaller than
-     * 8 bytes -- i.e. NA4 -- can therefore never permit an instruction
-     * fetch under this simplification, only TOR/NAPOT regions >=8 bytes
-     * can), matching exactly what's actually transferred over the bus
-     * rather than trying to predict the eventual instruction length
-     * before it's fetched.
+     * Fetch-side access spans (errata E6): PMP checks an instruction parcel
+     * by parcel, two bytes at a time, as Sail does -- the first parcel at pc
+     * before the low dword is requested, then, for a 32-bit instruction,
+     * the second at pc + 2: in the next dword for one that crosses
+     * (fetch_paddr_hi, the high request), or in the same dword for one at
+     * pc[2:1] == 01, whose length is known only once the low dword is back
+     * (pmp_fetchmid_fault). At pc[1] == 0 both parcels share one word, which
+     * a region (at 4-byte granularity) holds whole or not at all, so the
+     * first parcel's check covers both. Before E6 the check was the whole
+     * 8-byte window from pc: an execute-denied NA4 word next to the
+     * instruction made it partial, and before E5 a partial match counted as
+     * no match, so the fetch went through on another region.
      */
-    wire [(`WORD_SIZE-1):0] fetch_end_paddr    = fetch_paddr    + `WORD_SIZE'(7);
-    wire [(`WORD_SIZE-1):0] fetch_hi_end_paddr = fetch_paddr_hi + `WORD_SIZE'(7);
+    wire [(`WORD_SIZE-1):0] fetch_end_paddr    = fetch_paddr    + `WORD_SIZE'(1);
+    wire [(`WORD_SIZE-1):0] fetch_hi_end_paddr = fetch_paddr_hi + `WORD_SIZE'(1);
 
     // Fetch never uses mem_effective_priv (MPRV only ever affects DATA accesses, never instruction fetch --
     // norm:pmp_check_priv_modes), always raw current_priv.
     /* verilator lint_off UNUSEDSIGNAL */
     wire [2:0] pmp_fetchlo_xwr = ref_pmp_xwr(fetch_paddr, fetch_end_paddr, 2'(current_priv), pmpcfg0_w[31:0], pmpaddr0_w[53:0], pmpaddr1_w[53:0], pmpaddr2_w[53:0], pmpaddr3_w[53:0]);
     wire [2:0] pmp_fetchhi_xwr = ref_pmp_xwr(fetch_paddr_hi, fetch_hi_end_paddr, 2'(current_priv), pmpcfg0_w[31:0], pmpaddr0_w[53:0], pmpaddr1_w[53:0], pmpaddr2_w[53:0], pmpaddr3_w[53:0]);
-    /* verilator lint_on UNUSEDSIGNAL */
     assign pmp_fetchlo_fault = !debug_progbuf_active && !pmp_fetchlo_xwr[2];
     assign pmp_fetchhi_fault = !debug_progbuf_active && !pmp_fetchhi_xwr[2];
+    // a 32-bit instruction at pc[2:1] == 01: its second parcel, the next word of the same dword (same page)
+    wire [2:0] pmp_fetchmid_xwr = ref_pmp_xwr(fetch_paddr + `WORD_SIZE'(2), fetch_paddr + `WORD_SIZE'(3), 2'(current_priv),
+                                             pmpcfg0_w[31:0], pmpaddr0_w[53:0], pmpaddr1_w[53:0], pmpaddr2_w[53:0], pmpaddr3_w[53:0]);
+    /* verilator lint_on UNUSEDSIGNAL */
+    assign pmp_fetchmid_fault = !debug_progbuf_active && fetch_mid_taken && !pmp_fetchmid_xwr[2];
 
     /* --------------------------------------------------------------- *
      * Sv39 Page-Table Walker (Milestone 3 of the Sv39 staged plan) --
@@ -5080,7 +5099,8 @@ module ref_core
      * unconditionally for every trap, so mepc == mtval here, which is
      * both spec-correct and sidesteps needing to know whether S_FETCH or
      * S_FETCH_HI was the one that actually faulted. */
-    assign trap_val = fetch_fault_q[cur_slot] ? pc
+    // errata E6: a fetch access fault in the instruction's second parcel reports that parcel's address
+    assign trap_val = fetch_fault_q[cur_slot] ? (fetch_fault_hi_q[cur_slot] ? pc + `WORD_SIZE'(2) : pc)
         // Sv39 M3: the faulting VIRTUAL address, per spec's mtval
         // convention -- ptw_vaddr_q (captured at walk-start from the
         // pre-translation VA), not pc, since for a crossing fetch whose

@@ -354,10 +354,10 @@ module qv_commit #(
     always_comb begin
         if (i_head_ctrl.xcpt && i_head_ctrl.cause == 4'd2)
             tval = {32'b0, i_head_entry.raw};      // raw is already {16'b0, hw} for RVC
-        else if (i_head_ctrl.xcpt && i_head_ctrl.cause == 4'd1)
-            tval = i_head_entry.pc;
-        else if (i_head_ctrl.xcpt && i_head_ctrl.cause == 4'd12)
-            tval = i_head_ctrl.xcpt_hi ? i_head_entry.pc + 64'd8 : i_head_entry.pc;   // ref_core.sv reports the second dword's address
+        // a fetch fault in the instruction's second parcel (xcpt_hi) reports that parcel's address, pc + 2 (errata
+        // E6; a page fault there reported pc + 8 before, erratum B10, and an access fault the pc)
+        else if (i_head_ctrl.xcpt && (i_head_ctrl.cause == 4'd1 || i_head_ctrl.cause == 4'd12))
+            tval = i_head_ctrl.xcpt_hi ? i_head_entry.pc + 64'd2 : i_head_entry.pc;
         else if (i_head_ctrl.trig_exc)
             tval = i_head_entry.pc;                // errata E2: the trigger ranks with its cause, so its tval is the pc
         else if (mem_xcpt)
