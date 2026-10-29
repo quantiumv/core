@@ -184,6 +184,20 @@ it is cited with its directory.
   taken with MODE 1 goes to BASE + 4 * cause (exceptions still go to BASE).
   Tests: `core_pmp_spec_tb` checks 8-13 (WARL) and 29-32 (a vectored MTI in
   M, a vectored, delegated SEI in S).
+- **E5 (2026-10-29, found by ACT `pmpsm_access_double_region`,
+  `pmpsm_na4_boundary`, `pmpsm_tor_boundary` once the configs declared PMP;
+  fixed together in `design/pipe/qv_pmp.sv` and `ref_core.sv`).** A PMP
+  region that held only part of an access counted as no match, and the
+  search went on to the next region: an 8-byte store straddling an NA4 or
+  TOR edge succeeded on a more permissive region (or, in M mode, on none).
+  The spec, and Sail, let the lowest-numbered region holding ANY byte
+  decide, and the access fails unless that region holds all of them,
+  whatever L, R, W and X say and in M mode too. Both cores now do that, for
+  every stream (fetch, data, the walker's PTE reads); `ref_core.sv` has one
+  function, `ref_pmp_xwr`, in place of the four copies of the old match
+  logic. The fetch stream's span was still 8 bytes in this commit (E6).
+  Tests: `core_pmp_spec_tb` checks 14-17, `qv_pmp_tb` (its model is the
+  spec's rule now).
 
 ## Feature additions
 

@@ -2291,44 +2291,76 @@ module ref_core
      * colliding with this file's own established "_w" suffix meaning
      * "wire sourced from a csr_file0 output".
      */
-    wire        pmp0_l = pmpcfg0_w[7],  pmp1_l = pmpcfg0_w[15], pmp2_l = pmpcfg0_w[23], pmp3_l = pmpcfg0_w[31];
-    wire [1:0]  pmp0_a = pmpcfg0_w[4:3], pmp1_a = pmpcfg0_w[12:11], pmp2_a = pmpcfg0_w[20:19], pmp3_a = pmpcfg0_w[28:27];
-    wire        pmp0_x = pmpcfg0_w[2],  pmp1_x = pmpcfg0_w[10], pmp2_x = pmpcfg0_w[18], pmp3_x = pmpcfg0_w[26];
-    wire        pmp0_wperm = pmpcfg0_w[1], pmp1_wperm = pmpcfg0_w[9],  pmp2_wperm = pmpcfg0_w[17], pmp3_wperm = pmpcfg0_w[25];
-    wire        pmp0_rperm = pmpcfg0_w[0], pmp1_rperm = pmpcfg0_w[8],  pmp2_rperm = pmpcfg0_w[16], pmp3_rperm = pmpcfg0_w[24];
-
     /*
-     * Region bounds/masks, all in BYTE-address terms (consistently, not
-     * mixing word- and byte-address units -- mem_end_paddr, added below
-     * in the Memory section for the mem-side PMP check, uses this same
-     * byte-address convention). pmpaddrN_w holds
-     * address[55:2] (a real, spec-verified 54-bit field, see
-     * design/csr_file.sv's own header) -- left-shifting by 2 recovers
-     * the byte address TOR/NAPOT actually compare against.
-     *
-     * NAPOT mask derivation is the standard "(addr ^ (addr+1))"
-     * trailing-1s technique, directly derived from the real spec's own
-     * pmpcfg-napot encoding table (see the plan file's own citation) --
-     * computed in WORD units (pmpaddrN_w's own native granularity) then
-     * widened to byte units by appending 2'b11 (the byte-within-word
-     * offset is always don't-care at word granularity or coarser).
+     * errata E5: the PMP check of one access [a, last] at privilege priv, as
+     * the privileged spec has it (and Sail): the lowest-numbered region that
+     * holds ANY byte of the access decides, and unless it holds ALL of them
+     * the access fails, whatever L, R, W and X say and in M mode too. Before
+     * this fix a region holding only part of the access counted as no match
+     * and the search went on, so an 8-byte access straddling an NA4 or TOR
+     * edge could slip through to a more permissive region (ACT pmpsm_* found
+     * it). Returns {X, W, R} permission. No match: M may, S/U may not (at
+     * least one region is implemented). A matching unlocked region does not
+     * limit M. Regions as byte ranges [lo, hi) of 65 bits (a NAPOT region can
+     * end at 2^56): TOR i from pmpaddr[i-1] (0 for region 0) to pmpaddr[i],
+     * empty unless pmpaddr[i-1] < pmpaddr[i]; NA4 the word at pmpaddr; NAPOT
+     * the range the trailing ones of pmpaddr encode.
      */
-    wire [(`WORD_SIZE-1):0] pmp0_region_base = {8'b0, pmpaddr0_w[53:0], 2'b0};
-    wire [(`WORD_SIZE-1):0] pmp1_region_base = {8'b0, pmpaddr1_w[53:0], 2'b0};
-    wire [(`WORD_SIZE-1):0] pmp2_region_base = {8'b0, pmpaddr2_w[53:0], 2'b0};
-    wire [(`WORD_SIZE-1):0] pmp3_region_base = {8'b0, pmpaddr3_w[53:0], 2'b0};
-    wire [53:0] pmp0_napot_wordmask = pmpaddr0_w[53:0] ^ (pmpaddr0_w[53:0] + 54'd1);
-    wire [53:0] pmp1_napot_wordmask = pmpaddr1_w[53:0] ^ (pmpaddr1_w[53:0] + 54'd1);
-    wire [53:0] pmp2_napot_wordmask = pmpaddr2_w[53:0] ^ (pmpaddr2_w[53:0] + 54'd1);
-    wire [53:0] pmp3_napot_wordmask = pmpaddr3_w[53:0] ^ (pmpaddr3_w[53:0] + 54'd1);
-    wire [(`WORD_SIZE-1):0] pmp0_napot_mask = {8'b0, pmp0_napot_wordmask, 2'b11};
-    wire [(`WORD_SIZE-1):0] pmp1_napot_mask = {8'b0, pmp1_napot_wordmask, 2'b11};
-    wire [(`WORD_SIZE-1):0] pmp2_napot_mask = {8'b0, pmp2_napot_wordmask, 2'b11};
-    wire [(`WORD_SIZE-1):0] pmp3_napot_mask = {8'b0, pmp3_napot_wordmask, 2'b11};
-    wire [(`WORD_SIZE-1):0] pmp0_napot_base = pmp0_region_base & ~pmp0_napot_mask;
-    wire [(`WORD_SIZE-1):0] pmp1_napot_base = pmp1_region_base & ~pmp1_napot_mask;
-    wire [(`WORD_SIZE-1):0] pmp2_napot_base = pmp2_region_base & ~pmp2_napot_mask;
-    wire [(`WORD_SIZE-1):0] pmp3_napot_base = pmp3_region_base & ~pmp3_napot_mask;
+    function automatic [2:0] ref_pmp_xwr(input [63:0] a, input [63:0] last, input [1:0] priv, input [31:0] cfg,
+                                         input [53:0] p0, input [53:0] p1, input [53:0] p2, input [53:0] p3);
+        reg [64:0] s, e, lo, hi;
+        reg [53:0] pa, pp, mask;
+        reg [54:0] bw, ew;
+        /* verilator lint_off UNUSEDSIGNAL */
+        reg [7:0]  c;                   // [6:5] are reserved
+        /* verilator lint_on UNUSEDSIGNAL */
+        reg        ranged, decided;
+        integer    i;
+        begin
+            s = {1'b0, a};
+            e = {1'b0, last} + 65'd1;
+            ref_pmp_xwr = (priv == 2'b11) ? 3'b111 : 3'b000;
+            decided = 1'b0;
+            for (i = 0; i < 4; i = i + 1) begin
+                c  = cfg[8 * i +: 8];
+                pa = (i == 0) ? p0 : (i == 1) ? p1 : (i == 2) ? p2 : p3;
+                pp = (i == 0) ? 54'd0 : (i == 1) ? p0 : (i == 2) ? p1 : p2;
+                ranged = 1'b0;
+                lo = 65'd0;
+                hi = 65'd0;
+                mask = 54'd0;
+                bw = 55'd0;
+                ew = 55'd0;
+                case (c[4:3])
+                    2'b01: if (pp < pa) begin                                     // TOR
+                               lo = {9'b0, pp, 2'b00};
+                               hi = {9'b0, pa, 2'b00};
+                               ranged = 1'b1;
+                           end
+                    2'b10: begin                                                  // NA4
+                               lo = {9'b0, pa, 2'b00};
+                               hi = lo + 65'd4;
+                               ranged = 1'b1;
+                           end
+                    2'b11: begin                                                  // NAPOT
+                               mask = pa ^ (pa + 54'd1);
+                               bw = {1'b0, pa & ~mask};
+                               ew = bw + {1'b0, mask} + 55'd1;
+                               lo = {8'b0, bw, 2'b00};
+                               hi = {8'b0, ew, 2'b00};
+                               ranged = 1'b1;
+                           end
+                    default: ;                                                    // OFF
+                endcase
+                if (!decided && ranged && !(e <= lo || hi <= s)) begin
+                    decided = 1'b1;
+                    if (!(lo <= s && e <= hi))       ref_pmp_xwr = 3'b000;   // a partial match fails
+                    else if (priv == 2'b11 && !c[7]) ref_pmp_xwr = 3'b111;   // M, unlocked
+                    else                             ref_pmp_xwr = c[2:0];
+                end
+            end
+        end
+    endfunction
 
     /*
      * Fetch-side access span: this core issues one 8-byte (dword) bus
@@ -2349,75 +2381,14 @@ module ref_core
     wire [(`WORD_SIZE-1):0] fetch_end_paddr    = fetch_paddr    + `WORD_SIZE'(7);
     wire [(`WORD_SIZE-1):0] fetch_hi_end_paddr = fetch_paddr_hi + `WORD_SIZE'(7);
 
-    wire pmp0_fetchlo_match = (pmp0_a == 2'b00) ? 1'b0
-        : (pmp0_a == 2'b10) ? (fetch_paddr[55:2] == pmpaddr0_w[53:0] && fetch_end_paddr[55:2] == pmpaddr0_w[53:0])
-        : (pmp0_a == 2'b01) ? (fetch_end_paddr < pmp0_region_base)
-        :                     ((fetch_paddr & ~pmp0_napot_mask) == pmp0_napot_base
-                            && (fetch_end_paddr & ~pmp0_napot_mask) == pmp0_napot_base);
-    wire pmp1_fetchlo_match = (pmp1_a == 2'b00) ? 1'b0
-        : (pmp1_a == 2'b10) ? (fetch_paddr[55:2] == pmpaddr1_w[53:0] && fetch_end_paddr[55:2] == pmpaddr1_w[53:0])
-        : (pmp1_a == 2'b01) ? (fetch_paddr >= pmp0_region_base && fetch_end_paddr < pmp1_region_base)
-        :                     ((fetch_paddr & ~pmp1_napot_mask) == pmp1_napot_base
-                            && (fetch_end_paddr & ~pmp1_napot_mask) == pmp1_napot_base);
-    wire pmp2_fetchlo_match = (pmp2_a == 2'b00) ? 1'b0
-        : (pmp2_a == 2'b10) ? (fetch_paddr[55:2] == pmpaddr2_w[53:0] && fetch_end_paddr[55:2] == pmpaddr2_w[53:0])
-        : (pmp2_a == 2'b01) ? (fetch_paddr >= pmp1_region_base && fetch_end_paddr < pmp2_region_base)
-        :                     ((fetch_paddr & ~pmp2_napot_mask) == pmp2_napot_base
-                            && (fetch_end_paddr & ~pmp2_napot_mask) == pmp2_napot_base);
-    wire pmp3_fetchlo_match = (pmp3_a == 2'b00) ? 1'b0
-        : (pmp3_a == 2'b10) ? (fetch_paddr[55:2] == pmpaddr3_w[53:0] && fetch_end_paddr[55:2] == pmpaddr3_w[53:0])
-        : (pmp3_a == 2'b01) ? (fetch_paddr >= pmp2_region_base && fetch_end_paddr < pmp3_region_base)
-        :                     ((fetch_paddr & ~pmp3_napot_mask) == pmp3_napot_base
-                            && (fetch_end_paddr & ~pmp3_napot_mask) == pmp3_napot_base);
-
-    wire pmp0_fetchhi_match = (pmp0_a == 2'b00) ? 1'b0
-        : (pmp0_a == 2'b10) ? (fetch_paddr_hi[55:2] == pmpaddr0_w[53:0] && fetch_hi_end_paddr[55:2] == pmpaddr0_w[53:0])
-        : (pmp0_a == 2'b01) ? (fetch_hi_end_paddr < pmp0_region_base)
-        :                     ((fetch_paddr_hi & ~pmp0_napot_mask) == pmp0_napot_base
-                            && (fetch_hi_end_paddr & ~pmp0_napot_mask) == pmp0_napot_base);
-    wire pmp1_fetchhi_match = (pmp1_a == 2'b00) ? 1'b0
-        : (pmp1_a == 2'b10) ? (fetch_paddr_hi[55:2] == pmpaddr1_w[53:0] && fetch_hi_end_paddr[55:2] == pmpaddr1_w[53:0])
-        : (pmp1_a == 2'b01) ? (fetch_paddr_hi >= pmp0_region_base && fetch_hi_end_paddr < pmp1_region_base)
-        :                     ((fetch_paddr_hi & ~pmp1_napot_mask) == pmp1_napot_base
-                            && (fetch_hi_end_paddr & ~pmp1_napot_mask) == pmp1_napot_base);
-    wire pmp2_fetchhi_match = (pmp2_a == 2'b00) ? 1'b0
-        : (pmp2_a == 2'b10) ? (fetch_paddr_hi[55:2] == pmpaddr2_w[53:0] && fetch_hi_end_paddr[55:2] == pmpaddr2_w[53:0])
-        : (pmp2_a == 2'b01) ? (fetch_paddr_hi >= pmp1_region_base && fetch_hi_end_paddr < pmp2_region_base)
-        :                     ((fetch_paddr_hi & ~pmp2_napot_mask) == pmp2_napot_base
-                            && (fetch_hi_end_paddr & ~pmp2_napot_mask) == pmp2_napot_base);
-    wire pmp3_fetchhi_match = (pmp3_a == 2'b00) ? 1'b0
-        : (pmp3_a == 2'b10) ? (fetch_paddr_hi[55:2] == pmpaddr3_w[53:0] && fetch_hi_end_paddr[55:2] == pmpaddr3_w[53:0])
-        : (pmp3_a == 2'b01) ? (fetch_paddr_hi >= pmp2_region_base && fetch_hi_end_paddr < pmp3_region_base)
-        :                     ((fetch_paddr_hi & ~pmp3_napot_mask) == pmp3_napot_base
-                            && (fetch_hi_end_paddr & ~pmp3_napot_mask) == pmp3_napot_base);
-
-    /*
-     * Priority-encode (lowest-numbered region wins, norm:pmp_entry_priority)
-     * + X-permission check, one instantiation per fetch stream. Fetch
-     * never uses mem_effective_priv (MPRV only ever affects DATA
-     * accesses, never instruction fetch -- norm:pmp_check_priv_modes),
-     * always raw current_priv.
-     */
-    wire pmp_fetchlo_matched = pmp0_fetchlo_match || pmp1_fetchlo_match || pmp2_fetchlo_match || pmp3_fetchlo_match;
-    wire pmp_fetchlo_x = pmp0_fetchlo_match ? pmp0_x : pmp1_fetchlo_match ? pmp1_x : pmp2_fetchlo_match ? pmp2_x : pmp3_x;
-    wire pmp_fetchlo_l = pmp0_fetchlo_match ? pmp0_l : pmp1_fetchlo_match ? pmp1_l : pmp2_fetchlo_match ? pmp2_l : pmp3_l;
-    // norm:pmp_rwx_check + norm:pmp_no_entry_match: M-mode with L clear
-    // or no match always succeeds; S/U or a locked match needs the real
-    // X bit; S/U with NO match FAILS (>=1 region implemented, always
-    // true here).
-    wire pmp_fetchlo_x_ok = (current_priv == PRIV_M && !pmp_fetchlo_matched) ? 1'b1
-                           : (current_priv == PRIV_M && !pmp_fetchlo_l)      ? 1'b1
-                           : pmp_fetchlo_matched && pmp_fetchlo_x;
-
-    wire pmp_fetchhi_matched = pmp0_fetchhi_match || pmp1_fetchhi_match || pmp2_fetchhi_match || pmp3_fetchhi_match;
-    wire pmp_fetchhi_x = pmp0_fetchhi_match ? pmp0_x : pmp1_fetchhi_match ? pmp1_x : pmp2_fetchhi_match ? pmp2_x : pmp3_x;
-    wire pmp_fetchhi_l = pmp0_fetchhi_match ? pmp0_l : pmp1_fetchhi_match ? pmp1_l : pmp2_fetchhi_match ? pmp2_l : pmp3_l;
-    wire pmp_fetchhi_x_ok = (current_priv == PRIV_M && !pmp_fetchhi_matched) ? 1'b1
-                           : (current_priv == PRIV_M && !pmp_fetchhi_l)      ? 1'b1
-                           : pmp_fetchhi_matched && pmp_fetchhi_x;
-
-    assign pmp_fetchlo_fault = !debug_progbuf_active && !pmp_fetchlo_x_ok;
-    assign pmp_fetchhi_fault = !debug_progbuf_active && !pmp_fetchhi_x_ok;
+    // Fetch never uses mem_effective_priv (MPRV only ever affects DATA accesses, never instruction fetch --
+    // norm:pmp_check_priv_modes), always raw current_priv.
+    /* verilator lint_off UNUSEDSIGNAL */
+    wire [2:0] pmp_fetchlo_xwr = ref_pmp_xwr(fetch_paddr, fetch_end_paddr, 2'(current_priv), pmpcfg0_w[31:0], pmpaddr0_w[53:0], pmpaddr1_w[53:0], pmpaddr2_w[53:0], pmpaddr3_w[53:0]);
+    wire [2:0] pmp_fetchhi_xwr = ref_pmp_xwr(fetch_paddr_hi, fetch_hi_end_paddr, 2'(current_priv), pmpcfg0_w[31:0], pmpaddr0_w[53:0], pmpaddr1_w[53:0], pmpaddr2_w[53:0], pmpaddr3_w[53:0]);
+    /* verilator lint_on UNUSEDSIGNAL */
+    assign pmp_fetchlo_fault = !debug_progbuf_active && !pmp_fetchlo_xwr[2];
+    assign pmp_fetchhi_fault = !debug_progbuf_active && !pmp_fetchhi_xwr[2];
 
     /* --------------------------------------------------------------- *
      * Sv39 Page-Table Walker (Milestone 3 of the Sv39 staged plan) --
@@ -2474,32 +2445,10 @@ module ref_core
      * fetch-lo/fetch-hi checks above already declared -- only the
      * ADDRESS stream being matched (ptw_pte_addr) is new.
      */
-    wire pmp0_ptw_match = (pmp0_a == 2'b00) ? 1'b0
-        : (pmp0_a == 2'b10) ? (ptw_pte_addr[55:2] == pmpaddr0_w[53:0] && ptw_pte_end_addr[55:2] == pmpaddr0_w[53:0])
-        : (pmp0_a == 2'b01) ? (ptw_pte_end_addr < pmp0_region_base)
-        :                     ((ptw_pte_addr & ~pmp0_napot_mask) == pmp0_napot_base
-                            && (ptw_pte_end_addr & ~pmp0_napot_mask) == pmp0_napot_base);
-    wire pmp1_ptw_match = (pmp1_a == 2'b00) ? 1'b0
-        : (pmp1_a == 2'b10) ? (ptw_pte_addr[55:2] == pmpaddr1_w[53:0] && ptw_pte_end_addr[55:2] == pmpaddr1_w[53:0])
-        : (pmp1_a == 2'b01) ? (ptw_pte_addr >= pmp0_region_base && ptw_pte_end_addr < pmp1_region_base)
-        :                     ((ptw_pte_addr & ~pmp1_napot_mask) == pmp1_napot_base
-                            && (ptw_pte_end_addr & ~pmp1_napot_mask) == pmp1_napot_base);
-    wire pmp2_ptw_match = (pmp2_a == 2'b00) ? 1'b0
-        : (pmp2_a == 2'b10) ? (ptw_pte_addr[55:2] == pmpaddr2_w[53:0] && ptw_pte_end_addr[55:2] == pmpaddr2_w[53:0])
-        : (pmp2_a == 2'b01) ? (ptw_pte_addr >= pmp1_region_base && ptw_pte_end_addr < pmp2_region_base)
-        :                     ((ptw_pte_addr & ~pmp2_napot_mask) == pmp2_napot_base
-                            && (ptw_pte_end_addr & ~pmp2_napot_mask) == pmp2_napot_base);
-    wire pmp3_ptw_match = (pmp3_a == 2'b00) ? 1'b0
-        : (pmp3_a == 2'b10) ? (ptw_pte_addr[55:2] == pmpaddr3_w[53:0] && ptw_pte_end_addr[55:2] == pmpaddr3_w[53:0])
-        : (pmp3_a == 2'b01) ? (ptw_pte_addr >= pmp2_region_base && ptw_pte_end_addr < pmp3_region_base)
-        :                     ((ptw_pte_addr & ~pmp3_napot_mask) == pmp3_napot_base
-                            && (ptw_pte_end_addr & ~pmp3_napot_mask) == pmp3_napot_base);
-    wire ptw_pmp_matched = pmp0_ptw_match || pmp1_ptw_match || pmp2_ptw_match || pmp3_ptw_match;
-    wire ptw_pmp_r       = pmp0_ptw_match ? pmp0_rperm : pmp1_ptw_match ? pmp1_rperm : pmp2_ptw_match ? pmp2_rperm : pmp3_rperm;
-    // norm:pmp_no_entry_match: S/U (always the case for a PTE read) with
-    // no match FAILS (>=1 region always implemented here); L is
-    // irrelevant -- never M-mode-exempt for a page-table access.
-    assign ptw_pmp_fault = !(ptw_pmp_matched && ptw_pmp_r);
+    /* verilator lint_off UNUSEDSIGNAL */
+    wire [2:0] ptw_pmp_xwr = ref_pmp_xwr(ptw_pte_addr, ptw_pte_end_addr, 2'b01, pmpcfg0_w[31:0], pmpaddr0_w[53:0], pmpaddr1_w[53:0], pmpaddr2_w[53:0], pmpaddr3_w[53:0]);
+    /* verilator lint_on UNUSEDSIGNAL */
+    assign ptw_pmp_fault = !ptw_pmp_xwr[0];
 
     /*
      * Sv39 Milestone 5: which TLB entry hit (if any) and its own cached
@@ -4957,12 +4906,9 @@ module ref_core
     assign mem_store_misaligned = (state == S_EXEC) && mem_misaligned && (is_store || is_sc || is_lr || is_amo_rmw);
 
     /*
-     * PMP mem-side check (PMP+PLIC staged plan, Milestone 2). Reuses the
-     * exact same pmp0_l/pmp0_a/pmp0_x/pmp0_wperm/pmp0_rperm/
-     * pmp0_region_base/pmp0_napot_mask/pmp0_napot_base region-field
-     * wires (and their region 1-3 siblings) the fetch-side check above
-     * already declared -- plain module-scope wires, one real region
-     * config regardless of which access stream is checking it.
+     * PMP mem-side check (PMP+PLIC staged plan, Milestone 2). The same
+     * ref_pmp_xwr check the fetch side and the walker use (errata E5),
+     * one region configuration whatever stream is checking it.
      *
      * mem_end_paddr mirrors fetch_end_paddr's own byte-address-span
      * convention exactly, sized from the REAL access width (mem_size)
@@ -4989,41 +4935,11 @@ module ref_core
     assign mem_effective_priv = priv_t'((mstatus_mprv_w && current_priv == PRIV_M)
                                ? mstatus_mpp_w : current_priv);
 
-    wire pmp0_mem_match = (pmp0_a == 2'b00) ? 1'b0
-        : (pmp0_a == 2'b10) ? (mem_paddr[55:2] == pmpaddr0_w[53:0] && mem_end_paddr[55:2] == pmpaddr0_w[53:0])
-        : (pmp0_a == 2'b01) ? (mem_end_paddr < pmp0_region_base)
-        :                     ((mem_paddr & ~pmp0_napot_mask) == pmp0_napot_base
-                            && (mem_end_paddr & ~pmp0_napot_mask) == pmp0_napot_base);
-    wire pmp1_mem_match = (pmp1_a == 2'b00) ? 1'b0
-        : (pmp1_a == 2'b10) ? (mem_paddr[55:2] == pmpaddr1_w[53:0] && mem_end_paddr[55:2] == pmpaddr1_w[53:0])
-        : (pmp1_a == 2'b01) ? (mem_paddr >= pmp0_region_base && mem_end_paddr < pmp1_region_base)
-        :                     ((mem_paddr & ~pmp1_napot_mask) == pmp1_napot_base
-                            && (mem_end_paddr & ~pmp1_napot_mask) == pmp1_napot_base);
-    wire pmp2_mem_match = (pmp2_a == 2'b00) ? 1'b0
-        : (pmp2_a == 2'b10) ? (mem_paddr[55:2] == pmpaddr2_w[53:0] && mem_end_paddr[55:2] == pmpaddr2_w[53:0])
-        : (pmp2_a == 2'b01) ? (mem_paddr >= pmp1_region_base && mem_end_paddr < pmp2_region_base)
-        :                     ((mem_paddr & ~pmp2_napot_mask) == pmp2_napot_base
-                            && (mem_end_paddr & ~pmp2_napot_mask) == pmp2_napot_base);
-    wire pmp3_mem_match = (pmp3_a == 2'b00) ? 1'b0
-        : (pmp3_a == 2'b10) ? (mem_paddr[55:2] == pmpaddr3_w[53:0] && mem_end_paddr[55:2] == pmpaddr3_w[53:0])
-        : (pmp3_a == 2'b01) ? (mem_paddr >= pmp2_region_base && mem_end_paddr < pmp3_region_base)
-        :                     ((mem_paddr & ~pmp3_napot_mask) == pmp3_napot_base
-                            && (mem_end_paddr & ~pmp3_napot_mask) == pmp3_napot_base);
-
-    wire pmp_mem_matched = pmp0_mem_match || pmp1_mem_match || pmp2_mem_match || pmp3_mem_match;
-    wire pmp_mem_rperm = pmp0_mem_match ? pmp0_rperm : pmp1_mem_match ? pmp1_rperm : pmp2_mem_match ? pmp2_rperm : pmp3_rperm;
-    wire pmp_mem_wperm = pmp0_mem_match ? pmp0_wperm : pmp1_mem_match ? pmp1_wperm : pmp2_mem_match ? pmp2_wperm : pmp3_wperm;
-    wire pmp_mem_l     = pmp0_mem_match ? pmp0_l     : pmp1_mem_match ? pmp1_l     : pmp2_mem_match ? pmp2_l     : pmp3_l;
-    // norm:pmp_rwx_check + norm:pmp_no_entry_match: effective-M-mode
-    // with L clear or no match always succeeds; S/U or a locked match
-    // needs the real R/W bit; S/U with NO match FAILS (>=1 region
-    // implemented, always true here).
-    wire pmp_mem_read_ok  = (mem_effective_priv == PRIV_M && !pmp_mem_matched) ? 1'b1
-                           : (mem_effective_priv == PRIV_M && !pmp_mem_l)      ? 1'b1
-                           : pmp_mem_matched && pmp_mem_rperm;
-    wire pmp_mem_write_ok = (mem_effective_priv == PRIV_M && !pmp_mem_matched) ? 1'b1
-                           : (mem_effective_priv == PRIV_M && !pmp_mem_l)      ? 1'b1
-                           : pmp_mem_matched && pmp_mem_wperm;
+    /* verilator lint_off UNUSEDSIGNAL */
+    wire [2:0] pmp_mem_xwr = ref_pmp_xwr(mem_paddr, mem_end_paddr, 2'(mem_effective_priv), pmpcfg0_w[31:0], pmpaddr0_w[53:0], pmpaddr1_w[53:0], pmpaddr2_w[53:0], pmpaddr3_w[53:0]);
+    /* verilator lint_on UNUSEDSIGNAL */
+    wire pmp_mem_read_ok  = pmp_mem_xwr[0];
+    wire pmp_mem_write_ok = pmp_mem_xwr[1];
 
     /*
      * pmp_load_fault/pmp_store_fault: same is_load/is_lr/is_amo_rmw
