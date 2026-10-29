@@ -930,6 +930,13 @@ module qv_decode_tb #(
         feed(encode_i(1, 7, 3'b000, 5, OPI));
         check("xl pmp: physical second parcel 0x1010 above the top: denied", {63'b0, uop.xcpt}, 64'd1);
         check("xl pmp: ... xcpt_hi", {63'b0, uop.xcpt_hi}, 64'd1);
+        // not crossing (pc[2:1] == 2 or 1): the second parcel is in the first dword's page, whatever pg_hi says
+        feed_pc = 64'h4000_0004; feed_pg_lo = 44'h1; feed_pg_hi = 44'h80;
+        feed(encode_i(1, 7, 3'b000, 5, OPI));
+        check("xl pmp: pc[2:1] == 2 does not cross: the second parcel 0x1006 on pg_lo, inside", {63'b0, uop.xcpt}, 64'd0);
+        feed_pc = 64'h4000_000A;
+        feed(encode_i(1, 7, 3'b000, 5, OPI));
+        check("xl pmp: pc[2:1] == 1 does not cross: the second parcel 0x100C on pg_lo, inside", {63'b0, uop.xcpt}, 64'd0);
         // a crossing instruction: the second parcel is in another page, at its offset 0
         feed_pc = 64'h4000_0FFE; feed_pg_lo = 44'h0; feed_pg_hi = 44'h1;
         feed(encode_i(1, 7, 3'b000, 5, OPI));
