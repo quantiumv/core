@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 /* ------------------------------------------------------------------------- */
 /*
- * core_pmp_spec_tb -- errata E4-E7 on the running core (either build), through firmware/pmp_spec_test.s (see its
+ * core_pmp_spec_tb -- errata E4-E8 on the running core (either build), through firmware/pmp_spec_test.s (see its
  * header for what each group checks). The program stores (actual, expected) pairs at RES + 8 + 16 * i and their
  * number at RES; this bench compares them. It drives i_mtip while the word at MAGIC is 1 and i_seip while it is
  * 2 (the program's two vectored-interrupt checks).
@@ -14,7 +14,7 @@ module core_pmp_spec_tb;
     always #5 clk = ~clk;
     logic rst = 1;
 
-    localparam int RES = 32'h6000, MAGIC = 32'h6F80, N_CHECKS = 32;
+    localparam int RES = 32'h6000, MAGIC = 32'h6F80, N_CHECKS = 38;
     // the check names, in the program's order
     function automatic string name_of(input int i);
         case (i)
@@ -50,6 +50,12 @@ module core_pmp_spec_tb;
             29: return "E4 M vectored: nothing at entry 0";
             30: return "E4 S vectored SEI entry ran";
             31: return "E4 S vectored: back with ecall";
+            32: return "E8 mcounteren all ones: 0x7";
+            33: return "E8 scounteren all ones: 0x7";
+            34: return "E8 mcounteren bits 63:3: 0";
+            35: return "E8 scounteren bits 63:3: 0";
+            36: return "E8 mcounteren csrs";
+            37: return "E8 scounteren csrc";
             default: return "?";
         endcase
     endfunction

@@ -509,6 +509,11 @@ module csr_file_tb;
         check("mcounteren round trip", rdata, 64'h0000_0000_0000_0007);
         write_csr(CSR_ADDR_SCOUNTEREN, 64'h0000_0000_0000_0003);  read_csr(CSR_ADDR_SCOUNTEREN, rdata);
         check("scounteren round trip", rdata, 64'h0000_0000_0000_0003);
+        // errata E8: 32-bit registers that keep only CY, TM and IR
+        write_csr(CSR_ADDR_MCOUNTEREN, 64'hFFFF_FFFF_FFFF_FFFF);  read_csr(CSR_ADDR_MCOUNTEREN, rdata);
+        check("mcounteren keeps bits 2:0 only", rdata, 64'h0000_0000_0000_0007);
+        write_csr(CSR_ADDR_SCOUNTEREN, 64'hFFFF_FFFF_FFFF_FFF8);  read_csr(CSR_ADDR_SCOUNTEREN, rdata);
+        check("scounteren bits 63:3 read 0", rdata, 64'h0000_0000_0000_0000);
         write_csr(CSR_ADDR_SSCRATCH, 64'hFEED_FACE_BEEF_CAFE);  read_csr(CSR_ADDR_SSCRATCH, rdata);
         check("sscratch round trip", rdata, 64'hFEED_FACE_BEEF_CAFE);
         write_csr(CSR_ADDR_SATP, 64'h8000_0000_0004_0000);  read_csr(CSR_ADDR_SATP, rdata);

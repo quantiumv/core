@@ -1,11 +1,12 @@
 /*
- * pmp_spec_test.s -- errata E4-E7 (found by the ACT refresh that declared PMP and Sv39), on the running core:
+ * pmp_spec_test.s -- errata E4-E8 (found by the ACT refresh that declared PMP and Sv39), on the running core:
  *   E7  pmpcfg1, pmpcfg3-15 and pmpaddr16-63 do not exist (illegal); pmpcfg2 and pmpaddr4-15 read 0
  *   E4  mtvec/stvec MODE is WARL {0, 1}: a write of 2 or 3 keeps the old mode; MODE 1 vectors interrupts to
  *       BASE + 4 * cause (M: MTI, S: a delegated SEI)
  *   E5  PMP: an access that only partly overlaps the lowest matching region fails, in M mode too
  *   E6  PMP on a fetch checks each 2-byte parcel of the instruction; a fault on the second parcel has
  *       mtval = pc + 2
+ *   E8  mcounteren/scounteren keep CY, TM and IR (bits 2:0) only
  * Each check stores (actual, expected) at RES + 8 + 16 * i; RES itself gets the number of checks at the end.
  * testbench/core_pmp_spec_tb.sv compares the pairs and the count. The testbench drives i_mtip while the word
  * at MAGIC is 1 and i_seip while it is 2.
@@ -256,6 +257,35 @@ main:
     li      a3, 9
     CHECK   a2, a3              # 32: and S came back with its ecall
     csrw    mideleg, x0
+
+    # ---------------- E8: mcounteren/scounteren keep CY, TM and IR ----------------
+    li      a0, -1
+    li      a3, 7
+    csrw    mcounteren, a0
+    csrr    a2, mcounteren
+    CHECK   a2, a3              # 33: all ones written, 0x7 read
+    csrw    scounteren, a0
+    csrr    a2, scounteren
+    CHECK   a2, a3              # 34
+    li      a0, -8
+    csrw    mcounteren, a0
+    csrr    a2, mcounteren
+    CHECK   a2, x0              # 35: bits 63:3 written, 0 read
+    csrw    scounteren, a0
+    csrr    a2, scounteren
+    CHECK   a2, x0              # 36
+    li      a0, 5
+    csrw    mcounteren, a0
+    csrsi   mcounteren, 2
+    csrr    a2, mcounteren
+    CHECK   a2, a3              # 37: csrs on the kept bits
+    csrw    scounteren, a0
+    csrci   scounteren, 1
+    csrr    a2, scounteren
+    li      a3, 4
+    CHECK   a2, a3              # 38: csrc on the kept bits
+    csrw    mcounteren, x0
+    csrw    scounteren, x0
 
     # ---------------- the end ----------------
     li      a0, RES + 8
