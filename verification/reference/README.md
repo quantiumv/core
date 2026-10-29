@@ -213,6 +213,14 @@ it is cited with its directory.
   and an access fault there pc. Tests: `core_pmp_spec_tb` checks 18-28,
   `qv_decode_tb`, `qv_commit_tb`, `core_sv39_fetch_tb` E,
   `core_bus_fault_trap_tb` B.
+- **E8 (2026-10-30, found by ACT `S-00` (F/D config) once E4 let it past
+  `stvec`; fixed in `design/csr_file.sv`, so `ref_csr_file.sv`).**
+  `mcounteren` and `scounteren` stored all 64 bits as written. They are
+  32-bit registers, and Sail keeps only CY, TM and IR (bits 0-2); the HPM
+  bits read 0, since no hpmcounter exists. Both now store bits 0-2 and read
+  the rest as 0. Nothing in either core reads them (the Zicntr views they
+  gate are not implemented), so only a CSR read can see the change. Tests:
+  `csr_file_tb`, `core_pmp_spec_tb` checks 33-38.
 
 ## Feature additions
 

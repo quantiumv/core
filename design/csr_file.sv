@@ -474,9 +474,11 @@ module csr_file #(
      * (0) or vectored (1), and a write of 2 or 3 keeps the old mode
      * (errata E4). Vectored mode sends an interrupt to BASE + 4 * cause;
      * exceptions always go to BASE (the cores' trap-vector logic).
+     * mcounteren/scounteren are 32-bit registers that keep only CY, TM
+     * and IR (bits 2:0), as Sail does; the rest read 0 (errata E8).
      */
     logic [(`WORD_SIZE - 1):0] stvec_q, mtvec_q;
-    logic [(`WORD_SIZE - 1):0] mcounteren_q, scounteren_q;
+    logic [2:0]                mcounteren_q, scounteren_q;
     logic [(`WORD_SIZE - 1):0] sscratch_q;
     logic [(`WORD_SIZE - 1):0] satp_q;
     logic [(`WORD_SIZE - 1):0] medeleg_q, mideleg_q;
@@ -495,11 +497,11 @@ module csr_file #(
     end
     always_ff @(posedge i_clk) begin
         if (i_rst) mcounteren_q <= '0;
-        else if (i_csr_we && (i_csr_addr == CSR_ADDR_MCOUNTEREN)) mcounteren_q <= i_csr_wdata;
+        else if (i_csr_we && (i_csr_addr == CSR_ADDR_MCOUNTEREN)) mcounteren_q <= i_csr_wdata[2:0];
     end
     always_ff @(posedge i_clk) begin
         if (i_rst) scounteren_q <= '0;
-        else if (i_csr_we && (i_csr_addr == CSR_ADDR_SCOUNTEREN)) scounteren_q <= i_csr_wdata;
+        else if (i_csr_we && (i_csr_addr == CSR_ADDR_SCOUNTEREN)) scounteren_q <= i_csr_wdata[2:0];
     end
     always_ff @(posedge i_clk) begin
         if (i_rst) sscratch_q <= '0;
@@ -1178,7 +1180,7 @@ module csr_file #(
             CSR_ADDR_SSTATUS:    o_csr_rdata = ((mstatus_q | mstatus_sd) & SSTATUS_VIEW_MASK) | MSTATUS_UXL_FIXED;
             CSR_ADDR_SIE:        o_csr_rdata = mie_q & mideleg_q;
             CSR_ADDR_STVEC:      o_csr_rdata = stvec_q;
-            CSR_ADDR_SCOUNTEREN: o_csr_rdata = scounteren_q;
+            CSR_ADDR_SCOUNTEREN: o_csr_rdata = {{(`WORD_SIZE - 3){1'b0}}, scounteren_q};
             CSR_ADDR_SSCRATCH:   o_csr_rdata = sscratch_q;
             CSR_ADDR_SEPC:       o_csr_rdata = sepc_q;
             CSR_ADDR_SCAUSE:     o_csr_rdata = scause_q;
@@ -1192,7 +1194,7 @@ module csr_file #(
             CSR_ADDR_MIDELEG:    o_csr_rdata = mideleg_q;
             CSR_ADDR_MIE:        o_csr_rdata = mie_q;
             CSR_ADDR_MTVEC:      o_csr_rdata = mtvec_q;
-            CSR_ADDR_MCOUNTEREN: o_csr_rdata = mcounteren_q;
+            CSR_ADDR_MCOUNTEREN: o_csr_rdata = {{(`WORD_SIZE - 3){1'b0}}, mcounteren_q};
             CSR_ADDR_MEPC:       o_csr_rdata = mepc_q;
             CSR_ADDR_MCAUSE:     o_csr_rdata = mcause_q;
             CSR_ADDR_MTVAL:      o_csr_rdata = mtval_q;
