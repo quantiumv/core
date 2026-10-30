@@ -198,6 +198,56 @@ The exit gate (2026-10-29), the core against the reference, Verilator, four memo
 The FPU itself: the full TestFloat set (`verification/fpu/README.md`), 1,346,913,440 vectors, 0 failures. riscv-formal
 after F/D: every model clean (`../riscv-formal/quantiumv_pipe/README.md`).
 
+### ACT with Sv39 and PMP: errata E4 to E9
+
+Both ACT configs declare Sv39 (with Svade) and PMP (4 entries, G = 0) since `766840c`. Sail then holds the PMP and
+Sv39 tests to the real rules, and six places where both cores were wrong showed up. Each is fixed in both, as an
+erratum (`../reference/README.md`, the errata log):
+- E7 (`56646b4`): the PMP CSRs RV64 does not have (`pmpcfg1`, `pmpcfg3`-`pmpcfg15`, `pmpaddr16`-`pmpaddr63`) are
+  illegal.
+- E4 (`eb3a662`): `mtvec`/`stvec` MODE is WARL {0, 1}, and an interrupt taken with MODE 1 goes to BASE + 4 * cause.
+- E5 (`8643c4d`): a PMP region that holds part of an access fails it, in M mode too.
+- E6 (`9e1f90e`): fetch PMP checks each 2-byte parcel, and a fault in a 32-bit instruction's second parcel reports
+  pc + 2 (B10's pc + 8 is gone).
+- E8 (`a0f066e`): `mcounteren`/`scounteren` keep CY, TM and IR (bits 2:0); they stored all 64 bits.
+- E9 (`134ed92`): `menvcfg`/`senvcfg` keep FIOM (bit 0); they were unmapped. The bit has no effect, since neither
+  core lets an I/O access pass a memory access or the reverse.
+
+E8 and E9 were found one after the other by the F/D config's `S-00`, which stops at its first failed check. It still
+fails after them, on `satp`: Sail always has a 16-bit ASID and the cores have none (the reason
+`sv39_satp_access_test` fails), which is right for TLBs without ASID tags. With FIOM writable it matches Sail up to
+that check.
+
+ACT after E4-E7: 198/200 (rv64im) and 422/426 (F/D), the same on both cores; the failures are listed in the top-level
+README.
+
+What else they touched:
+- `qvgen` gave `mtvec`/`stvec` MODE 1 on some seeds, which the cores used to ignore. With E4 an interrupt went to
+  BASE + 4 * cause, into the middle of the handler, and the program never ended (the `f5_lockstep` baseline on
+  `random_10002`, with both cores agreeing). A MODE-1 xtvec now points at a table of 16 jumps to the handler
+  (`1da317e`).
+- The seven decode mutation specs had not compiled since F5 (their file lists lacked `qv_fp_dec.sv`); fixed with the
+  re-anchoring in `211b0a8`. Two decode mutants on the second parcel's page then survived (crossing decided by `pc[2]`
+  alone; the second parcel always on the second dword's page). `qv_decode_tb` gained the two non-crossing cases
+  (`b0d5ef1`), and every touched spec is killed in full.
+- The lockstep ACT lists name the regenerated ELFs (`6dd99b0`): 200 and 426.
+
+The gate for E4-E7 (2026-10-30), the core against the reference, Verilator, four memory configurations, on a
+snapshot of `211b0a8`:
+- The FP profile (`--isa imafdc --priv msu --pmp --irq --smc --sv39` with interrupts and the debug script, `--seed
+  31`): 500 x 4 = 2,000/2,000, 92.5 M retirements, 2.9 M interrupt entries.
+- An M-mode body with PMP (`--isa imafdc --priv m --pmp --irq --smc`, `--seed 32`): 300 x 4 = 1,200/1,200, 16.2 M
+  retirements.
+- The corpora x 4: the F/D ACT ELFs (426) 1,704/1,704; ACT (200), the firmware and 100 random FP programs (307)
+  1,228/1,228; the smc, irq and dbg corpora clean.
+- The reference against itself, 50 x 4: 200/200. The corruption self-test catches every field class (1-14) at the
+  targeted record; the kill matrix catches 17 of 17.
+- Regression on `297a84f`: core 133/133, reference 77/77.
+
+After E8 and E9 (`f555cb6`): regression core 133/133, reference 77/77; ACT 198/200 and 422/426, the same on both
+cores; lockstep, fresh seeds, on a snapshot of `f555cb6`: the FP profile 200 x 4 = 800/800 (37.1 M retirements, 1.2 M
+interrupt entries), act-fd 1,704/1,704 and the 307-program corpus 1,228/1,228.
+
 ## Where the core differs from ref_core.sv
 
 Architectural behavior is the same: the lockstep gate compares every retirement, a CSR snapshot, the bus
@@ -237,7 +287,7 @@ P9 (store buffer and branch prediction; the retired stream is the same, the timi
 
 Sv39 (the data side and the instruction side are both translated; same pages, same faults, same causes and
 mtvals per instruction):
-- The FSM translates once per instruction (the pc, and pc + 8 for a 32-bit one that crosses); the pipe translates
+- The FSM translates once per instruction (the pc, and pc + 2 for a 32-bit one that crosses); the pipe translates
   once per fetched dword and once per data access. The number of TLB lookups and fills differs, so a test that
   counts them counts walks (`core_sv39_tlb_tb`), not lookups.
 - The pipe has two 4-entry TLBs (instruction and data, round-robin each) against the FSM's one unified 4-entry
@@ -270,7 +320,7 @@ mtvals per instruction):
   abandoned (a cancelled walk's beat completes and its result is dropped), and a data walk can wait for a whole
   instruction-side walk. PTE reads are PMP-checked at S privilege, read only, and a denial or a bus error is an
   access fault of the original access's class.
-- A page fault in the second dword of a 32-bit instruction that crosses reports pc + 8, as ref_core.sv does; a low-dword
+- A fault in the second parcel of a 32-bit instruction reports pc + 2 (errata E6), as ref_core.sv does; a low-dword
   PMP denial ends the fetch before the high dword is looked at, so it wins over a high-dword page fault.
 
 RVFI fields the FSM reports stale, which the comparator masks or the stimulus avoids:
