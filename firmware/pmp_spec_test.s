@@ -1,5 +1,5 @@
 /*
- * pmp_spec_test.s -- errata E4-E8 (found by the ACT refresh that declared PMP and Sv39), on the running core:
+ * pmp_spec_test.s -- errata E4-E9 (found by the ACT refresh that declared PMP and Sv39), on the running core:
  *   E7  pmpcfg1, pmpcfg3-15 and pmpaddr16-63 do not exist (illegal); pmpcfg2 and pmpaddr4-15 read 0
  *   E4  mtvec/stvec MODE is WARL {0, 1}: a write of 2 or 3 keeps the old mode; MODE 1 vectors interrupts to
  *       BASE + 4 * cause (M: MTI, S: a delegated SEI)
@@ -7,6 +7,7 @@
  *   E6  PMP on a fetch checks each 2-byte parcel of the instruction; a fault on the second parcel has
  *       mtval = pc + 2
  *   E8  mcounteren/scounteren keep CY, TM and IR (bits 2:0) only
+ *   E9  menvcfg/senvcfg keep FIOM (bit 0) only, each on its own; S mode reads and writes senvcfg
  * Each check stores (actual, expected) at RES + 8 + 16 * i; RES itself gets the number of checks at the end.
  * testbench/core_pmp_spec_tb.sv compares the pairs and the count. The testbench drives i_mtip while the word
  * at MAGIC is 1 and i_seip while it is 2.
@@ -287,6 +288,33 @@ main:
     csrw    mcounteren, x0
     csrw    scounteren, x0
 
+    # ---------------- E9: menvcfg/senvcfg keep FIOM ----------------
+    li      a0, -1
+    li      a3, 1
+    csrw    menvcfg, a0
+    csrr    a2, menvcfg
+    CHECK   a2, a3              # 39: all ones written, FIOM read
+    li      a0, -2
+    csrw    menvcfg, a0
+    csrr    a2, menvcfg
+    CHECK   a2, x0              # 40: everything but FIOM written, 0 read
+    li      a0, -1
+    csrw    senvcfg, a0         # with menvcfg.FIOM = 0
+    csrr    a2, senvcfg
+    CHECK   a2, a3              # 41: senvcfg keeps FIOM on its own
+    li      a0, -2
+    csrw    senvcfg, a0
+    csrr    a2, senvcfg
+    CHECK   a2, x0              # 42
+    csrwi   senvcfg, 1
+    csrw    mie, x0
+    li      a6, 0
+    li      a7, -1
+    CLEAR_LT
+    RUN_S   s_envcfg
+    CHECK   a6, a3              # 43: S reads senvcfg
+    CHECK   a7, x0              # 44: and writes it
+
     # ---------------- the end ----------------
     li      a0, RES + 8
     sub     a0, s0, a0
@@ -334,6 +362,12 @@ s_wait:
     addi    t4, t4, -1
     bnez    t4, 1b
 2:  ecall
+    # E9: senvcfg from S mode (a trap would come back to M with a6 and a7 unchanged)
+s_envcfg:
+    csrr    a6, senvcfg
+    csrwi   senvcfg, 0
+    csrr    a7, senvcfg
+    ecall
 
     # ---------------- M vector table: entry 0 takes every exception ----------------
     .balign 256
