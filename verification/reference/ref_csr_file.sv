@@ -297,6 +297,7 @@ module ref_csr_file #(
     localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_SIE        = 12'h104;
     localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_STVEC      = 12'h105;
     localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_SCOUNTEREN = 12'h106;
+    localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_SENVCFG    = 12'h10A;
     localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_SSCRATCH   = 12'h140;
     localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_SEPC       = 12'h141;
     localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_SCAUSE     = 12'h142;
@@ -310,6 +311,7 @@ module ref_csr_file #(
     localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_MIE        = 12'h304;
     localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_MTVEC      = 12'h305;
     localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_MCOUNTEREN = 12'h306;
+    localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_MENVCFG    = 12'h30A;
     localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_MEPC       = 12'h341;
     localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_MCAUSE     = 12'h342;
     localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_MTVAL      = 12'h343;
@@ -476,9 +478,14 @@ module ref_csr_file #(
      * exceptions always go to BASE (the cores' trap-vector logic).
      * mcounteren/scounteren are 32-bit registers that keep only CY, TM
      * and IR (bits 2:0), as Sail does; the rest read 0 (errata E8).
+     * menvcfg/senvcfg keep only FIOM (bit 0), and the rest read 0, as Sail
+     * does (errata E9). The bit has no effect: the cores never let an I/O
+     * access pass a memory access or the reverse, so the ordering FIOM = 1
+     * asks for always holds.
      */
     logic [(`WORD_SIZE - 1):0] stvec_q, mtvec_q;
     logic [2:0]                mcounteren_q, scounteren_q;
+    logic                      menvcfg_fiom_q, senvcfg_fiom_q;
     logic [(`WORD_SIZE - 1):0] sscratch_q;
     logic [(`WORD_SIZE - 1):0] satp_q;
     logic [(`WORD_SIZE - 1):0] medeleg_q, mideleg_q;
@@ -502,6 +509,14 @@ module ref_csr_file #(
     always_ff @(posedge i_clk) begin
         if (i_rst) scounteren_q <= '0;
         else if (i_csr_we && (i_csr_addr == CSR_ADDR_SCOUNTEREN)) scounteren_q <= i_csr_wdata[2:0];
+    end
+    always_ff @(posedge i_clk) begin
+        if (i_rst) menvcfg_fiom_q <= 1'b0;
+        else if (i_csr_we && (i_csr_addr == CSR_ADDR_MENVCFG)) menvcfg_fiom_q <= i_csr_wdata[0];
+    end
+    always_ff @(posedge i_clk) begin
+        if (i_rst) senvcfg_fiom_q <= 1'b0;
+        else if (i_csr_we && (i_csr_addr == CSR_ADDR_SENVCFG)) senvcfg_fiom_q <= i_csr_wdata[0];
     end
     always_ff @(posedge i_clk) begin
         if (i_rst) sscratch_q <= '0;
@@ -1181,6 +1196,7 @@ module ref_csr_file #(
             CSR_ADDR_SIE:        o_csr_rdata = mie_q & mideleg_q;
             CSR_ADDR_STVEC:      o_csr_rdata = stvec_q;
             CSR_ADDR_SCOUNTEREN: o_csr_rdata = {{(`WORD_SIZE - 3){1'b0}}, scounteren_q};
+            CSR_ADDR_SENVCFG:    o_csr_rdata = {{(`WORD_SIZE - 1){1'b0}}, senvcfg_fiom_q};
             CSR_ADDR_SSCRATCH:   o_csr_rdata = sscratch_q;
             CSR_ADDR_SEPC:       o_csr_rdata = sepc_q;
             CSR_ADDR_SCAUSE:     o_csr_rdata = scause_q;
@@ -1195,6 +1211,7 @@ module ref_csr_file #(
             CSR_ADDR_MIE:        o_csr_rdata = mie_q;
             CSR_ADDR_MTVEC:      o_csr_rdata = mtvec_q;
             CSR_ADDR_MCOUNTEREN: o_csr_rdata = {{(`WORD_SIZE - 3){1'b0}}, mcounteren_q};
+            CSR_ADDR_MENVCFG:    o_csr_rdata = {{(`WORD_SIZE - 1){1'b0}}, menvcfg_fiom_q};
             CSR_ADDR_MEPC:       o_csr_rdata = mepc_q;
             CSR_ADDR_MCAUSE:     o_csr_rdata = mcause_q;
             CSR_ADDR_MTVAL:      o_csr_rdata = mtval_q;

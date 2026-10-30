@@ -221,6 +221,15 @@ it is cited with its directory.
   the rest as 0. Nothing in either core reads them (the Zicntr views they
   gate are not implemented), so only a CSR read can see the change. Tests:
   `csr_file_tb`, `core_pmp_spec_tb` checks 33-38.
+- **E9 (2026-10-30, found by ACT `S-00` (F/D config) once E8 let it past
+  `scounteren`; fixed in `design/csr_file.sv`, so `ref_csr_file.sv`).**
+  `menvcfg` and `senvcfg` were not implemented: they read 0 and ignored
+  writes. Sail keeps FIOM (bit 0) in each and reads the other bits as 0
+  (`writable_fiom` in both ACT configs). Both cores now store FIOM in each
+  register; `senvcfg.FIOM` does not depend on `menvcfg`. The bit has no
+  effect: neither core lets an I/O access pass a memory access or the
+  reverse, so the ordering FIOM = 1 asks for always holds. Tests:
+  `csr_file_tb`, `core_pmp_spec_tb` checks 39-44.
 
 ## Feature additions
 
