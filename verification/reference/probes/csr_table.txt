@@ -111,10 +111,10 @@
   write -1 to 30a: ok; read back: ok 0x1
   write -1 to 10a: ok; read back: ok 0x1
 == lockstep
-  pass 0 priv M mcounteren 0 scounteren 0: read ok  001-003 100 104-106 10a 10c-10f 140-144 180 300-306 30a 30c-30f 320 340-344 3a0 3a2 3b0-3bf 7a0 f11-f15
-  pass 0 priv M mcounteren 0 scounteren 0: write ok 001-003 100 104-106 10a 10c-10f 140-144 180 300-306 30a 30c-30f 320 340-344 3a0 3a2 3b0-3bf 7a0
-  pass 1 priv S mcounteren 0 scounteren 0: read ok  001-003 100 104-106 140-144 180
-  pass 1 priv S mcounteren 0 scounteren 0: write ok 001-003 100 104-106 140-144 180
+  pass 0 priv M mcounteren 0 scounteren 0: read ok  001-003 100 104-106 10a 140-144 180 300-306 30a 320 340-344 3a0 3a2 3b0-3bf 7a0 f11-f15
+  pass 0 priv M mcounteren 0 scounteren 0: write ok 001-003 100 104-106 10a 140-144 180 300-306 30a 320 340-344 3a0 3a2 3b0-3bf 7a0
+  pass 1 priv S mcounteren 0 scounteren 0: read ok  001-003 100 104-106 10a 140-144 180
+  pass 1 priv S mcounteren 0 scounteren 0: write ok 001-003 100 104-106 10a 140-144 180
   pass 2 priv U mcounteren 0 scounteren 0: read ok  001-003
   pass 2 priv U mcounteren 0 scounteren 0: write ok 001-003
   pass 3 priv S mcounteren 7 scounteren 0: read ok  
@@ -125,7 +125,7 @@
   pass 5 priv U mcounteren 7 scounteren 7: write ok 
   pass 6 priv U mcounteren 0 scounteren 7: read ok  
   pass 6 priv U mcounteren 0 scounteren 7: write ok 
-  write -1 to 320: ok; read back: ok 0xfffffffd
+  write -1 to 320: ok; read back: ok 0x5
   write -1 to 323: trap 2; read back: trap 2 0x0
   write -1 to b03: trap 2; read back: trap 2 0x0
   write -1 to f15: trap 2; read back: trap 2 0x0
@@ -134,15 +134,15 @@
   write -1 to 7a5: trap 2; read back: trap 2 0x0
   write -1 to b00: trap 2; read back: trap 2 0x0
   write -1 to b02: trap 2; read back: trap 2 0x0
-  write -1 to 306: ok; read back: ok 0xffffffff
-  write -1 to 106: ok; read back: ok 0xffffffff
+  write -1 to 306: ok; read back: ok 0x7
+  write -1 to 106: ok; read back: ok 0x7
   write -1 to 30a: ok; read back: ok 0x1
   write -1 to 10a: ok; read back: ok 0x1
 == lockstep+zicntr
-  pass 0 priv M mcounteren 0 scounteren 0: read ok  001-003 100 104-106 10a 10c-10f 140-144 180 300-306 30a 30c-30f 320 340-344 3a0 3a2 3b0-3bf 7a0 b00 b02 c00-c02 f11-f15
-  pass 0 priv M mcounteren 0 scounteren 0: write ok 001-003 100 104-106 10a 10c-10f 140-144 180 300-306 30a 30c-30f 320 340-344 3a0 3a2 3b0-3bf 7a0 b00 b02
-  pass 1 priv S mcounteren 0 scounteren 0: read ok  001-003 100 104-106 140-144 180
-  pass 1 priv S mcounteren 0 scounteren 0: write ok 001-003 100 104-106 140-144 180
+  pass 0 priv M mcounteren 0 scounteren 0: read ok  001-003 100 104-106 10a 140-144 180 300-306 30a 320 340-344 3a0 3a2 3b0-3bf 7a0 b00 b02 c00-c02 f11-f15
+  pass 0 priv M mcounteren 0 scounteren 0: write ok 001-003 100 104-106 10a 140-144 180 300-306 30a 320 340-344 3a0 3a2 3b0-3bf 7a0 b00 b02
+  pass 1 priv S mcounteren 0 scounteren 0: read ok  001-003 100 104-106 10a 140-144 180
+  pass 1 priv S mcounteren 0 scounteren 0: write ok 001-003 100 104-106 10a 140-144 180
   pass 2 priv U mcounteren 0 scounteren 0: read ok  001-003
   pass 2 priv U mcounteren 0 scounteren 0: write ok 001-003
   pass 3 priv S mcounteren 7 scounteren 0: read ok  c00-c02
@@ -153,7 +153,7 @@
   pass 5 priv U mcounteren 7 scounteren 7: write ok 
   pass 6 priv U mcounteren 0 scounteren 7: read ok  
   pass 6 priv U mcounteren 0 scounteren 7: write ok 
-  write -1 to 320: ok; read back: ok 0xfffffffd
+  write -1 to 320: ok; read back: ok 0x5
   write -1 to 323: trap 2; read back: trap 2 0x0
   write -1 to b03: trap 2; read back: trap 2 0x0
   write -1 to f15: trap 2; read back: trap 2 0x0
@@ -162,7 +162,7 @@
   write -1 to 7a5: trap 2; read back: trap 2 0x0
   write -1 to b00: ok; read back: ok 0x1
   write -1 to b02: ok; read back: ok 0x2
-  write -1 to 306: ok; read back: ok 0xffffffff
-  write -1 to 106: ok; read back: ok 0xffffffff
+  write -1 to 306: ok; read back: ok 0x7
+  write -1 to 106: ok; read back: ok 0x7
   write -1 to 30a: ok; read back: ok 0x1
   write -1 to 10a: ok; read back: ok 0x1

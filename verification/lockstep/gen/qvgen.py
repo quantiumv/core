@@ -563,6 +563,24 @@ _M_ANY = ["mstatus", "misa", "medeleg", "mideleg", "mie", "mtvec", "mscratch", "
 _U_RO = ["cycle", "instret", "time"]
 # dcsr, dpc, dscratch0/1, tselect, tdata1-3, tinfo: an illegal instruction outside Debug Mode, from every privilege
 _D_ANY = ["0x7b0", "0x7b1", "0x7b2", "0x7b3", "0x7a0", "0x7a1", "0x7a2", "0x7a3", "0x7a4"]
+# CSRs that do not exist (errata E10): an illegal instruction from every privilege, the read-suppressed forms too.
+# mhpmcounter3, menvcfgh, mhpmevent3, tcontrol, hstatus, stimecmp, hpmcounter3, seed, mseccfg, scontext: none of
+# them exists in Sail's lockstep config either (verification/reference/probes/csr_table.txt), so --sail-safe keeps them
+_ABSENT = ["0xb03", "0x31a", "0x323", "0x7a5", "0x600", "0x14d", "0xc03", "0x015", "0x747", "0x5a8"]
+
+
+def _emit_csr_access(p: Program, recent: list[int], csr: str):
+    """One access to `csr` in a random form: a read, or one of the six read-modify-write forms."""
+    rd = p.reg_biased(recent)
+    form = p.rng.choice(["csrrw", "csrrs", "csrrc", "csrrwi", "csrrsi", "csrrci", "read"])
+    if form == "read":
+        p.e(f"    csrr    x{rd}, {csr}")
+    elif form.endswith("i"):
+        p.e(f"    {form:<7} x{rd}, {csr}, {p.rng.randint(0, 31)}")
+    else:
+        p.e(f"    {form:<7} x{rd}, {csr}, x{p.reg_biased(recent)}")
+    recent.append(rd)
+    del recent[:-8]
 
 
 def emit_priv_csr(p: Program, recent: list[int]):
@@ -663,6 +681,10 @@ def emit_csr(p: Program, recent: list[int]):
     # ONLY the CSR its own current privilege can legally reach.
     if p.priv_ext and p.rng.random() < 0.5:
         emit_priv_csr(p, recent)
+        return
+    if p.rng.random() < 0.06:
+        # a CSR that does not exist (errata E10); in an M-mode body this is the only way to reach that check
+        _emit_csr_access(p, recent, p.rng.choice(_ABSENT))
         return
     if p.rng.random() < 0.12:
         # a debug or trigger CSR outside Debug Mode: an illegal instruction at every privilege. In an M-mode body

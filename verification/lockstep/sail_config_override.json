@@ -48,6 +48,9 @@
     "pmp": { "count": 16, "usable_count": 4 }
   },
   "base": {
+    // As the ACT configs: of the counter bits, mcounteren/scounteren/mcountinhibit keep CY, TM and IR only (Sail's
+    // default keeps all 32, for HPM counters this core does not have).
+    "writable_hpm_counters": { "len": 32, "value": "0x5" },
     "xtval_nonzero": {
       // Illegal-instruction mtval holds the instruction bits.
       "illegal_instruction": true,
@@ -74,7 +77,9 @@
     "Ssqosid": { "supported": false },
     "Sstc": { "supported": false },
     "Sstvala": { "supported": false },
-    "Stateen": { "supported": false },
+    // Smstateen and Ssstateen are separate keys (a flat "supported" here left both on, and with them the
+    // mstateen/sstateen CSRs, verification/reference/probes/csr_table.txt)
+    "Stateen": { "Smstateen": { "supported": false }, "Ssstateen": { "supported": false } },
     "Sv32": { "supported": false },
     "Sv48": { "supported": false },
     "Sv57": { "supported": false },
