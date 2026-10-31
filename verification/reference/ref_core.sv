@@ -3833,14 +3833,16 @@ module ref_core
     // ref_decoder as INVALID, see the F/D block below the decoder)
     wire fp_csr_off = FPU_EN && is_csr && (imm_2[11:0] == 12'h001 || imm_2[11:0] == 12'h002 || imm_2[11:0] == 12'h003)
                       && (mstatus_fs_w == 2'b00);
-    // errata E7: with 16 PMP CSRs (4 implemented, the rest read 0) RV64 has pmpcfg0, pmpcfg2 and pmpaddr0-15;
-    // pmpcfg1, pmpcfg3-15 and pmpaddr16-63 do not exist, and touching one is illegal (Sail; ACT pmpsm_csr_walk)
-    wire csr_pmp_absent = is_csr && ((imm_2[11:4] == 8'h3A && imm_2[3:0] != 4'h0 && imm_2[3:0] != 4'h2)
-                                     || (imm_2[11:0] >= 12'h3C0 && imm_2[11:0] <= 12'h3EF));
+    // errata E10: a CSR that does not exist is illegal, from every privilege level and for every access, the
+    // read-suppressed forms included (ref_csr_exists.sv, gen_copies.sh's copy of design/pipe/qv_csr_exists.sv, has
+    // the set; E7's absent PMP CSRs, pmpcfg1, pmpcfg3-15 and pmpaddr16-63, are part of it)
+    logic csr_exists;
+    ref_csr_exists #(.FP_EN(FPU_EN)) csr_exists0 (.i_addr(imm_2[11:0]), .o_exists(csr_exists));
+    wire csr_absent = is_csr && !csr_exists;
     wire is_illegal_instr = is_invalid_instr || csr_priv_violation || csr_readonly_violation
                           || debug_csr_violation || trigger_csr_violation
                           || mret_priv_violation || sret_priv_violation || tvm_violation
-                          || (is_compressed && c_expand_illegal) || fp_csr_off || csr_pmp_absent;
+                          || (is_compressed && c_expand_illegal) || fp_csr_off || csr_absent;
     wire is_ecall = (decoded_instruction == `REF_INSTR_CODE(ECALL));
     /*
      * Zifencei: is_fence_i drives icache_flush_o below (see that port's

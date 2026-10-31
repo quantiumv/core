@@ -164,6 +164,22 @@ module qv_decode_tb #(
     endtask
 
     // m/s scratch, epc, cause, tval: written without a flush under CSR_NOSER
+    // errata E10: the CSRs that exist, written from Sail's table (verification/reference/probes/csr_table.txt), not
+    // from the RTL: Sail's M-mode set under the ACT configs, plus mcycle/minstret (always) and the trigger CSRs
+    // 0x7A1-0x7A4 (Debug Mode only, a separate rule); fflags/frm/fcsr only with the FPU
+    function automatic logic tb_exists(input logic [11:0] a);
+        case (a)
+            12'h001, 12'h002, 12'h003: return FPU_EN;
+            12'h100, 12'h104, 12'h105, 12'h106, 12'h10A,
+            12'h140, 12'h141, 12'h142, 12'h143, 12'h144, 12'h180,
+            12'h300, 12'h301, 12'h302, 12'h303, 12'h304, 12'h305, 12'h306, 12'h30A, 12'h320,
+            12'h340, 12'h341, 12'h342, 12'h343, 12'h344, 12'h3A0, 12'h3A2,
+            12'h7A0, 12'h7A1, 12'h7A2, 12'h7A3, 12'h7A4, 12'h7B0, 12'h7B1, 12'h7B2, 12'h7B3,
+            12'hB00, 12'hB02, 12'hF11, 12'hF12, 12'hF13, 12'hF14, 12'hF15: return 1'b1;
+            default: return a[11:4] == 8'h3B;                       // pmpaddr0-15
+        endcase
+    endfunction
+
     function automatic logic trap_csr(input logic [11:0] a);
         return (a >= 12'h340 && a <= 12'h343) || (a >= 12'h140 && a <= 12'h143);
     endfunction
@@ -504,8 +520,10 @@ module qv_decode_tb #(
         // read-only CSRs: reading is fine, a real write is illegal
         expect_csr("read mhartid", encode_csr(12'hF14, 0, 3'b010, 5, `OPC_SYSTEM), `INSTR_CODE(CSRRS),
                    QV_CSR_RS, 12'hF14, 0, 0, 0, 1'b1, 5);
-        expect_csr("read instret (RSI 0)", encode_csr(12'hC02, 0, 3'b110, 5, `OPC_SYSTEM), `INSTR_CODE(CSRRSI),
-                   QV_CSR_RS, 12'hC02, 0, 0, 64'd0, 1'b1, 5);
+        expect_csr("read mconfigptr (RSI 0)", encode_csr(12'hF15, 0, 3'b110, 5, `OPC_SYSTEM), `INSTR_CODE(CSRRSI),
+                   QV_CSR_RS, 12'hF15, 0, 0, 64'd0, 1'b1, 5);
+        // errata E10: without Zicntr instret does not exist, so even a read is illegal
+        expect_fault("read instret (RSI 0)", encode_csr(12'hC02, 0, 3'b110, 5, `OPC_SYSTEM), 1'b0, 4'd0, 4'd2);
         expect_fault("write mhartid",        encode_csr(12'hF14, 6, 3'b001, 5, `OPC_SYSTEM), 1'b0, 4'd0, 4'd2);
         expect_fault("CSRRS mhartid, x6",    encode_csr(12'hF14, 6, 3'b010, 5, `OPC_SYSTEM), 1'b0, 4'd0, 4'd2);
         expect_fault("CSRRSI cycle, 1",      encode_csr(12'hC00, 1, 3'b110, 5, `OPC_SYSTEM), 1'b0, 4'd0, 4'd2);
@@ -544,18 +562,20 @@ module qv_decode_tb #(
         expect_fault("write mhartid in debug mode", encode_csr(12'hF14, 6, 3'b001, 5, `OPC_SYSTEM), 1'b0, 4'd0, 4'd2);
         in_debug = 1'b0;
         expect_fault("read dcsr again outside debug mode", encode_csr(12'h7B0, 0, 3'b010, 5, `OPC_SYSTEM), 1'b0, 4'd0, 4'd2);
-        // the neighbours of those ranges are ordinary (unbacked) CSRs
-        expect_csr("read 0x7A5", encode_csr(12'h7A5, 0, 3'b010, 5, `OPC_SYSTEM), `INSTR_CODE(CSRRS),
-                   QV_CSR_RS, 12'h7A5, 0, 0, 0, 1'b1, 5);
-        expect_csr("write 0x7B4", encode_csr(12'h7B4, 6, 3'b001, 5, `OPC_SYSTEM), `INSTR_CODE(CSRRW),
-                   QV_CSR_RW, 12'h7B4, 6, 1, 0, 1'b0, 5);
+        // the neighbours of those ranges do not exist (errata E10): illegal too, in Debug Mode as well
+        expect_fault("read 0x7A5", encode_csr(12'h7A5, 0, 3'b010, 5, `OPC_SYSTEM), 1'b0, 4'd0, 4'd2);
+        expect_fault("write 0x7B4", encode_csr(12'h7B4, 6, 3'b001, 5, `OPC_SYSTEM), 1'b0, 4'd0, 4'd2);
+        in_debug = 1'b1;
+        expect_fault("read 0x7A5 in Debug Mode", encode_csr(12'h7A5, 0, 3'b010, 5, `OPC_SYSTEM), 1'b0, 4'd0, 4'd2);
+        expect_fault("write 0x7B4 in Debug Mode", encode_csr(12'h7B4, 6, 3'b001, 5, `OPC_SYSTEM), 1'b0, 4'd0, 4'd2);
+        in_debug = 1'b0;
         // which CSR writes flush after them (P10c: only the trap CSRs are written without one) -- the neighbours too
         begin : ser_rule
             logic [11:0] wa [0:17];
             wa[0] = 12'h340; wa[1] = 12'h341; wa[2] = 12'h342; wa[3] = 12'h343;
             wa[4] = 12'h140; wa[5] = 12'h141; wa[6] = 12'h142; wa[7] = 12'h143;
             wa[8] = 12'h300; wa[9] = 12'h100; wa[10] = 12'h180; wa[11] = 12'h304; wa[12] = 12'h344;
-            wa[13] = 12'h33F; wa[14] = 12'h144; wa[15] = 12'h13F; wa[16] = 12'h3A0; wa[17] = 12'h305;
+            wa[13] = 12'h306; wa[14] = 12'h144; wa[15] = 12'h106; wa[16] = 12'h3A0; wa[17] = 12'h305;
             for (int w = 0; w < 18; w++) begin
                 expect_csr($sformatf("CSRRW 0x%03h", wa[w]), encode_csr(wa[w], 6, 3'b001, 5, `OPC_SYSTEM), `INSTR_CODE(CSRRW),
                            QV_CSR_RW, wa[w], 6, 1, 0, 1'b0, 5);
@@ -715,8 +735,8 @@ module qv_decode_tb #(
             priv = 2'(pv);
             foreach (csr_probe[i]) begin
                 feed(encode_csr(csr_probe[i], 5'd0, `FUNCT3_CSRRS, 5'd5, `OPC_SYSTEM));
-                check($sformatf("csr %h at priv %0d: illegal iff addr[9:8] > priv", csr_probe[i], pv),
-                      {63'b0, uop.xcpt}, {63'b0, csr_probe[i][9:8] > 2'(pv)});
+                check($sformatf("csr %h at priv %0d: illegal iff addr[9:8] > priv or absent", csr_probe[i], pv),
+                      {63'b0, uop.xcpt}, {63'b0, csr_probe[i][9:8] > 2'(pv) || !tb_exists(csr_probe[i])});
                 if (uop.xcpt) check($sformatf("csr %h at priv %0d: cause 2", csr_probe[i], pv), {60'b0, uop.xcpt_cause}, 64'd2);
             end
         end

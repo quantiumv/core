@@ -26,11 +26,11 @@
  *     unlike the csrrs-with-rs1=x0 reads above) traps too --
  *     debug_csr_violation is deliberately NOT gated on write-suppression
  *     the way csr_readonly_violation is.
- *   - Two negative controls proving debug_csr_violation doesn't
- *     over-fire: an ordinary CSR (mscratch) access succeeds normally,
- *     and accesses to the addresses immediately adjacent to the 4-CSR
- *     block (0x7AF below, 0x7B4 above) do NOT trap -- pins down
- *     is_debug_csr_addr's exact range-check boundary.
+ *   - A negative control proving debug_csr_violation doesn't
+ *     over-fire: an ordinary CSR (mscratch) access succeeds normally.
+ *     The addresses immediately adjacent to the 4-CSR block (0x7AF
+ *     below, 0x7B4 above) used to be the other control (they did not
+ *     trap); since errata E10 they trap too, as CSRs that do not exist.
  *   - Privilege is then dropped M -> S (via mret) and S -> U (via sret,
  *     the established core_priv_tb.sv-precedented mechanism), and a
  *     debug-CSR access is repeated from each level. Both of these also
@@ -99,8 +99,8 @@ module core_debug_csr_violation_tb;
          *  0x18  addi x6, x0, 85 (0x55)                   write payload
          *  0x1C  csrrw x0, dcsr, x6                       TRAP -- M-mode WRITE, not suppressed (resumes 0x20)
          *  0x20  csrrs x5, mscratch, x0                   NOT a trap -- ordinary CSR, negative control
-         *  0x24  csrrs x7, 0x7AF, x0                       NOT a trap -- one below the block, negative control
-         *  0x28  csrrs x8, 0x7B4, x0                       NOT a trap -- one above the block, negative control
+         *  0x24  csrrs x7, 0x7AF, x0                       TRAP -- one below the block, does not exist (E10)
+         *  0x28  csrrs x8, 0x7B4, x0                       TRAP -- one above the block, does not exist (E10)
          *  0x2C  addi x11, x0, 2047 (0x7FF)
          *  0x30  addi x11, x11, 1                          x11 = 0x800 (mstatus.MPP = S, bit 11)
          *  0x34  csrrw x0, mstatus, x11
@@ -170,16 +170,16 @@ module core_debug_csr_violation_tb;
             dut.core0.regfile0.gp_registers[6], 64'd85);
         check("x5 == 0 -- ordinary mscratch access did NOT trap (negative control)",
             dut.core0.regfile0.gp_registers[5], 64'd0);
-        check("x7 == 0 -- 0x7AF (below the block) did NOT trap (boundary control)",
+        check("x7 never written -- 0x7AF (below the block, does not exist) trapped",
             dut.core0.regfile0.gp_registers[7], 64'd0);
-        check("x8 == 0 -- 0x7B4 (above the block) did NOT trap (boundary control)",
+        check("x8 never written -- 0x7B4 (above the block, does not exist) trapped",
             dut.core0.regfile0.gp_registers[8], 64'd0);
         check("x13 never written -- dcsr S-mode read trapped (dual-violation path)",
             dut.core0.regfile0.gp_registers[13], 64'd0);
         check("x15 never written -- dpc U-mode read trapped (dual-violation path)",
             dut.core0.regfile0.gp_registers[15], 64'd0);
-        check("trap_count == 7 -- 4 M-reads + 1 M-write + 1 S-read + 1 U-read, nothing else",
-            dut.core0.regfile0.gp_registers[28], 64'd7);
+        check("trap_count == 9 -- 4 M-reads + 1 M-write + 2 absent neighbours + 1 S-read + 1 U-read, nothing else",
+            dut.core0.regfile0.gp_registers[28], 64'd9);
         check("mcause == 2 (illegal instruction) for the last (U-mode dpc) trap",
             mcause_snap, 64'd2);
         check("mtval == the U-mode dpc csrrs's own raw 32-bit encoding",

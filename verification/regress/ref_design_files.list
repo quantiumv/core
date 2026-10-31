@@ -23,6 +23,8 @@ verification/reference/ref_fpu_pipe.sv
 verification/reference/ref_fpu_divsqrt.sv
 verification/reference/ref_exu_fpu.sv
 verification/reference/ref_fprf.sv
+# errata E10: which CSRs exist (gen_copies.sh's copy of design/pipe/qv_csr_exists.sv)
+verification/reference/ref_csr_exists.sv
 design/cache_complex.sv
 design/clint.sv
 verification/reference/ref_core.sv

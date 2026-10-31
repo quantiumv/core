@@ -230,6 +230,29 @@ it is cited with its directory.
   effect: neither core lets an I/O access pass a memory access or the
   reverse, so the ordering FIOM = 1 asks for always holds. Tests:
   `csr_file_tb`, `core_pmp_spec_tb` checks 39-44.
+- **E10 (2026-10-31, found reading the cores for Linux; fixed together in
+  `design/pipe/qv_decode.sv` and `ref_core.sv`, through the new
+  `design/pipe/qv_csr_exists.sv` and its copy `ref_csr_exists.sv`).**
+  Every CSR address `csr_file.sv` does not map read 0 and ignored writes,
+  without a trap (E7 had made only the absent PMP CSRs illegal). The spec
+  makes an access to a CSR that does not exist an illegal instruction, and
+  software relies on it: OpenSBI probes Sstc, Smstateen and others by
+  reading a CSR and watching for the trap, and S-mode Linux reads `time`,
+  which read 0 here without a trap OpenSBI could emulate. An access to a CSR
+  that does not exist is now illegal (cause 2, tval the instruction) from
+  every privilege level, the read-suppressed forms and rd = x0 included.
+  The set that exists is Sail's under the ACT configs
+  (`probes/csr_table.txt`, made by `probes/csr_probe.py`), with
+  `mcountinhibit` (0x320) and `mconfigptr` (0xF15) new and reading 0, and
+  three differences from Sail: `mcycle`/`minstret` always exist (Sail ties
+  them to Zicntr; Sm requires them), the trigger CSRs 0x7A1-0x7A4 exist
+  (in Debug Mode only, as before; Sail has only `tselect`, and also lets M
+  reach it outside Debug Mode), and `mcountinhibit`'s CY and IR bits read 0
+  where Sail keeps them. E7's rule is part of the new set. Still as before:
+  an action-0 trigger on an instruction that is also illegal reports cause
+  2, not 3 (the ranking since E2). Tests: `qv_decode_tb` (every address at
+  every privilege, read and write, against Sail's table),
+  `core_pmp_spec_tb` checks 45-54, `core_debug_csr_violation_tb`.
 
 ## Feature additions
 

@@ -410,10 +410,11 @@ module qv_decode #(
                           || csr_addr[11:2] == 10'h1E8 || csr_addr == 12'h7A4;
     wire csr_illegal = is_csr && ((!csr_wsup && csr_addr[11:10] == 2'b11)
                                   || (csr_debug_addr && !i_in_debug));
-    // errata E7: with 16 PMP CSRs (4 of them implemented, the rest read 0) RV64 has pmpcfg0, pmpcfg2 and
-    // pmpaddr0-15; pmpcfg1, pmpcfg3-15 and pmpaddr16-63 do not exist, and touching one is illegal
-    wire csr_pmp_absent = is_csr && ((csr_addr[11:4] == 8'h3A && csr_addr[3:0] != 4'h0 && csr_addr[3:0] != 4'h2)
-                                     || (csr_addr >= 12'h3C0 && csr_addr <= 12'h3EF));
+    // errata E10: a CSR that does not exist is illegal, from every privilege level and for every access, the
+    // read-suppressed forms included (qv_csr_exists.sv has the set; E7's absent PMP CSRs are part of it)
+    logic csr_exists;
+    qv_csr_exists #(.FP_EN(FPU_EN)) csr_exists0 (.i_addr(csr_addr), .o_exists(csr_exists));
+    wire csr_absent = is_csr && !csr_exists;
     // the trap CSRs: mscratch, mepc, mcause, mtval (0x340-0x343) and sscratch, sepc, scause, stval (0x140-0x143)
     wire csr_trap_wr = (csr_addr[11:2] == 10'h0D0) || (csr_addr[11:2] == 10'h050);
 
@@ -430,8 +431,8 @@ module qv_decode #(
     wire sret_priv_violation = is_sret_op && ((i_priv == QV_PRIV_U) || (i_priv == QV_PRIV_S && i_tsr));
     wire tvm_violation       = i_tvm && (i_priv == QV_PRIV_S) && ((is_csr && csr_addr == 12'h180) || is_sfence);
     wire priv_illegal = csr_priv_violation || mret_priv_violation || sret_priv_violation || tvm_violation;
-    // F/D: a reserved FP encoding or rounding mode, FS Off; fflags/frm/fcsr with FS Off (without the FPU they are
-    // unmapped, as before)
+    // F/D: a reserved FP encoding or rounding mode, FS Off; fflags/frm/fcsr with FS Off (without the FPU they do
+    // not exist: csr_absent)
     wire fp_illegal = (is_fp && fp_ill)
                       || (FPU_EN && is_csr && (csr_addr == 12'h001 || csr_addr == 12'h002 || csr_addr == 12'h003)
                           && i_fs == 2'b00);
@@ -539,7 +540,7 @@ module qv_decode #(
             uop_d.xcpt       = 1'b1;
             uop_d.xcpt_cause = 4'd1;
             uop_d.xcpt_hi    = !lo_denied;           // the second parcel's: mtval = pc + 2
-        end else if (c_illegal || !implemented || csr_illegal || priv_illegal || fp_illegal || csr_pmp_absent) begin
+        end else if (c_illegal || !implemented || csr_illegal || priv_illegal || fp_illegal || csr_absent) begin
             uop_d.xcpt       = 1'b1;
             uop_d.xcpt_cause = 4'd2;
         end

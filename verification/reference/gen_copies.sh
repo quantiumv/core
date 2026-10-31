@@ -11,6 +11,7 @@
 #   design/pipe/qv_fpu_divsqrt.sv   -> ref_fpu_divsqrt.sv
 #   design/pipe/qv_exu_fpu.sv       -> ref_exu_fpu.sv
 #   design/pipe/qv_fprf.sv          -> ref_fprf.sv
+#   design/pipe/qv_csr_exists.sv    -> ref_csr_exists.sv    (errata E10: which CSRs exist)
 #   design/pipe/qv_pkg.sv's F/D section (between its "F/D section" markers) -> ref_fpu_pkg.sv (package ref_fpu_pkg)
 # (ref_c_expand.sv is not here: it carries mutant 8's hook, so its Zcd arms were copied by hand.)
 #
@@ -22,12 +23,12 @@ OUT=${1:-.}
 
 ren() {
     sed -e 's/\bqv_pkg\b/ref_fpu_pkg/g' -e 's/\bqv_fp_dec\b/ref_fp_dec/g' -e 's/\bqv_fpu_\([a-z]*\)\b/ref_fpu_\1/g' \
-        -e 's/\bqv_exu_fpu\b/ref_exu_fpu/g' -e 's/\bqv_fprf\b/ref_fprf/g' "$@"
+        -e 's/\bqv_exu_fpu\b/ref_exu_fpu/g' -e 's/\bqv_fprf\b/ref_fprf/g' -e 's/\bqv_csr_exists\b/ref_csr_exists/g' "$@"
 }
 
 sed -e 's/^module csr_file\b/module ref_csr_file/' -e 's/^endmodule: csr_file\b/endmodule: ref_csr_file/' \
     "$REPO/design/csr_file.sv" > "$OUT/ref_csr_file.sv"
-for f in qv_fp_dec qv_fpu_round qv_fpu_pipe qv_fpu_divsqrt qv_exu_fpu qv_fprf; do
+for f in qv_fp_dec qv_fpu_round qv_fpu_pipe qv_fpu_divsqrt qv_exu_fpu qv_fprf qv_csr_exists; do
     ren "$REPO/design/pipe/$f.sv" > "$OUT/$(echo $f | sed -e 's/^qv_fp_dec$/ref_fp_dec/' -e 's/^qv_/ref_/').sv"
 done
 {

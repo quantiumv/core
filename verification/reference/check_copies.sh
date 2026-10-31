@@ -15,4 +15,4 @@ for f in "$T"/*.sv; do
     fi
 done
 rm -rf "$T"
-[ "$bad" == "0" ] && echo "check_copies: all $(ls ref_fp*.sv ref_exu_fpu.sv ref_csr_file.sv 2>/dev/null | wc -l) copies match" || exit 1
+[ "$bad" == "0" ] && echo "check_copies: all $(ls ref_fp*.sv ref_exu_fpu.sv ref_csr_file.sv ref_csr_exists.sv 2>/dev/null | wc -l) copies match" || exit 1
