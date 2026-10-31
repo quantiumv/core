@@ -1,5 +1,5 @@
 /*
- * pmp_spec_test.s -- errata E4-E9 (found by the ACT refresh that declared PMP and Sv39), on the running core:
+ * pmp_spec_test.s -- errata E4-E10 (E4-E9 found by the ACT refresh that declared PMP and Sv39), on the running core:
  *   E7  pmpcfg1, pmpcfg3-15 and pmpaddr16-63 do not exist (illegal); pmpcfg2 and pmpaddr4-15 read 0
  *   E4  mtvec/stvec MODE is WARL {0, 1}: a write of 2 or 3 keeps the old mode; MODE 1 vectors interrupts to
  *       BASE + 4 * cause (M: MTI, S: a delegated SEI)
@@ -8,6 +8,8 @@
  *       mtval = pc + 2
  *   E8  mcounteren/scounteren keep CY, TM and IR (bits 2:0) only
  *   E9  menvcfg/senvcfg keep FIOM (bit 0) only, each on its own; S mode reads and writes senvcfg
+ *   E10 a CSR that does not exist is illegal (mtval the instruction), rd = rs1 = x0 too, in M and S;
+ *       mcountinhibit and mconfigptr exist and read 0
  * Each check stores (actual, expected) at RES + 8 + 16 * i; RES itself gets the number of checks at the end.
  * testbench/core_pmp_spec_tb.sv compares the pairs and the count. The testbench drives i_mtip while the word
  * at MAGIC is 1 and i_seip while it is 2.
@@ -315,6 +317,50 @@ main:
     CHECK   a6, a3              # 43: S reads senvcfg
     CHECK   a7, x0              # 44: and writes it
 
+    # ---------------- E10: a CSR that does not exist is illegal ----------------
+    li      a3, 2
+    CLEAR_LT
+    la      s11, 1f
+    csrr    a0, 0xb03           # mhpmcounter3
+1:  ld      a2, 0(t5)
+    CHECK   a2, a3              # 45: illegal
+    ld      a2, 16(t5)
+    li      a4, 0xb0302573      # csrrs a0, 0xb03, x0
+    CHECK   a2, a4              # 46: mtval = the instruction
+    CLEAR_LT
+    la      s11, 1f
+    csrrs   x0, 0x31a, x0       # menvcfgh (RV32 only): rd = rs1 = x0 is still an access
+1:  ld      a2, 0(t5)
+    CHECK   a2, a3              # 47
+    CLEAR_LT
+    la      s11, 1f
+    csrr    a0, 0x7a5           # tcontrol
+1:  ld      a2, 0(t5)
+    CHECK   a2, a3              # 48
+    CLEAR_LT
+    la      s11, 1f
+    csrr    a0, 0x600           # hstatus, from M
+1:  ld      a2, 0(t5)
+    CHECK   a2, a3              # 49
+    CLEAR_LT
+    li      a0, -1
+    la      s11, 1f
+    csrw    0x320, a0           # mcountinhibit: exists, keeps nothing
+    csrr    a0, 0x320
+1:  ld      a2, 24(t5)
+    CHECK   a2, x0              # 50: no trap
+    CHECK   a0, x0              # 51: reads 0
+    li      a0, -1
+    la      s11, 1f
+    csrr    a0, 0xf15           # mconfigptr: exists, reads 0
+1:  ld      a2, 24(t5)
+    CHECK   a2, x0              # 52: no trap
+    CHECK   a0, x0              # 53: reads 0
+    CLEAR_LT
+    RUN_S   s_absent
+    ld      a2, 0(t5)
+    CHECK   a2, a3              # 54: stimecmp (Sstc) is illegal from S
+
     # ---------------- the end ----------------
     li      a0, RES + 8
     sub     a0, s0, a0
@@ -367,6 +413,10 @@ s_envcfg:
     csrr    a6, senvcfg
     csrwi   senvcfg, 0
     csrr    a7, senvcfg
+    ecall
+    # E10: stimecmp from S (does not exist: the trap comes back to M)
+s_absent:
+    csrr    a6, 0x14d
     ecall
 
     # ---------------- M vector table: entry 0 takes every exception ----------------

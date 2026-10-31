@@ -751,6 +751,29 @@ module qv_decode_tb #(
             feed(encode_csr(12'(a), 5'd6, `FUNCT3_CSRRW, 5'd0, `OPC_SYSTEM));
             check($sformatf("csrw %h in M: illegal iff absent", a), {63'b0, uop.xcpt}, {63'b0, pmp_absent});
         end
+        // errata E10: every CSR address at every privilege, a read (csrrs x5, csr, x0) and a write (csrrw x0, csr,
+        // x6): illegal iff the CSR does not exist (tb_exists, Sail's table), sits above the privilege, is a debug or
+        // trigger CSR outside Debug Mode, or, for the write, is read-only. FS is Initial and TVM clear here.
+        for (int pv = 0; pv < 4; pv++) begin
+            priv = 2'(pv);
+            for (int a = 0; a < 4096; a++) begin
+                logic [11:0] ad;
+                logic        bad;
+                ad  = 12'(a);
+                bad = !tb_exists(ad) || ad[9:8] > 2'(pv) || ad[11:2] == 10'h1EC || ad[11:2] == 10'h1E8 || ad == 12'h7A4;
+                feed(encode_csr(ad, 5'd0, `FUNCT3_CSRRS, 5'd5, `OPC_SYSTEM));
+                if (uop.xcpt != bad || (bad && uop.xcpt_cause != 4'd2))
+                    check($sformatf("E10: csrr %h at priv %0d: illegal iff absent/privilege/debug", ad, pv),
+                          {59'b0, uop.xcpt, uop.xcpt_cause}, {59'b0, bad, bad ? 4'd2 : uop.xcpt_cause});
+                bad = bad || ad[11:10] == 2'b11;
+                feed(encode_csr(ad, 5'd6, `FUNCT3_CSRRW, 5'd0, `OPC_SYSTEM));
+                if (uop.xcpt != bad || (bad && uop.xcpt_cause != 4'd2))
+                    check($sformatf("E10: csrw %h at priv %0d: illegal iff absent/privilege/debug/read-only", ad, pv),
+                          {59'b0, uop.xcpt, uop.xcpt_cause}, {59'b0, bad, bad ? 4'd2 : uop.xcpt_cause});
+            end
+        end
+        check("E10: the sweep ran", 64'd1, 64'd1);
+        priv = 2'b11;
         // MRET only in M; SRET not in U, nor in S under TSR; WFI and SFENCE.VMA (bar TVM) anywhere
         for (int pv = 0; pv < 4; pv++)
             for (int ts = 0; ts < 2; ts++)
@@ -1265,7 +1288,7 @@ module qv_decode_tb #(
     endtask
 
     initial begin
-        #100000;
+        #2000000;                       // the E10 sweep alone feeds 32768 instructions
         $display("TIMEOUT: qv_decode_tb");
         $finish;
     end

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 /* ------------------------------------------------------------------------- */
 /*
- * core_pmp_spec_tb -- errata E4-E9 on the running core (either build), through firmware/pmp_spec_test.s (see its
+ * core_pmp_spec_tb -- errata E4-E10 on the running core (either build), through firmware/pmp_spec_test.s (see its
  * header for what each group checks). The program stores (actual, expected) pairs at RES + 8 + 16 * i and their
  * number at RES; this bench compares them. It drives i_mtip while the word at MAGIC is 1 and i_seip while it is
  * 2 (the program's two vectored-interrupt checks).
@@ -14,7 +14,7 @@ module core_pmp_spec_tb;
     always #5 clk = ~clk;
     logic rst = 1;
 
-    localparam int RES = 32'h6000, MAGIC = 32'h6F80, N_CHECKS = 44;
+    localparam int RES = 32'h6000, MAGIC = 32'h6F80, N_CHECKS = 54;
     // the check names, in the program's order
     function automatic string name_of(input int i);
         case (i)
@@ -62,6 +62,16 @@ module core_pmp_spec_tb;
             41: return "E9 senvcfg all but FIOM: 0";
             42: return "E9 S reads senvcfg";
             43: return "E9 S writes senvcfg";
+            44: return "E10 mhpmcounter3 illegal";
+            45: return "E10 its mtval is the instruction";
+            46: return "E10 menvcfgh illegal, rd = rs1 = x0";
+            47: return "E10 tcontrol illegal";
+            48: return "E10 hstatus illegal in M";
+            49: return "E10 mcountinhibit write: no trap";
+            50: return "E10 mcountinhibit reads 0";
+            51: return "E10 mconfigptr: no trap";
+            52: return "E10 mconfigptr reads 0";
+            53: return "E10 stimecmp illegal from S";
             default: return "?";
         endcase
     endfunction

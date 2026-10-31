@@ -247,9 +247,10 @@ m10_debug_test:
 	riscv64-unknown-elf-objdump -d m10_debug_test.elf
 	riscv64-unknown-elf-objcopy -O verilog -j .text -j .rodata -j .data --verilog-data-width=8 m10_debug_test.elf m10_debug_test.hex
 
-# Errata E4-E9 (the ACT refresh that declared PMP and Sv39): firmware/pmp_spec_test.s checks the PMP CSR
-#   existence rule, xtvec MODE (WARL and vectored interrupts), PMP partial overlap, per-parcel fetch PMP and
-#   the bits mcounteren/scounteren and menvcfg/senvcfg keep; testbench/core_pmp_spec_tb.sv runs it on either core.
+# Errata E4-E10 (E4-E9 from the ACT refresh that declared PMP and Sv39): firmware/pmp_spec_test.s checks the
+#   PMP CSR existence rule, xtvec MODE (WARL and vectored interrupts), PMP partial overlap, per-parcel fetch PMP,
+#   the bits mcounteren/scounteren and menvcfg/senvcfg keep, and that a CSR that does not exist is illegal;
+#   testbench/core_pmp_spec_tb.sv runs it on either core.
 pmp_spec_test:
 	riscv64-unknown-elf-as $(ASFLAGS) crt0.s -o crt0.o
 	riscv64-unknown-elf-as $(PRIV_ASFLAGS) pmp_spec_test.s -o pmp_spec_test.o
