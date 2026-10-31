@@ -42,6 +42,8 @@ Svbare_Smode: ACT_RESULT: PASS
 Svbare_Umode: ACT_RESULT: PASS
 Svbare_mstatus_mprv: ACT_RESULT: PASS
 U-00: ACT_RESULT: PASS
+ZicntrS-00: ACT_RESULT: PASS
+ZicntrU-00: ACT_RESULT: PASS
 pmpsm_access_double_region: ACT_RESULT: PASS
 pmpsm_all_entries_check: ACT_RESULT: PASS
 pmpsm_cfg_A_all: ACT_RESULT: PASS
@@ -192,6 +194,8 @@ Zca-c.subw-00: ACT_RESULT: PASS
 Zca-c.sw-00: ACT_RESULT: PASS
 Zca-c.swsp-00: ACT_RESULT: PASS
 Zca-c.xor-00: ACT_RESULT: PASS
+Zicntr-csrrc-00: ACT_RESULT: PASS
+Zicntr-csrrs-00: ACT_RESULT: PASS
 Zicsr-csrrc-00: ACT_RESULT: PASS
 Zicsr-csrrci-00: ACT_RESULT: PASS
 Zicsr-csrrs-00: ACT_RESULT: PASS
