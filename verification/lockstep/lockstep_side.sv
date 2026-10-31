@@ -159,6 +159,12 @@ module lockstep_side #(
     logic [4:0]  rvfi_frd_addr;
     logic [63:0] rvfi_frd_wdata;
 
+    // Zicntr: time on this side counts this side's own retirements (the value before this cycle's). Both cores read
+    // a CSR in the cycle it retires, so a time read returns the same number on both sides at the same retirement;
+    // the real mtime counts clock cycles, which the two cores spend differently.
+    logic [63:0] time_q;
+    always_ff @(posedge clk) time_q <= rst ? 64'b0 : time_q + {63'b0, rvfi_valid};
+
     // the port list both branches share
 `define LS_CORE_PORTS \
         .clk(clk), .rst(rst), \
@@ -169,7 +175,7 @@ module lockstep_side #(
         .wb_mem_cyc_o(wb_mem_cyc), .wb_mem_stb_o(wb_mem_stb), \
         .wb_mem_ack_i(wb_mem_ack), .wb_mem_err_i(wb_mem_err), .wb_mem_lock_o(wb_mem_lock), \
         .icache_flush_o(icache_flush), \
-        .i_mtip(i_mtip), .i_meip(i_meip), .i_seip(i_seip), \
+        .i_mtip(i_mtip), .i_meip(i_meip), .i_seip(i_seip), .i_time(time_q), \
         .rvfi_valid(rvfi_valid), .rvfi_order(rvfi_order), .rvfi_insn(rvfi_insn), \
         .rvfi_trap(rvfi_trap), .rvfi_halt(rvfi_halt), .rvfi_intr(rvfi_intr), \
         .rvfi_mode(rvfi_mode), .rvfi_ixl(rvfi_ixl), \

@@ -108,6 +108,8 @@ module rvfi_wrapper (
     // is exactly the "could this happen on some cycle" question BMC asks.
     (* keep *) `rvformal_rand_reg i_debug_halt_req;
     (* keep *) `rvformal_rand_reg i_debug_resume_req;
+    // Zicntr: the platform's mtime, any value on any cycle (no check reads time against a model)
+    (* keep *) `rvformal_rand_reg [63:0] i_time;
 
 `ifdef RISCV_FORMAL_FAIRNESS
     // liveness/hang only (genchecks defines RISCV_FORMAL_FAIRNESS for
@@ -167,6 +169,7 @@ module rvfi_wrapper (
         .wb_mem_ack_i(wb_mem_ack),
         .wb_mem_err_i(wb_mem_err),
         .i_mtip(i_mtip),
+        .i_time(i_time),
         .i_debug_halt_req(i_debug_halt_req),
         .i_debug_resume_req(i_debug_resume_req),
 

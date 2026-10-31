@@ -146,7 +146,13 @@ module ref_csr_file #(
      * and accrue fflags. 0 (the default) leaves FS read-only 0 and the FP
      * CSRs unmapped, exactly as before.
      */
-    parameter bit FP_EN = 1'b0
+    parameter bit FP_EN = 1'b0,
+    /*
+     * Zicntr (the cores pass QV_ZICNTR_EN): cycle, time and instret (0xC00-0xC02) read mcycle, i_time and
+     * minstret. Who may read them (mcounteren/scounteren, exported below) is decode's rule; whether they exist at
+     * all is qv_csr_exists. 0 (the default) leaves them reading 0, as before.
+     */
+    parameter bit ZICNTR_EN = 1'b0
 ) (
     input  logic i_clk,
     input  logic i_rst,
@@ -160,6 +166,10 @@ module ref_csr_file #(
     input  logic                          i_mtip = 1'b0,
     input  logic                          i_meip = 1'b0,
     input  logic                          i_seip = 1'b0,
+    // Zicntr: the platform's mtime (the CLINT's), which the time CSR reads; unused without ZICNTR_EN
+    /* verilator lint_off UNUSEDSIGNAL */
+    input  logic [(`WORD_SIZE - 1):0]     i_time = '0,
+    /* verilator lint_on UNUSEDSIGNAL */
 
     input  logic                          i_trap_taken,
     input  logic [(`WORD_SIZE - 1):0]     i_trap_cause,
@@ -244,7 +254,10 @@ module ref_csr_file #(
     input  logic [4:0]                    i_fp_accrue = 5'b0,
     output logic [1:0]                    o_mstatus_fs,
     output logic [2:0]                    o_frm,
-    output logic [4:0]                    o_fflags
+    output logic [4:0]                    o_fflags,
+    // Zicntr: the counter enables (CY, TM, IR), for decode's rule on who may read cycle, time and instret
+    output logic [2:0]                    o_mcounteren,
+    output logic [2:0]                    o_scounteren
 `ifdef RISCV_FORMAL
     /*
      * mcause/scause: no real core.sv control logic needs these today (unlike
@@ -280,6 +293,10 @@ module ref_csr_file #(
     localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_MSCRATCH  = 12'h340;
     localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_MCYCLE    = 12'hB00;
     localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_MINSTRET  = 12'hB02;
+    /* Zicntr: the unprivileged views (mapped only when ZICNTR_EN). */
+    localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_CYCLE     = 12'hC00;
+    localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_TIME      = 12'hC01;
+    localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_INSTRET   = 12'hC02;
 
     /* F/D: the unprivileged FP CSRs (mapped only when FP_EN). */
     localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_FFLAGS    = 12'h001;
@@ -1168,6 +1185,8 @@ module ref_csr_file #(
     assign o_mstatus_fs    = mstatus_q[MSTATUS_FS_MSB:MSTATUS_FS_LSB];   // 0 without FP_EN: never written
     assign o_frm           = frm_q;
     assign o_fflags        = fflags_q;
+    assign o_mcounteren    = mcounteren_q;
+    assign o_scounteren    = scounteren_q;
 `ifdef RISCV_FORMAL
     assign o_mcause      = mcause_q;
     assign o_scause      = scause_q;
@@ -1190,6 +1209,10 @@ module ref_csr_file #(
             CSR_ADDR_MSCRATCH:  o_csr_rdata = mscratch_q;
             CSR_ADDR_MCYCLE:    o_csr_rdata = mcycle_q;
             CSR_ADDR_MINSTRET:  o_csr_rdata = minstret_q;
+            /* Zicntr: the read-only views; without ZICNTR_EN they read 0, as before */
+            CSR_ADDR_CYCLE:     o_csr_rdata = ZICNTR_EN ? mcycle_q : '0;
+            CSR_ADDR_TIME:      o_csr_rdata = ZICNTR_EN ? i_time : '0;
+            CSR_ADDR_INSTRET:   o_csr_rdata = ZICNTR_EN ? minstret_q : '0;
 
             /* S-mode CSRs -- sstatus/sie/sip are masked VIEWS, not plain reads. */
             CSR_ADDR_SSTATUS:    o_csr_rdata = ((mstatus_q | mstatus_sd) & SSTATUS_VIEW_MASK) | MSTATUS_UXL_FIXED;

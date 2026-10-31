@@ -84,7 +84,8 @@ module clint (
     output logic         ack_o,
     output logic         err_o,
 
-    output logic mtip_o
+    output logic mtip_o,
+    output logic [63:0] mtime_o           // Zicntr: the core's time CSR reads it
 );
     localparam logic [15:0] MSIP_OFF     = 16'h0000;
     localparam logic [15:0] MTIMECMP_OFF = 16'h4000;
@@ -102,6 +103,7 @@ module clint (
         if (rst) mtime_q <= 64'b0;
         else     mtime_q <= mtime_q + 64'b1;   // free-running, same precedent as csr_file.sv's mcycle_q
     end
+    assign mtime_o = mtime_q;
 
     /*
      * mtimecmp resets to all-ones, NOT zero -- resetting to 0 would make

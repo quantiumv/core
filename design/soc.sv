@@ -192,6 +192,7 @@ module soc (
     logic        wb_mem_lock;
     logic        icache_flush;
     logic        clint_mtip;
+    logic [63:0] clint_mtime;      // Zicntr: the core's time CSR
     // plic_meip/plic_seip: forward-declared here (not near plic0's own
     // instantiation further down) -- core0's own instantiation, right
     // below, needs them at i_meip/i_seip, but plic0 itself (which drives
@@ -240,7 +241,7 @@ module soc (
         .wb_mem_sel_o(core_wb_mem_sel), .wb_mem_we_o(core_wb_mem_we), .wb_mem_cyc_o(core_wb_mem_cyc),
         .wb_mem_stb_o(core_wb_mem_stb), .wb_mem_ack_i(core_wb_mem_ack), .wb_mem_err_i(core_wb_mem_err),
         .wb_mem_lock_o(wb_mem_lock),
-        .icache_flush_o(icache_flush), .i_mtip(clint_mtip),
+        .icache_flush_o(icache_flush), .i_mtip(clint_mtip), .i_time(clint_mtime),
         .i_meip(plic_meip), .i_seip(plic_seip),
 
         /*
@@ -456,7 +457,8 @@ module soc (
         .clk(clk), .rst(rst),
         .addr_i(clint_addr), .dat_i(clint_dat_o), .dat_o(clint_dat_i), .sel_i(clint_sel),
         .ack_o(clint_ack), .err_o(clint_err), .cyc_i(clint_cyc), .stb_i(clint_stb), .we_i(clint_we),
-        .mtip_o(clint_mtip)
+        .mtip_o(clint_mtip),
+        .mtime_o(clint_mtime)
     );
 
     plic plic0 (

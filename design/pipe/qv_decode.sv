@@ -76,7 +76,8 @@
  */
 module qv_decode #(
     parameter bit FPU_EN = 1'b0,          // F/D: the FP encodings are instructions (else illegal, as before)
-    parameter bit CSR_NOSER = 1'b0
+    parameter bit CSR_NOSER = 1'b0,
+    parameter bit ZICNTR_EN = 1'b0        // Zicntr: cycle, time and instret exist (else they do not: errata E10)
 ) (
     input  logic              clk,
     input  logic              rst,
@@ -93,6 +94,11 @@ module qv_decode #(
     // exact: writes to them serialize, and a commit's step to Dirty never changes what is legal.
     input  logic [1:0]        i_fs  = 2'b00,
     input  logic [2:0]        i_frm = 3'b000,
+    // Zicntr: mcounteren and scounteren (CY, TM, IR), which decide who below M may read cycle, time and instret.
+    // Live values are exact: writes to them serialize (they are not trap CSRs, P10c), the Debug Module writes them
+    // only while the hart is halted, and halt entry and resume both flush.
+    input  logic [2:0]        i_mcounteren = 3'b0,
+    input  logic [2:0]        i_scounteren = 3'b0,
     // Debug Mode: the debug and trigger CSRs exist only there (outside it they are illegal for every
     // privilege level), and the usual privilege rule still applies inside it
     input  logic              i_in_debug = 1'b0,
@@ -413,8 +419,16 @@ module qv_decode #(
     // errata E10: a CSR that does not exist is illegal, from every privilege level and for every access, the
     // read-suppressed forms included (qv_csr_exists.sv has the set; E7's absent PMP CSRs are part of it)
     logic csr_exists;
-    qv_csr_exists #(.FP_EN(FPU_EN)) csr_exists0 (.i_addr(csr_addr), .o_exists(csr_exists));
+    qv_csr_exists #(.FP_EN(FPU_EN), .ZICNTR_EN(ZICNTR_EN)) csr_exists0 (.i_addr(csr_addr), .o_exists(csr_exists));
     wire csr_absent = is_csr && !csr_exists;
+    // Zicntr: cycle, time and instret (0xC00-0xC02, bit addr[1:0] of the enables) below M need their mcounteren
+    // bit, and in U their scounteren bit too. The reserved privilege 2'b10 takes the U arm, as in the trigger and
+    // EBREAK selects. (Their writes are illegal anyway: read-only addresses.)
+    wire csr_cnt   = ZICNTR_EN && is_csr && csr_addr[11:2] == 10'h300 && csr_addr[1:0] != 2'b11;
+    wire cnt_m     = i_mcounteren[csr_addr[1:0]];
+    wire cnt_s     = i_scounteren[csr_addr[1:0]];
+    wire cnt_ok    = (i_priv == QV_PRIV_M) ? 1'b1 : (i_priv == QV_PRIV_S) ? cnt_m : (cnt_m && cnt_s);
+    wire csr_cnt_denied = csr_cnt && !cnt_ok;
     // the trap CSRs: mscratch, mepc, mcause, mtval (0x340-0x343) and sscratch, sepc, scause, stval (0x140-0x143)
     wire csr_trap_wr = (csr_addr[11:2] == 10'h0D0) || (csr_addr[11:2] == 10'h050);
 
@@ -541,6 +555,9 @@ module qv_decode #(
             uop_d.xcpt_cause = 4'd1;
             uop_d.xcpt_hi    = !lo_denied;           // the second parcel's: mtval = pc + 2
         end else if (c_illegal || !implemented || csr_illegal || priv_illegal || fp_illegal || csr_absent) begin
+            uop_d.xcpt       = 1'b1;
+            uop_d.xcpt_cause = 4'd2;
+        end else if (csr_cnt_denied) begin               // Zicntr: a counter its enables do not open to this privilege
             uop_d.xcpt       = 1'b1;
             uop_d.xcpt_cause = 4'd2;
         end

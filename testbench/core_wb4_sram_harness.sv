@@ -29,6 +29,7 @@ module core_wb4_sram_harness #(
     input logic i_mtip = 1'b0,
     input logic i_meip = 1'b0,
     input logic i_seip = 1'b0,
+    input logic [63:0] i_time = 64'b0,       // Zicntr: what the time CSR reads
     input logic i_debug_halt_req = 1'b0,
     input logic i_debug_resume_req = 1'b0,
     output logic o_debug_mode
@@ -68,7 +69,7 @@ module core_wb4_sram_harness #(
         .wb_mem_sel_o(wbm_sel), .wb_mem_we_o(wbm_we), .wb_mem_cyc_o(wbm_cyc), .wb_mem_stb_o(wbm_stb),
         .wb_mem_ack_i(wbm_ack), .wb_mem_err_i(wbm_err), .wb_mem_lock_o(wbm_lock),
         .i_mtip(i_mtip),
-        .i_meip(i_meip), .i_seip(i_seip),
+        .i_meip(i_meip), .i_seip(i_seip), .i_time(i_time),
         .i_debug_halt_req(i_debug_halt_req), .i_debug_resume_req(i_debug_resume_req),
         .o_debug_mode(o_debug_mode)
     );

@@ -108,13 +108,18 @@ module act_runner_tb;
     logic [7:0]  wbm_sel;
     logic        wbm_we, wbm_cyc, wbm_stb, wbm_ack, wbm_err, wbm_lock;
 
+    // Zicntr: a free-running mtime for the time CSR (ACT's Zicntr tests wait for it to move)
+    logic [63:0] mtime_q = 64'b0;
+    always @(posedge clk) mtime_q <= rst ? 64'b0 : mtime_q + 64'b1;
+
     core dut (
         .clk(clk), .rst(rst),
         .wb_fetch_addr_o(wbf_addr), .wb_fetch_cyc_o(wbf_cyc), .wb_fetch_stb_o(wbf_stb),
         .wb_fetch_dat_i(wbf_dat_s2m), .wb_fetch_ack_i(wbf_ack), .wb_fetch_err_i(wbf_err),
         .wb_mem_addr_o(wbm_addr), .wb_mem_dat_o(wbm_dat_m2s), .wb_mem_dat_i(wbm_dat_s2m),
         .wb_mem_sel_o(wbm_sel), .wb_mem_we_o(wbm_we), .wb_mem_cyc_o(wbm_cyc), .wb_mem_stb_o(wbm_stb),
-        .wb_mem_ack_i(wbm_ack), .wb_mem_err_i(wbm_err), .wb_mem_lock_o(wbm_lock)
+        .wb_mem_ack_i(wbm_ack), .wb_mem_err_i(wbm_err), .wb_mem_lock_o(wbm_lock),
+        .i_time(mtime_q)
     );
 
     // core.sv now has separate fetch/mem ports; this merges them onto the

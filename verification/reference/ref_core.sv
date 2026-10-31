@@ -242,6 +242,14 @@
 `ifndef QV_FPU_EN
 `define QV_FPU_EN 1
 `endif
+/*
+ * Zicntr (a feature addition, README.md): with QV_ZICNTR_EN cycle, time and instret exist (time reads i_time, the
+ * platform's mtime), gated below M by mcounteren/scounteren, the same rule as design/pipe/qv_decode.sv's. 0 leaves
+ * them absent (illegal since errata E10). The pipelined core reads the same define and must get the same value.
+ */
+`ifndef QV_ZICNTR_EN
+`define QV_ZICNTR_EN 0
+`endif
 /* verilator lint_off DECLFILENAME */
 // Under -DQV_REF_AS_CORE this module is named `core`, deliberately not
 // matching this file's own name (ref_core.sv) -- the whole point of the
@@ -288,6 +296,7 @@ module ref_core
     input  logic         i_mtip = 1'b0,
     input  logic         i_meip = 1'b0,
     input  logic         i_seip = 1'b0,
+    input  logic [63:0]  i_time = 64'b0,       // Zicntr: the platform's mtime, which the time CSR reads
 
     /*
      * Debug Mode halt/resume (Milestone 4 of the EBREAK/JTAG staged
@@ -553,6 +562,7 @@ module ref_core
 `else
     localparam bit FPU_EN = (`QV_FPU_EN != 0);
 `endif
+    localparam bit ZICNTR_EN = (`QV_ZICNTR_EN != 0);
 
     /* --------------------------------------------------------------- *
      * FSM state
@@ -3160,6 +3170,7 @@ module ref_core
      *   illegal  -> 0x00000000, which decodes as INVALID: the illegal-instruction trap (mtval is `instruction`).
      * Without FPU_EN ref_decoder sees `instruction`, and FP encodings stay INVALID as before.
      */
+    logic [2:0]  mcounteren_w, scounteren_w;   // Zicntr: csr_file0's counter enables
     logic [1:0]  mstatus_fs_w;           // csr_file0's F/D exports (the lockstep harness reads these names)
     logic [2:0]  frm_w;
     /* verilator lint_off UNUSEDSIGNAL */
@@ -3837,12 +3848,20 @@ module ref_core
     // read-suppressed forms included (ref_csr_exists.sv, gen_copies.sh's copy of design/pipe/qv_csr_exists.sv, has
     // the set; E7's absent PMP CSRs, pmpcfg1, pmpcfg3-15 and pmpaddr16-63, are part of it)
     logic csr_exists;
-    ref_csr_exists #(.FP_EN(FPU_EN)) csr_exists0 (.i_addr(imm_2[11:0]), .o_exists(csr_exists));
+    ref_csr_exists #(.FP_EN(FPU_EN), .ZICNTR_EN(ZICNTR_EN)) csr_exists0 (.i_addr(imm_2[11:0]), .o_exists(csr_exists));
     wire csr_absent = is_csr && !csr_exists;
+    // Zicntr: cycle, time and instret (0xC00-0xC02, bit imm_2[1:0] of the enables) below M need their mcounteren
+    // bit, and in U their scounteren bit too; the reserved privilege 2'b10 takes the U arm (the ternary's last), as
+    // in the trigger and EBREAK selects
+    wire csr_cnt = ZICNTR_EN && is_csr && imm_2[11:2] == 10'h300 && imm_2[1:0] != 2'b11;
+    wire cnt_m   = mcounteren_w[imm_2[1:0]];
+    wire cnt_s   = scounteren_w[imm_2[1:0]];
+    wire cnt_ok  = (current_priv == PRIV_M) ? 1'b1 : (current_priv == PRIV_S) ? cnt_m : (cnt_m && cnt_s);
+    wire csr_cnt_denied = csr_cnt && !cnt_ok;
     wire is_illegal_instr = is_invalid_instr || csr_priv_violation || csr_readonly_violation
                           || debug_csr_violation || trigger_csr_violation
                           || mret_priv_violation || sret_priv_violation || tvm_violation
-                          || (is_compressed && c_expand_illegal) || fp_csr_off || csr_absent;
+                          || (is_compressed && c_expand_illegal) || fp_csr_off || csr_absent || csr_cnt_denied;
     wire is_ecall = (decoded_instruction == `REF_INSTR_CODE(ECALL));
     /*
      * Zifencei: is_fence_i drives icache_flush_o below (see that port's
@@ -4377,7 +4396,7 @@ module ref_core
      * combinational and unconditional -- csr_rdata already reflects
      * whichever address is currently muxed in, for both consumers.
      */
-    ref_csr_file #(.FP_EN(FPU_EN)) csr_file0 (
+    ref_csr_file #(.FP_EN(FPU_EN), .ZICNTR_EN(ZICNTR_EN)) csr_file0 (
         .i_clk(clk),
         .i_rst(rst),
         .i_csr_addr(dm_access_active ? i_dm_csr_addr : imm_2[(`CSR_ADDR_SIZE - 1):0]),
@@ -4409,6 +4428,7 @@ module ref_core
         .i_mtip(i_mtip),
         .i_meip(i_meip),
         .i_seip(i_seip),
+        .i_time(i_time),
         .i_trap_taken(trap_taken || interrupt_taken),
         .i_trap_cause(trap_taken ? trap_cause : {1'b1, 59'b0, int_cause}),
         .i_trap_val(trap_taken ? trap_val : `WORD_SIZE'(0)),
@@ -4481,7 +4501,8 @@ module ref_core
          */
         .i_fp_frd_we(fp_reg_write && !(QV_MUTANT == 16)),
         .i_fp_accrue((fp_arith && commit_now && !instr_faulted && !(QV_MUTANT == 15)) ? fpu_flags_q : 5'b0),
-        .o_mstatus_fs(mstatus_fs_w), .o_frm(frm_w), .o_fflags(fflags_w)
+        .o_mstatus_fs(mstatus_fs_w), .o_frm(frm_w), .o_fflags(fflags_w),
+        .o_mcounteren(mcounteren_w), .o_scounteren(scounteren_w)
 `ifdef RISCV_FORMAL
         ,
         .o_mcause(mcause_w),

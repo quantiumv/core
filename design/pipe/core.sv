@@ -166,6 +166,13 @@
 `define QV_FPU_EN 1
 `endif
 
+// Zicntr: QV_ZICNTR_EN makes cycle, time and instret exist (time reads i_time, the platform's mtime); 0 leaves them
+// absent (illegal, errata E10). The reference reads the same define and must get the same value: lockstep compiles
+// both cores in one unit, where the first definition wins.
+`ifndef QV_ZICNTR_EN
+`define QV_ZICNTR_EN 0
+`endif
+
 module core
 #(
     parameter bit SERIALIZE = `QV_PIPE_SERIALIZE,
@@ -211,6 +218,7 @@ module core
     input  logic         i_mtip = 1'b0,
     input  logic         i_meip = 1'b0,
     input  logic         i_seip = 1'b0,
+    input  logic [63:0]  i_time = 64'b0,       // Zicntr: the platform's mtime, which the time CSR reads
 
     input  logic        i_debug_halt_req = 1'b0,
     input  logic        i_debug_resume_req = 1'b0,
@@ -307,6 +315,7 @@ module core
 `else
     localparam bit FPU_EN = (`QV_FPU_EN != 0);
 `endif
+    localparam bit ZICNTR_EN = (`QV_ZICNTR_EN != 0);
 
     localparam logic [63:0] RESET_PC = 64'h0;   // ref_core.sv's own reset pc
 
@@ -323,6 +332,7 @@ module core
     logic [1:0]  mstatus_fs_w;
     logic [2:0]  frm_w;
     logic [4:0]  fflags_w;
+    logic [2:0]  mcounteren_w, scounteren_w;   // Zicntr: who below M may read cycle, time and instret
     /* verilator lint_on UNUSEDSIGNAL */
 
     logic [1:0]  priv;                       // the privilege commit keeps
@@ -504,9 +514,10 @@ module core
     logic uop_valid, issue_fire;
     uop_t uop;
 
-    qv_decode #(.CSR_NOSER(CSR_NOSER), .FPU_EN(FPU_EN)) decode0 (
+    qv_decode #(.CSR_NOSER(CSR_NOSER), .FPU_EN(FPU_EN), .ZICNTR_EN(ZICNTR_EN)) decode0 (
         .clk(clk), .rst(rst), .i_flush(flush),
         .i_fs(mstatus_fs_w), .i_frm(frm_w),
+        .i_mcounteren(mcounteren_w), .i_scounteren(scounteren_w),
         .i_priv(priv), .i_tsr(mstatus_tsr_w), .i_tvm(mstatus_tvm_w), .i_in_debug(dbg_in_debug), .i_pb_active(pb_active),
         .i_tdata1_0(tdata1_0_w), .i_tdata2_0(tdata2_0_w), .i_tdata1_1(tdata1_1_w), .i_tdata2_1(tdata2_1_w),
         .i_pmpcfg0(pmpcfg0_w), .i_pmpaddr0(pmpaddr0_w), .i_pmpaddr1(pmpaddr1_w),
@@ -939,7 +950,7 @@ module core
     logic [63:0] mcause_w, scause_w, mepc_next_w, sepc_next_w, mcause_next_w, scause_next_w;
 `endif
 
-    csr_file #(.FP_EN(FPU_EN)) csr_file0 (
+    csr_file #(.FP_EN(FPU_EN), .ZICNTR_EN(ZICNTR_EN)) csr_file0 (
         .i_clk(clk), .i_rst(rst),
         .i_fp_frd_we(c_fprf_we), .i_fp_accrue(c_fp_accrue),
         .i_csr_addr(dm_access_active ? i_dm_csr_addr : c_csr_addr), .o_csr_rdata(csr_rdata),
@@ -947,7 +958,7 @@ module core
         .i_csr_wdata(dm_access_active ? i_dm_csr_wdata : c_csr_wdata),
         .i_instr_retired(c_instr_retired),
         .i_current_priv(priv),
-        .i_mtip(i_mtip), .i_meip(i_meip), .i_seip(i_seip),
+        .i_mtip(i_mtip), .i_meip(i_meip), .i_seip(i_seip), .i_time(i_time),
         .i_trap_taken(c_trap_taken), .i_trap_cause(c_trap_cause), .i_trap_val(c_trap_val),
         .i_trap_pc(arch_pc),
         .i_trap_to_s(c_trap_to_s), .i_mret_taken(c_mret_taken), .i_sret_taken(c_sret_taken),
@@ -964,7 +975,8 @@ module core
         .o_pmpaddr2(pmpaddr2_w), .o_pmpaddr3(pmpaddr3_w), .o_mstatus_mprv(mstatus_mprv_w),
         .o_satp(satp_w), .o_mstatus_sum(mstatus_sum_w), .o_mstatus_mxr(mstatus_mxr_w),
         .o_mstatus_tvm(mstatus_tvm_w),
-        .o_mstatus_fs(mstatus_fs_w), .o_frm(frm_w), .o_fflags(fflags_w)
+        .o_mstatus_fs(mstatus_fs_w), .o_frm(frm_w), .o_fflags(fflags_w),
+        .o_mcounteren(mcounteren_w), .o_scounteren(scounteren_w)
 `ifdef RISCV_FORMAL
         , .o_mcause(mcause_w), .o_scause(scause_w),
         .o_mepc_next(mepc_next_w), .o_sepc_next(sepc_next_w),
