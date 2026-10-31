@@ -590,6 +590,8 @@ def emit_priv_csr(p: Program, recent: list[int]):
     s_ro = [c for c in _S_RO if not (p.irq and c == "sip")]
     m_any = [c for c in _M_ANY if not (p.irq and c in ("mscratch", "mip"))]
     r = p.rng.random()
+    if p.body_priv2 and p.rng.random() < 0.2:
+        r = 0.91        # privilege 2's own scounteren idiom below, often: the only place a stale enable could show
     rd = p.reg_biased(recent)
     if r < 0.30:
         csr = p.rng.choice(s_rw)
@@ -606,6 +608,12 @@ def emit_priv_csr(p: Program, recent: list[int]):
     elif r < 0.93:
         # Zicntr: S (and privilege 2) decide which counters U may read; from U this traps
         p.e(f"    csrwi   scounteren, {p.rng.randint(0, 7)}")
+        if p.body_priv2:
+            # privilege 2 reads under the U rule, so this read depends on the value just written: the write must
+            # reach decode first (it serializes)
+            p.e(f"    csrr    x{rd}, {p.rng.choice(['time', 'instret'])}")
+            recent.append(rd)
+            del recent[:-8]
         return
     else:
         csr = p.rng.choice(_U_RO)
