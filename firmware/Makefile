@@ -257,3 +257,12 @@ pmp_spec_test:
 	riscv64-unknown-elf-ld -T link.ld -o pmp_spec_test.elf crt0.o pmp_spec_test.o
 	riscv64-unknown-elf-objdump -d pmp_spec_test.elf
 	riscv64-unknown-elf-objcopy -O verilog -j .text -j .rodata -j .data --verilog-data-width=8 pmp_spec_test.elf pmp_spec_test.hex
+
+# Zicntr: firmware/zicntr_test.s reads cycle, time and instret at every privilege under the counter enables;
+#   testbench/core_zicntr_tb.sv runs it on either core.
+zicntr_test:
+	riscv64-unknown-elf-as $(ASFLAGS) crt0.s -o crt0.o
+	riscv64-unknown-elf-as -march=rv64i_zicsr_zicntr -mabi=lp64 -mno-relax zicntr_test.s -o zicntr_test.o
+	riscv64-unknown-elf-ld -T link.ld -o zicntr_test.elf crt0.o zicntr_test.o
+	riscv64-unknown-elf-objdump -d zicntr_test.elf
+	riscv64-unknown-elf-objcopy -O verilog -j .text -j .rodata -j .data --verilog-data-width=8 zicntr_test.elf zicntr_test.hex

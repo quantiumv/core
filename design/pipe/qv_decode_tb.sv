@@ -19,7 +19,8 @@
  */
 module qv_decode_tb #(
     parameter bit CSR_NOSER = 1'b0,     // P10c: tests.list runs both
-    parameter bit FPU_EN    = 1'b0      // F/D: tests.list runs both; the FP section needs it
+    parameter bit FPU_EN    = 1'b0,     // F/D: tests.list runs both; the FP section needs it
+    parameter bit ZICNTR_EN = 1'b0      // Zicntr: tests.list runs both; the counter section needs it
 );
     import qv_pkg::*;
 
@@ -53,9 +54,11 @@ module qv_decode_tb #(
     logic [43:0] feed_pg_lo = '0, feed_pg_hi = '0;
     logic [1:0]  fs  = 2'b01;          // F/D: mstatus.FS (Initial) and frm
     logic [2:0]  frm = 3'd0;
+    logic [2:0]  mcounteren = 3'd0, scounteren = 3'd0;   // Zicntr: who below M may read cycle, time, instret
 
-    qv_decode #(.CSR_NOSER(CSR_NOSER), .FPU_EN(FPU_EN)) dut (
+    qv_decode #(.CSR_NOSER(CSR_NOSER), .FPU_EN(FPU_EN), .ZICNTR_EN(ZICNTR_EN)) dut (
         .clk(clk), .rst(rst), .i_flush(flush), .i_fs(fs), .i_frm(frm),
+        .i_mcounteren(mcounteren), .i_scounteren(scounteren),
         .i_priv(priv), .i_tsr(tsr), .i_tvm(tvm), .i_in_debug(in_debug), .i_pb_active(pb_active),
         .i_tdata1_0(tdata1_0), .i_tdata2_0(tdata2_0), .i_tdata1_1(tdata1_1), .i_tdata2_1(tdata2_1),
         .i_pmpcfg0(pmpcfg0), .i_pmpaddr0(pmpaddr0), .i_pmpaddr1(pmpaddr1),
@@ -170,6 +173,7 @@ module qv_decode_tb #(
     function automatic logic tb_exists(input logic [11:0] a);
         case (a)
             12'h001, 12'h002, 12'h003: return FPU_EN;
+            12'hC00, 12'hC01, 12'hC02: return ZICNTR_EN;
             12'h100, 12'h104, 12'h105, 12'h106, 12'h10A,
             12'h140, 12'h141, 12'h142, 12'h143, 12'h144, 12'h180,
             12'h300, 12'h301, 12'h302, 12'h303, 12'h304, 12'h305, 12'h306, 12'h30A, 12'h320,
@@ -522,8 +526,12 @@ module qv_decode_tb #(
                    QV_CSR_RS, 12'hF14, 0, 0, 0, 1'b1, 5);
         expect_csr("read mconfigptr (RSI 0)", encode_csr(12'hF15, 0, 3'b110, 5, `OPC_SYSTEM), `INSTR_CODE(CSRRSI),
                    QV_CSR_RS, 12'hF15, 0, 0, 64'd0, 1'b1, 5);
-        // errata E10: without Zicntr instret does not exist, so even a read is illegal
-        expect_fault("read instret (RSI 0)", encode_csr(12'hC02, 0, 3'b110, 5, `OPC_SYSTEM), 1'b0, 4'd0, 4'd2);
+        // errata E10: without Zicntr instret does not exist, so even a read is illegal; with it, M may read it
+        if (ZICNTR_EN)
+            expect_csr("read instret (RSI 0)", encode_csr(12'hC02, 0, 3'b110, 5, `OPC_SYSTEM), `INSTR_CODE(CSRRSI),
+                       QV_CSR_RS, 12'hC02, 0, 0, 64'd0, 1'b1, 5);
+        else
+            expect_fault("read instret (RSI 0)", encode_csr(12'hC02, 0, 3'b110, 5, `OPC_SYSTEM), 1'b0, 4'd0, 4'd2);
         expect_fault("write mhartid",        encode_csr(12'hF14, 6, 3'b001, 5, `OPC_SYSTEM), 1'b0, 4'd0, 4'd2);
         expect_fault("CSRRS mhartid, x6",    encode_csr(12'hF14, 6, 3'b010, 5, `OPC_SYSTEM), 1'b0, 4'd0, 4'd2);
         expect_fault("CSRRSI cycle, 1",      encode_csr(12'hC00, 1, 3'b110, 5, `OPC_SYSTEM), 1'b0, 4'd0, 4'd2);
@@ -736,7 +744,8 @@ module qv_decode_tb #(
             foreach (csr_probe[i]) begin
                 feed(encode_csr(csr_probe[i], 5'd0, `FUNCT3_CSRRS, 5'd5, `OPC_SYSTEM));
                 check($sformatf("csr %h at priv %0d: illegal iff addr[9:8] > priv or absent", csr_probe[i], pv),
-                      {63'b0, uop.xcpt}, {63'b0, csr_probe[i][9:8] > 2'(pv) || !tb_exists(csr_probe[i])});
+                      {63'b0, uop.xcpt}, {63'b0, csr_probe[i][9:8] > 2'(pv) || !tb_exists(csr_probe[i])
+                                           || (csr_probe[i][11:8] == 4'hC && pv != 3)});   // Zicntr, enables clear
                 if (uop.xcpt) check($sformatf("csr %h at priv %0d: cause 2", csr_probe[i], pv), {60'b0, uop.xcpt_cause}, 64'd2);
             end
         end
@@ -760,7 +769,8 @@ module qv_decode_tb #(
                 logic [11:0] ad;
                 logic        bad;
                 ad  = 12'(a);
-                bad = !tb_exists(ad) || ad[9:8] > 2'(pv) || ad[11:2] == 10'h1EC || ad[11:2] == 10'h1E8 || ad == 12'h7A4;
+                bad = !tb_exists(ad) || ad[9:8] > 2'(pv) || ad[11:2] == 10'h1EC || ad[11:2] == 10'h1E8 || ad == 12'h7A4
+                      || (ad >= 12'hC00 && ad <= 12'hC02 && pv != 3);    // Zicntr, enables clear here
                 feed(encode_csr(ad, 5'd0, `FUNCT3_CSRRS, 5'd5, `OPC_SYSTEM));
                 if (uop.xcpt != bad || (bad && uop.xcpt_cause != 4'd2))
                     check($sformatf("E10: csrr %h at priv %0d: illegal iff absent/privilege/debug", ad, pv),
@@ -773,6 +783,27 @@ module qv_decode_tb #(
             end
         end
         check("E10: the sweep ran", 64'd1, 64'd1);
+        // Zicntr: cycle, time and instret at every privilege under every pair of enables. M may always read them;
+        // S needs mcounteren's bit; U, and the reserved privilege 2'b10, need mcounteren's and scounteren's. Without
+        // Zicntr they do not exist at all.
+        for (int pv = 0; pv < 4; pv++)
+            for (int m = 0; m < 8; m++)
+                for (int s = 0; s < 8; s++)
+                    for (int i = 0; i < 3; i++) begin
+                        logic ok;
+                        priv = 2'(pv); mcounteren = 3'(m); scounteren = 3'(s);
+                        ok = ZICNTR_EN && ((pv == 3) || (pv == 1 ? mcounteren[i] : (mcounteren[i] && scounteren[i])));
+                        feed(encode_csr(12'hC00 + 12'(i), 5'd0, `FUNCT3_CSRRS, 5'd5, `OPC_SYSTEM));
+                        if (uop.xcpt != !ok || (!ok && uop.xcpt_cause != 4'd2))
+                            check($sformatf("Zicntr: read %h at priv %0d, mcounteren %0d, scounteren %0d", 12'hC00 + i,
+                                            pv, m, s), {59'b0, uop.xcpt, uop.xcpt_cause}, {59'b0, !ok, 4'(ok ? 0 : 2)});
+                        feed(encode_csr(12'hC00 + 12'(i), 5'd6, `FUNCT3_CSRRW, 5'd0, `OPC_SYSTEM));
+                        if (!uop.xcpt || uop.xcpt_cause != 4'd2)
+                            check($sformatf("Zicntr: write %h at priv %0d: illegal", 12'hC00 + i, pv),
+                                  {59'b0, uop.xcpt, uop.xcpt_cause}, {59'b0, 1'b1, 4'd2});
+                    end
+        check("Zicntr: the matrix ran", 64'd1, 64'd1);
+        mcounteren = 3'd0; scounteren = 3'd0;
         priv = 2'b11;
         // MRET only in M; SRET not in U, nor in S under TSR; WFI and SFENCE.VMA (bar TVM) anywhere
         for (int pv = 0; pv < 4; pv++)

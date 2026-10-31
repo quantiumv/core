@@ -9,9 +9,9 @@
 # "cores" names the builds a test is meaningful for (run_regress.sh --core):
 #   pipe  the main build, the pipelined core in design/pipe/ -- every row
 #   ref   the frozen multi-cycle reference, verification/reference/ref_core.sv
-#         (named `core` by -DQV_REF_AS_CORE) -- 77 rows
+#         (named `core` by -DQV_REF_AS_CORE) -- 78 rows
 # run_regress.sh --core X SKIPS any row not listing X, silently, so a row that
-# names neither core would just never run: there must be 133 rows listing pipe.
+# names neither core would just never run: there must be 136 rows listing pipe.
 #
 # The rows that omit ref are the design/*_tb.sv unit tests of a leaf module
 # (alu, c_expand, csr_file, divider, register_file) and of the divider's
@@ -33,6 +33,7 @@ design_clint_tb|design/clint_tb.sv||design|ref,pipe|pass|
 design_csr_file_priv_random_tb|design/csr_file_priv_random_tb.sv||design|pipe|pass|
 design_csr_file_random_tb|design/csr_file_random_tb.sv||design|pipe|pass|
 design_csr_file_tb|design/csr_file_tb.sv||design|pipe|pass|
+design_csr_file_zicntr_tb|design/csr_file_tb.sv||design|pipe|pass||-Pcsr_file_tb.ZICNTR_EN=1
 design_csr_file_fp_tb|design/csr_file_fp_tb.sv||design|pipe|pass|
 design_dcache_random_tb|design/dcache_random_tb.sv||design|ref,pipe|pass|
 design_dcache_tb|design/dcache_tb.sv||design|ref,pipe|pass|
@@ -118,6 +119,8 @@ tb_core_m_ext_cache_tb|testbench/core_m_ext_cache_tb.sv|testbench/core_cache_har
 
 tb_core_pmp_tb|testbench/core_pmp_tb.sv|testbench/core_wb4_sram_harness.sv|design|ref,pipe|pass|
 tb_core_pmp_spec_tb|testbench/core_pmp_spec_tb.sv|testbench/core_wb4_sram_harness.sv|design|ref,pipe|pass|
+# Zicntr (QV_ZICNTR_EN): the counters at every privilege under the enables; the define until it defaults to 1
+tb_core_zicntr_tb|testbench/core_zicntr_tb.sv|testbench/core_wb4_sram_harness.sv|design|ref,pipe|pass||-DQV_ZICNTR_EN=1
 
 # === special harnesses ===
 tb_core_amo_write_fault_tb|testbench/core_amo_write_fault_tb.sv|testbench/core_amo_write_fault_harness.sv|design|ref,pipe|pass|
@@ -141,6 +144,7 @@ pipe_bht_tb|design/pipe/qv_bht_tb.sv||design|pipe|pass|
 pipe_decode_tb|design/pipe/qv_decode_tb.sv||design|pipe|pass|
 pipe_decode_noser_tb|design/pipe/qv_decode_tb.sv||design|pipe|pass||-Pqv_decode_tb.CSR_NOSER=1
 pipe_decode_fp_tb|design/pipe/qv_decode_tb.sv||design|pipe|pass||-Pqv_decode_tb.FPU_EN=1
+pipe_decode_zicntr_tb|design/pipe/qv_decode_tb.sv||design|pipe|pass||-Pqv_decode_tb.ZICNTR_EN=1
 pipe_pmp_tb|design/pipe/qv_pmp_tb.sv||design|pipe|pass||
 pipe_pte_tb|design/pipe/qv_pte_tb.sv||design|pipe|pass|
 pipe_tlb_tb|design/pipe/qv_tlb_tb.sv||design|pipe|pass|

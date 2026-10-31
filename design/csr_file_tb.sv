@@ -25,7 +25,9 @@
  * two writers each) is correct, independent of whether core.sv's own
  * classification wires (is_illegal_instr, trap_to_s, etc.) are right.
  */
-module csr_file_tb;
+module csr_file_tb #(
+    parameter bit ZICNTR_EN = 1'b0      // Zicntr: tests.list runs both
+);
 
     logic clk = 0;
     always #5 clk = ~clk;
@@ -74,7 +76,10 @@ module csr_file_tb;
     logic [(`WORD_SIZE - 1):0]     satp_w;
     logic                          mstatus_sum_w, mstatus_mxr_w, mstatus_tvm_w;
 
-    csr_file dut (
+    logic [(`WORD_SIZE - 1):0]     time_v = '0;          // Zicntr: the platform's mtime
+    logic [2:0]                    mcounteren_w, scounteren_w;
+
+    csr_file #(.ZICNTR_EN(ZICNTR_EN)) dut (
         .i_clk(clk),
         .i_rst(rst),
         .i_csr_addr(csr_addr),
@@ -87,6 +92,7 @@ module csr_file_tb;
         .i_mtip(mtip),
         .i_meip(meip),
         .i_seip(seip),
+        .i_time(time_v),
         .i_trap_taken(trap_taken),
         .i_trap_cause(trap_cause),
         .i_trap_val(trap_val),
@@ -126,7 +132,9 @@ module csr_file_tb;
         .o_satp(satp_w),
         .o_mstatus_sum(mstatus_sum_w),
         .o_mstatus_mxr(mstatus_mxr_w),
-        .o_mstatus_tvm(mstatus_tvm_w)
+        .o_mstatus_tvm(mstatus_tvm_w),
+        .o_mcounteren(mcounteren_w),
+        .o_scounteren(scounteren_w)
     );
 
     /* Local mirrors of csr_file.sv's address map -- this testbench drives
@@ -1217,6 +1225,33 @@ module csr_file_tb;
         check("Sv39: o_mstatus_tvm tracks a direct mstatus.TVM write", mstatus_tvm_w, 1'b1);
         write_csr(CSR_ADDR_MSTATUS, `WORD_SIZE'(0));
         check("Sv39: o_mstatus_tvm clears when mstatus.TVM is cleared", mstatus_tvm_w, 1'b0);
+
+        // Zicntr: cycle, time and instret read mcycle, i_time and minstret (0 without ZICNTR_EN), and the counter
+        // enables are exported for decode
+        begin : zicntr
+            logic [(`WORD_SIZE - 1):0] a, b;
+            time_v = 64'h0123_4567_89AB_CDEF;
+            read_csr(12'hC01, rdata);
+            check("Zicntr: time reads i_time", rdata, ZICNTR_EN ? 64'h0123_4567_89AB_CDEF : 64'd0);
+            time_v = 64'h0000_0000_0000_0042;
+            read_csr(12'hC01, rdata);
+            check("Zicntr: time follows i_time", rdata, ZICNTR_EN ? 64'h42 : 64'd0);
+            @(negedge clk); instr_retired = 1; @(negedge clk); instr_retired = 0;
+            read_csr(CSR_ADDR_MINSTRET, a);
+            read_csr(12'hC02, b);
+            check("Zicntr: instret reads minstret", b, ZICNTR_EN ? a : 64'd0);
+            check("Zicntr: minstret is not 0 here", `WORD_SIZE'(a != 0), `WORD_SIZE'(1));
+            read_csr(CSR_ADDR_MCYCLE, a);
+            read_csr(12'hC00, b);
+            check("Zicntr: cycle reads mcycle (the same cycle or the next)",
+                  `WORD_SIZE'(ZICNTR_EN ? (b == a || b == a + 1) : (b == 0)), `WORD_SIZE'(1));
+            write_csr(CSR_ADDR_MCOUNTEREN, 64'h5);
+            write_csr(CSR_ADDR_SCOUNTEREN, 64'h2);
+            check("Zicntr: o_mcounteren", `WORD_SIZE'(mcounteren_w), `WORD_SIZE'(5));
+            check("Zicntr: o_scounteren", `WORD_SIZE'(scounteren_w), `WORD_SIZE'(2));
+            write_csr(CSR_ADDR_MCOUNTEREN, 64'h0);
+            write_csr(CSR_ADDR_SCOUNTEREN, 64'h0);
+        end
 
         $display("");
         $display("csr_file_tb: %0d passed, %0d failed", pass_count, fail_count);
