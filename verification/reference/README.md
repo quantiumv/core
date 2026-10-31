@@ -291,9 +291,9 @@ verified on its own (for the FPU: TestFloat, Sail and ACT).
   Mutants 14-17 below. With `QV_FPU_EN` 0 the reference behaves as before
   (FP encodings are illegal, FS reads 0).
 - **Zicntr (2026-10-31): cycle, time and instret, behind `QV_ZICNTR_EN`.** It
-  defaults to 0 until the pipelined core and both ACT configs have it. The
-  three CSRs read `mcycle`, the new `i_time` input (the platform's mtime: in
-  `soc.sv` the CLINT's) and `minstret`, the count before the reading
+  defaulted to 0 until the pipelined core and both ACT configs had it, and is
+  1 since. The three CSRs read `mcycle`, the new `i_time` input (the
+  platform's mtime: in `soc.sv` the CLINT's) and `minstret`, the count before the reading
   instruction. Below M a read needs its `mcounteren` bit, and in U its
   `scounteren` bit too; the reserved privilege 2'b10 takes the U rule, as in
   the trigger and EBREAK selects. A write is illegal (read-only addresses).
@@ -302,8 +302,8 @@ verified on its own (for the FPU: TestFloat, Sail and ACT).
   three addresses exist). The access rule is in `ref_core.sv`'s
   `is_illegal_instr`, written as `design/pipe/qv_decode.sv`'s. The Sail diff
   says little here: its programs never read the counters, and `cycle` and
-  `time` cannot match Sail's. ACT is the evidence. With `QV_ZICNTR_EN` 0 the
-  reference behaves as before (the three CSRs do not exist, errata E10).
+  `time` cannot match Sail's. ACT is the evidence. `QV_ZICNTR_EN=0` builds
+  the reference as before (the three CSRs do not exist, errata E10).
 
 ## Running the reference as `core`
 

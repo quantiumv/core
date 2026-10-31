@@ -134,7 +134,7 @@
     "Zic64b": { "supported": false },
     "Zicfilp": { "supported": false },
     "Zicond": { "supported": false },
-    "Zicntr": { "supported": false }, // unprivileged 0xC00-range cycle/time/instret shadows not implemented
+    "Zicntr": { "supported": true }, // cycle, time and instret (QV_ZICNTR_EN)
     "Zicsr": { "supported": true },
     "Zifencei": { "supported": false },
     "Zihintntl": { "supported": false },

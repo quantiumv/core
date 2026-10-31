@@ -170,7 +170,7 @@
 // absent (illegal, errata E10). The reference reads the same define and must get the same value: lockstep compiles
 // both cores in one unit, where the first definition wins.
 `ifndef QV_ZICNTR_EN
-`define QV_ZICNTR_EN 0
+`define QV_ZICNTR_EN 1
 `endif
 
 module core

@@ -119,8 +119,8 @@ tb_core_m_ext_cache_tb|testbench/core_m_ext_cache_tb.sv|testbench/core_cache_har
 
 tb_core_pmp_tb|testbench/core_pmp_tb.sv|testbench/core_wb4_sram_harness.sv|design|ref,pipe|pass|
 tb_core_pmp_spec_tb|testbench/core_pmp_spec_tb.sv|testbench/core_wb4_sram_harness.sv|design|ref,pipe|pass|
-# Zicntr (QV_ZICNTR_EN): the counters at every privilege under the enables; the define until it defaults to 1
-tb_core_zicntr_tb|testbench/core_zicntr_tb.sv|testbench/core_wb4_sram_harness.sv|design|ref,pipe|pass||-DQV_ZICNTR_EN=1
+# Zicntr: the counters at every privilege under the enables
+tb_core_zicntr_tb|testbench/core_zicntr_tb.sv|testbench/core_wb4_sram_harness.sv|design|ref,pipe|pass|
 
 # === special harnesses ===
 tb_core_amo_write_fault_tb|testbench/core_amo_write_fault_tb.sv|testbench/core_amo_write_fault_harness.sv|design|ref,pipe|pass|

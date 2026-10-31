@@ -20,6 +20,7 @@ implemented_extensions:
   - { name: F, version: "= 2.2.0" }
   - { name: D, version: "= 2.2.0" }
   - { name: Zicsr, version: "= 2.0" }
+  - { name: Zicntr, version: "= 2.0" } # cycle, time (the CLINT's mtime) and instret
   - { name: Zifencei, version: "= 2.0.0" }
   - { name: Zca, version: "= 1.0.0" }
   - { name: Zcd, version: "= 1.0.0" }
@@ -31,6 +32,7 @@ implemented_extensions:
   - { name: Svade, version: "= 1.0.0" } # a PTE with A=0, or D=0 for a write, page-faults: no hardware A/D update
 
 params:
+  TIME_CSR_IMPLEMENTED: true # Zicntr: time reads the platform's mtime
   # --- A params ---
   # The reservation is the exact LR address (64-bit compare); any store, SC or AMO clears it.
   MISALIGNED_AMO: false
@@ -67,7 +69,7 @@ params:
   TRAP_ON_ILLEGAL_WLRL: false
   TRAP_ON_UNIMPLEMENTED_INSTRUCTION: true
   TRAP_ON_RESERVED_INSTRUCTION: true
-  TRAP_ON_UNIMPLEMENTED_CSR: false # csr_file.sv: unmapped CSR reads 0, writes silently ignored, no trap (deliberate, Zicsr-milestone decision)
+  TRAP_ON_UNIMPLEMENTED_CSR: true # errata E10: an access to a CSR that does not exist is illegal
   REPORT_VA_IN_MTVAL_ON_BREAKPOINT: false
   # Confirmed true via direct trace comparison against sail_riscv_sim (2026-08-17, root-causing
   # ACT4's ExceptionsZc-00 failure): core.sv's mem_load_misaligned/mem_store_misaligned trap arm
@@ -110,12 +112,11 @@ params:
   MSTATUS_VS_LEGAL_VALUES: [0] # no V -- VS field always reads Off
   MCOUNTENABLE_EN:
     [
+      true, true, true, false, false, false, false, false,
       false, false, false, false, false, false, false, false,
       false, false, false, false, false, false, false, false,
       false, false, false, false, false, false, false, false,
-      false, false, false, false, false, false, false, false,
-    ] # mcounteren delegates access to the Zicntr unprivileged views, which don't exist here --
-      # every bit is meaningless (all false) even though mcycle/minstret themselves exist (see HPM_COUNTER_EN)
+    ] # Zicntr: CY, TM and IR are kept (errata E8); there are no HPM counters
   HPM_COUNTER_EN:
     [
       false, false, false, false, false, false, false, false,
@@ -168,8 +169,8 @@ params:
   MSTATUS_TVM_IMPLEMENTED: true # S-mode satp access and SFENCE.VMA trap under TVM
   SCOUNTENABLE_EN:
     [
+      true, true, true, false, false, false, false, false,
       false, false, false, false, false, false, false, false,
       false, false, false, false, false, false, false, false,
       false, false, false, false, false, false, false, false,
-      false, false, false, false, false, false, false, false,
-    ] # same reasoning as MCOUNTENABLE_EN -- no Zicntr means every delegation bit is meaningless
+    ] # as MCOUNTENABLE_EN

@@ -248,7 +248,7 @@
  * them absent (illegal since errata E10). The pipelined core reads the same define and must get the same value.
  */
 `ifndef QV_ZICNTR_EN
-`define QV_ZICNTR_EN 0
+`define QV_ZICNTR_EN 1
 `endif
 /* verilator lint_off DECLFILENAME */
 // Under -DQV_REF_AS_CORE this module is named `core`, deliberately not

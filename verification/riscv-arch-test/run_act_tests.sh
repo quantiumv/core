@@ -22,7 +22,8 @@
 # config's suffix (e.g. act_results_rv64imafdc_ref.log) for any config other
 # than quantiumv-rv64im (ACT_RESULTS=<path> overrides, to keep the tracked
 # log untouched). Both cores pass the same ELFs. Both configs declare Sv39
-# (with Svade) and PMP (4 entries, G = 0), so the Sv39 and PMP tests run too.
+# (with Svade), PMP (4 entries, G = 0) and Zicntr, so the Sv39, PMP and
+# counter tests run too.
 set -u
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
