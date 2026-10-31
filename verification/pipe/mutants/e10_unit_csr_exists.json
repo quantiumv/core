@@ -1,0 +1,142 @@
+{
+ "dut": "design/pipe/qv_csr_exists.sv",
+ "tb": "design/pipe/qv_decode_tb.sv",
+ "files": [
+  "design/decoder.sv",
+  "design/c_expand.sv",
+  "design/alu.sv",
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_pmp.sv",
+  "design/pipe/qv_fp_dec.sv",
+  "design/pipe/qv_csr_exists.sv",
+  "design/pipe/qv_decode.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench"
+ ],
+ "cwd": "design",
+ "timeout": 900,
+ "mutants": [
+  {
+   "name": "fflags/frm/fcsr exist without the FPU",
+   "old": "(FP_EN && a >= 12'h001",
+   "new": "(a >= 12'h001"
+  },
+  {
+   "name": "sstatus does not exist",
+   "old": "|| a == 12'h100 ||",
+   "new": "||"
+  },
+  {
+   "name": "scounteren does not exist",
+   "old": "a <= 12'h106)",
+   "new": "a <= 12'h105)"
+  },
+  {
+   "name": "senvcfg does not exist",
+   "old": "|| a == 12'h10A",
+   "new": ""
+  },
+  {
+   "name": "sip does not exist",
+   "old": "a <= 12'h144)",
+   "new": "a <= 12'h143)"
+  },
+  {
+   "name": "satp does not exist",
+   "old": "|| a == 12'h180",
+   "new": ""
+  },
+  {
+   "name": "mcounteren does not exist",
+   "old": "a <= 12'h306)",
+   "new": "a <= 12'h305)"
+  },
+  {
+   "name": "menvcfg does not exist",
+   "old": "|| a == 12'h30A",
+   "new": ""
+  },
+  {
+   "name": "mcountinhibit does not exist",
+   "old": "|| a == 12'h320",
+   "new": ""
+  },
+  {
+   "name": "mip does not exist",
+   "old": "a <= 12'h344)",
+   "new": "a <= 12'h343)"
+  },
+  {
+   "name": "pmpcfg2 does not exist",
+   "old": "|| a == 12'h3A2",
+   "new": ""
+  },
+  {
+   "name": "pmpaddr8-15 do not exist",
+   "old": "a[11:4] == 8'h3B",
+   "new": "a[11:3] == 9'h076"
+  },
+  {
+   "name": "tinfo does not exist",
+   "old": "a <= 12'h7A4)",
+   "new": "a <= 12'h7A3)"
+  },
+  {
+   "name": "dscratch1 does not exist",
+   "old": "a <= 12'h7B3)",
+   "new": "a <= 12'h7B2)"
+  },
+  {
+   "name": "mcycle does not exist",
+   "old": "a == 12'hB00 || a == 12'hB02",
+   "new": "a == 12'hB02"
+  },
+  {
+   "name": "minstret does not exist",
+   "old": "|| a == 12'hB02",
+   "new": ""
+  },
+  {
+   "name": "cycle, time and instret exist without Zicntr",
+   "old": "(ZICNTR_EN && a >= 12'hC00",
+   "new": "(a >= 12'hC00"
+  },
+  {
+   "name": "mconfigptr does not exist",
+   "old": "a <= 12'hF15)",
+   "new": "a <= 12'hF14)"
+  },
+  {
+   "name": "mvendorid does not exist",
+   "old": "(a >= 12'hF11",
+   "new": "(a >= 12'hF12"
+  },
+  {
+   "name": "mhpmcounter3 exists",
+   "old": "|| a == 12'hB00 || a == 12'hB02",
+   "new": "|| a == 12'hB00 || a == 12'hB02 || a == 12'hB03"
+  },
+  {
+   "name": "menvcfgh exists",
+   "old": "|| a == 12'h320",
+   "new": "|| a == 12'h320 || a == 12'h31A"
+  },
+  {
+   "name": "hstatus exists",
+   "old": "|| (a >= 12'h340 && a <= 12'h344)",
+   "new": "|| (a >= 12'h340 && a <= 12'h344) || a == 12'h600"
+  },
+  {
+   "name": "every CSR exists",
+   "old": "assign o_exists = ",
+   "new": "assign o_exists = 1'b1 || "
+  }
+ ]
+}

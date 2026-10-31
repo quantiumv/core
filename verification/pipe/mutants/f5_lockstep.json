@@ -29,8 +29,8 @@
   {
    "name": "decode: a reserved FP encoding or FS Off is not illegal",
    "file": "qv_decode.sv",
-   "old": "csr_illegal || priv_illegal || fp_illegal || csr_pmp_absent) begin",
-   "new": "csr_illegal || priv_illegal || csr_pmp_absent) begin"
+   "old": "csr_illegal || priv_illegal || fp_illegal || csr_absent) begin",
+   "new": "csr_illegal || priv_illegal || csr_absent) begin"
   },
   {
    "name": "decode: the FMA's third source is never read",
