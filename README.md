@@ -14,7 +14,8 @@ the head of the ROB, and stores to RAM retire into a store buffer that writes th
 Translated code runs at nearly untranslated speed (fetch reuses its last page, the data side looks up its
 TLB before the head), and CSR reads and trap-CSR writes do not flush the pipeline.
 
-- RV64IMAFDC (RV64GC: also Zicsr, Zifencei), with Zcd
+- RV64IMAFDC (RV64GC: also Zicsr, Zifencei), with Zcd and Zicntr (`cycle`, `instret`, and `time`, which reads
+  the CLINT's mtime)
 - An FPU with IEEE 754 single and double precision: a 4-stage pipeline (fused multiply-add, the other
   arithmetic, conversions, compares) that takes one op per cycle, and divide/square root beside it
 - M, S and U modes, with trap delegation
@@ -23,8 +24,9 @@ TLB before the head), and CSR reads and trap-CSR writes do not flush the pipelin
 - Timer and external interrupts
 - RISC-V Debug Module over JTAG, which works with OpenOCD
 
-It doesn't have user-level counters, vectored `mtvec`, or misaligned
-access support (those trap). `QV_FPU_EN=0` builds it without F/D.
+It doesn't have misaligned access support (those trap) or hardware performance counters beyond `mcycle` and
+`minstret`. An access to a CSR that doesn't exist traps. `QV_FPU_EN=0` builds it without F/D, `QV_ZICNTR_EN=0`
+without Zicntr.
 
 **SoC** (`design/soc.sv`): the core, write-through L1 I/D caches, and Wishbone
 peripherals.
@@ -67,7 +69,7 @@ simulation, with UART output in your terminal. See
 |---|---|
 | `make regress [CORE=pipe\|ref]` | The unit and integration testbenches (`pipe`, the default, is the core; `ref` is the frozen reference) |
 | `make lint [CORE=...]` | Verilator lint of the full SoC |
-| `make act` | The official RISC-V architecture tests, with Sv39 (Svade) and PMP (4 entries) declared: 198/200 pass, and 422/426 with `CONFIG=quantiumv-rv64imafdc` (F, D, Zcd, A, Zifencei), the same on both cores. `sv39_satp_access_test` fails in both: Sail's `satp.ASID` has 16 bits, the core's none. `S-00` fails in both: the rv64im config leaves out letters `misa` reports, and in the F/D config it reaches the same `satp.ASID` check. `Zalrsc-sc.w`/`sc.d` fail because any store between LR and SC clears the reservation here. |
+| `make act` | The official RISC-V architecture tests, with Sv39 (Svade), PMP (4 entries) and Zicntr declared: 202/204 pass, and 426/430 with `CONFIG=quantiumv-rv64imafdc` (F, D, Zcd, A, Zifencei), the same on both cores. `sv39_satp_access_test` fails in both: Sail's `satp.ASID` has 16 bits, the core's none. `S-00` fails in both: the rv64im config leaves out letters `misa` reports, and in the F/D config it reaches the same `satp.ASID` check. `Zalrsc-sc.w`/`sc.d` fail because any store between LR and SC clears the reservation here. |
 | `make lockstep` | Runs the core and the reference side by side and compares every retired instruction |
 | `make openocd-smoke` | OpenOCD drives the Debug Module over JTAG |
 

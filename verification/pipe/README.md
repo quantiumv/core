@@ -248,6 +248,41 @@ After E8 and E9 (`f555cb6`): regression core 133/133, reference 77/77; ACT 198/2
 cores; lockstep, fresh seeds, on a snapshot of `f555cb6`: the FP profile 200 x 4 = 800/800 (37.1 M retirements, 1.2 M
 interrupt entries), act-fd 1,704/1,704 and the 307-program corpus 1,228/1,228.
 
+### Erratum E10 and Zicntr
+
+- E10 (`78d77d1`): an access to a CSR that does not exist is an illegal instruction, from every privilege level, the
+  read-suppressed forms and rd = x0 included. Both cores read 0 there before and did not trap, which S-mode Linux and
+  OpenSBI cannot live with: OpenSBI probes Sstc, Smstateen and others by reading a CSR and watching for the trap, and
+  emulates `time` only when reading it traps. The set that exists is Sail's under the ACT configs
+  (`../reference/probes/csr_table.txt`, from `csr_probe.py`), in `design/pipe/qv_csr_exists.sv`, which the reference
+  uses as a renamed copy; the reference README's errata log has the details and the three places it differs from Sail.
+- Zicntr (`1f64710`, on by default since `31d24c6`, `QV_ZICNTR_EN`): `cycle`, `time` and `instret` read `mcycle`, the
+  core's new `i_time` input and `minstret`. Below M a read needs its `mcounteren` bit, and in U (and the reserved
+  privilege 2'b10) its `scounteren` bit too. In the SoC `i_time` is the CLINT's mtime.
+- In lockstep each side's `time` counts that side's own retirements, so a `time` read returns the same value on both
+  sides at the same retirement (both cores read a CSR in the cycle it retires); the real mtime counts clock cycles,
+  which the two cores spend differently. `qvgen` reads `cycle` only into x0 for the same reason: whether the read traps
+  is compared, the value is not. The ACT Zicntr tests read `cycle` into registers, so the lockstep ACT lists leave them
+  out; ACT runs them on both cores.
+
+The gate (2026-10-31), the core against the reference, Verilator, four memory configurations, on a snapshot of
+`84dfaa5`:
+- Regression: core 136/136, reference 78/78. Lint clean. The perf CSVs (M and S builds) are byte-identical. The RVFI
+  diff: 150/150.
+- ACT: 202/204 and 426/430, the same on both cores (the four Zicntr tests pass). OpenOCD smoke: 29/29 on both cores.
+- Lockstep, fresh seeds:
+  - the FP profile 500 x 4 = 2,000/2,000 (90.8 M retirements, 2.8 M interrupt entries);
+  - an M-mode body with PMP 300 x 4 = 1,200/1,200 (16.8 M retirements);
+  - the corpora x 4: act-fd 1,704/1,704, ACT + firmware + 100 random 1,228/1,228, and the smc, irq and dbg corpora clean.
+- The reference against itself, 50 x 4: 200/200. The corruption self-test catches every field class (1-14). The kill
+  matrix catches 18 of 18 (mutant 18: U ignores `scounteren`).
+- Mutation:
+  - `e10_unit_csr_exists` 23/23, `zicntr_unit_decode` 11/11, `zicntr_unit_csr_file` 6/6, and every decode spec in full;
+  - `zicntr_lockstep` 12/12. Two of those needed stimulus first: an M-mode body for M's ungated read, and the
+    privilege-2 `scounteren` idiom (`59bd40f`). That generator was then checked on its own: FP profile 200 x 4, M body
+    100 x 4 and REF vs REF 25 x 4, all clean.
+- riscv-formal: `../riscv-formal/quantiumv_pipe/README.md`.
+
 ## Where the core differs from ref_core.sv
 
 Architectural behavior is the same: the lockstep gate compares every retirement, a CSR snapshot, the bus
