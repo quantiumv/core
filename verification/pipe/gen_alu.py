@@ -104,8 +104,8 @@ FENCES = ["fence", "fence rw, rw", "fence r, r", "fence w, w", "fence iorw, iorw
 CSR_RW = [0x340, 0x341, 0x342, 0x343, 0x304, 0x302, 0x303]
 # read with write-suppressed forms only: mstatus/mtvec/mip are writable
 # but must not change, the rest are read-only; never cycle/time, whose
-# values depend on timing (instret, 0xC02, exists only with Zicntr)
-CSR_RO = [0x300, 0x301, 0x305, 0x344, 0xF11, 0xF12, 0xF13, 0xF14, 0xF15, 0xB02]
+# values depend on timing (instret, 0xC02, is Zicntr's: QV_ZICNTR_EN)
+CSR_RO = [0x300, 0x301, 0x305, 0x344, 0xF11, 0xF12, 0xF13, 0xF14, 0xF15, 0xB02, 0xC02]
 # illegal in M-mode outside debug mode: debug and trigger CSRs at all,
 # read-only CSRs when actually written
 CSR_DEBUG = [0x7B0, 0x7B1, 0x7A0, 0x7A4]

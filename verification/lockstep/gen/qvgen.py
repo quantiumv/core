@@ -603,9 +603,15 @@ def emit_priv_csr(p: Program, recent: list[int]):
     elif r < 0.90:
         csr = p.rng.choice(_D_ANY)
         form = p.rng.choice(["csrrw", "csrrs", "csrrc", "csrrwi", "csrrsi", "csrrci", "read"])
+    elif r < 0.93:
+        # Zicntr: S (and privilege 2) decide which counters U may read; from U this traps
+        p.e(f"    csrwi   scounteren, {p.rng.randint(0, 7)}")
+        return
     else:
         csr = p.rng.choice(_U_RO)
         form = "read"
+        if csr == "cycle":
+            rd = 0          # mcycle counts clocks, which the two cores spend differently: whether it traps is compared
     if form == "read":
         p.e(f"    csrr    x{rd}, {csr}")
     elif form.endswith("i"):
@@ -685,6 +691,16 @@ def emit_csr(p: Program, recent: list[int]):
     if p.rng.random() < 0.06:
         # a CSR that does not exist (errata E10); in an M-mode body this is the only way to reach that check
         _emit_csr_access(p, recent, p.rng.choice(_ABSENT))
+        return
+    if not p.args.sail_safe and p.rng.random() < 0.04:
+        # Zicntr: a counter read (M may read them all). cycle only into x0: mcycle counts clocks, which the two cores
+        # spend differently; time and instret read the same on both (lockstep's time counts retirements)
+        csr = p.rng.choice(["cycle", "time", "instret"])
+        rd = 0 if csr == "cycle" else p.reg_biased(recent)
+        p.e(f"    csrr    x{rd}, {csr}")
+        if rd:
+            recent.append(rd)
+            del recent[:-8]
         return
     if p.rng.random() < 0.12:
         # a debug or trigger CSR outside Debug Mode: an illegal instruction at every privilege. In an M-mode body
@@ -2091,6 +2107,12 @@ def emit_trap_delegation(p: Program):
             mideleg &= ~(1 << 9)
     p.li(6, mideleg)
     p.e("    csrw    mideleg, x6")
+    if p.priv_ext:
+        # Zicntr: which of cycle, time and instret the body may read below M (the body changes scounteren too)
+        p.li(6, p.rng.randint(0, 7))
+        p.e("    csrw    mcounteren, x6")
+        p.li(6, p.rng.randint(0, 7))
+        p.e("    csrw    scounteren, x6")
 
 
 def emit_msu_minimal_pmp(p: Program):
