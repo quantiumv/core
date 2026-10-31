@@ -20,7 +20,26 @@
  ],
  "mutants": [
   {
-   "from": "zicntr_unit_decode.json"
+   "from": "zicntr_unit_decode.json",
+   "only": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    6,
+    7,
+    8,
+    9,
+    10
+   ]
+  },
+  {
+   "from": "zicntr_unit_decode.json",
+   "only": [
+    5
+   ],
+   "profile": "--isa imafdc --priv m --pmp --irq --smc"
   },
   {
    "name": "decode: a scounteren write does not serialize (privilege 2 then reads a counter against the old value)",
