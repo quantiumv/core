@@ -104,7 +104,9 @@ they're defined exactly once regardless of how many cores include them.
   "Running mutants" below) that forgot to regenerate the manifest
   (regenerate it -- see below). The manifest has been regenerated for
   every deliberate change since the freeze: mutants 1-10
-  (`ref_core.sv`, `ref_c_expand.sv`), errata E1 and E2, mutants 11-13.
+  (`ref_core.sv`, `ref_c_expand.sv`), errata E1 and E2, mutants 11-13,
+  and since then each errata entry and feature addition below and mutants
+  14-18.
   Each is a real, intentional diff from the original freeze snapshot, not
   an accidental edit -- `QV_MUTANT=0` (every existing caller) behaves
   identically before and after, shown by the unchanged regression and
@@ -357,6 +359,7 @@ never the register indices mutant 1 needs).
 | 15 | FP exception flags are not accrued into fflags (F/D) | ref_core.sv, `csr_file0`'s `i_fp_accrue` |
 | 16 | An FP register write does not set mstatus.FS Dirty (F/D) | ref_core.sv, `csr_file0`'s `i_fp_frd_we` |
 | 17 | A dynamic rounding mode (rm = 7) ignores frm and rounds to nearest (F/D) | ref_core.sv, `fpdec0`'s `i_frm` |
+| 18 | A counter read in U ignores scounteren (Zicntr) | ref_core.sv, `cnt_ok` |
 
 All 13 are caught (a REF-vs-REF run reports `LOCKSTEP_RESULT: FAIL`):
 `verification/lockstep/run_kill_matrix.sh` runs each against `#(0)`

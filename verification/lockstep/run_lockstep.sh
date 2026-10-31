@@ -111,7 +111,7 @@ Usage: run_lockstep.sh --mode selfproof|mutant|corrupt [options]
   --pipe-dir DIR       design/pipe/ replacement for --dut pipe (default design/pipe)
   --defines "A=1 B=0"  preprocessor defines for the build, both sides (the QV_PIPE_* feature knobs, QV_FPU_EN);
                         part of the cache key
-  --mutant N           QV_MUTANT_B value, 1-17 (--mode mutant only)
+  --mutant N           QV_MUTANT_B value, 1-18 (--mode mutant only)
   --memcfg-b sram|cache  side B's memory config (default sram -- also applies
                         under --mode mutant, e.g. --mutant 9 needs cache)
   --delay-max N        max bus-delay wait states (default 0 = disabled)
@@ -187,7 +187,7 @@ case "$MODE" in
     selfproof|mutant|corrupt) ;;
     *) echo "Unknown --mode: $MODE (expected selfproof, mutant or corrupt)" >&2; exit 1 ;;
 esac
-if [ "$MODE" == "mutant" ] && { [ "$MUTANT" -lt 1 ] || [ "$MUTANT" -gt 17 ]; }; then
+if [ "$MODE" == "mutant" ] && { [ "$MUTANT" -lt 1 ] || [ "$MUTANT" -gt 18 ]; }; then
     echo "ERROR: --mode mutant needs --mutant N with N in 1..17" >&2; exit 1
 fi
 case "$DUT" in

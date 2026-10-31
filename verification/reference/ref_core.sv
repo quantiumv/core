@@ -3856,7 +3856,9 @@ module ref_core
     wire csr_cnt = ZICNTR_EN && is_csr && imm_2[11:2] == 10'h300 && imm_2[1:0] != 2'b11;
     wire cnt_m   = mcounteren_w[imm_2[1:0]];
     wire cnt_s   = scounteren_w[imm_2[1:0]];
-    wire cnt_ok  = (current_priv == PRIV_M) ? 1'b1 : (current_priv == PRIV_S) ? cnt_m : (cnt_m && cnt_s);
+    // mutant 18: U (and privilege 2'b10) ignore scounteren
+    wire cnt_ok  = (current_priv == PRIV_M) ? 1'b1 : (current_priv == PRIV_S) ? cnt_m
+                 : (cnt_m && (cnt_s || QV_MUTANT == 18));
     wire csr_cnt_denied = csr_cnt && !cnt_ok;
     wire is_illegal_instr = is_invalid_instr || csr_priv_violation || csr_readonly_violation
                           || debug_csr_violation || trigger_csr_violation
