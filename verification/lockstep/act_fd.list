@@ -1,7 +1,9 @@
 # riscv-arch-test (ACT4) F/D corpus for the lockstep harness (--corpus act-fd): the ELFs of the
 # quantiumv-rv64imafdc config (run_act_tests.sh CONFIG=quantiumv-rv64imafdc builds them). Same format as act.list.
 # Not part of --corpus all. Regenerate with:
-#   find verification/riscv-arch-test/work/quantiumv-rv64imafdc/elfs/ -name '*.elf' | sort
+#   find verification/riscv-arch-test/work/quantiumv-rv64imafdc/elfs/ -name '*.elf' | grep -v /Zicntr | sort
+# The Zicntr tests are left out: they read cycle, which counts clocks, so the two cores read different
+# values. ACT runs them on both cores.
 verification/riscv-arch-test/work/quantiumv-rv64imafdc/elfs/priv/ExceptionsZc/ExceptionsZc-00.elf
 verification/riscv-arch-test/work/quantiumv-rv64imafdc/elfs/priv/ExceptionsZicboS/ExceptionsZicboS-00.elf
 verification/riscv-arch-test/work/quantiumv-rv64imafdc/elfs/priv/ExceptionsZicboU/ExceptionsZicboU-00.elf

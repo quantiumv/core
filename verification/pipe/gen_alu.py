@@ -99,10 +99,9 @@ STORES = [("sb", 1), ("sh", 2), ("sw", 4), ("sd", 8)]
 FENCES = ["fence", "fence rw, rw", "fence r, r", "fence w, w", "fence iorw, iorw"]
 
 # CSRs safe to write in M-mode without changing control flow or enabling
-# anything: scratch/trap CSRs, interrupt enables (mstatus.MIE stays 0),
-# delegation (never applies to M-mode traps), and an unbacked custom
-# address (reads 0, ignores writes).
-CSR_RW = [0x340, 0x341, 0x342, 0x343, 0x304, 0x302, 0x303, 0x7C0]
+# anything: scratch/trap CSRs, interrupt enables (mstatus.MIE stays 0) and
+# delegation (never applies to M-mode traps).
+CSR_RW = [0x340, 0x341, 0x342, 0x343, 0x304, 0x302, 0x303]
 # read with write-suppressed forms only: mstatus/mtvec/mip are writable
 # but must not change, the rest are read-only; never cycle/time, whose
 # values depend on timing

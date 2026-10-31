@@ -11,8 +11,9 @@
  * PERF_SMODE (the S-mode build, crt0_s.s): S cannot read either, so the two
  * reads become window markers for perf_stack.sv, which counts the window
  * itself: rdcycle reads sscratch (the marker the monitor keys on), rdinstret
- * reads instret (0xC02: legal from S, unmapped, reads 0), so the kernel retires
- * the same instructions as in the M build. The values they return mean nothing.
+ * reads scounteren (an S CSR crt0_s.s never writes; instret would trap unless
+ * mcounteren.IR were set), so the kernel retires the same instructions as in
+ * the M build. The values they return mean nothing.
  */
 #ifdef PERF_SMODE
 static inline uint64_t rdcycle(void) {
@@ -23,7 +24,7 @@ static inline uint64_t rdcycle(void) {
 
 static inline uint64_t rdinstret(void) {
     uint64_t x;
-    asm volatile("csrr %0, instret" : "=r"(x));
+    asm volatile("csrr %0, scounteren" : "=r"(x));
     return x;
 }
 #else

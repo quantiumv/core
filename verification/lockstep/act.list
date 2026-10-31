@@ -1,7 +1,9 @@
 # riscv-arch-test (ACT4) corpus for the P3.4 lockstep harness. One ELF
 # path per line, repo-root-relative. #-comments and blank lines ignored.
 # Regenerate with:
-#   find verification/riscv-arch-test/work/quantiumv-rv64im/elfs/ -name '*.elf' | sort
+#   find verification/riscv-arch-test/work/quantiumv-rv64im/elfs/ -name '*.elf' | grep -v /Zicntr | sort
+# The Zicntr tests are left out: they read cycle, which counts clocks, so the two cores read different
+# values. ACT runs them on both cores.
 verification/riscv-arch-test/work/quantiumv-rv64im/elfs/priv/ExceptionsZc/ExceptionsZc-00.elf
 verification/riscv-arch-test/work/quantiumv-rv64im/elfs/priv/ExceptionsZicboS/ExceptionsZicboS-00.elf
 verification/riscv-arch-test/work/quantiumv-rv64im/elfs/priv/ExceptionsZicboU/ExceptionsZicboU-00.elf
