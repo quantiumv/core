@@ -1,0 +1,32 @@
+{
+ "counts": [
+  8,
+  24,
+  64
+ ],
+ "memcfg": "sram",
+ "delay": 0,
+ "jobs": 3,
+ "inner_jobs": 2,
+ "sim": "verilator",
+ "profile": "--isa imafdc --priv msu --pmp --irq --smc --sv39",
+ "extra": [
+  "--irq-mode",
+  "2",
+  "--irq-density",
+  "1",
+  "--dbg-mode",
+  "1"
+ ],
+ "mutants": [
+  {
+   "from": "zicntr_unit_decode.json"
+  },
+  {
+   "name": "decode: a scounteren write does not serialize (privilege 2 then reads a counter against the old value)",
+   "file": "qv_decode.sv",
+   "old": "wire csr_trap_wr = (csr_addr[11:2] == 10'h0D0) || (csr_addr[11:2] == 10'h050);",
+   "new": "wire csr_trap_wr = (csr_addr[11:2] == 10'h0D0) || (csr_addr[11:2] == 10'h050) || csr_addr == 12'h106;"
+  }
+ ]
+}

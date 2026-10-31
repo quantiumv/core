@@ -1,0 +1,83 @@
+{
+ "dut": "design/pipe/qv_decode.sv",
+ "tb": "design/pipe/qv_decode_tb.sv",
+ "files": [
+  "design/decoder.sv",
+  "design/c_expand.sv",
+  "design/alu.sv",
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_pmp.sv",
+  "design/pipe/qv_fp_dec.sv",
+  "design/pipe/qv_csr_exists.sv",
+  "design/pipe/qv_decode.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench",
+  "-Pqv_decode_tb.ZICNTR_EN=1"
+ ],
+ "cwd": "design",
+ "timeout": 900,
+ "mutants": [
+  {
+   "name": "S may read a counter without its mcounteren bit",
+   "old": "(i_priv == QV_PRIV_S) ? cnt_m :",
+   "new": "(i_priv == QV_PRIV_S) ? 1'b1 :"
+  },
+  {
+   "name": "U ignores scounteren",
+   "old": "(cnt_m && cnt_s);",
+   "new": "(cnt_m);"
+  },
+  {
+   "name": "U ignores mcounteren",
+   "old": "(cnt_m && cnt_s);",
+   "new": "(cnt_s);"
+  },
+  {
+   "name": "S takes the U rule",
+   "old": "(i_priv == QV_PRIV_S) ? cnt_m :",
+   "new": "(i_priv == QV_PRIV_S) ? (cnt_m && cnt_s) :"
+  },
+  {
+   "name": "privilege 2'b10 takes the S rule",
+   "old": "(i_priv == QV_PRIV_S) ? cnt_m :",
+   "new": "(i_priv == QV_PRIV_S || i_priv == 2'b10) ? cnt_m :"
+  },
+  {
+   "name": "M is gated too",
+   "old": "(i_priv == QV_PRIV_M) ? 1'b1 :",
+   "new": "(i_priv == QV_PRIV_M) ? cnt_m :"
+  },
+  {
+   "name": "mcounteren's TM and IR swapped",
+   "old": "wire cnt_m     = i_mcounteren[csr_addr[1:0]];",
+   "new": "wire cnt_m     = i_mcounteren[{csr_addr[0], csr_addr[1]}];"
+  },
+  {
+   "name": "scounteren's TM and IR swapped",
+   "old": "wire cnt_s     = i_scounteren[csr_addr[1:0]];",
+   "new": "wire cnt_s     = i_scounteren[{csr_addr[0], csr_addr[1]}];"
+  },
+  {
+   "name": "the gate never closes",
+   "old": "wire csr_cnt_denied = csr_cnt && !cnt_ok;",
+   "new": "wire csr_cnt_denied = 1'b0;"
+  },
+  {
+   "name": "the gate looks at the wrong addresses",
+   "old": "csr_addr[11:2] == 10'h300 &&",
+   "new": "csr_addr[11:2] == 10'h2C0 &&"
+  },
+  {
+   "name": "a denied counter read is not a fault",
+   "old": "end else if (csr_cnt_denied) begin",
+   "new": "end else if (1'b0) begin"
+  }
+ ]
+}

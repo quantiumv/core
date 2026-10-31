@@ -1,0 +1,51 @@
+{
+ "dut": "design/csr_file.sv",
+ "tb": "design/csr_file_tb.sv",
+ "files": [
+  "design/csr_file.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench",
+  "-Pcsr_file_tb.ZICNTR_EN=1"
+ ],
+ "cwd": "design",
+ "timeout": 600,
+ "mutants": [
+  {
+   "name": "time reads mcycle",
+   "old": "CSR_ADDR_TIME:      o_csr_rdata = ZICNTR_EN ? i_time : '0;",
+   "new": "CSR_ADDR_TIME:      o_csr_rdata = ZICNTR_EN ? mcycle_q : '0;"
+  },
+  {
+   "name": "instret reads mcycle",
+   "old": "CSR_ADDR_INSTRET:   o_csr_rdata = ZICNTR_EN ? minstret_q : '0;",
+   "new": "CSR_ADDR_INSTRET:   o_csr_rdata = ZICNTR_EN ? mcycle_q : '0;"
+  },
+  {
+   "name": "cycle reads minstret",
+   "old": "CSR_ADDR_CYCLE:     o_csr_rdata = ZICNTR_EN ? mcycle_q : '0;",
+   "new": "CSR_ADDR_CYCLE:     o_csr_rdata = ZICNTR_EN ? minstret_q : '0;"
+  },
+  {
+   "name": "time reads 0",
+   "old": "CSR_ADDR_TIME:      o_csr_rdata = ZICNTR_EN ? i_time : '0;",
+   "new": "CSR_ADDR_TIME:      o_csr_rdata = '0;"
+  },
+  {
+   "name": "o_mcounteren exports scounteren",
+   "old": "assign o_mcounteren    = mcounteren_q;",
+   "new": "assign o_mcounteren    = scounteren_q;"
+  },
+  {
+   "name": "o_scounteren exports mcounteren",
+   "old": "assign o_scounteren    = scounteren_q;",
+   "new": "assign o_scounteren    = mcounteren_q;"
+  }
+ ]
+}
