@@ -1,0 +1,27 @@
+{
+ "dut": "design/pipe/qv_issue.sv",
+ "tb": "design/pipe/qv_issue_wbl_tb.sv",
+ "files": [
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_issue.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench",
+  "-Pqv_issue_wbl_tb.BYPASS_EN=0"
+ ],
+ "cwd": "design",
+ "timeout": 300,
+ "mutants": [
+  {
+   "name": "the bypass ignores BYPASS_EN",
+   "old": "            else if (LSU_BYPASS && BYPASS_EN && i_wbl.valid && i_wbl.tag == p1_tag) opa = i_wbl.value;\n",
+   "new": "            else if (LSU_BYPASS && i_wbl.valid && i_wbl.tag == p1_tag) opa = i_wbl.value;\n"
+  }
+ ]
+}
