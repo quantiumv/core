@@ -11,7 +11,7 @@
 #   ref   the frozen multi-cycle reference, verification/reference/ref_core.sv
 #         (named `core` by -DQV_REF_AS_CORE) -- 78 rows
 # run_regress.sh --core X SKIPS any row not listing X, silently, so a row that
-# names neither core would just never run: there must be 136 rows listing pipe.
+# names neither core would just never run: there must be 138 rows listing pipe.
 #
 # The rows that omit ref are the design/*_tb.sv unit tests of a leaf module
 # (alu, c_expand, csr_file, divider, register_file) and of the divider's
@@ -164,6 +164,8 @@ pipe_lsu_xl_probe_tb|design/pipe/qv_lsu_xl_tb.sv||design|pipe|pass||-Pqv_lsu_xl_
 pipe_lsu_sb_tb|design/pipe/qv_lsu_sb_tb.sv||design|pipe|pass|
 pipe_sb_tb|design/pipe/qv_sb_tb.sv||design|pipe|pass|
 pipe_commit_sb_tb|design/pipe/qv_commit_sb_tb.sv||design|pipe|pass|
+pipe_lsq_tb|design/pipe/qv_lsq_tb.sv||design|pipe|pass|
+pipe_lsq_d2_tb|design/pipe/qv_lsq_tb.sv||design|pipe|pass||-Pqv_lsq_tb.DEPTH=2
 pipe_rob_tb_d8|design/pipe/qv_rob_tb.sv||design|pipe|pass||-Pqv_rob_tb.ROB_DEPTH=8
 pipe_rob_tb_d4|design/pipe/qv_rob_tb.sv||design|pipe|pass||-Pqv_rob_tb.ROB_DEPTH=4
 pipe_rob_tb_d2|design/pipe/qv_rob_tb.sv||design|pipe|pass||-Pqv_rob_tb.ROB_DEPTH=2
