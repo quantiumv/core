@@ -232,9 +232,11 @@ module core_sb_tb;
             logic seen_int, seen_ext;
             seen_int = 1'b0; seen_ext = 1'b0; t_int = -1; t_ext = -1;
             for (c = 0; c < 400 && !seen_ext; c++) begin
-                @(posedge clk); #1;
-                // the halt request goes up as the 4th store retires
-                if (dut.core0.commit_now_w && dut.core0.c_pc_rdata === 64'h14) halt_req = 1'b1;
+                @(posedge clk);
+                // the halt request goes up as the 4th store retires: decided at the edge that ends its retiring cycle
+                // (raised later in that cycle, it would be sampled with the store and win over it)
+                if (dut.core0.commit_now_w && dut.core0.c_pc_rdata === 64'h14) halt_req <= 1'b1;
+                #1;
                 if (!seen_int && dut.core0.in_debug_mode) begin seen_int = 1'b1; t_int = c; end
                 if (!seen_ext && o_debug_mode) begin seen_ext = 1'b1; t_ext = c; end
             end
