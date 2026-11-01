@@ -39,6 +39,8 @@ Usage: run_perf.sh [options]
   --force             rebuild kernels/testbenches even if cached
   --oracle store      the cache configuration only, with the ideal-store D$ (oracle_dcache.sv): an upper bound for a store buffer;
                       writes oracle_store_<core>.csv, never the baselines
+  --oracle early      both configurations, with the early-load LSU (oracle_lsu.sv): an upper bound for early loads (O2.0);
+                      writes oracle_early_<core>[_s].csv and its _stack.csv, never the baselines
   --defines "A=1 B"    extra Verilog defines for the testbench builds (e.g. "QV_PIPE_SB_DEPTH=0" for the old timing)
   --label NAME        results go to baseline_<core>_<NAME>.csv (and its _stack.csv) and the builds are tagged, so the committed baselines stay
   --timeout N          per-run cycle budget passed as +TIMEOUT (default 2000000)
@@ -70,8 +72,8 @@ KERNELS="memcpy crc32 qsort matmul sieve listchase mixedint trap fmatmul fpmix"
 case "$MODE" in
     m) SFX=""; MAKE_TARGET=all; SMODE=0 ;;
     s) SFX="_s"; MAKE_TARGET=all_s; SMODE=1
-       if [ "$CORE" != "pipe" ] || [ -n "$ORACLE" ]; then
-           echo "--mode s needs --core pipe and no --oracle (its result is the pipelined core's CPI monitor)" >&2; exit 1
+       if [ "$CORE" != "pipe" ] || { [ -n "$ORACLE" ] && [ "$ORACLE" != "early" ]; }; then
+           echo "--mode s needs --core pipe and no --oracle but early (its result is the pipelined core's CPI monitor)" >&2; exit 1
        fi ;;
     *) echo "Unknown --mode: $MODE (expected m or s)" >&2; exit 1 ;;
 esac
@@ -101,8 +103,13 @@ if [ "$ORACLE" == "store" ]; then
     ORACLE_DCACHE=verification/perf/oracle_dcache.sv
     DESIGN_FILES="${DESIGN_FILES/design\/dcache.sv/$ORACLE_DCACHE}"
     TAG="${CORE}_oracle_store"
+elif [ "$ORACLE" == "early" ]; then
+    if [ "$CORE" != "pipe" ]; then echo "--oracle early needs --core pipe" >&2; exit 1; fi
+    ORACLE_LSU=verification/perf/oracle_lsu.sv
+    DESIGN_FILES="${DESIGN_FILES/design\/pipe\/qv_lsu.sv/$ORACLE_LSU}"
+    TAG="${CORE}${SFX}_oracle_early"
 elif [ -n "$ORACLE" ]; then
-    echo "Unknown --oracle: $ORACLE (expected store)" >&2; exit 1
+    echo "Unknown --oracle: $ORACLE (expected store or early)" >&2; exit 1
 fi
 [ -n "$LABEL" ] && TAG="${TAG}_${LABEL}"
 DEF_FLAGS=""
@@ -132,22 +139,23 @@ build_tb() {
     fi
 }
 
-if [ -z "$ORACLE" ]; then build_tb 0 "$OUTDIR/perf_tb_${TAG}_sram.vvp" "$OUTDIR/build_${TAG}_sram.log"; fi
+if [ "$ORACLE" != "store" ]; then build_tb 0 "$OUTDIR/perf_tb_${TAG}_sram.vvp" "$OUTDIR/build_${TAG}_sram.log"; fi
 build_tb 1 "$OUTDIR/perf_tb_${TAG}_cache.vvp" "$OUTDIR/build_${TAG}_cache.log"
 
 # ---------------- run every kernel against both configs ----------------
 CSV="$SCRIPT_DIR/baseline_${CORE}${SFX}${LABEL:+_$LABEL}.csv"
-if [ -n "$ORACLE" ]; then CSV="$SCRIPT_DIR/oracle_${ORACLE}_${CORE}${LABEL:+_$LABEL}.csv"; fi
+if [ -n "$ORACLE" ]; then CSV="$SCRIPT_DIR/oracle_${ORACLE}_${CORE}${SFX}${LABEL:+_$LABEL}.csv"; fi
 echo "kernel,config,cycles,instret,cpi" > "$CSV"
 
 # The CPI stack of the pipelined core (perf_stack.sv): where the window's cycles go, and the side counters. The
 # columns are the keys of the PERF_STACK and PERF_SIDE lines, in this order.
 STACK_CSV="$SCRIPT_DIR/baseline_${CORE}${SFX}${LABEL:+_$LABEL}_stack.csv"
+if [ -n "$ORACLE" ]; then STACK_CSV="$SCRIPT_DIR/oracle_${ORACLE}_${CORE}${SFX}${LABEL:+_$LABEL}_stack.csv"; fi
 STACK_KEYS="window retire blk_lsu blk_div blk_alu blk_sys ear_align ear_mispred ear_serial ear_other empty_front blk_fpu"
 SIDE_KEYS="iq_empty fb_empty no_uop is_rob is_oper is_lsu is_div re_align re_mispred re_serial re_other mp_cond mp_jal mp_jalr mp_wait bus_wait"
 SIDE_KEYS="$SIDE_KEYS xl_req xl_reuse xl_cyc dx_n dx_hit dx_save re_ser_ro re_ser_trapw re_ser_csr re_ser_sys"
 SIDE_KEYS="$SIDE_KEYS ear_ser_ro ear_ser_trapw ear_ser_csr ear_ser_sys"
-if [ "$CORE" == "pipe" ] && [ -z "$ORACLE" ]; then
+if [ "$CORE" == "pipe" ] && [ "$ORACLE" != "store" ]; then
     echo "kernel,config,$(echo $STACK_KEYS $SIDE_KEYS | tr ' ' ',')" > "$STACK_CSV"
 fi
 
@@ -180,7 +188,7 @@ run_one() {
     echo "${kernel},${cfg_name},${cycles},${instret},${cpi}" >> "$CSV"
     printf "%-10s %-6s cycles=%-8s instret=%-8s cpi=%s\n" "$kernel" "$cfg_name" "$cycles" "$instret" "$cpi"
 
-    if [ "$CORE" == "pipe" ] && [ -z "$ORACLE" ]; then
+    if [ "$CORE" == "pipe" ] && [ "$ORACLE" != "store" ]; then
         local sline pline row
         sline=$(echo "$out" | grep "^PERF_STACK:" | head -1)
         pline=$(echo "$out" | grep "^PERF_SIDE:" | head -1)
@@ -198,7 +206,7 @@ run_one() {
 
 echo "=== running kernels ==="
 for kernel in $KERNELS; do
-    if [ -z "$ORACLE" ]; then run_one "$kernel" "sram" "$OUTDIR/perf_tb_${TAG}_sram.vvp"; fi
+    if [ "$ORACLE" != "store" ]; then run_one "$kernel" "sram" "$OUTDIR/perf_tb_${TAG}_sram.vvp"; fi
     run_one "$kernel" "cache" "$OUTDIR/perf_tb_${TAG}_cache.vvp"
 done
 
