@@ -103,7 +103,16 @@ module perf_stack #(
     input logic             lsu_at_head,        // ... and it is the head
     input logic             x_req,              // its translation is asked (at the head)
     input logic             x_done,
-    input logic             x_fault
+    input logic             x_fault,
+
+    // the load/store queue (O2); 0 when the core has none
+    input logic             lsq_early_ld = 1'b0,    // a load starts before it is the head
+    input logic             lsq_early_st = 1'b0,    // a store is posted before it is the head
+    input logic             lsq_bar_wait = 1'b0,    // the LSU's op could go early but a barrier is older
+    input logic             lsq_match_wait = 1'b0,  // a load waits for an older store to its dword (queue or buffer)
+    input logic             lsq_qmatch = 1'b0,      // ... one in the queue (posted, not retired)
+    input logic             lsq_handoff = 1'b0,     // the LSU takes its next op as the last completes
+    input logic             lsq_drain = 1'b0        // a flush finds an early load on the bus (it is drained)
 );
     localparam logic [2:0] FU_DIV = 3'd2;
     localparam logic [2:0] FU_LSU = 3'd3;
@@ -128,6 +137,7 @@ module perf_stack #(
     longint unsigned c_window, c_retire, c_blk_lsu, c_blk_div, c_blk_alu, c_blk_sys, c_blk_fpu;
     longint unsigned c_ear_align, c_ear_mispred, c_ear_serial, c_ear_other, c_empty_front;
     longint unsigned c_iq_empty, c_fb_empty, c_is_oper, c_is_rob, c_is_lsu, c_is_div, c_no_uop;
+    longint unsigned c_lq_ld, c_lq_st, c_lq_bar, c_lq_match, c_lq_qmatch, c_lq_hand, c_lq_drain;
     longint unsigned c_re_align, c_re_mispred, c_re_serial, c_re_other;
     longint unsigned c_mp_cond, c_mp_jal, c_mp_jalr, c_mp_wait, c_mp_n;
     longint unsigned c_bus_wait;
@@ -183,6 +193,7 @@ module perf_stack #(
             c_bus_wait <= 0;
             c_instret <= 0;
             c_xl_req <= 0; c_xl_reuse <= 0; c_xl_cyc <= 0; c_dx_n <= 0; c_dx_hit <= 0; c_dx_save <= 0;
+            c_lq_ld <= 0; c_lq_st <= 0; c_lq_bar <= 0; c_lq_match <= 0; c_lq_qmatch <= 0; c_lq_hand <= 0; c_lq_drain <= 0;
             for (int k = 0; k < 4; k++) begin c_re_ser[k] <= 0; c_ear_ser[k] <= 0; end
             shadow_q <= SRC_NONE;
             shadow_kind_q <= 0;
@@ -275,6 +286,14 @@ module perf_stack #(
                     c_re_align <= c_re_align + 1;
                 end
                 if (lsu_bus_wait) c_bus_wait <= c_bus_wait + 1;
+                // O2: what the load/store queue's engine does before the head, and what holds it back
+                if (lsq_early_ld)   c_lq_ld     <= c_lq_ld + 1;
+                if (lsq_early_st)   c_lq_st     <= c_lq_st + 1;
+                if (lsq_bar_wait)   c_lq_bar    <= c_lq_bar + 1;
+                if (lsq_match_wait) c_lq_match  <= c_lq_match + 1;
+                if (lsq_qmatch)     c_lq_qmatch <= c_lq_qmatch + 1;
+                if (lsq_handoff)    c_lq_hand   <= c_lq_hand + 1;
+                if (lsq_drain)      c_lq_drain  <= c_lq_drain + 1;
 
                 // P10a: a translated request in the page of the last translation; P10b: a head lookup that hit
                 // after the op had waited before the head
@@ -327,6 +346,8 @@ module perf_stack #(
                  c_re_other, c_mp_cond, c_mp_jal, c_mp_jalr, c_mp_wait, c_bus_wait,
                  c_xl_req, c_xl_reuse, c_xl_cyc, c_dx_n, c_dx_hit, c_dx_save,
                  c_re_ser[0], c_re_ser[1], c_re_ser[2], c_re_ser[3], c_ear_ser[0], c_ear_ser[1], c_ear_ser[2], c_ear_ser[3]);
+        $display("PERF_LSQ: early_ld=%0d early_st=%0d bar_wait=%0d match_wait=%0d qmatch_wait=%0d handoff=%0d drain=%0d",
+                 c_lq_ld, c_lq_st, c_lq_bar, c_lq_match, c_lq_qmatch, c_lq_hand, c_lq_drain);
         if (win_q != 2)
             $display("PERF_STACK_WARN: the window never closed (state %0d)", win_q);
         if (sum != c_window)

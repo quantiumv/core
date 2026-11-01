@@ -155,8 +155,12 @@ STACK_KEYS="window retire blk_lsu blk_div blk_alu blk_sys ear_align ear_mispred 
 SIDE_KEYS="iq_empty fb_empty no_uop is_rob is_oper is_lsu is_div re_align re_mispred re_serial re_other mp_cond mp_jal mp_jalr mp_wait bus_wait"
 SIDE_KEYS="$SIDE_KEYS xl_req xl_reuse xl_cyc dx_n dx_hit dx_save re_ser_ro re_ser_trapw re_ser_csr re_ser_sys"
 SIDE_KEYS="$SIDE_KEYS ear_ser_ro ear_ser_trapw ear_ser_csr ear_ser_sys"
+# the load/store queue's counters (O2), a file of their own so the stack's stays as it was
+LSQ_CSV="${STACK_CSV%_stack.csv}_lsq.csv"
+LSQ_KEYS="early_ld early_st bar_wait match_wait qmatch_wait handoff drain"
 if [ "$CORE" == "pipe" ] && [ "$ORACLE" != "store" ]; then
     echo "kernel,config,$(echo $STACK_KEYS $SIDE_KEYS | tr ' ' ',')" > "$STACK_CSV"
+    echo "kernel,config,$(echo $LSQ_KEYS | tr ' ' ',')" > "$LSQ_CSV"
 fi
 
 # kv "<line>" key: the number after key= in a PERF_ line
@@ -201,6 +205,11 @@ run_one() {
         for k in $STACK_KEYS; do row="$row,$(kv "$sline" $k)"; done
         for k in $SIDE_KEYS; do row="$row,$(kv "$pline" $k)"; done
         echo "$row" >> "$STACK_CSV"
+        local qline
+        qline=$(echo "$out" | grep "^PERF_LSQ:" | head -1)
+        row="${kernel},${cfg_name}"
+        for k in $LSQ_KEYS; do row="$row,$(kv "$qline" $k)"; done
+        echo "$row" >> "$LSQ_CSV"
     fi
 }
 
