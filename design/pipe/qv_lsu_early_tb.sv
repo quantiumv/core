@@ -15,9 +15,15 @@
  * Program Buffer access; a load whose dword has a buffered or posted store (i_sb_match). A flush while an early load
  * is on the bus drains it (no writeback); one while it waits drops it. o_load_near, for a load near the head, says
  * yes only when it may start now: with i_early, or once it is the head.
+ *
+ * HANDOFF = 1 (O2b), with the next request presented while one is in flight: it is taken (o_take) in the cycle the
+ * current op completes on the bus or is posted, and goes to the bus in the next; both results are right. It is not
+ * taken in the cycle of a completion without the bus (a misaligned op at the head), nor in a flush cycle. Without
+ * HANDOFF it is taken only from IDLE, a cycle after the completion.
  */
 module qv_lsu_early_tb #(
-    parameter bit EARLY_ST = 1'b1
+    parameter bit EARLY_ST = 1'b1,
+    parameter bit HANDOFF  = 1'b0
 );
     import qv_pkg::*;
 
@@ -48,9 +54,10 @@ module qv_lsu_early_tb #(
     logic [63:0]             pmpcfg0 = 64'h1F, pmpaddr0 = 64'h003F_FFFF_FFFF_FFFF;
     logic                    sb_empty = 1'b1, sb_match = 1'b0, sb_beat = 1'b0, sb_go = 1'b0;
     logic [31:3]             sb_addr;
-    logic                    load_near, bus_busy;
+    logic                    load_near, bus_busy, take;
 
-    qv_lsu #(.SB_EN(1'b1), .PMA_RAM_BASE(64'h0), .PMA_RAM_SIZE(64'h400), .EARLY(1'b1), .EARLY_ST(EARLY_ST)) dut (
+    qv_lsu #(.SB_EN(1'b1), .PMA_RAM_BASE(64'h0), .PMA_RAM_SIZE(64'h400), .EARLY(1'b1), .EARLY_ST(EARLY_ST),
+             .HANDOFF(HANDOFF)) dut (
         .clk(clk), .rst(rst), .i_flush(flush),
         .i_req(req), .o_free(free),
         .i_head_valid(head_valid), .i_head_tag(head_tag), .i_early(early_ok),
@@ -62,7 +69,7 @@ module qv_lsu_early_tb #(
         .o_wb(wb), .o_res(res), .o_head_started(started),
         .o_bus_busy(bus_busy),
         .i_sb_empty(sb_empty), .i_sb_match(sb_match), .i_sb_beat(sb_beat), .i_sb_go(sb_go),
-        .o_sb_addr(sb_addr), .o_load_near(load_near), .o_in_bus(in_bus)
+        .o_sb_addr(sb_addr), .o_load_near(load_near), .o_in_bus(in_bus), .o_take(take)
     );
 
     // ---------------- slave model (as in qv_lsu_sb_tb, with a settable latency) ----------------
@@ -355,6 +362,112 @@ module qv_lsu_early_tb #(
         at_head(20);
         check("... then it runs", b(got_wb), 64'd1);
         early_ok = 1'b1;
+
+        // ---- the handoff: the next request is presented while the current op is in flight ----
+        settle();
+        early_ok = 1'b1; wait_fix = 1;
+        begin
+            int t_done, t_take, t_cyc2;
+            logic [63:0] v1, v2;
+            logic [QV_ROB_TAG_W-1:0] tag1, tag2;
+            // op 1: a load before the head, on the bus
+            dispatch(1'b0, QV_AMO_LR, 1'b0, 2'd3, 64'h0C0, 64'd0);
+            tag1 = last_tag;
+            @(negedge clk); head_valid = 1'b1; head_tag = tag1 - 1'b1;
+            // op 2 presented at once and held until taken
+            tag2 = next_tag; next_tag = next_tag + 1'b1; last_tag = tag2;
+            req = '0; req.valid = 1'b1; req.tag = tag2; req.op = {1'b0, 1'b0, 1'b1, 2'd3}; req.a = 64'h0C8;
+            t_done = -1; t_take = -1; t_cyc2 = -1;
+            for (int c = 0; c < 20; c++) begin
+                logic took;
+                #1;
+                if (wb.valid && wb.tag == tag1) begin t_done = c; v1 = wb.value; end
+                if (wb.valid && wb.tag == tag2) v2 = wb.value;
+                took = take && req.valid;
+                if (took && t_take < 0) t_take = c;
+                if (t_take >= 0 && c > t_take && cyc && addr == 32'h0C8 && t_cyc2 < 0) t_cyc2 = c;
+                @(posedge clk);
+                if (took) begin #1; req = '0; end
+            end
+            req = '0;
+            @(negedge clk); head_valid = 1'b0;
+            check("handoff: op 1 completes", b(t_done >= 0), 64'd1);
+            check("handoff: op 1's value", v1, mem[8'h18]);
+            check("handoff: op 2's value", v2, mem[8'h19]);
+            check("handoff: op 1's result record", res.mem_rdata, mem[8'h19]);   // op 2 completed last
+            if (HANDOFF) begin
+                check("handoff: op 2 taken in op 1's completion cycle", 64'(t_take), 64'(t_done));
+                check("handoff: op 2 on the bus the next cycle", 64'(t_cyc2), 64'(t_done + 1));
+            end else begin
+                check("no handoff: op 2 taken a cycle after op 1 completes", 64'(t_take), 64'(t_done + 1));
+            end
+        end
+        // ... a posted store hands off to the load behind it
+        begin
+            int t_post, t_take;
+            dispatch(1'b0, QV_AMO_LR, 1'b1, 2'd3, 64'h0D0, 64'h1111_2222_3333_4444);
+            @(negedge clk); head_valid = 1'b1; head_tag = last_tag;            // the store is the head
+            req = '0; req.valid = 1'b1; req.tag = next_tag; req.op = {1'b0, 1'b0, 1'b1, 2'd3}; req.a = 64'h0D8;
+            last_tag = next_tag; next_tag = next_tag + 1'b1;
+            #1;
+            t_post = wb.valid ? 0 : -1; t_take = take ? 0 : -1;
+            @(posedge clk); #1;
+            if (t_take < 0) begin                        // not taken at once: from IDLE, at the end of this cycle
+                if (take) t_take = 1;
+                @(posedge clk); #1;
+            end
+            req = '0;
+            check("handoff after a post: the store is posted at once", 64'(t_post), 64'd0);
+            check("handoff after a post: the load is taken in that cycle (or from IDLE after)", 64'(t_take), HANDOFF ? 64'd0 : 64'd1);
+            // it goes early (the store, still the head, is done): watch for its completion from here
+            begin
+                logic seen; seen = 1'b0;
+                for (int c = 0; c < 20 && !seen; c++) begin
+                    #1; if (wb.valid && wb.tag == last_tag) seen = 1'b1;
+                    @(posedge clk);
+                end
+                check("... the load then completes", b(seen), 64'd1);
+            end
+            @(negedge clk); head_valid = 1'b0;
+        end
+        // ... a completion without the bus (a misaligned load at the head) does not hand off
+        begin
+            logic took;
+            dispatch(1'b0, QV_AMO_LR, 1'b0, 2'd3, 64'h0E4, 64'd0);
+            @(negedge clk); head_valid = 1'b1; head_tag = last_tag;
+            req = '0; req.valid = 1'b1; req.tag = next_tag; req.op = {1'b0, 1'b0, 1'b1, 2'd3}; req.a = 64'h0E8;
+            #1;
+            took = take;
+            check("misaligned at the head: completes at once", b(wb.valid), 64'd1);
+            check("... and the next op is not taken in that cycle", b(took), 64'd0);
+            @(posedge clk); #1;
+            check("... it trapped (cause 4)", {60'b0, res.cause}, 64'd4);
+            check("... the next op is taken from IDLE in the next cycle", b(take), 64'd1);
+            last_tag = next_tag; next_tag = next_tag + 1'b1;
+            @(posedge clk); #1; req = '0;
+            head_tag = last_tag;
+            at_head(20);
+        end
+        // ... nor does a completion in a flush cycle take anything
+        begin
+            logic took_in_flush;
+            wait_fix = 2;
+            dispatch(1'b0, QV_AMO_LR, 1'b0, 2'd3, 64'h0F0, 64'd0);
+            @(negedge clk); head_valid = 1'b1; head_tag = last_tag - 1'b1;
+            req = '0; req.valid = 1'b1; req.tag = next_tag; req.op = {1'b0, 1'b0, 1'b1, 2'd3}; req.a = 64'h0F8;
+            took_in_flush = 1'b0;
+            for (int c = 0; c < 20; c++) begin
+                #1;
+                if (ack) begin flush = 1'b1; #1; if (take) took_in_flush = 1'b1; end
+                @(posedge clk); #1;
+                if (flush) begin flush = 1'b0; c = 20; end
+            end
+            req = '0; head_valid = 1'b0;
+            check("a flush in the completion cycle: nothing taken", b(took_in_flush), 64'd0);
+            settle();
+            check("... and the LSU is idle after", b(free), 64'd1);
+            wait_fix = 0;
+        end
 
         settle();
         check("bus protocol kept throughout", b(proto_ok), 64'd1);
