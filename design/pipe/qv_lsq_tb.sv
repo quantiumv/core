@@ -11,11 +11,16 @@
  * Directed: a dispatch into an empty queue reaches the engine in the same cycle; the queue fills to DEPTH and frees a
  * slot only when an op retires; the result is read in the cycle after completion (from the engine) and later (from
  * the queue's copy); a pop whose tag is not the oldest entry's does nothing; a flush empties it.
+ * PRE_XL = 1 (O2c): while the port is free, the oldest queued op is looked up (a model TLB answers at once with a page
+ * of its own, or misses, or faults), and the engine takes it with that page; not an SC, not a misaligned op, not while
+ * the engine holds the port, not a miss or a fault, not a dispatch that goes straight to the engine, not across a
+ * slot's reuse.
  * Random: 4000 cycles of dispatches, completions, retirements and flushes, checking that the engine sees the ops in
  * dispatch order, that every retirement reads its own op's result, and that o_free is "fewer than DEPTH in the queue".
  */
 module qv_lsq_tb #(
-    parameter int DEPTH = 4
+    parameter int DEPTH  = 4,
+    parameter bit PRE_XL = 1'b0
 );
     import qv_pkg::*;
 
@@ -42,14 +47,22 @@ module qv_lsq_tb #(
     logic [QV_ROB_TAG_W-1:0] bar_tag = '0;
     logic                    early, match;
     logic [31:3]             match_addr = '0;
+    // the model TLB for pre-translation: answers the queue's lookup at once (xl_miss: not at all; xl_fault: with a fault)
+    logic                    xl_req, xl_wr, xl_free = 1'b1, xl_miss = 1'b0, xl_fault = 1'b0, eng_xl;
+    logic [63:0]             xl_va;
+    logic [43:0]             eng_ppn;
+    function automatic logic [43:0] page_of(input logic [63:0] va); return va[55:12] ^ 44'h0AB_CDEF_0123; endfunction
 
     logic                    e_take;             // the model engine takes eng_req (below)
-    qv_lsq #(.DEPTH(DEPTH)) dut (
+    qv_lsq #(.DEPTH(DEPTH), .PRE_XL(PRE_XL)) dut (
         .clk(clk), .rst(rst), .i_flush(flush),
         .i_req(req), .o_free(free),
         .o_eng_req(eng_req), .i_eng_take(e_take), .i_eng_wb(eng_wb), .i_eng_res(eng_res),
         .i_pop(pop), .i_pop_tag(pop_tag), .o_head_res(head_res),
-        .i_bar_alloc(bar_alloc), .i_bar_tag(bar_tag), .o_early(early), .i_match_addr(match_addr), .o_match(match)
+        .i_bar_alloc(bar_alloc), .i_bar_tag(bar_tag), .o_early(early), .i_match_addr(match_addr), .o_match(match),
+        .o_xl_req(xl_req), .o_xl_va(xl_va), .o_xl_wr(xl_wr), .i_xl_free(xl_free), .i_xl_active(1'b1),
+        .i_xl_done(xl_req && !xl_miss), .i_xl_pf(xl_fault), .i_xl_af(1'b0), .i_xl_ppn(page_of(xl_va)),
+        .o_eng_xl(eng_xl), .o_eng_ppn(eng_ppn)
     );
 
     // ---------------- the model engine ----------------
@@ -106,6 +119,16 @@ module qv_lsq_tb #(
                 else            e_cnt <= e_cnt - 1;
             end
         end
+    end
+
+    // what the engine took last, and how; whether a lookup asked as a write
+    logic [QV_ROB_TAG_W-1:0] took_tag;
+    logic                    took_xl;
+    logic [43:0]             took_ppn;
+    logic                    saw_wr = 1'b0;
+    always @(posedge clk) begin
+        if (e_take) begin took_tag <= eng_req.tag; took_xl <= eng_xl; took_ppn <= eng_ppn; end
+        if (xl_req) saw_wr <= xl_wr;
     end
 
     // ---------------- helpers ----------------
@@ -301,6 +324,107 @@ module qv_lsq_tb #(
         pop = 1'b1; pop_tag = t0; tick(); pop = 1'b0;
         next_a = 64'h100;
         match_addr = '0;
+
+        // ---- pre-translation ----
+        if (PRE_XL) begin
+            logic [QV_ROB_TAG_W-1:0] tq;
+            logic [63:0]             aq;
+            flush = 1'b1; tick(); flush = 1'b0;
+            e_lat = 6;
+            next_a = 64'h0000_0000_1234_5100;
+            // a dispatch that goes straight to the engine is not translated
+            present(t0, a0); #1;
+            check("pre-xl: straight to the engine: not translated", b(eng_xl), 64'd0);
+            tick(); idle();
+            // the next one waits in the queue and is looked up there
+            present(t1, a1); tick(); idle(); #1;
+            check("pre-xl: the queued op is looked up", b(xl_req), 64'd1);
+            repeat (8) tick();
+            check("pre-xl: the engine took it ...", 64'(took_tag), 64'(t1));
+            check("... translated", b(took_xl), 64'd1);
+            check("... to its page", {20'b0, took_ppn}, {20'b0, page_of(a1)});
+            repeat (8) tick();
+            pop = 1'b1; pop_tag = t0; tick(); pop = 1'b0;
+            pop = 1'b1; pop_tag = t1; tick(); pop = 1'b0;
+            // the port is the engine's: no lookup is taken
+            present(t0, a0); tick(); idle();
+            xl_free = 1'b0;
+            present(t1, a1); tick(); idle();
+            repeat (8) tick();
+            xl_free = 1'b1;
+            check("pre-xl: port busy throughout: taken untranslated", b(took_xl), 64'd0);
+            repeat (8) tick();
+            pop = 1'b1; pop_tag = t0; tick(); pop = 1'b0;
+            pop = 1'b1; pop_tag = t1; tick(); pop = 1'b0;
+            // a miss and a fault leave it to the engine
+            present(t0, a0); tick(); idle();
+            xl_miss = 1'b1;
+            present(t1, a1); tick(); idle();
+            repeat (8) tick();
+            xl_miss = 1'b0;
+            check("pre-xl: a miss: taken untranslated", b(took_xl), 64'd0);
+            repeat (8) tick();
+            pop = 1'b1; pop_tag = t0; tick(); pop = 1'b0;
+            pop = 1'b1; pop_tag = t1; tick(); pop = 1'b0;
+            present(t0, a0); tick(); idle();
+            xl_fault = 1'b1;
+            present(t1, a1); tick(); idle();
+            repeat (8) tick();
+            xl_fault = 1'b0;
+            check("pre-xl: a fault: taken untranslated", b(took_xl), 64'd0);
+            repeat (8) tick();
+            pop = 1'b1; pop_tag = t0; tick(); pop = 1'b0;
+            pop = 1'b1; pop_tag = t1; tick(); pop = 1'b0;
+            // an SC and a misaligned op are never looked up
+            present(t0, a0); tick(); idle();
+            req = '0; req.valid = 1'b1; req.tag = next_tag; req.a = 64'h1234_6000; req.op = {1'b1, 4'(QV_AMO_SC)};
+            tq = next_tag; next_tag = next_tag + 1'b1;
+            tick(); idle(); #1;
+            check("pre-xl: an SC is not looked up", b(xl_req), 64'd0);
+            repeat (8) tick();
+            check("... nor taken translated", b(took_xl), 64'd0);
+            repeat (8) tick();
+            pop = 1'b1; pop_tag = t0; tick(); pop = 1'b0;
+            pop = 1'b1; pop_tag = tq; tick(); pop = 1'b0;
+            present(t0, a0); tick(); idle();
+            req = '0; req.valid = 1'b1; req.tag = next_tag; req.a = 64'h1234_6004; req.op = 5'b00011;   // ld at +4
+            tq = next_tag; next_tag = next_tag + 1'b1;
+            tick(); idle(); #1;
+            check("pre-xl: a misaligned op is not looked up", b(xl_req), 64'd0);
+            repeat (16) tick();
+            check("... nor taken translated", b(took_xl), 64'd0);
+            pop = 1'b1; pop_tag = t0; tick(); pop = 1'b0;
+            pop = 1'b1; pop_tag = tq; tick(); pop = 1'b0;
+            // a store is looked up as one that writes
+            present(t0, a0); tick(); idle();
+            req = '0; req.valid = 1'b1; req.tag = next_tag; req.a = 64'h1234_7000; req.op = 5'b01011;   // sd
+            tq = next_tag; next_tag = next_tag + 1'b1;
+            #1;
+            tick(); idle(); #1;
+            repeat (8) tick();
+            check("pre-xl: a store is taken translated", b(took_xl), 64'd1);
+            check("... and was looked up as a write", b(saw_wr), 64'd1);
+            repeat (8) tick();
+            pop = 1'b1; pop_tag = t0; tick(); pop = 1'b0;
+            pop = 1'b1; pop_tag = tq; tick(); pop = 1'b0;
+            // a slot used again starts untranslated: fill every slot with translated ops, then miss
+            for (int i = 0; i < DEPTH; i++) begin
+                present(t0, a0); tick(); idle();
+                present(t1, a1); tick(); idle();
+                repeat (16) tick();
+                pop = 1'b1; pop_tag = t0; tick(); pop = 1'b0;
+                pop = 1'b1; pop_tag = t1; tick(); pop = 1'b0;
+            end
+            present(t0, a0); tick(); idle();
+            xl_miss = 1'b1;
+            present(t1, a1); tick(); idle();
+            repeat (16) tick();
+            xl_miss = 1'b0;
+            check("pre-xl: a slot used again does not keep the old translation", b(took_xl), 64'd0);
+            pop = 1'b1; pop_tag = t0; tick(); pop = 1'b0;
+            pop = 1'b1; pop_tag = t1; tick(); pop = 1'b0;
+            next_a = 64'h100;
+        end
 
         // ---- random ----
         seen_tags.delete();

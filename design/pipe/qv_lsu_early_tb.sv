@@ -16,6 +16,8 @@
  * is on the bus drains it (no writeback); one while it waits drops it. o_load_near, for a load near the head, says
  * yes only when it may start now: with i_early, or once it is the head.
  *
+ * An op that comes translated (i_req_xl, O2c) under Sv39 asks for no lookup and goes to the bus at its physical
+ * address; the same op without it asks for its lookup (and, unanswered here, waits).
  * SB_EN = 0 (no store buffer): only loads go early; a store in the window is not posted and waits for the head, where
  * it goes to the bus.
  * HANDOFF = 1 (O2b), with the next request presented while one is in flight: it is taken (o_take) in the cycle the
@@ -58,6 +60,9 @@ module qv_lsu_early_tb #(
     logic                    sb_empty = 1'b1, sb_match = 1'b0, sb_beat = 1'b0, sb_go = 1'b0;
     logic [31:3]             sb_addr;
     logic                    load_near, bus_busy, take;
+    logic                    satp_on = 1'b0, xlreq, rq_xl = 1'b0, xl_seen = 1'b0;
+    logic [43:0]             rq_ppn = '0;
+    always @(posedge clk) if (xlreq) xl_seen <= 1'b1;
 
     qv_lsu #(.SB_EN(SB_EN), .PMA_RAM_BASE(64'h0), .PMA_RAM_SIZE(64'h400), .EARLY(1'b1), .EARLY_ST(EARLY_ST),
              .HANDOFF(HANDOFF)) dut (
@@ -72,7 +77,8 @@ module qv_lsu_early_tb #(
         .o_wb(wb), .o_res(res), .o_head_started(started),
         .o_bus_busy(bus_busy),
         .i_sb_empty(sb_empty), .i_sb_match(sb_match), .i_sb_beat(sb_beat), .i_sb_go(sb_go),
-        .o_sb_addr(sb_addr), .o_load_near(load_near), .o_in_bus(in_bus), .o_take(take)
+        .o_sb_addr(sb_addr), .o_load_near(load_near), .o_in_bus(in_bus), .o_take(take),
+        .i_satp_on(satp_on), .o_xl_req(xlreq), .i_req_xl(rq_xl), .i_req_ppn(rq_ppn)
     );
 
     // ---------------- slave model (as in qv_lsu_sb_tb, with a settable latency) ----------------
@@ -375,6 +381,33 @@ module qv_lsu_early_tb #(
             check("... with no bus access", b(cyc), 64'd0);
         end
         wait_fix = 0;
+
+        // ---- an op that comes translated (O2c): no lookup of its own, the bus gets the physical address ----
+        priv = 2'b01; satp_on = 1'b1;                    // S mode under Sv39 (region 0 allows everything)
+        rq_xl = 1'b1; rq_ppn = 44'h0;                    // VA 0x7000_0048 -> PA 0x048
+        xl_seen = 1'b0;
+        dispatch(1'b0, QV_AMO_LR, 1'b0, 2'd3, 64'h7000_0048, 64'd0);
+        rq_xl = 1'b0;
+        before_head(20);
+        check("translated op: completes before the head", b(got_wb), 64'd1);
+        check("... without a lookup of its own", b(xl_seen), 64'd0);
+        check("... reading the physical address", wb_value, mem[8'h09]);
+        check("... rvfi address is the physical dword", res.mem_addr, 64'h048);
+        check("... tval the virtual address", res.tval, 64'h7000_0048);
+        // the same op without it waits for its translation: it asks at the head (this LSU has no early lookup) and,
+        // unanswered, does nothing
+        xl_seen = 1'b0;
+        dispatch(1'b0, QV_AMO_LR, 1'b0, 2'd3, 64'h7000_0050, 64'd0);
+        before_head(8);
+        check("untranslated op under Sv39: nothing before the head", b(got_wb), 64'd0);
+        at_head(8);
+        check("untranslated op under Sv39: asks for its lookup at the head", b(xl_seen), 64'd1);
+        check("... and waits for it", b(got_wb), 64'd0);
+        check("... with nothing on the bus", 64'(acc_d), 64'd0);
+        @(negedge clk); flush = 1'b1;
+        @(posedge clk); #1; flush = 1'b0;
+        priv = 2'b11; satp_on = 1'b0;
+        settle();
 
         // ---- a flush in the cycle an early load would start: no request at all ----
         sb_beat = 1'b1;                                  // holds the start off
