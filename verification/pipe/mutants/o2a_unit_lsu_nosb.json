@@ -1,0 +1,38 @@
+{
+ "dut": "design/pipe/qv_lsu.sv",
+ "tb": "design/pipe/qv_lsu_early_tb.sv",
+ "files": [
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_pmp.sv",
+  "design/pipe/qv_lsu.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench",
+  "-Pqv_lsu_early_tb.SB_EN=0"
+ ],
+ "cwd": "design",
+ "timeout": 600,
+ "mutants": [
+  {
+   "name": "early ignores the barrier",
+   "old": "    wire early     = EARLY && i_early && (state_q == S_WAIT_HEAD) && !at_head && !i_flush\n                     && (ram_ld || (EARLY_ST && postable));",
+   "new": "    wire early     = EARLY && (state_q == S_WAIT_HEAD) && !at_head && !i_flush\n                     && (ram_ld || (EARLY_ST && postable));"
+  },
+  {
+   "name": "an early load outside the window",
+   "old": "    wire ram_ld    = pa_in_window && !store_q && !atomic_q && !i_pmp_bypass;",
+   "new": "    wire ram_ld    = !store_q && !atomic_q && !i_pmp_bypass;"
+  },
+  {
+   "name": "an early store that is not postable",
+   "old": "    wire ram_ld    = pa_in_window && !store_q && !atomic_q && !i_pmp_bypass;",
+   "new": "    wire ram_ld    = pa_in_window && !atomic_q && !i_pmp_bypass;"
+  }
+ ]
+}

@@ -1,0 +1,155 @@
+{
+ "dut": "design/pipe/qv_lsq.sv",
+ "tb": "design/pipe/qv_lsq_tb.sv",
+ "files": [
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_lsq.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench"
+ ],
+ "cwd": "design",
+ "timeout": 600,
+ "mutants": [
+  {
+   "name": "o_free one short",
+   "old": "assign o_free      = (count != (IW + 1)'(DEPTH));",
+   "new": "assign o_free      = (count < (IW + 1)'(DEPTH - 1));"
+  },
+  {
+   "name": "o_free with a full queue",
+   "old": "assign o_free      = (count != (IW + 1)'(DEPTH));",
+   "new": "assign o_free      = 1'b1;"
+  },
+  {
+   "name": "no pass-through to a free engine",
+   "old": "o_eng_req       = has_q ? send_e : i_req;",
+   "new": "o_eng_req       = send_e;"
+  },
+  {
+   "name": "the engine is offered issue's request over a queued one",
+   "old": "o_eng_req       = has_q ? send_e : i_req;",
+   "new": "o_eng_req       = i_req.valid ? i_req : send_e;"
+  },
+  {
+   "name": "a dispatch in a flush cycle is kept",
+   "old": "wire push = i_req.valid && !i_flush;",
+   "new": "wire push = i_req.valid;",
+   "equivalent": true,
+   "why": "the always_ff takes its rst || i_flush arm first, which resets every pointer, so a dispatch in a flush cycle changes nothing"
+  },
+  {
+   "name": "a completion in a flush cycle counts",
+   "old": "wire cmpl = i_eng_wb.valid && !i_flush;",
+   "new": "wire cmpl = i_eng_wb.valid;",
+   "equivalent": true,
+   "why": "the always_ff takes its rst || i_flush arm first, which resets every pointer, so a completion in a flush cycle changes nothing (copy_q is reset there too)"
+  },
+  {
+   "name": "a pop of another tag retires the oldest entry",
+   "old": "wire pop  = i_pop && !empty && (i_pop_tag == tag_q[head_i]) && !i_flush;",
+   "new": "wire pop  = i_pop && !empty && !i_flush;"
+  },
+  {
+   "name": "the head's result ignores the copy in flight",
+   "old": "assign o_head_res = (copy_q && copy_idx_q == head_i) ? i_eng_res : res_q[head_i];",
+   "new": "assign o_head_res = res_q[head_i];"
+  },
+  {
+   "name": "the head's result is always the engine's",
+   "old": "assign o_head_res = (copy_q && copy_idx_q == head_i) ? i_eng_res : res_q[head_i];",
+   "new": "assign o_head_res = i_eng_res;"
+  },
+  {
+   "name": "the copy goes to the next entry",
+   "old": "copy_idx_q <= cmpl_i;",
+   "new": "copy_idx_q <= cmpl_i + 1'b1;"
+  },
+  {
+   "name": "the copy is dropped",
+   "old": "if (copy_q) res_q[copy_idx_q] <= i_eng_res;",
+   "new": "if (1'b0) res_q[copy_idx_q] <= i_eng_res;"
+  },
+  {
+   "name": "a flush leaves the entries",
+   "old": "        if (rst || i_flush) begin\n            head_q <= '0;",
+   "new": "        if (rst) begin\n            head_q <= '0;"
+  },
+  {
+   "name": "o_early ignores the barrier",
+   "old": "assign o_early  = (cmpl_q != send_q) && !bar_q[cmpl_i];",
+   "new": "assign o_early  = (cmpl_q != send_q);"
+  },
+  {
+   "name": "o_early reads the next entry's barrier",
+   "old": "assign o_early  = (cmpl_q != send_q) && !bar_q[cmpl_i];",
+   "new": "assign o_early  = (cmpl_q != send_q) && !bar_q[send_i];"
+  },
+  {
+   "name": "a new entry ignores the barrier",
+   "old": "bar_q[tail_i]     <= lbar_q && !(bar_retire && i_pop_tag == lbar_tag_q);",
+   "new": "bar_q[tail_i]     <= 1'b0;"
+  },
+  {
+   "name": "a barrier retiring as the op is dispatched still holds it",
+   "old": "bar_q[tail_i]     <= lbar_q && !(bar_retire && i_pop_tag == lbar_tag_q);",
+   "new": "bar_q[tail_i]     <= lbar_q;"
+  },
+  {
+   "name": "any retirement clears every entry's barrier",
+   "old": "if (bar_retire && i_pop_tag == bar_tag_q[i] && !(push && tail_i == IW'(i))) bar_q[i] <= 1'b0;",
+   "new": "if (bar_retire && !(push && tail_i == IW'(i))) bar_q[i] <= 1'b0;"
+  },
+  {
+   "name": "an entry's barrier never clears",
+   "old": "if (bar_retire && i_pop_tag == bar_tag_q[i] && !(push && tail_i == IW'(i))) bar_q[i] <= 1'b0;",
+   "new": "if (1'b0) bar_q[i] <= 1'b0;"
+  },
+  {
+   "name": "the youngest barrier never retires",
+   "old": "            end else if (bar_retire && i_pop_tag == lbar_tag_q) begin\n                lbar_q     <= 1'b0;",
+   "new": "            end else if (1'b0) begin\n                lbar_q     <= 1'b0;"
+  },
+  {
+   "name": "the youngest barrier keeps the first tag",
+   "old": "                lbar_q     <= 1'b1;\n                lbar_tag_q <= i_bar_tag;",
+   "new": "                lbar_q     <= 1'b1;\n                if (!lbar_q) lbar_tag_q <= i_bar_tag;"
+  },
+  {
+   "name": "a flush keeps the barrier",
+   "old": "            copy_q <= 1'b0;\n            lbar_q <= 1'b0;",
+   "new": "            copy_q <= 1'b0;"
+  },
+  {
+   "name": "the match sees entries not done",
+   "old": "posted_hit[i] = ({1'b0, pos} < (cmpl_q - head_q)) && r.posted && (r.mem_addr[31:3] == i_match_addr);",
+   "new": "posted_hit[i] = ({1'b0, pos} < (send_q - head_q)) && r.posted && (r.mem_addr[31:3] == i_match_addr);"
+  },
+  {
+   "name": "the match ignores posted",
+   "old": "posted_hit[i] = ({1'b0, pos} < (cmpl_q - head_q)) && r.posted && (r.mem_addr[31:3] == i_match_addr);",
+   "new": "posted_hit[i] = ({1'b0, pos} < (cmpl_q - head_q)) && (r.mem_addr[31:3] == i_match_addr);"
+  },
+  {
+   "name": "the match ignores the copy in flight",
+   "old": "r    = (copy_q && copy_idx_q == IW'(i)) ? i_eng_res : res_q[i];",
+   "new": "r    = res_q[i];"
+  },
+  {
+   "name": "the match compares the line, not the dword",
+   "old": "posted_hit[i] = ({1'b0, pos} < (cmpl_q - head_q)) && r.posted && (r.mem_addr[31:3] == i_match_addr);",
+   "new": "posted_hit[i] = ({1'b0, pos} < (cmpl_q - head_q)) && r.posted && (r.mem_addr[31:5] == i_match_addr[31:5]);"
+  },
+  {
+   "name": "the match never fires",
+   "old": "assign o_match = |posted_hit;",
+   "new": "assign o_match = 1'b0;"
+  }
+ ]
+}

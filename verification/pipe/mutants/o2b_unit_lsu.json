@@ -1,0 +1,58 @@
+{
+ "dut": "design/pipe/qv_lsu.sv",
+ "tb": "design/pipe/qv_lsu_early_tb.sv",
+ "files": [
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_pmp.sv",
+  "design/pipe/qv_lsu.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench",
+  "-Pqv_lsu_early_tb.HANDOFF=1"
+ ],
+ "cwd": "design",
+ "timeout": 600,
+ "mutants": [
+  {
+   "name": "no handoff",
+   "old": "    assign handoff    = HANDOFF && (done_bus || post_done);",
+   "new": "    assign handoff    = 1'b0;"
+  },
+  {
+   "name": "a handoff after a completion without the bus",
+   "old": "    assign handoff    = HANDOFF && (done_bus || post_done);",
+   "new": "    assign handoff    = HANDOFF && (done_bus || post_done || done_nobus);"
+  },
+  {
+   "name": "a handoff after a post only",
+   "old": "    assign handoff    = HANDOFF && (done_bus || post_done);",
+   "new": "    assign handoff    = HANDOFF && post_done;"
+  },
+  {
+   "name": "a handoff after a bus completion only",
+   "old": "    assign handoff    = HANDOFF && (done_bus || post_done);",
+   "new": "    assign handoff    = HANDOFF && done_bus;"
+  },
+  {
+   "name": "a handoff in a flush cycle",
+   "old": "    wire        accept      = ((state_q == S_IDLE) || handoff) && i_req.valid && !i_flush;",
+   "new": "    wire        accept      = (((state_q == S_IDLE) && !i_flush) || handoff) && i_req.valid;"
+  },
+  {
+   "name": "the handoff keeps the old op's arm",
+   "old": "            case ((handoff && accept) ? S_IDLE : state_q)",
+   "new": "            case (state_q)"
+  },
+  {
+   "name": "o_take is the IDLE state",
+   "old": "    assign o_take         = accept;",
+   "new": "    assign o_take         = o_free && i_req.valid && !i_flush;"
+  }
+ ]
+}

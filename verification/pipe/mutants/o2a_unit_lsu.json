@@ -1,0 +1,109 @@
+{
+ "dut": "design/pipe/qv_lsu.sv",
+ "tb": "design/pipe/qv_lsu_early_tb.sv",
+ "files": [
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_pmp.sv",
+  "design/pipe/qv_lsu.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench"
+ ],
+ "cwd": "design",
+ "timeout": 600,
+ "mutants": [
+  {
+   "name": "early ignores the barrier",
+   "old": "    wire early     = EARLY && i_early && (state_q == S_WAIT_HEAD) && !at_head && !i_flush\n                     && (ram_ld || (EARLY_ST && postable));",
+   "new": "    wire early     = EARLY && (state_q == S_WAIT_HEAD) && !at_head && !i_flush\n                     && (ram_ld || (EARLY_ST && postable));"
+  },
+  {
+   "name": "early ignores the head (a head access counts as early)",
+   "old": "    wire early     = EARLY && i_early && (state_q == S_WAIT_HEAD) && !at_head && !i_flush\n                     && (ram_ld || (EARLY_ST && postable));",
+   "new": "    wire early     = EARLY && i_early && (state_q == S_WAIT_HEAD) && !i_flush\n                     && (ram_ld || (EARLY_ST && postable));"
+  },
+  {
+   "name": "an early load outside the window",
+   "old": "    wire ram_ld    = pa_in_window && !store_q && !atomic_q && !i_pmp_bypass;",
+   "new": "    wire ram_ld    = !store_q && !atomic_q && !i_pmp_bypass;"
+  },
+  {
+   "name": "an early atomic",
+   "old": "    wire ram_ld    = pa_in_window && !store_q && !atomic_q && !i_pmp_bypass;",
+   "new": "    wire ram_ld    = pa_in_window && !store_q && !i_pmp_bypass;"
+  },
+  {
+   "name": "an early Program Buffer load",
+   "old": "    wire ram_ld    = pa_in_window && !store_q && !atomic_q && !i_pmp_bypass;",
+   "new": "    wire ram_ld    = pa_in_window && !store_q && !atomic_q;"
+  },
+  {
+   "name": "an early store that is not postable",
+   "old": "    wire ram_ld    = pa_in_window && !store_q && !atomic_q && !i_pmp_bypass;",
+   "new": "    wire ram_ld    = pa_in_window && !atomic_q && !i_pmp_bypass;",
+   "equivalent": true,
+   "why": "with the store buffer (this testbench's SB_EN 1) every plain store in the window is postable, so ram_ld's !store_q never decides; o2a_unit_lsu_nosb.json (SB_EN 0) kills it"
+  },
+  {
+   "name": "no early stores",
+   "old": "    wire early     = EARLY && i_early && (state_q == S_WAIT_HEAD) && !at_head && !i_flush\n                     && (ram_ld || (EARLY_ST && postable));",
+   "new": "    wire early     = EARLY && i_early && (state_q == S_WAIT_HEAD) && !at_head && !i_flush\n                     && ram_ld;"
+  },
+  {
+   "name": "an early access in a flush cycle",
+   "old": "    wire early     = EARLY && i_early && (state_q == S_WAIT_HEAD) && !at_head && !i_flush\n                     && (ram_ld || (EARLY_ST && postable));",
+   "new": "    wire early     = EARLY && i_early && (state_q == S_WAIT_HEAD) && !at_head\n                     && (ram_ld || (EARLY_ST && postable));"
+  },
+  {
+   "name": "an early access counts as the head's",
+   "old": "    assign o_head_started = (start && !early) || (in_bus && !early_q);",
+   "new": "    assign o_head_started = start || in_bus;"
+  },
+  {
+   "name": "an early access in flight counts as the head's",
+   "old": "    assign o_head_started = (start && !early) || (in_bus && !early_q);",
+   "new": "    assign o_head_started = (start && !early) || in_bus;"
+  },
+  {
+   "name": "early_q never set",
+   "old": "else if (start)      begin state_q <= S_BUS; early_q <= early; end",
+   "new": "else if (start)      begin state_q <= S_BUS; early_q <= 1'b0; end"
+  },
+  {
+   "name": "the drain yields to a load that may not start",
+   "old": "                         && (!EARLY || i_early || head_dist == '0);       // (EARLY) one that may start now",
+   "new": "                         ;"
+  },
+  {
+   "name": "the drain never yields to a load at the head behind a barrier",
+   "old": "                         && (!EARLY || i_early || head_dist == '0);       // (EARLY) one that may start now",
+   "new": "                         && (!EARLY || i_early);"
+  },
+  {
+   "name": "an early load does not wait for a matching store",
+   "old": "    wire start_raw = go && !misaligned_q && !pmp_deny && !sc_fail && pa_valid && !postable && !sb_wait;",
+   "new": "    wire start_raw = go && !misaligned_q && !pmp_deny && !sc_fail && pa_valid && !postable && (at_head ? !sb_wait : 1'b1);"
+  },
+  {
+   "name": "an early misaligned load",
+   "old": "    wire start_raw = go && !misaligned_q && !pmp_deny && !sc_fail && pa_valid && !postable && !sb_wait;",
+   "new": "    wire start_raw = go && (!misaligned_q || !at_head) && !pmp_deny && !sc_fail && pa_valid && !postable && !sb_wait;"
+  },
+  {
+   "name": "an early PMP-denied load",
+   "old": "    wire start_raw = go && !misaligned_q && !pmp_deny && !sc_fail && pa_valid && !postable && !sb_wait;",
+   "new": "    wire start_raw = go && !misaligned_q && (!pmp_deny || !at_head) && !sc_fail && pa_valid && !postable && !sb_wait;"
+  },
+  {
+   "name": "an early misaligned store is posted",
+   "old": "    wire post_done = go && !misaligned_q && !pmp_deny && pa_valid && postable;",
+   "new": "    wire post_done = go && (!misaligned_q || !at_head) && !pmp_deny && pa_valid && postable;"
+  }
+ ]
+}
