@@ -74,7 +74,8 @@
  * Knobs (defines, each also a parameter): QV_PIPE_SB_DEPTH (store buffer, 0 = none), QV_PIPE_LSQ_DEPTH (load/store
  * queue, 0 = none: one memory op between dispatch and completion), QV_PIPE_LSQ_EARLY / _EARLY_ST (with the queue,
  * RAM loads / stores before the head), QV_PIPE_LSQ_HANDOFF (the LSU takes the next op as the last completes),
- * QV_PIPE_LSQ_PRE_XL (the queue looks up a queued op's translation while the LSU is busy),
+ * QV_PIPE_LSQ_PRE_XL (the queue looks up a queued op's translation while the LSU is busy), QV_PIPE_LSQ_BYPASS (a
+ * load's value bypasses to issue),
  * QV_PIPE_FETCH_STREAM (back-to-back fetch, bigger fetch buffer and queue), QV_PIPE_BP (the three predictors;
  * their sizes QV_PIPE_BTB_ENTRIES / QV_PIPE_RAS_DEPTH / QV_PIPE_BHT_ENTRIES). With every one off the timing is
  * the one of P8, cycle for cycle.
@@ -160,6 +161,11 @@
 `ifndef QV_PIPE_LSQ_PRE_XL
 `define QV_PIPE_LSQ_PRE_XL 1
 `endif
+// ... and a load's value reaches issue's bypass in its completion cycle (O2d); 0: dependents read it from the ROB a
+// cycle later.
+`ifndef QV_PIPE_LSQ_BYPASS
+`define QV_PIPE_LSQ_BYPASS 1
+`endif
 `ifndef QV_PIPE_PMA_RAM_SIZE
 `define QV_PIPE_PMA_RAM_SIZE 64'h0
 `endif
@@ -226,6 +232,7 @@ module core
     parameter bit LSQ_EARLY_ST = `QV_PIPE_LSQ_EARLY_ST,  // ... the stores too
     parameter bit LSQ_HANDOFF  = `QV_PIPE_LSQ_HANDOFF,   // (with the queue) the LSU takes the next op as the last completes
     parameter bit LSQ_PRE_XL   = `QV_PIPE_LSQ_PRE_XL,    // (with the queue and Sv39) queued ops are looked up in the TLB
+    parameter bit LSQ_BYPASS   = `QV_PIPE_LSQ_BYPASS,    // (with the queue) the LSU's writeback is a bypass source
     parameter logic [63:0] PMA_RAM_BASE = `QV_PIPE_PMA_RAM_BASE,   // physical window of RAM: stores into it are posted
     parameter logic [63:0] PMA_RAM_SIZE = `QV_PIPE_PMA_RAM_SIZE
 ) (
@@ -593,7 +600,10 @@ module core
     wb_fp_t                  fpu_wb;
     logic                    fpu_ds_free;
 
-    qv_issue #(.SERIALIZE(SERIALIZE), .BYPASS_EN(BYPASS_EN), .CSR_LATE(CSR_NOSER)) issue0 (
+    // slow-unit outputs, declared ahead of issue (the LSU's writeback is a bypass source, O2d), the ROB and commit
+    wb_t      lsu_wb, div_wb;
+    qv_issue #(.SERIALIZE(SERIALIZE), .BYPASS_EN(BYPASS_EN), .CSR_LATE(CSR_NOSER),
+               .LSU_BYPASS(LSQ_DEPTH > 0 && LSQ_BYPASS)) issue0 (
         .clk(clk), .rst(rst), .i_flush(flush),
         .i_uop_valid(uop_valid), .i_uop(uop), .o_issue(issue_fire),
         .o_rs1_sel(rs1_sel), .o_rs2_sel(rs2_sel), .i_rs1_data(rs1_data), .i_rs2_data(rs2_data),
@@ -610,13 +620,11 @@ module core
         .o_lookup3_tag(l3_tag), .i_lookup3_complete(l3_complete), .i_lookup3_value(l3_value),
         .o_frs1_sel(frs1_sel), .o_frs2_sel(frs2_sel), .o_frs3_sel(frs3_sel),
         .i_frs1_data(frs1_data), .i_frs2_data(frs2_data), .i_frs3_data(frs3_data),
-        .i_wbf(fpu_wb), .o_fpu_req(fpu_req), .i_fpu_ds_free(fpu_ds_free),
+        .i_wbf(fpu_wb), .o_fpu_req(fpu_req), .i_fpu_ds_free(fpu_ds_free), .i_wbl(lsu_wb),
         .i_commit_valid(c_valid), .i_commit_rd(c_rd), .i_commit_rd_wen(c_rd_wen), .i_commit_rd_fp(c_rd_fp),
         .i_commit_tag(c_tag)
     );
 
-    // slow-unit outputs, declared ahead of the ROB and commit, which take them
-    wb_t      lsu_wb, div_wb;
     lsu_res_t lsu_res;                     // the result of the memory op at the ROB head (commit, RVFI, the store buffer)
     logic     c_sfence;                    // commit: an SFENCE.VMA retires, empty the TLBs
 
@@ -732,8 +740,8 @@ module core
     assign x_wr     = lx_req ? lx_wr : qx_wr;
     assign x_nowalk = lx_req ? lx_nowalk : 1'b1;
 
-    // No bypass from the LSU's writeback: a dependent reads the ROB the next cycle, which
-    // keeps wb_mem_dat_i out of issue's combinational paths.
+    // The LSU's writeback reaches issue's bypass only with LSQ_BYPASS (O2d); without it a dependent reads the ROB the
+    // next cycle, which keeps wb_mem_dat_i out of issue's combinational paths.
     // With the load/store queue, issue dispatches into the queue and the queue hands lsu0 one op at a time (eng_*);
     // without it, issue talks to lsu0 directly.
     fu_req_t  eng_req;

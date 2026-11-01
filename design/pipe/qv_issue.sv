@@ -33,6 +33,10 @@
  * takes the FPU's writeback bus. FPU ops go to qv_exu_fpu; a divide or square root waits for its side unit to be
  * free. RVFI reports an FP source as register 0 (RVFI's rs fields are integer registers).
  *
+ * LSU_BYPASS (O2d): path 3 also takes the LSU's writeback, so an op that needs a load's value issues in the cycle
+ * the load completes rather than a cycle later from the ROB. (It is a long path, from the memory port's data input
+ * through the LSU's extension into the operand registers; nothing here measures clock rate.)
+ *
  * CSR_LATE (P10c): a CSR op's rd value is made at commit (its ROB value and
  * its writeback are only the ALU's pass of its source), so its claim is
  * marked late: paths 3 and 4 never apply to it, and a dependent waits until
@@ -42,7 +46,8 @@
 module qv_issue #(
     parameter bit SERIALIZE = 1'b0,
     parameter bit BYPASS_EN = 1'b1,
-    parameter bit CSR_LATE  = 1'b0
+    parameter bit CSR_LATE  = 1'b0,
+    parameter bit LSU_BYPASS = 1'b0             // path 3 also takes the LSU's writeback (O2d)
 ) (
     input  logic                             clk,
     input  logic                             rst,
@@ -92,6 +97,8 @@ module qv_issue #(
     // flags are for the ROB
     /* verilator lint_off UNUSEDSIGNAL */
     input  qv_pkg::wb_fp_t                   i_wbf = '0,
+    // (LSU_BYPASS) the LSU's writeback: a load's value in its completion cycle
+    input  qv_pkg::wb_t                      i_wbl = '0,
     /* verilator lint_on UNUSEDSIGNAL */
     output qv_pkg::fpu_req_t                 o_fpu_req,
     input  logic                             i_fpu_ds_free = 1'b1,   // registered: one divide/sqrt at a time
@@ -156,6 +163,7 @@ module qv_issue #(
             else if (p1_late)                                      a_ready = 1'b0;
             else if (BYPASS_EN && i_wb.valid && i_wb.tag == p1_tag) opa = i_wb.value;
             else if (BYPASS_EN && i_wbf.valid && i_wbf.tag == p1_tag) opa = i_wbf.value;
+            else if (LSU_BYPASS && BYPASS_EN && i_wbl.valid && i_wbl.tag == p1_tag) opa = i_wbl.value;
             else if (i_lookup1_complete)                           opa = i_lookup1_value;
             else                                                   a_ready = 1'b0;
         end
@@ -167,6 +175,7 @@ module qv_issue #(
             else if (p2_late)                                      b_ready = 1'b0;
             else if (BYPASS_EN && i_wb.valid && i_wb.tag == p2_tag) opb = i_wb.value;
             else if (BYPASS_EN && i_wbf.valid && i_wbf.tag == p2_tag) opb = i_wbf.value;
+            else if (LSU_BYPASS && BYPASS_EN && i_wbl.valid && i_wbl.tag == p2_tag) opb = i_wbl.value;
             else if (i_lookup2_complete)                           opb = i_lookup2_value;
             else                                                   b_ready = 1'b0;
         end
@@ -177,6 +186,7 @@ module qv_issue #(
         if (i_uop.rs3_used) begin
             if (!p3_busy)                                            opc = i_frs3_data;
             else if (BYPASS_EN && i_wbf.valid && i_wbf.tag == p3_tag) opc = i_wbf.value;
+            else if (LSU_BYPASS && BYPASS_EN && i_wbl.valid && i_wbl.tag == p3_tag) opc = i_wbl.value;
             else if (i_lookup3_complete)                             opc = i_lookup3_value;
             else                                                     c_ready = 1'b0;
         end
