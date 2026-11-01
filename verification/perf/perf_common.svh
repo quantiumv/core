@@ -44,7 +44,7 @@
         .f_hold(CORE.fetch_hold), .f_redirect(CORE.fetch_redirect), .f_redirect_ctx(CORE.fetch_redirect_ctx), \
         .sfence(CORE.c_sfence), .in_debug(CORE.dbg_in_debug), \
         .lsu_wait_head(CORE.lsu0.state_q == 2'd1), .lsu_at_head(CORE.lsu0.at_head), \
-        .x_req(CORE.x_req), .x_done(CORE.x_done), .x_fault(CORE.x_pf || CORE.x_af), \
+        .x_req(CORE.lx_req), .x_done(CORE.x_done), .x_fault(CORE.x_pf || CORE.x_af), \
         .lsq_early_ld(CORE.lsu0.start && !CORE.lsu0.at_head), .lsq_early_st(CORE.lsu0.post_done && !CORE.lsu0.at_head), \
         .lsq_bar_wait(CORE.lsu0.EARLY && CORE.lsu0.state_q == 2'd1 && !CORE.lsu0.at_head && !CORE.lsu0.i_early \
                       && (CORE.lsu0.ram_ld || CORE.lsu0.postable) && CORE.lsu0.pa_valid && !CORE.lsu0.misaligned_q \

@@ -74,6 +74,7 @@
  * Knobs (defines, each also a parameter): QV_PIPE_SB_DEPTH (store buffer, 0 = none), QV_PIPE_LSQ_DEPTH (load/store
  * queue, 0 = none: one memory op between dispatch and completion), QV_PIPE_LSQ_EARLY / _EARLY_ST (with the queue,
  * RAM loads / stores before the head), QV_PIPE_LSQ_HANDOFF (the LSU takes the next op as the last completes),
+ * QV_PIPE_LSQ_PRE_XL (the queue looks up a queued op's translation while the LSU is busy),
  * QV_PIPE_FETCH_STREAM (back-to-back fetch, bigger fetch buffer and queue), QV_PIPE_BP (the three predictors;
  * their sizes QV_PIPE_BTB_ENTRIES / QV_PIPE_RAS_DEPTH / QV_PIPE_BHT_ENTRIES). With every one off the timing is
  * the one of P8, cycle for cycle.
@@ -154,6 +155,11 @@
 `ifndef QV_PIPE_LSQ_HANDOFF
 `define QV_PIPE_LSQ_HANDOFF 1
 `endif
+// ... and the queue looks up the oldest queued op's translation while the LSU is busy, so a translated op starts in its
+// first cycle (O2c); 0: the LSU looks each one up when it takes it.
+`ifndef QV_PIPE_LSQ_PRE_XL
+`define QV_PIPE_LSQ_PRE_XL 1
+`endif
 `ifndef QV_PIPE_PMA_RAM_SIZE
 `define QV_PIPE_PMA_RAM_SIZE 64'h0
 `endif
@@ -219,6 +225,7 @@ module core
     parameter bit LSQ_EARLY = `QV_PIPE_LSQ_EARLY,    // (with the queue) RAM loads and stores go before the head
     parameter bit LSQ_EARLY_ST = `QV_PIPE_LSQ_EARLY_ST,  // ... the stores too
     parameter bit LSQ_HANDOFF  = `QV_PIPE_LSQ_HANDOFF,   // (with the queue) the LSU takes the next op as the last completes
+    parameter bit LSQ_PRE_XL   = `QV_PIPE_LSQ_PRE_XL,    // (with the queue and Sv39) queued ops are looked up in the TLB
     parameter logic [63:0] PMA_RAM_BASE = `QV_PIPE_PMA_RAM_BASE,   // physical window of RAM: stores into it are posted
     parameter logic [63:0] PMA_RAM_SIZE = `QV_PIPE_PMA_RAM_SIZE
 ) (
@@ -716,7 +723,14 @@ module core
     logic [63:0] x_va;
     logic [1:0]  x_priv;
     logic [43:0] x_ppn;
-    logic        x_nowalk;                   // the LSU's request is a lookup only (before the head)
+    logic        x_nowalk;                   // the request is a lookup only (before the head)
+    // the port is the LSU's when it asks (lx_*), else the load/store queue's lookup of its oldest queued op (qx_*)
+    logic        lx_req, lx_wr, lx_nowalk, qx_req, qx_wr;
+    logic [63:0] lx_va, qx_va;
+    assign x_req    = lx_req || qx_req;
+    assign x_va     = lx_req ? lx_va : qx_va;
+    assign x_wr     = lx_req ? lx_wr : qx_wr;
+    assign x_nowalk = lx_req ? lx_nowalk : 1'b1;
 
     // No bypass from the LSU's writeback: a dependent reads the ROB the next cycle, which
     // keeps wb_mem_dat_i out of issue's combinational paths.
@@ -724,6 +738,8 @@ module core
     // without it, issue talks to lsu0 directly.
     fu_req_t  eng_req;
     logic     eng_free, eng_take;
+    logic     eng_xl;                       // (the queue) eng_req comes translated, to eng_ppn
+    logic [43:0] eng_ppn;
     lsu_res_t eng_res;
     logic     lsq_early, lsq_match;         // (the queue) no barrier is older than lsu0's op; a posted store matches
     qv_lsu #(.SB_EN(SB_DEPTH > 0), .PMA_RAM_BASE(PMA_RAM_BASE), .PMA_RAM_SIZE(PMA_RAM_SIZE),
@@ -743,8 +759,8 @@ module core
         .o_wb(lsu_wb), .o_res(eng_res),
         .o_head_started(lsu_head_started),
         .i_satp_on(satp_on),
-        .o_xl_req(x_req), .o_xl_va(x_va), .o_xl_wr(x_wr), .o_xl_active(x_active), .o_xl_priv(x_priv),
-        .o_xl_cancel(x_cancel), .o_xl_nowalk(x_nowalk),
+        .o_xl_req(lx_req), .o_xl_va(lx_va), .o_xl_wr(lx_wr), .o_xl_active(x_active), .o_xl_priv(x_priv),
+        .o_xl_cancel(x_cancel), .o_xl_nowalk(lx_nowalk), .i_req_xl(eng_xl), .i_req_ppn(eng_ppn),
         .i_xl_done(x_done), .i_xl_pf(x_pf), .i_xl_af(x_af), .i_xl_ppn(x_ppn),
         .i_ptw_beat(ptw_beat), .o_bus_busy(lsu_bus_busy),
         .i_sb_empty(sb_empty), .i_sb_match(sb_match || lsq_match), .i_sb_beat(sb_beat), .i_sb_go(sb_go_idle), .i_fetch_start(fetch_start_q),
@@ -759,13 +775,16 @@ module core
                                      || (alloc_raw[6:0] == 7'b0001111 && alloc_raw[14:12] == 3'b000));
     generate
         if (LSQ_DEPTH > 0) begin : g_lsq
-            qv_lsq #(.DEPTH(LSQ_DEPTH)) lsq0 (
+            qv_lsq #(.DEPTH(LSQ_DEPTH), .PRE_XL(SV39_EN && LSQ_PRE_XL)) lsq0 (
                 .clk(clk), .rst(rst), .i_flush(flush),
                 .i_req(lsu_req), .o_free(lsu_free),
                 .o_eng_req(eng_req), .i_eng_take(eng_take), .i_eng_wb(lsu_wb), .i_eng_res(eng_res),
                 .i_pop(commit_pop), .i_pop_tag(head_tag), .o_head_res(lsu_res),
                 .i_bar_alloc(alloc_bar), .i_bar_tag(alloc_tag), .o_early(lsq_early),
-                .i_match_addr(sb_match_addr), .o_match(lsq_match)
+                .i_match_addr(sb_match_addr), .o_match(lsq_match),
+                .o_xl_req(qx_req), .o_xl_va(qx_va), .o_xl_wr(qx_wr), .i_xl_free(!lx_req), .i_xl_active(x_active),
+                .i_xl_done(x_done), .i_xl_pf(x_pf), .i_xl_af(x_af), .i_xl_ppn(x_ppn),
+                .o_eng_xl(eng_xl), .o_eng_ppn(eng_ppn)
             );
             /* verilator lint_off UNUSEDSIGNAL */
             wire   free_unused = eng_free;           // the queue follows the LSU's o_take
@@ -776,6 +795,11 @@ module core
             assign lsu_res   = eng_res;
             assign lsq_early = 1'b0;
             assign lsq_match = 1'b0;
+            assign qx_req    = 1'b0;
+            assign qx_va     = 64'b0;
+            assign qx_wr     = 1'b0;
+            assign eng_xl    = 1'b0;
+            assign eng_ppn   = 44'b0;
             /* verilator lint_off UNUSEDSIGNAL */
             wire   bar_unused = alloc_bar || eng_take;
             /* verilator lint_on UNUSEDSIGNAL */
@@ -1181,7 +1205,9 @@ module core
     // The translators are safe only while a client keeps to one rule: a request it holds does not change (what it
     // asks for, the context it asks in) except in the cycle after a cancel, so that the answer of a walk that was
     // cancelled can never reach another request. Fetch replaces a translating request only with a cancel (drop);
-    // the LSU's op leaves with a flush, which cancels, and the next op is accepted a cycle later.
+    // the LSU's op leaves with a flush, which cancels, or once it is translated (it asks nothing then). A request that
+    // is a lookup only (nowalk: the LSU's before the head, the load/store queue's) starts no walk, so it may change:
+    // the rule binds only one that may walk.
     reg        g_f_req = 1'b0, g_x_req = 1'b0, g_f_cancel = 1'b0, g_x_cancel = 1'b0, g_x_wr = 1'b0, g_sum = 1'b0, g_mxr = 1'b0;
     reg [63:0] g_f_va = '0, g_x_va = '0, g_satp = '0;
     reg [1:0]  g_f_priv = '0, g_x_priv = '0;
@@ -1190,7 +1216,7 @@ module core
         g_f_cancel <= f_xl_cancel;
         g_f_va     <= f_xl_va;
         g_f_priv   <= priv;
-        g_x_req    <= x_req && !rst;
+        g_x_req    <= x_req && !rst && !x_nowalk;
         g_x_cancel <= x_cancel;
         g_x_va     <= x_va;
         g_x_wr     <= x_wr;
@@ -1234,7 +1260,7 @@ module core
     always @(posedge clk) begin
         if (rst || flush || lsu0.state_q != 2'd1 || lsu0.accept)
             g_px_valid <= 1'b0;
-        else if (lsu0.x_ok) begin
+        else if (lsu0.x_ok || (lsu0.accept && eng_xl)) begin
             g_px_valid <= 1'b1;
             g_px_satp  <= satp_w;
             g_px_priv  <= x_priv;

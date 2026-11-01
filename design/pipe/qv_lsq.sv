@@ -31,9 +31,19 @@
  *   o_match  a done entry holds a posted store (performed, not yet in the store buffer: it is pushed when it
  *            retires) to the dword the engine asks about (i_match_addr, qv_lsu's o_sb_addr). Every done entry is
  *            older than the op in the engine; with the buffer's own match it makes a load wait for the store.
+ *
+ * Pre-translation (O2c, PRE_XL): while the engine leaves the data TLB's port free (i_xl_free: it is on the bus, or
+ * holds nothing), the oldest queued op's virtual address is looked up there (o_xl_req, a lookup only: the port's
+ * owner sets nowalk), unless it is an SC (its reservation is the head's to judge) or misaligned (it faults before any
+ * translation). A clean hit is kept in the entry, and the engine takes the op with its physical page (o_eng_xl,
+ * o_eng_ppn), so it can start in its first cycle; a miss or a hit that faults leaves the op to the engine, which looks
+ * up again (and at the head walks). The page stays right until the op is performed for the reason the engine's own
+ * early lookup does (qv_lsu, PROBE): every change of the privilege, MPRV, SUM, MXR or satp and every SFENCE.VMA
+ * flushes the queue, and a TLB entry, once found, may be used until an SFENCE.VMA.
  */
 module qv_lsq #(
-    parameter int DEPTH = 4                     // a power of 2, >= 2
+    parameter int DEPTH  = 4,                   // a power of 2, >= 2
+    parameter bit PRE_XL = 1'b0                 // the oldest queued op's translation is looked up early (O2c)
 ) (
     input  logic                             clk,
     input  logic                             rst,
@@ -61,7 +71,20 @@ module qv_lsq #(
     input  logic [qv_pkg::QV_ROB_TAG_W-1:0]  i_bar_tag = '0,       // ... with this tag
     output logic                             o_early,              // no barrier is older than the engine's op
     input  logic [31:3]                      i_match_addr = '0,
-    output logic                             o_match
+    output logic                             o_match,
+
+    // pre-translation
+    output logic                             o_xl_req,
+    output logic [63:0]                      o_xl_va,
+    output logic                             o_xl_wr,              // a store, SC or AMO (needs W and D)
+    input  logic                             i_xl_free = 1'b0,     // the engine asks nothing of the port
+    input  logic                             i_xl_active = 1'b0,   // translation is on (the engine's context)
+    input  logic                             i_xl_done = 1'b0,
+    input  logic                             i_xl_pf = 1'b0,
+    input  logic                             i_xl_af = 1'b0,
+    input  logic [43:0]                      i_xl_ppn = '0,
+    output logic                             o_eng_xl,             // o_eng_req comes translated ...
+    output logic [43:0]                      o_eng_ppn             // ... to this physical page
 );
     import qv_pkg::*;
 
@@ -77,6 +100,8 @@ module qv_lsq #(
     logic [QV_ROB_TAG_W-1:0] bar_tag_q [DEPTH];      // ... the youngest one at dispatch
     logic                    lbar_q;                 // the youngest barrier allocated has not retired ...
     logic [QV_ROB_TAG_W-1:0] lbar_tag_q;             // ... its tag
+    logic                    xl_q      [DEPTH];      // (PRE_XL) the entry's translation is in ...
+    logic [43:0]             ppn_q     [DEPTH];      // ... its physical page
 
     wire [IW-1:0] head_i = head_q[IW-1:0];
     wire [IW-1:0] cmpl_i = cmpl_q[IW-1:0];
@@ -124,6 +149,23 @@ module qv_lsq #(
     end
     assign o_match = |posted_hit;
 
+    // ---------------- (PRE_XL) the oldest queued op's translation ----------------
+    // its address and kind exactly as qv_lsu works them out at dispatch
+    wire        p_atomic = send_e.op[4];
+    wire        p_lr     = p_atomic && (qv_amo_op_e'(send_e.op[3:0]) == QV_AMO_LR);
+    wire        p_sc     = p_atomic && (qv_amo_op_e'(send_e.op[3:0]) == QV_AMO_SC);
+    wire        p_store  = !p_atomic && send_e.op[3];
+    wire [1:0]  p_size   = p_atomic ? (send_e.is_word ? 2'd2 : 2'd3) : send_e.op[1:0];
+    wire [63:0] p_va     = p_atomic ? send_e.a : send_e.a + (p_store ? send_e.imm : send_e.b);
+    wire        p_mis    = (p_size == 2'd1) ? p_va[0] : (p_size == 2'd2) ? (p_va[1:0] != 2'd0)
+                         : (p_size == 2'd3) ? (p_va[2:0] != 3'd0) : 1'b0;
+    assign o_xl_req  = PRE_XL && i_xl_active && has_q && !xl_q[send_i] && !p_sc && !p_mis && !i_flush;
+    assign o_xl_va   = p_va;
+    assign o_xl_wr   = p_atomic ? !p_lr : p_store;
+    wire   pre_hit   = o_xl_req && i_xl_free && i_xl_done && !i_xl_pf && !i_xl_af;
+    assign o_eng_xl  = PRE_XL && has_q && xl_q[send_i];
+    assign o_eng_ppn = ppn_q[send_i];
+
     always_ff @(posedge clk) begin
         if (rst || i_flush) begin
             head_q <= '0;
@@ -133,7 +175,12 @@ module qv_lsq #(
             copy_q <= 1'b0;
             lbar_q <= 1'b0;
         end else begin
+            if (pre_hit) begin
+                xl_q[send_i]  <= 1'b1;
+                ppn_q[send_i] <= i_xl_ppn;
+            end
             if (push) begin
+                xl_q[tail_i]      <= 1'b0;
                 req_q[tail_i]     <= i_req;
                 tag_q[tail_i]     <= i_req.tag;
                 bar_q[tail_i]     <= lbar_q && !(bar_retire && i_pop_tag == lbar_tag_q);

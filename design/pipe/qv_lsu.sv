@@ -83,6 +83,8 @@
  * address; the bus, the PMP and RVFI's memory address use the physical one. A flush while the
  * translation is pending cancels it (cannot happen in the real core: flushes only come in the cycle
  * after a retirement, when nothing waits, but the formal harness drives it freely).
+ * An op can also come translated (i_req_xl, i_req_ppn: the load/store queue looked it up while it waited, O2c); it is
+ * taken in with xlated_q set, as if its own lookup had hit.
  * PROBE (P10b): before the op is the head, its translation is looked up already (o_xl_nowalk: the TLB only,
  * never a walk). A hit without a fault is taken into pa_q at once, so the access can start in its first head
  * cycle; a miss or a hit that faults leaves everything to the head, which looks up again (and walks). An SC is
@@ -143,6 +145,8 @@ module qv_lsu #(
     input  logic                             i_head_valid,
     input  logic [qv_pkg::QV_ROB_TAG_W-1:0]  i_head_tag,
     input  logic                             i_early = 1'b0,      // (EARLY) no barrier is older than the held op
+    input  logic                             i_req_xl = 1'b0,     // (O2c) i_req comes translated (the queue looked it up) ...
+    input  logic [43:0]                      i_req_ppn = '0,      // ... to this physical page
 
     // LR/SC reservation, kept by commit
     input  logic                             i_res_valid,
@@ -420,7 +424,8 @@ module qv_lsu #(
                     atomic_q     <= req_atomic;
                     aop_q        <= qv_amo_op_e'(i_req.op[3:0]);
                     phase_wr_q   <= 1'b0;
-                    xlated_q     <= 1'b0;
+                    xlated_q     <= i_req_xl;
+                    pa_q         <= {8'b0, i_req_ppn, req_addr[11:0]};
                     early_q      <= 1'b0;
                 end
                 S_WAIT_HEAD: begin
