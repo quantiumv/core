@@ -425,7 +425,7 @@ module qv_lsu #(
                     aop_q        <= qv_amo_op_e'(i_req.op[3:0]);
                     phase_wr_q   <= 1'b0;
                     xlated_q     <= i_req_xl;
-                    pa_q         <= {8'b0, i_req_ppn, req_addr[11:0]};
+                    if (i_req_xl) pa_q <= {8'b0, i_req_ppn, req_addr[11:0]};
                     early_q      <= 1'b0;
                 end
                 S_WAIT_HEAD: begin
