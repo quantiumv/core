@@ -1207,7 +1207,8 @@ module core
     // cancelled can never reach another request. Fetch replaces a translating request only with a cancel (drop);
     // the LSU's op leaves with a flush, which cancels, or once it is translated (it asks nothing then). A request that
     // is a lookup only (nowalk: the LSU's before the head, the load/store queue's) starts no walk, so it may change:
-    // the rule binds only one that may walk.
+    // the rule binds only one that may walk, and only until it has its answer (then the LSU drops it, and the queue's
+    // lookup may take the port in that very cycle).
     reg        g_f_req = 1'b0, g_x_req = 1'b0, g_f_cancel = 1'b0, g_x_cancel = 1'b0, g_x_wr = 1'b0, g_sum = 1'b0, g_mxr = 1'b0;
     reg [63:0] g_f_va = '0, g_x_va = '0, g_satp = '0;
     reg [1:0]  g_f_priv = '0, g_x_priv = '0;
@@ -1216,7 +1217,7 @@ module core
         g_f_cancel <= f_xl_cancel;
         g_f_va     <= f_xl_va;
         g_f_priv   <= priv;
-        g_x_req    <= x_req && !rst && !x_nowalk;
+        g_x_req    <= x_req && !rst && !x_nowalk && !x_done;    // a request may change once it has its answer
         g_x_cancel <= x_cancel;
         g_x_va     <= x_va;
         g_x_wr     <= x_wr;
