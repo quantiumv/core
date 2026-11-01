@@ -6,7 +6,8 @@
  *
  * A store the LSU posted (lsu_res.posted) retires only while the buffer has room, and is pushed in the very
  * cycle it retires -- never when an interrupt or a halt takes the slot, never when it does not retire. Any
- * other memory op retires whatever the buffer says. FENCE.I and an EBREAK that traps wait for an empty buffer
+ * other memory op retires whatever the buffer says. FENCE.I, an EBREAK that traps and a FENCE ordering writes
+ * before reads (pred.W, succ.R, not FENCE.TSO) wait for an empty buffer
  * (FENCE.I also for fetch to be idle, and its fetch hold is up meanwhile); an EBREAK that enters Debug Mode is
  * not a retirement and does not wait; every other head ignores both signals.
  */
@@ -253,6 +254,71 @@ module qv_commit_sb_tb;
         check("... as a debug entry, not a retirement", b(commit_now), 64'd0);
         retire();
         dcsr = '0;
+        sb_empty = 1'b1;
+
+        // ---- a FENCE ordering writes before reads waits for an empty buffer (it retires as an ALU no-op) ----
+        sb_empty = 1'b0;
+        set_entry(arch_pc, 32'h0330_000F, 0, 1'b0, 64'd0);   // fence rw,rw
+        #1;
+        check("fence rw,rw, buffer not empty: does not retire", b(commit_now), 64'd0);
+        check("fence rw,rw, buffer not empty: no redirect", b(redirect), 64'd0);
+        sb_empty = 1'b1;
+        #1;
+        check("fence rw,rw, buffer empty: retires", b(commit_now), 64'd1);
+        retire();
+        sb_empty = 1'b0;
+        set_entry(arch_pc, 32'h0120_000F, 0, 1'b0, 64'd0);   // fence w,r
+        #1;
+        check("fence w,r, buffer not empty: does not retire", b(commit_now), 64'd0);
+        sb_empty = 1'b1;
+        #1;
+        check("fence w,r, buffer empty: retires", b(commit_now), 64'd1);
+        retire();
+        sb_empty = 1'b0;
+        set_entry(arch_pc, 32'h0FF0_000F, 0, 1'b0, 64'd0);   // fence iorw,iorw
+        #1;
+        check("fence iorw,iorw, buffer not empty: does not retire", b(commit_now), 64'd0);
+        sb_empty = 1'b1;
+        #1;
+        check("fence iorw,iorw, buffer empty: retires", b(commit_now), 64'd1);
+        retire();
+        // the ones that leave W->R open retire with a non-empty buffer
+        sb_empty = 1'b0;
+        set_entry(arch_pc, 32'h0230_000F, 0, 1'b0, 64'd0);   // fence r,rw: no W before
+        #1;
+        check("fence r,rw, buffer not empty: retires", b(commit_now), 64'd1);
+        retire();
+        set_entry(arch_pc, 32'h0110_000F, 0, 1'b0, 64'd0);   // fence w,w: no R after
+        #1;
+        check("fence w,w, buffer not empty: retires", b(commit_now), 64'd1);
+        retire();
+        set_entry(arch_pc, 32'h0100_000F, 0, 1'b0, 64'd0);   // pause (fence w,0)
+        #1;
+        check("pause, buffer not empty: retires", b(commit_now), 64'd1);
+        retire();
+        set_entry(arch_pc, 32'h8330_000F, 0, 1'b0, 64'd0);   // fence.tso: W->R is not ordered
+        #1;
+        check("fence.tso, buffer not empty: retires", b(commit_now), 64'd1);
+        retire();
+        // a FENCE that traps (a fault marker, or an action-0 trigger) does not wait
+        set_entry(arch_pc, 32'h0330_000F, 0, 1'b0, 64'd0);
+        c.xcpt = 1'b1; c.cause = 4'd1;
+        #1;
+        check("fence rw,rw with a fault marker, buffer not empty: retires as a trap", b(commit_now), 64'd1);
+        check("... the trap is taken", b(trap_taken), 64'd1);
+        retire();
+        set_entry(arch_pc, 32'h0330_000F, 0, 1'b0, 64'd0);
+        c.trig_exc = 1'b1;
+        #1;
+        check("fence rw,rw with an action-0 trigger, buffer not empty: retires as a trap", b(commit_now), 64'd1);
+        check("... cause 3", trap_cause, 64'd3);
+        retire();
+        // the same bits on a head that is not an ALU op (an encoding that is not a FENCE never has them)
+        set_entry(arch_pc, 32'h0330_000F, 0, 1'b0, 64'd0);
+        c.cls = QV_FU_CSR;
+        #1;
+        check("FENCE bits on a non-ALU head, buffer not empty: retires", b(commit_now), 64'd1);
+        retire();
         sb_empty = 1'b1;
 
         // ---- everything else ignores both signals ----

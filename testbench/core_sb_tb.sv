@@ -25,6 +25,8 @@
  *     tests that read memory at the trap, perf_tb and the toolchain ones, rely on it).
  * Run 2: a halt request right after a run of stores. The hart is halted internally at once, but o_debug_mode
  * (what the Debug Module reads) rises only once the buffer is empty, with all the stores in memory.
+ * Runs 3 and 4: four stores, a FENCE, a load from another dword, with the memory port's order recorded. fence rw,rw
+ * puts all four stores on the bus before the load; fence w,w (the control) lets the load get ahead.
  */
 module core_sb_tb;
 
@@ -153,6 +155,36 @@ module core_sb_tb;
 
     function automatic logic [63:0] x(input int r); return dut.core0.regfile0.gp_registers[r]; endfunction
 
+    // runs 3 and 4: four stores to 0x400-0x418, the FENCE, a load from 0x500
+    task automatic build_fence_run(input logic [31:0] fence_word);
+        n = 0;
+        emit(i_(32'h400, 0, 3'b000, R_BASE, `OPC_OP_IMM));              // addi x1, x0, 0x400
+        emit(ld_(32'h300, 0, 3'b011, R_K1));                            // ld   x2, 0x300(x0)
+        emit(st_(0,  R_K1, R_BASE, 3'b011));
+        emit(st_(8,  R_K1, R_BASE, 3'b011));
+        emit(st_(16, R_K1, R_BASE, 3'b011));
+        emit(st_(24, R_K1, R_BASE, 3'b011));
+        emit(fence_word);
+        emit(ld_(32'h100, R_BASE, 3'b011, 10));                         // ld   x10, 0x100(x1)  another dword
+        for (int i = 0; i < 8; i++) emit(32'h0000_0013);
+        emit(32'h0010_0073);
+    endtask
+
+    // the memory port's order: how many of the four stores were acknowledged before the load from 0x500
+    logic mon_on = 1'b0, mon_ld_seen = 1'b0;
+    int   mon_w = 0, mon_w_at_ld = -1;
+    always @(posedge clk) begin
+        if (!mon_on) begin
+            mon_ld_seen <= 1'b0; mon_w <= 0;
+        end else if (dut.wbm_ack) begin                     // cyc is already low in the ack cycle
+            if (dut.wbm_we && dut.wbm_addr >= 32'h400 && dut.wbm_addr <= 32'h418) mon_w <= mon_w + 1;
+            if (!dut.wbm_we && dut.wbm_addr == 32'h500 && !mon_ld_seen) begin
+                mon_ld_seen <= 1'b1;
+                mon_w_at_ld <= mon_w;
+            end
+        end
+    end
+
     initial begin
         // ================= run 1 =================
         build_run1();
@@ -216,6 +248,28 @@ module core_sb_tb;
             check("run 2: store 4 in memory", dut.sram0.memory[8'h83], K1);
             check("run 2: the exported halt lagged the internal one while the buffer drained", 64'(t_ext > t_int), 64'd1);
         end
+
+        // ================= runs 3 and 4: FENCE between stores and a load from another dword =================
+        // fence rw,rw orders the four buffered stores before the load, so every one of them reaches the bus first;
+        // fence w,w does not, and the load (which waits only for a store to its own dword) gets ahead of some
+        // (the control: it shows the monitor can see a load pass)
+        halt_req = 1'b0;
+        build_fence_run(32'h0330_000F);
+        reset_and_run(0);
+        mon_on = 1'b1;
+        wait_halted_or_timeout(`TIMEOUT_CYCLES_LARGE, "run 3: EBREAK trap never fired");
+        mon_on = 1'b0;
+        check("run 3 (fence rw,rw): the load reached the bus", {63'b0, mon_ld_seen}, 64'd1);
+        check("run 3 (fence rw,rw): all four older stores were on the bus before the load", 64'(mon_w_at_ld), 64'd4);
+        check("run 3: the load read the old value", x(10), 64'h0);
+        halted = 1'b0;
+        build_fence_run(32'h0110_000F);
+        reset_and_run(0);
+        mon_on = 1'b1;
+        wait_halted_or_timeout(`TIMEOUT_CYCLES_LARGE, "run 4: EBREAK trap never fired");
+        mon_on = 1'b0;
+        check("run 4 (fence w,w, control): the load reached the bus", {63'b0, mon_ld_seen}, 64'd1);
+        check("run 4 (fence w,w, control): the load got ahead of some of the older stores", 64'(mon_w_at_ld < 4), 64'd1);
 
         $display("");
         $display("core_sb_tb: %0d passed, %0d failed", pass_count, fail_count);
