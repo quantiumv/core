@@ -43,10 +43,11 @@ module qv_lsq_tb #(
     logic                    early, match;
     logic [31:3]             match_addr = '0;
 
+    logic                    e_take;             // the model engine takes eng_req (below)
     qv_lsq #(.DEPTH(DEPTH)) dut (
         .clk(clk), .rst(rst), .i_flush(flush),
         .i_req(req), .o_free(free),
-        .o_eng_req(eng_req), .i_eng_free(eng_free), .i_eng_wb(eng_wb), .i_eng_res(eng_res),
+        .o_eng_req(eng_req), .i_eng_take(e_take), .i_eng_wb(eng_wb), .i_eng_res(eng_res),
         .i_pop(pop), .i_pop_tag(pop_tag), .o_head_res(head_res),
         .i_bar_alloc(bar_alloc), .i_bar_tag(bar_tag), .o_early(early), .i_match_addr(match_addr), .o_match(match)
     );
@@ -76,7 +77,7 @@ module qv_lsq_tb #(
     int                      e_cnt = 0;
     int                      e_lat = 0;          // the latency of the next op the engine takes (set by the test)
     assign eng_free = !e_busy && !e_drain;
-    wire e_take = eng_free && eng_req.valid && !flush;
+    assign e_take = eng_free && eng_req.valid && !flush;
     wire e_done = e_busy && (e_cnt == 0) && !flush;
     always_comb begin
         eng_wb       = '0;

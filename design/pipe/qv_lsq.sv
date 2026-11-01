@@ -13,7 +13,7 @@
  *   send_q  the next to go to the engine (the oldest Q)  tail_q  the next free slot
  *
  *   dispatch    issue's request goes in at the tail; while there is no Q entry it also goes to the engine in that same
- *               cycle, if the engine is free (the timing of the core without the queue)
+ *               cycle, if the engine takes one (the timing of the core without the queue)
  *   completion  the engine's writeback (o_wb, valid only for the op it holds) makes that entry done; the engine's
  *               o_res is copied into the entry in the next cycle, and until then o_head_res reads it directly
  *   retirement  when commit pops the ROB head and the head's tag is the oldest entry's, that entry leaves
@@ -45,7 +45,7 @@ module qv_lsq #(
 
     // the engine (qv_lsu)
     output qv_pkg::fu_req_t                  o_eng_req,        // its i_req
-    input  logic                             i_eng_free,       // its o_free
+    input  logic                             i_eng_take,       // its o_take: it takes o_eng_req in this cycle
     /* verilator lint_off UNUSEDSIGNAL */
     input  qv_pkg::wb_t                      i_eng_wb,         // its o_wb (valid and tag: value goes to the ROB)
     /* verilator lint_on UNUSEDSIGNAL */
@@ -97,7 +97,7 @@ module qv_lsq #(
         o_eng_req       = has_q ? send_e : i_req;
         o_eng_req.valid = has_q || i_req.valid;
     end
-    wire send = i_eng_free && o_eng_req.valid && !i_flush;    // the engine takes it (qv_lsu's accept)
+    wire send = i_eng_take && !i_flush;                        // the engine takes it
 
     wire cmpl = i_eng_wb.valid && !i_flush;
 

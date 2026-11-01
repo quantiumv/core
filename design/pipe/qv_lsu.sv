@@ -115,6 +115,11 @@
  * younger load waits for an older posted store to its dword exactly as for a buffered one: the queue's own match
  * is part of i_sb_match. o_head_started stays "an access the head started": an early load that is in flight when
  * an interrupt or a halt is taken is drained and done again later (it reads RAM, which has no side effects).
+ *
+ * Handoff (O2b, HANDOFF): the next op is taken (o_take) in the cycle the last one completes on the bus or is posted,
+ * not a cycle later from IDLE, so a stream of loads keeps the bus busy. The completing op's result is written in that
+ * same cycle as always, from its own registers. A completion without the bus (a fault, a failed SC) does not hand
+ * off: it is the head's, and it either traps, which flushes everything younger, or retires next.
  */
 module qv_lsu #(
     parameter bit          SB_EN        = 1'b0,
@@ -122,7 +127,8 @@ module qv_lsu #(
     parameter logic [63:0] PMA_RAM_SIZE = 64'h0,     // 0: nothing is RAM, nothing is posted
     parameter bit          PROBE        = 1'b0,      // the translation is looked up before the head (P10b)
     parameter bit          EARLY        = 1'b0,      // a plain RAM load or store goes before the head (O2)
-    parameter bit          EARLY_ST     = 1'b1       // ... the stores too (EARLY 1, this 0: only the loads)
+    parameter bit          EARLY_ST     = 1'b1,      // ... the stores too (EARLY 1, this 0: only the loads)
+    parameter bit          HANDOFF      = 1'b0       // the next op is taken in the cycle the last one completes (O2b)
 ) (
     input  logic                             clk,
     input  logic                             rst,
@@ -197,7 +203,8 @@ module qv_lsu #(
     input  logic                             i_fetch_start = 1'b0,  // fetch's translated request starts its bus beat in this cycle: give way
     output logic [31:3]                      o_sb_addr,
     output logic                             o_load_near,
-    output logic                             o_in_bus      // an access is on the bus (registered state: no path to start)
+    output logic                             o_in_bus,     // an access is on the bus (registered state: no path to start)
+    output logic                             o_take        // i_req is taken in this cycle
 );
     import qv_pkg::*;
 
@@ -226,7 +233,10 @@ module qv_lsu #(
     wire        req_misaligned = (req_size == 2'd1) ? req_addr[0]
                                : (req_size == 2'd2) ? (req_addr[1:0] != 2'd0)
                                : (req_size == 2'd3) ? (req_addr[2:0] != 3'd0) : 1'b0;
-    wire        accept      = (state_q == S_IDLE) && i_req.valid && !i_flush;
+    // (HANDOFF) the next op is taken in the cycle the last one completes on the bus or is posted (never after a
+    // completion without the bus: a fault or a failed SC is the head's, and a younger op is flushed with it)
+    wire        handoff;
+    wire        accept      = ((state_q == S_IDLE) || handoff) && i_req.valid && !i_flush;
 
     // ---------------- what the held op is ----------------
     wire lr_q      = atomic_q && (aop_q == QV_AMO_LR);
@@ -328,6 +338,7 @@ module qv_lsu #(
     assign wb_mem_dat_o   = phase_wr_q ? amo_wdata : wdata_q;
 
     assign o_free         = (state_q == S_IDLE);
+    assign o_take         = accept;
     assign o_head_started = (start && !early) || (in_bus && !early_q);
     assign o_in_bus       = in_bus;
     assign o_bus_busy     = start_raw || in_bus;           // the walker waits while this is high
@@ -338,6 +349,7 @@ module qv_lsu #(
     wire amo_read_ack = (state_q == S_BUS) && amo_q && !phase_wr_q && wb_mem_ack_i && !wb_mem_err_i && !i_flush;
     wire done_bus     = (state_q == S_BUS) && resp && !amo_read_ack;
     wire done_nobus   = at_head && (misaligned_q || pmp_deny || sc_fail || x_fault);   // trapped before the bus, or SC without its reservation
+    assign handoff    = HANDOFF && (done_bus || post_done);
 
     // load data: shift the addressed bytes down, then extend
     wire [63:0] shifted = wb_mem_dat_i >> {addr_q[2:0], 3'b000};
@@ -392,7 +404,8 @@ module qv_lsu #(
             early_q    <= 1'b0;
             o_res      <= '0;
         end else begin
-            case (state_q)
+            // a handoff takes the IDLE arm (the new op), in place of the arm that would end the old one in IDLE
+            case ((handoff && accept) ? S_IDLE : state_q)
                 S_IDLE: if (accept) begin
                     state_q      <= S_WAIT_HEAD;
                     tag_q        <= i_req.tag;
@@ -408,6 +421,7 @@ module qv_lsu #(
                     aop_q        <= qv_amo_op_e'(i_req.op[3:0]);
                     phase_wr_q   <= 1'b0;
                     xlated_q     <= 1'b0;
+                    early_q      <= 1'b0;
                 end
                 S_WAIT_HEAD: begin
                     if (i_flush)         state_q <= S_IDLE;

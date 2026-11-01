@@ -73,7 +73,7 @@
  *
  * Knobs (defines, each also a parameter): QV_PIPE_SB_DEPTH (store buffer, 0 = none), QV_PIPE_LSQ_DEPTH (load/store
  * queue, 0 = none: one memory op between dispatch and completion), QV_PIPE_LSQ_EARLY / _EARLY_ST (with the queue,
- * RAM loads / stores before the head),
+ * RAM loads / stores before the head), QV_PIPE_LSQ_HANDOFF (the LSU takes the next op as the last completes),
  * QV_PIPE_FETCH_STREAM (back-to-back fetch, bigger fetch buffer and queue), QV_PIPE_BP (the three predictors;
  * their sizes QV_PIPE_BTB_ENTRIES / QV_PIPE_RAS_DEPTH / QV_PIPE_BHT_ENTRIES). With every one off the timing is
  * the one of P8, cycle for cycle.
@@ -150,6 +150,10 @@
 `ifndef QV_PIPE_LSQ_EARLY_ST
 `define QV_PIPE_LSQ_EARLY_ST 1
 `endif
+// ... and the LSU takes its next op in the cycle the last one completes on the bus or is posted (O2b); 0: a cycle later.
+`ifndef QV_PIPE_LSQ_HANDOFF
+`define QV_PIPE_LSQ_HANDOFF 1
+`endif
 `ifndef QV_PIPE_PMA_RAM_SIZE
 `define QV_PIPE_PMA_RAM_SIZE 64'h0
 `endif
@@ -214,6 +218,7 @@ module core
     parameter int LSQ_DEPTH = `QV_PIPE_LSQ_DEPTH,    // load/store queue entries (a power of 2), 0: none
     parameter bit LSQ_EARLY = `QV_PIPE_LSQ_EARLY,    // (with the queue) RAM loads and stores go before the head
     parameter bit LSQ_EARLY_ST = `QV_PIPE_LSQ_EARLY_ST,  // ... the stores too
+    parameter bit LSQ_HANDOFF  = `QV_PIPE_LSQ_HANDOFF,   // (with the queue) the LSU takes the next op as the last completes
     parameter logic [63:0] PMA_RAM_BASE = `QV_PIPE_PMA_RAM_BASE,   // physical window of RAM: stores into it are posted
     parameter logic [63:0] PMA_RAM_SIZE = `QV_PIPE_PMA_RAM_SIZE
 ) (
@@ -718,11 +723,12 @@ module core
     // With the load/store queue, issue dispatches into the queue and the queue hands lsu0 one op at a time (eng_*);
     // without it, issue talks to lsu0 directly.
     fu_req_t  eng_req;
-    logic     eng_free;
+    logic     eng_free, eng_take;
     lsu_res_t eng_res;
     logic     lsq_early, lsq_match;         // (the queue) no barrier is older than lsu0's op; a posted store matches
     qv_lsu #(.SB_EN(SB_DEPTH > 0), .PMA_RAM_BASE(PMA_RAM_BASE), .PMA_RAM_SIZE(PMA_RAM_SIZE),
-             .PROBE(SV39_EN && DTLB_PROBE), .EARLY(LSQ_DEPTH > 0 && LSQ_EARLY), .EARLY_ST(LSQ_EARLY_ST)) lsu0 (
+             .PROBE(SV39_EN && DTLB_PROBE), .EARLY(LSQ_DEPTH > 0 && LSQ_EARLY), .EARLY_ST(LSQ_EARLY_ST),
+             .HANDOFF(LSQ_DEPTH > 0 && LSQ_HANDOFF)) lsu0 (
         .clk(clk), .rst(rst), .i_flush(flush),
         .i_req(eng_req), .o_free(eng_free),
         .i_head_valid(head_valid), .i_head_tag(head_tag), .i_early(lsq_early),
@@ -742,7 +748,7 @@ module core
         .i_xl_done(x_done), .i_xl_pf(x_pf), .i_xl_af(x_af), .i_xl_ppn(x_ppn),
         .i_ptw_beat(ptw_beat), .o_bus_busy(lsu_bus_busy),
         .i_sb_empty(sb_empty), .i_sb_match(sb_match || lsq_match), .i_sb_beat(sb_beat), .i_sb_go(sb_go_idle), .i_fetch_start(fetch_start_q),
-        .o_sb_addr(sb_match_addr), .o_load_near(lsu_load_near), .o_in_bus(lsu_in_bus)
+        .o_sb_addr(sb_match_addr), .o_load_near(lsu_load_near), .o_in_bus(lsu_in_bus), .o_take(eng_take)
     );
 
     // ---------------- the load/store queue ----------------
@@ -756,11 +762,14 @@ module core
             qv_lsq #(.DEPTH(LSQ_DEPTH)) lsq0 (
                 .clk(clk), .rst(rst), .i_flush(flush),
                 .i_req(lsu_req), .o_free(lsu_free),
-                .o_eng_req(eng_req), .i_eng_free(eng_free), .i_eng_wb(lsu_wb), .i_eng_res(eng_res),
+                .o_eng_req(eng_req), .i_eng_take(eng_take), .i_eng_wb(lsu_wb), .i_eng_res(eng_res),
                 .i_pop(commit_pop), .i_pop_tag(head_tag), .o_head_res(lsu_res),
                 .i_bar_alloc(alloc_bar), .i_bar_tag(alloc_tag), .o_early(lsq_early),
                 .i_match_addr(sb_match_addr), .o_match(lsq_match)
             );
+            /* verilator lint_off UNUSEDSIGNAL */
+            wire   free_unused = eng_free;           // the queue follows the LSU's o_take
+            /* verilator lint_on UNUSEDSIGNAL */
         end else begin : g_nolsq
             assign eng_req   = lsu_req;
             assign lsu_free  = eng_free;
@@ -768,7 +777,7 @@ module core
             assign lsq_early = 1'b0;
             assign lsq_match = 1'b0;
             /* verilator lint_off UNUSEDSIGNAL */
-            wire   bar_unused = alloc_bar;
+            wire   bar_unused = alloc_bar || eng_take;
             /* verilator lint_on UNUSEDSIGNAL */
         end
     endgenerate
@@ -1223,7 +1232,7 @@ module core
     reg [1:0]  g_px_priv = '0;
     reg        g_px_sum = 1'b0, g_px_mxr = 1'b0;
     always @(posedge clk) begin
-        if (rst || flush || lsu0.state_q != 2'd1)
+        if (rst || flush || lsu0.state_q != 2'd1 || lsu0.accept)
             g_px_valid <= 1'b0;
         else if (lsu0.x_ok) begin
             g_px_valid <= 1'b1;
