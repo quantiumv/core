@@ -47,7 +47,8 @@ module qv_lsq_tb #(
     logic [QV_ROB_TAG_W-1:0] bar_tag = '0;
     logic                    early, match;
     logic [31:3]             match_addr = '0;
-    // the model TLB for pre-translation: answers the queue's lookup at once (xl_miss: not at all; xl_fault: with a fault)
+    // the model TLB for pre-translation: answers the queue's lookup at once (xl_miss: not at all; xl_fault: with a fault);
+    // a page with VA bit 32 set is read-only: a lookup that writes faults there
     logic                    xl_req, xl_wr, xl_free = 1'b1, xl_miss = 1'b0, xl_fault = 1'b0, eng_xl;
     logic [63:0]             xl_va;
     logic [43:0]             eng_ppn;
@@ -61,7 +62,8 @@ module qv_lsq_tb #(
         .i_pop(pop), .i_pop_tag(pop_tag), .o_head_res(head_res),
         .i_bar_alloc(bar_alloc), .i_bar_tag(bar_tag), .o_early(early), .i_match_addr(match_addr), .o_match(match),
         .o_xl_req(xl_req), .o_xl_va(xl_va), .o_xl_wr(xl_wr), .i_xl_free(xl_free), .i_xl_active(1'b1),
-        .i_xl_done(xl_req && !xl_miss), .i_xl_pf(xl_fault), .i_xl_af(1'b0), .i_xl_ppn(page_of(xl_va)),
+        .i_xl_done(xl_req && !xl_miss), .i_xl_pf(xl_fault || (xl_wr && xl_va[32])), .i_xl_af(1'b0),
+        .i_xl_ppn(page_of(xl_va)),
         .o_eng_xl(eng_xl), .o_eng_ppn(eng_ppn)
     );
 
@@ -407,6 +409,45 @@ module qv_lsq_tb #(
             repeat (8) tick();
             pop = 1'b1; pop_tag = t0; tick(); pop = 1'b0;
             pop = 1'b1; pop_tag = tq; tick(); pop = 1'b0;
+            // a read-only page: a load there is translated, a store is not (it is looked up as one that writes)
+            present(t0, a0); tick(); idle();
+            req = '0; req.valid = 1'b1; req.tag = next_tag; req.a = 64'h1234_8100 | 64'h1_0000_0000; req.op = 5'b00011;   // ld
+            tq = next_tag; next_tag = next_tag + 1'b1;
+            tick(); idle();
+            repeat (8) tick();
+            check("pre-xl: a load on a read-only page is taken translated", b(took_xl), 64'd1);
+            repeat (8) tick();
+            pop = 1'b1; pop_tag = t0; tick(); pop = 1'b0;
+            pop = 1'b1; pop_tag = tq; tick(); pop = 1'b0;
+            present(t0, a0); tick(); idle();
+            req = '0; req.valid = 1'b1; req.tag = next_tag; req.a = 64'h1234_8108 | 64'h1_0000_0000; req.op = 5'b01011;   // sd
+            tq = next_tag; next_tag = next_tag + 1'b1;
+            tick(); idle();
+            repeat (8) tick();
+            check("pre-xl: a store on a read-only page is not", b(took_xl), 64'd0);
+            repeat (8) tick();
+            pop = 1'b1; pop_tag = t0; tick(); pop = 1'b0;
+            pop = 1'b1; pop_tag = tq; tick(); pop = 1'b0;
+            // a dispatch straight to the engine into a slot whose last op was translated: not translated. Slot 1 gets a
+            // translation, a flush leaves it there, and the second dispatch after the flush goes straight into slot 1.
+            flush = 1'b1; tick(); flush = 1'b0;
+            repeat (6) tick();
+            e_lat = 12;
+            present(t0, a0); tick(); idle();                 // slot 0, straight
+            present(t1, a1); tick(); idle();                 // slot 1, queued: looked up
+            repeat (2) tick();
+            flush = 1'b1; tick(); flush = 1'b0;
+            repeat (16) tick();
+            e_lat = 1;
+            present(t0, a0); tick(); idle();                 // slot 0, straight
+            repeat (4) tick();
+            pop = 1'b1; pop_tag = t0; tick(); pop = 1'b0;
+            present(t2, a2); #1;                             // slot 1, straight
+            check("pre-xl: straight to the engine into a slot that held a translation: not translated", b(eng_xl), 64'd0);
+            tick(); idle();
+            repeat (4) tick();
+            pop = 1'b1; pop_tag = t2; tick(); pop = 1'b0;
+            e_lat = 6;
             // a slot used again starts untranslated: fill every slot with translated ops, then miss
             for (int i = 0; i < DEPTH; i++) begin
                 present(t0, a0); tick(); idle();
