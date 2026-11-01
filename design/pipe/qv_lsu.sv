@@ -105,12 +105,24 @@
  * held off while a drain beat is in flight (i_sb_beat) or decided in this cycle (i_sb_go), just as it is for
  * the walker's. o_load_near tells the buffer that a load that does not wait for it is among the oldest ROB
  * entries, so the drain yields to it.
+ *
+ * Early (O2, EARLY, with the load/store queue qv_lsq in front): an op that is translated, aligned, allowed by the
+ * PMP, inside the PMA window and not part of a Program Buffer run goes before it is the head, when the queue says
+ * no barrier is older (i_early): a plain load starts its bus access, a plain store is posted. Both complete like
+ * any other access; the queue keeps the result until the op retires. Everything else -- faults (and the order of
+ * their causes), atomics, the SC's reservation compare, MMIO, Program Buffer accesses, page walks -- still waits
+ * for the head. Ops still go through here one at a time and in order, so loads are performed in program order. A
+ * younger load waits for an older posted store to its dword exactly as for a buffered one: the queue's own match
+ * is part of i_sb_match. o_head_started stays "an access the head started": an early load that is in flight when
+ * an interrupt or a halt is taken is drained and done again later (it reads RAM, which has no side effects).
  */
 module qv_lsu #(
     parameter bit          SB_EN        = 1'b0,
     parameter logic [63:0] PMA_RAM_BASE = 64'h0,
     parameter logic [63:0] PMA_RAM_SIZE = 64'h0,     // 0: nothing is RAM, nothing is posted
-    parameter bit          PROBE        = 1'b0       // the translation is looked up before the head (P10b)
+    parameter bit          PROBE        = 1'b0,      // the translation is looked up before the head (P10b)
+    parameter bit          EARLY        = 1'b0,      // a plain RAM load or store goes before the head (O2)
+    parameter bit          EARLY_ST     = 1'b1       // ... the stores too (EARLY 1, this 0: only the loads)
 ) (
     input  logic                             clk,
     input  logic                             rst,
@@ -124,6 +136,7 @@ module qv_lsu #(
 
     input  logic                             i_head_valid,
     input  logic [qv_pkg::QV_ROB_TAG_W-1:0]  i_head_tag,
+    input  logic                             i_early = 1'b0,      // (EARLY) no barrier is older than the held op
 
     // LR/SC reservation, kept by commit
     input  logic                             i_res_valid,
@@ -282,15 +295,23 @@ module qv_lsu #(
     wire sb_wait      = match_case ? i_sb_match : (!postable && !i_sb_empty);
     assign o_sb_addr  = pa[31:3];
 
-    wire post_done = at_head && !misaligned_q && !pmp_deny && pa_valid && postable;
-    wire start_raw = at_head && !misaligned_q && !pmp_deny && !sc_fail && pa_valid && !postable && !sb_wait;
+    // (EARLY) a plain load from RAM, or a postable store, before the head: one that faults waits for the head
+    wire ram_ld    = pa_in_window && !store_q && !atomic_q && !i_pmp_bypass;
+    wire early     = EARLY && i_early && (state_q == S_WAIT_HEAD) && !at_head && !i_flush
+                     && (ram_ld || (EARLY_ST && postable));
+    wire go        = at_head || early;
+    logic early_q;                         // the access on the bus was started early
+
+    wire post_done = go && !misaligned_q && !pmp_deny && pa_valid && postable;
+    wire start_raw = go && !misaligned_q && !pmp_deny && !sc_fail && pa_valid && !postable && !sb_wait;
     wire start     = start_raw && !i_ptw_beat && !i_sb_beat && !i_sb_go && !i_fetch_start;
 
     // a load that does not wait for the buffer, among the three oldest ROB entries (the tags carry a wrap bit,
     // so the difference modulo the tag width is the distance): the drain yields to it
     wire [QV_ROB_TAG_W-1:0] head_dist = tag_q - i_head_tag;
     assign o_load_near = (state_q == S_WAIT_HEAD) && i_head_valid && match_case && pa_valid && !i_sb_match
-                         && !misaligned_q && !pmp_deny && (head_dist <= QV_ROB_TAG_W'(2));
+                         && !misaligned_q && !pmp_deny && (head_dist <= QV_ROB_TAG_W'(2))
+                         && (!EARLY || i_early || head_dist == '0);       // (EARLY) one that may start now
     wire resp     = wb_mem_ack_i || wb_mem_err_i;
     wire in_bus   = (state_q == S_BUS) || (state_q == S_DRAIN);
 
@@ -307,7 +328,7 @@ module qv_lsu #(
     assign wb_mem_dat_o   = phase_wr_q ? amo_wdata : wdata_q;
 
     assign o_free         = (state_q == S_IDLE);
-    assign o_head_started = start || in_bus;
+    assign o_head_started = (start && !early) || (in_bus && !early_q);
     assign o_in_bus       = in_bus;
     assign o_bus_busy     = start_raw || in_bus;           // the walker waits while this is high
 
@@ -368,6 +389,7 @@ module qv_lsu #(
             state_q    <= S_IDLE;
             phase_wr_q <= 1'b0;
             xlated_q   <= 1'b0;
+            early_q    <= 1'b0;
             o_res      <= '0;
         end else begin
             case (state_q)
@@ -389,7 +411,7 @@ module qv_lsu #(
                 end
                 S_WAIT_HEAD: begin
                     if (i_flush)         state_q <= S_IDLE;
-                    else if (start)      state_q <= S_BUS;
+                    else if (start)      begin state_q <= S_BUS; early_q <= early; end
                     else if (done_nobus || post_done) state_q <= S_IDLE;
                     else if (x_ok) begin                      // translated: the physical address, checked and used from the next cycle
                         pa_q     <= {8'b0, i_xl_ppn, addr_q[11:0]};

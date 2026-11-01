@@ -20,6 +20,17 @@
  *   flush       empties the queue (the engine drops or drains its own op)
  *
  * o_free is registered (the pointers only), so nothing that commit does in a cycle reaches issue in that cycle.
+ *
+ * For the engine's early accesses (qv_lsu EARLY):
+ *   o_early  no barrier is older than the op in the engine. A barrier is a uop that may change what an access may do,
+ *            or must be ordered before one: a FENCE, a serializing uop (a CSR write that is not to a trap CSR,
+ *            FENCE.I, SFENCE.VMA), a system op (ECALL, EBREAK, xRET, WFI), and a uop that traps or has a trigger.
+ *            Issue tells the queue of each one it allocates (i_bar_alloc); an op dispatched while one is unretired
+ *            records the youngest one's tag and may not go early until that tag retires. Apart from FENCE and WFI,
+ *            everything younger than a barrier is flushed when it retires, so the rule costs nothing else.
+ *   o_match  a done entry holds a posted store (performed, not yet in the store buffer: it is pushed when it
+ *            retires) to the dword the engine asks about (i_match_addr, qv_lsu's o_sb_addr). Every done entry is
+ *            older than the op in the engine; with the buffer's own match it makes a load wait for the store.
  */
 module qv_lsq #(
     parameter int DEPTH = 4                     // a power of 2, >= 2
@@ -43,7 +54,14 @@ module qv_lsq #(
     // commit
     input  logic                             i_pop,            // the ROB head retires ...
     input  logic [qv_pkg::QV_ROB_TAG_W-1:0]  i_pop_tag,        // ... with this tag
-    output qv_pkg::lsu_res_t                 o_head_res        // the oldest entry's result
+    output qv_pkg::lsu_res_t                 o_head_res,       // the oldest entry's result
+
+    // early accesses
+    input  logic                             i_bar_alloc = 1'b0,   // issue allocates a barrier uop ...
+    input  logic [qv_pkg::QV_ROB_TAG_W-1:0]  i_bar_tag = '0,       // ... with this tag
+    output logic                             o_early,              // no barrier is older than the engine's op
+    input  logic [31:3]                      i_match_addr = '0,
+    output logic                             o_match
 );
     import qv_pkg::*;
 
@@ -55,6 +73,10 @@ module qv_lsq #(
     lsu_res_t                res_q [DEPTH];
     logic                    copy_q;                 // the engine completed an entry last cycle ...
     logic [IW-1:0]           copy_idx_q;             // ... this one: its o_res still holds the result
+    logic                    bar_q     [DEPTH];      // an older barrier has not retired yet ...
+    logic [QV_ROB_TAG_W-1:0] bar_tag_q [DEPTH];      // ... the youngest one at dispatch
+    logic                    lbar_q;                 // the youngest barrier allocated has not retired ...
+    logic [QV_ROB_TAG_W-1:0] lbar_tag_q;             // ... its tag
 
     wire [IW-1:0] head_i = head_q[IW-1:0];
     wire [IW-1:0] cmpl_i = cmpl_q[IW-1:0];
@@ -83,6 +105,25 @@ module qv_lsq #(
 
     assign o_head_res = (copy_q && copy_idx_q == head_i) ? i_eng_res : res_q[head_i];
 
+    // ---------------- barriers ----------------
+    wire bar_retire = i_pop && !i_flush;             // the ROB head retires: is it a barrier someone waits for?
+    assign o_early  = (cmpl_q != send_q) && !bar_q[cmpl_i];
+
+    // ---------------- the posted stores not retired yet ----------------
+    logic [DEPTH-1:0] posted_hit;
+    always_comb begin
+        for (int i = 0; i < DEPTH; i++) begin
+            /* verilator lint_off UNUSEDSIGNAL */
+            lsu_res_t      r;                        // only posted and the address matter here
+            /* verilator lint_on UNUSEDSIGNAL */
+            logic [IW-1:0] pos;                      // how far entry i is from the head
+            r    = (copy_q && copy_idx_q == IW'(i)) ? i_eng_res : res_q[i];
+            pos  = IW'(i) - head_i;
+            posted_hit[i] = ({1'b0, pos} < (cmpl_q - head_q)) && r.posted && (r.mem_addr[31:3] == i_match_addr);
+        end
+    end
+    assign o_match = |posted_hit;
+
     always_ff @(posedge clk) begin
         if (rst || i_flush) begin
             head_q <= '0;
@@ -90,11 +131,22 @@ module qv_lsq #(
             send_q <= '0;
             tail_q <= '0;
             copy_q <= 1'b0;
+            lbar_q <= 1'b0;
         end else begin
             if (push) begin
-                req_q[tail_i] <= i_req;
-                tag_q[tail_i] <= i_req.tag;
-                tail_q        <= tail_q + 1'b1;
+                req_q[tail_i]     <= i_req;
+                tag_q[tail_i]     <= i_req.tag;
+                bar_q[tail_i]     <= lbar_q && !(bar_retire && i_pop_tag == lbar_tag_q);
+                bar_tag_q[tail_i] <= lbar_tag_q;
+                tail_q            <= tail_q + 1'b1;
+            end
+            for (int i = 0; i < DEPTH; i++)
+                if (bar_retire && i_pop_tag == bar_tag_q[i] && !(push && tail_i == IW'(i))) bar_q[i] <= 1'b0;
+            if (i_bar_alloc) begin
+                lbar_q     <= 1'b1;
+                lbar_tag_q <= i_bar_tag;
+            end else if (bar_retire && i_pop_tag == lbar_tag_q) begin
+                lbar_q     <= 1'b0;
             end
             if (send) send_q <= send_q + 1'b1;
             if (cmpl) cmpl_q <= cmpl_q + 1'b1;

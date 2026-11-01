@@ -72,7 +72,8 @@
  * commit's wins a tie.
  *
  * Knobs (defines, each also a parameter): QV_PIPE_SB_DEPTH (store buffer, 0 = none), QV_PIPE_LSQ_DEPTH (load/store
- * queue, 0 = none: one memory op between dispatch and completion),
+ * queue, 0 = none: one memory op between dispatch and completion), QV_PIPE_LSQ_EARLY / _EARLY_ST (with the queue,
+ * RAM loads / stores before the head),
  * QV_PIPE_FETCH_STREAM (back-to-back fetch, bigger fetch buffer and queue), QV_PIPE_BP (the three predictors;
  * their sizes QV_PIPE_BTB_ENTRIES / QV_PIPE_RAS_DEPTH / QV_PIPE_BHT_ENTRIES). With every one off the timing is
  * the one of P8, cycle for cycle.
@@ -141,6 +142,14 @@
 `define QV_PIPE_LSQ_DEPTH 4
 `endif
 `endif
+// With the queue, a plain load from RAM starts and a plain store to RAM is posted before it is the ROB head, once
+// no barrier is older (O2a). QV_PIPE_LSQ_EARLY 0: only at the head; QV_PIPE_LSQ_EARLY_ST 0: only the loads.
+`ifndef QV_PIPE_LSQ_EARLY
+`define QV_PIPE_LSQ_EARLY 1
+`endif
+`ifndef QV_PIPE_LSQ_EARLY_ST
+`define QV_PIPE_LSQ_EARLY_ST 1
+`endif
 `ifndef QV_PIPE_PMA_RAM_SIZE
 `define QV_PIPE_PMA_RAM_SIZE 64'h0
 `endif
@@ -203,6 +212,8 @@ module core
     parameter bit CSR_NOSER  = `QV_PIPE_CSR_NOSER,    // CSR ops that change nothing a younger one sees do not serialize
     parameter int SB_DEPTH  = `QV_PIPE_SB_DEPTH,     // store buffer entries, 0: none
     parameter int LSQ_DEPTH = `QV_PIPE_LSQ_DEPTH,    // load/store queue entries (a power of 2), 0: none
+    parameter bit LSQ_EARLY = `QV_PIPE_LSQ_EARLY,    // (with the queue) RAM loads and stores go before the head
+    parameter bit LSQ_EARLY_ST = `QV_PIPE_LSQ_EARLY_ST,  // ... the stores too
     parameter logic [63:0] PMA_RAM_BASE = `QV_PIPE_PMA_RAM_BASE,   // physical window of RAM: stores into it are posted
     parameter logic [63:0] PMA_RAM_SIZE = `QV_PIPE_PMA_RAM_SIZE
 ) (
@@ -709,11 +720,12 @@ module core
     fu_req_t  eng_req;
     logic     eng_free;
     lsu_res_t eng_res;
+    logic     lsq_early, lsq_match;         // (the queue) no barrier is older than lsu0's op; a posted store matches
     qv_lsu #(.SB_EN(SB_DEPTH > 0), .PMA_RAM_BASE(PMA_RAM_BASE), .PMA_RAM_SIZE(PMA_RAM_SIZE),
-             .PROBE(SV39_EN && DTLB_PROBE)) lsu0 (
+             .PROBE(SV39_EN && DTLB_PROBE), .EARLY(LSQ_DEPTH > 0 && LSQ_EARLY), .EARLY_ST(LSQ_EARLY_ST)) lsu0 (
         .clk(clk), .rst(rst), .i_flush(flush),
         .i_req(eng_req), .o_free(eng_free),
-        .i_head_valid(head_valid), .i_head_tag(head_tag),
+        .i_head_valid(head_valid), .i_head_tag(head_tag), .i_early(lsq_early),
         .i_res_valid(res_valid), .i_res_addr(res_addr),
         .i_priv(priv), .i_mprv(mstatus_mprv_w), .i_mpp(mstatus_mpp_w), .i_pmp_bypass(pb_active),
         .i_pmpcfg0(pmpcfg0_w), .i_pmpaddr0(pmpaddr0_w), .i_pmpaddr1(pmpaddr1_w),
@@ -729,23 +741,35 @@ module core
         .o_xl_cancel(x_cancel), .o_xl_nowalk(x_nowalk),
         .i_xl_done(x_done), .i_xl_pf(x_pf), .i_xl_af(x_af), .i_xl_ppn(x_ppn),
         .i_ptw_beat(ptw_beat), .o_bus_busy(lsu_bus_busy),
-        .i_sb_empty(sb_empty), .i_sb_match(sb_match), .i_sb_beat(sb_beat), .i_sb_go(sb_go_idle), .i_fetch_start(fetch_start_q),
+        .i_sb_empty(sb_empty), .i_sb_match(sb_match || lsq_match), .i_sb_beat(sb_beat), .i_sb_go(sb_go_idle), .i_fetch_start(fetch_start_q),
         .o_sb_addr(sb_match_addr), .o_load_near(lsu_load_near), .o_in_bus(lsu_in_bus)
     );
 
     // ---------------- the load/store queue ----------------
+    // A barrier for the early accesses: a uop that may change what an access may do, or must be ordered before one
+    // -- a FENCE (the MISC-MEM opcode, funct3 0), a serializing uop, a system op, one that traps or has a trigger.
+    wire alloc_bar = alloc_valid && (alloc_ctrl.serialize || alloc_ctrl.cls == QV_FU_SYS || alloc_ctrl.xcpt
+                                     || alloc_ctrl.trig_debug || alloc_ctrl.trig_exc
+                                     || (alloc_raw[6:0] == 7'b0001111 && alloc_raw[14:12] == 3'b000));
     generate
         if (LSQ_DEPTH > 0) begin : g_lsq
             qv_lsq #(.DEPTH(LSQ_DEPTH)) lsq0 (
                 .clk(clk), .rst(rst), .i_flush(flush),
                 .i_req(lsu_req), .o_free(lsu_free),
                 .o_eng_req(eng_req), .i_eng_free(eng_free), .i_eng_wb(lsu_wb), .i_eng_res(eng_res),
-                .i_pop(commit_pop), .i_pop_tag(head_tag), .o_head_res(lsu_res)
+                .i_pop(commit_pop), .i_pop_tag(head_tag), .o_head_res(lsu_res),
+                .i_bar_alloc(alloc_bar), .i_bar_tag(alloc_tag), .o_early(lsq_early),
+                .i_match_addr(sb_match_addr), .o_match(lsq_match)
             );
         end else begin : g_nolsq
-            assign eng_req  = lsu_req;
-            assign lsu_free = eng_free;
-            assign lsu_res  = eng_res;
+            assign eng_req   = lsu_req;
+            assign lsu_free  = eng_free;
+            assign lsu_res   = eng_res;
+            assign lsq_early = 1'b0;
+            assign lsq_match = 1'b0;
+            /* verilator lint_off UNUSEDSIGNAL */
+            wire   bar_unused = alloc_bar;
+            /* verilator lint_on UNUSEDSIGNAL */
         end
     endgenerate
 
@@ -1055,8 +1079,9 @@ module core
 
     // ---------------- ports ----------------
     // the Debug Module's system bus access must not read memory behind a retired store: the hart shows as halted
-    // to it once the store buffer has drained (internally it is halted at the sample point, as before)
-    assign o_debug_mode    = in_debug_mode && sb_empty;
+    // to it once the store buffer has drained (internally it is halted at the sample point, as before), and once an
+    // early load that was in flight at the halt has drained, so that the port is quiet
+    assign o_debug_mode    = in_debug_mode && sb_empty && !lsu_in_bus;
     assign o_dm_csr_rdata  = csr_rdata;
     assign o_dm_gpr_rdata  = rs2_data;
     assign o_progbuf_pc    = pb_idx;
@@ -1127,7 +1152,8 @@ module core
     // An interrupt or a halt is only ever taken with nothing started on the LSU's side of the data bus: the cycle
     // before retired something, so no memory op was in flight, and a head that would start in that cycle is held
     // off by the flush. An EBREAK or trigger entry happens at a head that is not a memory op, and memory
-    // ops only start at the head. (A started access cannot be abandoned, so this is what makes entering
+    // ops only start at the head -- or early (O2): a plain read of RAM, which the flush drains and the op does again
+    // later, and which lsu_head_started does not count. (A started access cannot be abandoned, so this is what makes entering
     // Debug Mode without waiting for the LSU safe. The walker may have a PTE read of a cancelled fetch walk in
     // flight; it is a read that completes and is dropped, and the LSU's next start waits for it.)
     always @* assert (!((interrupt_taken || debug_halt_req_entry || debug_ebreak_entry || trigger_debug_entry)
@@ -1135,6 +1161,13 @@ module core
     // The LSU, the walker and the store buffer's drain never drive the memory port together: each starts a beat
     // only while the others have nothing started or ready to start, and waits out a beat in flight.
     always @* assert (!((lsu_cyc && ptw_cyc) || (lsu_cyc && sb_cyc) || (ptw_cyc && sb_cyc)));
+    // (O2) An access that goes before the head is a plain load from RAM or a posted plain store to RAM, of an op no
+    // barrier is older than, translated, aligned, allowed, and (a load) with no store to its dword that is posted or
+    // buffered and not yet in memory; one started early is always such a load.
+    always @* if (!rst && (lsu0.start || lsu0.post_done) && !lsu0.at_head)
+        assert (lsu0.EARLY && lsq_early && lsu0.pa_in_window && !lsu0.atomic_q && !pb_active && lsu0.pa_valid
+                && !lsu0.misaligned_q && !lsu0.pmp_deny && (lsu0.store_q || !(sb_match || lsq_match)));
+    always @* if (!rst && lsu0.in_bus && lsu0.early_q) assert (!lsu0.store_q && !lsu0.atomic_q);
 
     // The translators are safe only while a client keeps to one rule: a request it holds does not change (what it
     // asks for, the context it asks in) except in the cycle after a cancel, so that the answer of a walk that was
