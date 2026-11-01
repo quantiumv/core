@@ -1,0 +1,78 @@
+{
+ "dut": "design/pipe/qv_commit.sv",
+ "tb": "design/pipe/qv_commit_sb_tb.sv",
+ "files": [
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_commit.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench"
+ ],
+ "cwd": "design",
+ "timeout": 600,
+ "mutants": [
+  {
+   "name": "a FENCE does not wait",
+   "old": "wire sb_drain_first = is_fence_i || (is_sys && i_head_ctrl.sys_op == QV_SYS_EBREAK) || is_fence_wr;",
+   "new": "wire sb_drain_first = is_fence_i || (is_sys && i_head_ctrl.sys_op == QV_SYS_EBREAK);"
+  },
+  {
+   "name": "pred.W ignored",
+   "old": "&& i_head_entry.raw[24] && i_head_entry.raw[21] && (i_head_entry.raw[31:28] != 4'b1000);",
+   "new": "&& i_head_entry.raw[21] && (i_head_entry.raw[31:28] != 4'b1000);"
+  },
+  {
+   "name": "succ.R ignored",
+   "old": "&& i_head_entry.raw[24] && i_head_entry.raw[21] && (i_head_entry.raw[31:28] != 4'b1000);",
+   "new": "&& i_head_entry.raw[24] && (i_head_entry.raw[31:28] != 4'b1000);"
+  },
+  {
+   "name": "FENCE.TSO waits",
+   "old": "&& i_head_entry.raw[24] && i_head_entry.raw[21] && (i_head_entry.raw[31:28] != 4'b1000);",
+   "new": "&& i_head_entry.raw[24] && i_head_entry.raw[21];"
+  },
+  {
+   "name": "pred.R taken for pred.W",
+   "old": "&& i_head_entry.raw[24] && i_head_entry.raw[21] && (i_head_entry.raw[31:28] != 4'b1000);",
+   "new": "&& i_head_entry.raw[25] && i_head_entry.raw[21] && (i_head_entry.raw[31:28] != 4'b1000);"
+  },
+  {
+   "name": "succ.W taken for succ.R",
+   "old": "&& i_head_entry.raw[24] && i_head_entry.raw[21] && (i_head_entry.raw[31:28] != 4'b1000);",
+   "new": "&& i_head_entry.raw[24] && i_head_entry.raw[20] && (i_head_entry.raw[31:28] != 4'b1000);"
+  },
+  {
+   "name": "a FENCE with a fault marker waits",
+   "old": "(i_head_ctrl.cls == QV_FU_ALU) && !i_head_ctrl.xcpt && !i_head_ctrl.trig_exc",
+   "new": "(i_head_ctrl.cls == QV_FU_ALU) && !i_head_ctrl.trig_exc"
+  },
+  {
+   "name": "a FENCE under an action-0 trigger waits",
+   "old": "(i_head_ctrl.cls == QV_FU_ALU) && !i_head_ctrl.xcpt && !i_head_ctrl.trig_exc",
+   "new": "(i_head_ctrl.cls == QV_FU_ALU) && !i_head_ctrl.xcpt"
+  },
+  {
+   "name": "any class with the bits waits",
+   "old": "(i_head_ctrl.cls == QV_FU_ALU) && !i_head_ctrl.xcpt && !i_head_ctrl.trig_exc",
+   "new": "!i_head_ctrl.xcpt && !i_head_ctrl.trig_exc"
+  },
+  {
+   "name": "the opcode is not checked",
+   "old": "&& (i_head_entry.raw[6:0] == 7'b0001111) && (i_head_entry.raw[14:12] == 3'b000)",
+   "new": "&& (i_head_entry.raw[14:12] == 3'b000)"
+  },
+  {
+   "name": "funct3 is not checked",
+   "old": "&& (i_head_entry.raw[6:0] == 7'b0001111) && (i_head_entry.raw[14:12] == 3'b000)",
+   "new": "&& (i_head_entry.raw[6:0] == 7'b0001111)",
+   "equivalent": true,
+   "why": "an ALU-class head with no fault marker and opcode MISC-MEM is a FENCE: FENCE.I is SYS class, and every other funct3 decodes as an illegal instruction (a fault marker)"
+  }
+ ]
+}

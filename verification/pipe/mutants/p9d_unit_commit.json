@@ -38,19 +38,19 @@
    "new": "wire sb_ok          = (!sb_posted || i_sb_ready);"
   },
   {
-   "name": "only FENCE.I waits",
-   "old": "wire sb_drain_first = is_fence_i || (is_sys && i_head_ctrl.sys_op == QV_SYS_EBREAK);",
-   "new": "wire sb_drain_first = is_fence_i;"
+   "name": "FENCE.I waits, EBREAK does not",
+   "old": "wire sb_drain_first = is_fence_i || (is_sys && i_head_ctrl.sys_op == QV_SYS_EBREAK) || is_fence_wr;",
+   "new": "wire sb_drain_first = is_fence_i || is_fence_wr;"
   },
   {
-   "name": "only EBREAK waits",
-   "old": "wire sb_drain_first = is_fence_i || (is_sys && i_head_ctrl.sys_op == QV_SYS_EBREAK);",
-   "new": "wire sb_drain_first = (is_sys && i_head_ctrl.sys_op == QV_SYS_EBREAK);"
+   "name": "EBREAK waits, FENCE.I does not",
+   "old": "wire sb_drain_first = is_fence_i || (is_sys && i_head_ctrl.sys_op == QV_SYS_EBREAK) || is_fence_wr;",
+   "new": "wire sb_drain_first = (is_sys && i_head_ctrl.sys_op == QV_SYS_EBREAK) || is_fence_wr;"
   },
   {
    "name": "ECALL waits too",
-   "old": "wire sb_drain_first = is_fence_i || (is_sys && i_head_ctrl.sys_op == QV_SYS_EBREAK);",
-   "new": "wire sb_drain_first = is_fence_i || (is_sys && (i_head_ctrl.sys_op == QV_SYS_EBREAK || i_head_ctrl.sys_op == QV_SYS_ECALL));"
+   "old": "wire sb_drain_first = is_fence_i || (is_sys && i_head_ctrl.sys_op == QV_SYS_EBREAK) || is_fence_wr;",
+   "new": "wire sb_drain_first = is_fence_i || (is_sys && (i_head_ctrl.sys_op == QV_SYS_EBREAK || i_head_ctrl.sys_op == QV_SYS_ECALL)) || is_fence_wr;"
   },
   {
    "name": "a debug-entry EBREAK waits for the buffer",
