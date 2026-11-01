@@ -60,18 +60,18 @@
   },
   {
    "name": "a misaligned store is posted",
-   "old": "wire post_done = at_head && !misaligned_q && !pmp_deny && pa_valid && postable;",
-   "new": "wire post_done = at_head && !pmp_deny && pa_valid && postable;"
+   "old": "wire post_done = go && !misaligned_q && !pmp_deny && pa_valid && postable;",
+   "new": "wire post_done = go && !pmp_deny && pa_valid && postable;"
   },
   {
    "name": "a PMP-denied store is posted",
-   "old": "wire post_done = at_head && !misaligned_q && !pmp_deny && pa_valid && postable;",
-   "new": "wire post_done = at_head && !misaligned_q && pa_valid && postable;"
+   "old": "wire post_done = go && !misaligned_q && !pmp_deny && pa_valid && postable;",
+   "new": "wire post_done = go && !misaligned_q && pa_valid && postable;"
   },
   {
    "name": "a store is posted before its address is translated",
-   "old": "wire post_done = at_head && !misaligned_q && !pmp_deny && pa_valid && postable;",
-   "new": "wire post_done = at_head && !misaligned_q && !pmp_deny && postable;",
+   "old": "wire post_done = go && !misaligned_q && !pmp_deny && pa_valid && postable;",
+   "new": "wire post_done = go && !misaligned_q && !pmp_deny && postable;",
    "equivalent": true
   },
   {

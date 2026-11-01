@@ -90,8 +90,8 @@
   },
   {
    "name": "a denied access still starts on the bus",
-   "old": "wire start_raw = at_head && !misaligned_q && !pmp_deny && !sc_fail && pa_valid",
-   "new": "wire start_raw = at_head && !misaligned_q && !sc_fail && pa_valid"
+   "old": "wire start_raw = go && !misaligned_q && !pmp_deny && !sc_fail && pa_valid",
+   "new": "wire start_raw = go && !misaligned_q && !sc_fail && pa_valid"
   },
   {
    "name": "a denial does not complete the op",
