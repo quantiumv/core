@@ -405,6 +405,32 @@ the P9 plan predicted. The bound is at least 5 % on three kernels, so the store 
 did better than the bound on memcpy (-24.5 %) and mixedint (-23.0 %), since its drain also keeps the D$ free
 for the loads behind it.
 
+### Early-load oracle (before the load/store queue, O2.0)
+
+`run_perf.sh --oracle early` (both configurations; `--mode s` too) builds the core with `oracle_lsu.sv` in place of
+`qv_lsu.sv`: a plain load from RAM starts before it is the ROB head, as soon as it is translated, aligned, allowed and
+has no store-buffer match, and its result waits for its commit in a per-tag copy of the LSU's result. It is still one
+op at a time with a lost cycle between ops, and it checks no barriers, so it is a timing model, not a core. The bound
+column is the window minus the cycles the head waited for the LSU in the baseline's stack (everything memory costs
+at the head). `oracle_early_pipe.csv`, `oracle_early_pipe_s.csv`; instret is unchanged on every kernel.
+
+| kernel | M SoC | early loads | change | M SRAM change | bound (SoC) | S SoC change |
+|---|---|---|---|---|---|---|
+| memcpy | 1148 | 1020 | -11.1 % | -3.0 % | -39.7 % | 0.0 % |
+| crc32 | 9913 | 9786 | -1.3 % | -1.3 % | -3.0 % | 0.0 % |
+| qsort | 8566 | 7819 | -8.7 % | -7.8 % | -22.5 % | -6.9 % |
+| matmul | 6972 | 6012 | -13.8 % | -3.6 % | -32.2 % | -6.7 % |
+| sieve | 7540 | 7512 | -0.4 % | -0.3 % | -19.7 % | 0.0 % |
+| listchase | 4883 | 3348 | -31.4 % | -11.2 % | -47.3 % | -10.5 % |
+| mixedint | 6939 | 6215 | -10.4 % | -2.3 % | -31.4 % | -0.1 % |
+| trap | 13432 | 13432 | 0.0 % | -1.6 % | -35.9 % | 0.0 % |
+| fmatmul | 7740 | 5749 | -25.7 % | -16.1 % | -30.6 % | -19.3 % |
+| fpmix | 4427 | 4393 | -0.8 % | -1.5 % | -3.3 % | 0.0 % |
+
+At least 5 % on six kernels of the SoC configuration, so the load/store queue is a go. What the oracle leaves: stores
+still hold the head (sieve, trap, memcpy's stores), the engine loses a cycle between ops (the handoff), and in S mode
+a load meets its translation only once it is in the engine, a cycle before it could start (memcpy, mixedint: O2c).
+
 ### Branch traces
 
 `+BRTRACE` (a plusarg of `perf_tb`) makes the monitor print one line per control-flow instruction retired
