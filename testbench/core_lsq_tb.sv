@@ -30,6 +30,9 @@
  *      quiet; after the resume the program finishes with the right values
  */
 module core_lsq_tb;
+    // the build has early accesses (the queue and QV_PIPE_LSQ_EARLY; core.sv defines both knobs). Without them the
+    // runs check only what holds either way: values, order, the window, the wrong path; C and D are skipped.
+    localparam bit EARLY_ON = (`QV_PIPE_LSQ_DEPTH != 0) && (`QV_PIPE_LSQ_EARLY != 0);
 
     logic clk = 0;
     always #5 clk = ~clk;
@@ -275,9 +278,11 @@ module core_lsq_tb;
         run(4000, "A");
         check("A: the load of the stored dword sees the store", x(10), K1);
         check("A: the other load read memory", x(11), init_word((32'h1008) >> 3));
-        check("A: the other load went early (on the bus before the DIV retired)",
-              b(first_acc(32'h1008, 1'b0) >= 0 && first_acc(32'h1008, 1'b0) < t_ret(pc_div)), 64'd1);
-        check("A: the store was posted early (before the DIV retired)", b(early_post_cyc >= 0 && early_post_cyc < t_ret(pc_div)), 64'd1);
+        if (EARLY_ON) begin
+            check("A: the other load went early (on the bus before the DIV retired)",
+                  b(first_acc(32'h1008, 1'b0) >= 0 && first_acc(32'h1008, 1'b0) < t_ret(pc_div)), 64'd1);
+            check("A: the store was posted early (before the DIV retired)", b(early_post_cyc >= 0 && early_post_cyc < t_ret(pc_div)), 64'd1);
+        end
         check("A: the same-dword load read only after the store's write",
               b(first_acc(32'h1000, 1'b1) >= 0 && first_acc(32'h1000, 1'b0) > first_acc(32'h1000, 1'b1)), 64'd1);
 
@@ -342,7 +347,7 @@ module core_lsq_tb;
         emit(EBREAK);
         handler();
         run(4000, "F");
-        check("F: the wrong path ran (its RAM load went to the bus early)", b(first_acc(32'h1018, 1'b0) >= 0), 64'd1);
+        if (EARLY_ON) check("F: the wrong path ran (its RAM load went to the bus early)", b(first_acc(32'h1018, 1'b0) >= 0), 64'd1);
         check("F: the wrong-path load the PMP denies never reached the bus", b(any_acc(32'h1800)), 64'd0);
         check("F: the wrong-path load outside the window never reached the bus", b(any_acc(32'h2000)), 64'd0);
         check("F: no fault was taken", x(26), 64'd0);
@@ -369,6 +374,7 @@ module core_lsq_tb;
 
         // ===== C: an interrupt while an early load is on the bus =====
         DW = 6;
+        if (EARLY_ON) begin
         build_load_stream();
         ev_irq = 1'b1; ev_halt = 1'b0; ev_hit = 1'b0; ev_armed = 1'b1;
         run(8000, "C");
@@ -397,6 +403,7 @@ module core_lsq_tb;
         check("D: it showed as halted only once the port was quiet (and never stayed hidden once it was)", b(dbg_show_ok), 64'd1);
         check("D: it showed as halted", b(dbg_shown), 64'd1);
         check_stream("D");
+        end
 
         $display("");
         $display("core_lsq_tb: %0d passed, %0d failed", pass_count, fail_count);
