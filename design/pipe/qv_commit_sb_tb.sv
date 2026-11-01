@@ -313,6 +313,11 @@ module qv_commit_sb_tb;
         check("fence rw,rw with an action-0 trigger, buffer not empty: retires as a trap", b(commit_now), 64'd1);
         check("... cause 3", trap_cause, 64'd3);
         retire();
+        // an ALU op whose bits 24 and 21 are set (addi x5, x0, 0x12) is not a FENCE
+        set_entry(arch_pc, 32'h0120_0293, 5, 1'b1, 64'h12);
+        #1;
+        check("addi with FENCE's pred.W/succ.R bits, buffer not empty: retires", b(commit_now), 64'd1);
+        retire();
         // the same bits on a head that is not an ALU op (an encoding that is not a FENCE never has them)
         set_entry(arch_pc, 32'h0330_000F, 0, 1'b0, 64'd0);
         c.cls = QV_FU_CSR;
