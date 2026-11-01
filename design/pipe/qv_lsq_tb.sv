@@ -219,6 +219,8 @@ module qv_lsq_tb #(
         // an op dispatched now is behind the second barrier
         present(t0, a0); tick(); idle();
         check("behind the second barrier: may not", b(early), 64'd0);
+        pop = 1'b1; pop_tag = next_tag + 4'd8; tick(); pop = 1'b0;      // another ROB entry retires (not a barrier)
+        check("an unrelated retirement: still may not", b(early), 64'd0);
         pop = 1'b1; pop_tag = next_tag - 4'd2; tick(); pop = 1'b0;      // the second barrier's tag
         check("the second barrier retired: may go", b(early), 64'd1);
         repeat (8) tick();
@@ -228,6 +230,15 @@ module qv_lsq_tb #(
         tick(); bar_alloc = 1'b0;
         present(t0, a0); pop = 1'b1; pop_tag = t2; tick(); pop = 1'b0; idle();
         check("barrier retiring as the op is dispatched: the op may go", b(early), 64'd1);
+        repeat (8) tick();
+        pop = 1'b1; pop_tag = t0; tick(); pop = 1'b0;
+        // a barrier that retired before the op is dispatched does not hold it
+        bar_alloc = 1'b1; bar_tag = next_tag; t2 = next_tag; next_tag = next_tag + 1'b1;
+        tick(); bar_alloc = 1'b0;
+        pop = 1'b1; pop_tag = t2; tick(); pop = 1'b0;
+        repeat (2) tick();
+        present(t0, a0); tick(); idle();
+        check("barrier retired before the dispatch: the op may go", b(early), 64'd1);
         repeat (8) tick();
         pop = 1'b1; pop_tag = t0; tick(); pop = 1'b0;
         // a flush forgets the barrier
@@ -268,6 +279,25 @@ module qv_lsq_tb #(
         check("a posted store not done yet does not match", b(match), 64'd0);
         repeat (8) tick();
         check("... and does once done", b(match), 64'd1);
+        pop = 1'b1; pop_tag = t0; tick(); pop = 1'b0;
+        // a slot that once held a posted store and now holds the op in the engine: its old result does not match
+        flush = 1'b1; tick(); flush = 1'b0;
+        e_lat = 1;
+        next_a = 64'h8000_0000_0000_0340;                // a posted store at 0x340 through slot 0
+        present(t0, a0); tick(); idle();
+        repeat (3) tick();
+        pop = 1'b1; pop_tag = t0; tick(); pop = 1'b0;
+        next_a = 64'h0000_0000_0000_0500;
+        for (int i = 1; i < DEPTH; i++) begin            // slots 1 .. DEPTH-1, each done and retired
+            present(t0, a0); tick(); idle();
+            repeat (3) tick();
+            pop = 1'b1; pop_tag = t0; tick(); pop = 1'b0;
+        end
+        e_lat = 5;
+        present(t0, a0); tick(); idle();                 // slot 0 again, in the engine
+        match_addr = 29'(64'h340 >> 3); #1;
+        check("the op in the engine, in a slot that held a posted store: no match", b(match), 64'd0);
+        repeat (8) tick();
         pop = 1'b1; pop_tag = t0; tick(); pop = 1'b0;
         next_a = 64'h100;
         match_addr = '0;

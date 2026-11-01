@@ -16,6 +16,8 @@
  * is on the bus drains it (no writeback); one while it waits drops it. o_load_near, for a load near the head, says
  * yes only when it may start now: with i_early, or once it is the head.
  *
+ * SB_EN = 0 (no store buffer): only loads go early; a store in the window is not posted and waits for the head, where
+ * it goes to the bus.
  * HANDOFF = 1 (O2b), with the next request presented while one is in flight: it is taken (o_take) in the cycle the
  * current op completes on the bus or is posted, and goes to the bus in the next; both results are right. It is not
  * taken in the cycle of a completion without the bus (a misaligned op at the head), nor in a flush cycle. Without
@@ -23,7 +25,8 @@
  */
 module qv_lsu_early_tb #(
     parameter bit EARLY_ST = 1'b1,
-    parameter bit HANDOFF  = 1'b0
+    parameter bit HANDOFF  = 1'b0,
+    parameter bit SB_EN    = 1'b1
 );
     import qv_pkg::*;
 
@@ -56,7 +59,7 @@ module qv_lsu_early_tb #(
     logic [31:3]             sb_addr;
     logic                    load_near, bus_busy, take;
 
-    qv_lsu #(.SB_EN(1'b1), .PMA_RAM_BASE(64'h0), .PMA_RAM_SIZE(64'h400), .EARLY(1'b1), .EARLY_ST(EARLY_ST),
+    qv_lsu #(.SB_EN(SB_EN), .PMA_RAM_BASE(64'h0), .PMA_RAM_SIZE(64'h400), .EARLY(1'b1), .EARLY_ST(EARLY_ST),
              .HANDOFF(HANDOFF)) dut (
         .clk(clk), .rst(rst), .i_flush(flush),
         .i_req(req), .o_free(free),
@@ -272,19 +275,40 @@ module qv_lsu_early_tb #(
         check("Program Buffer load: at the head", b(got_wb), 64'd1);
         pmp_bypass = 1'b0;
         // a load whose dword has a store not in memory yet
-        sb_match = 1'b1;
-        dispatch(1'b0, QV_AMO_LR, 1'b0, 2'd3, 64'h080, 64'd0);
+        if (SB_EN) begin
+            sb_match = 1'b1;
+            dispatch(1'b0, QV_AMO_LR, 1'b0, 2'd3, 64'h080, 64'd0);
+            before_head(12);
+            check("load with a matching store: waits", b(got_wb), 64'd0);
+            check("... no bus", 64'(acc_d), 64'd0);
+            sb_match = 1'b0;
+            before_head(20);
+            check("match gone: goes before the head", b(got_wb), 64'd1);
+        end
+        // a misaligned store and one the PMP denies: their traps are the head's
+        dispatch(1'b0, QV_AMO_LR, 1'b1, 2'd3, 64'h0B4, 64'h1);
         before_head(12);
-        check("load with a matching store: waits", b(got_wb), 64'd0);
-        check("... no bus", 64'(acc_d), 64'd0);
-        sb_match = 1'b0;
-        before_head(20);
-        check("match gone: goes before the head", b(got_wb), 64'd1);
+        check("misaligned store: nothing before the head", b(got_wb), 64'd0);
+        at_head(8);
+        check("misaligned store: traps at the head (cause 6)", {60'b0, res.cause}, 64'd6);
+        priv = 2'b00; pmpcfg0 = 64'h18;
+        dispatch(1'b0, QV_AMO_LR, 1'b1, 2'd3, 64'h0B8, 64'h1);
+        before_head(12);
+        check("PMP-denied store: nothing before the head", b(got_wb), 64'd0);
+        at_head(8);
+        check("PMP-denied store: traps at the head (cause 7)", {60'b0, res.cause}, 64'd7);
+        priv = 2'b11; pmpcfg0 = 64'h1F;
 
         // ---- a plain store to RAM: posted before the head (EARLY_ST), or at the head ----
         dispatch(1'b0, QV_AMO_LR, 1'b1, 2'd3, 64'h088, 64'h0123_4567_89AB_CDEF);
         before_head(8);
-        if (EARLY_ST) begin
+        if (!SB_EN) begin
+            check("no store buffer: a store in the window does not go before the head", b(got_wb), 64'd0);
+            check("... no bus access", 64'(acc_d), 64'd0);
+            at_head(20);
+            check("no store buffer: the store goes to the bus at the head", 64'(wr_d), 64'd1);
+            check("... not posted", b(res.posted), 64'd0);
+        end else if (EARLY_ST) begin
             check("early store: posted before the head", b(got_wb), 64'd1);
             check("early store: posted", b(res.posted), 64'd1);
             check("early store: no bus", 64'(acc_d), 64'd0);
@@ -316,12 +340,15 @@ module qv_lsu_early_tb #(
         check("... completes", b(got_wb), 64'd1);
         check("... never counted as the head's", b(any_started), 64'd0);
         check("... the memory word", wb_value, mem[8'h12]);
-        // a head load on a slow slave: o_head_started high while it is on the bus (the control)
+        // a head load on a slow slave: o_head_started high while it is on the bus (the control), with no barrier too
         early_ok = 1'b0;
         dispatch(1'b0, QV_AMO_LR, 1'b0, 2'd3, 64'h098, 64'd0);
         at_head(20);
         check("slow head load: counted as the head's", b(any_started), 64'd1);
         early_ok = 1'b1;
+        dispatch(1'b0, QV_AMO_LR, 1'b0, 2'd3, 64'h0A0, 64'd0);
+        at_head(20);
+        check("slow head load, no barrier: still the head's", b(any_started), 64'd1);
 
         // ---- a flush while an early load is on the bus: drained, no writeback ----
         dispatch(1'b0, QV_AMO_LR, 1'b0, 2'd3, 64'h0A0, 64'd0);
@@ -338,16 +365,32 @@ module qv_lsu_early_tb #(
         end
         check("flushed early load: the slot is free after the response", b(free), 64'd1);
         // ... one that waits (a match holds it) is dropped
-        sb_match = 1'b1;
-        dispatch(1'b0, QV_AMO_LR, 1'b0, 2'd3, 64'h0A8, 64'd0);
-        @(negedge clk); flush = 1'b1;
-        @(posedge clk); #1; flush = 1'b0; sb_match = 1'b0;
-        check("flushed waiting load: the slot is free at once", b(free), 64'd1);
-        settle();
-        check("... with no bus access", b(cyc), 64'd0);
+        if (SB_EN) begin
+            sb_match = 1'b1;
+            dispatch(1'b0, QV_AMO_LR, 1'b0, 2'd3, 64'h0A8, 64'd0);
+            @(negedge clk); flush = 1'b1;
+            @(posedge clk); #1; flush = 1'b0; sb_match = 1'b0;
+            check("flushed waiting load: the slot is free at once", b(free), 64'd1);
+            settle();
+            check("... with no bus access", b(cyc), 64'd0);
+        end
         wait_fix = 0;
 
-        // ---- o_load_near: only for a load that may start now ----
+        // ---- a flush in the cycle an early load would start: no request at all ----
+        sb_beat = 1'b1;                                  // holds the start off
+        dispatch(1'b0, QV_AMO_LR, 1'b0, 2'd3, 64'h0A8, 64'd0);
+        @(negedge clk); head_valid = 1'b1; head_tag = last_tag - 1'b1;
+        @(posedge clk); #1;
+        @(negedge clk); sb_beat = 1'b0; flush = 1'b1; head_valid = 1'b0;   // it could start now, but the flush comes
+        #1;
+        check("flush in the would-be start cycle: no request", b(cyc), 64'd0);
+        @(posedge clk); #1; flush = 1'b0;
+        settle();
+        check("... and none after", b(cyc), 64'd0);
+        check("... the slot is free", b(free), 64'd1);
+
+        // ---- o_load_near: only for a load that may start now (it is the store buffer's) ----
+        if (SB_EN) begin
         sb_beat = 1'b1;                                  // a drain beat holds every start off
         early_ok = 1'b0;
         dispatch(1'b0, QV_AMO_LR, 1'b0, 2'd3, 64'h0B0, 64'd0);
@@ -362,6 +405,7 @@ module qv_lsu_early_tb #(
         at_head(20);
         check("... then it runs", b(got_wb), 64'd1);
         early_ok = 1'b1;
+        end
 
         // ---- the handoff: the next request is presented while the current op is in flight ----
         settle();
@@ -403,7 +447,7 @@ module qv_lsu_early_tb #(
             end
         end
         // ... a posted store hands off to the load behind it
-        begin
+        if (SB_EN) begin
             int t_post, t_take;
             dispatch(1'b0, QV_AMO_LR, 1'b1, 2'd3, 64'h0D0, 64'h1111_2222_3333_4444);
             @(negedge clk); head_valid = 1'b1; head_tag = last_tag;            // the store is the head
