@@ -38,12 +38,17 @@ module qv_lsq_tb #(
     logic                    pop = 1'b0;
     logic [QV_ROB_TAG_W-1:0] pop_tag = '0;
     lsu_res_t                head_res;
+    logic                    bar_alloc = 1'b0;
+    logic [QV_ROB_TAG_W-1:0] bar_tag = '0;
+    logic                    early, match;
+    logic [31:3]             match_addr = '0;
 
     qv_lsq #(.DEPTH(DEPTH)) dut (
         .clk(clk), .rst(rst), .i_flush(flush),
         .i_req(req), .o_free(free),
         .o_eng_req(eng_req), .i_eng_free(eng_free), .i_eng_wb(eng_wb), .i_eng_res(eng_res),
-        .i_pop(pop), .i_pop_tag(pop_tag), .o_head_res(head_res)
+        .i_pop(pop), .i_pop_tag(pop_tag), .o_head_res(head_res),
+        .i_bar_alloc(bar_alloc), .i_bar_tag(bar_tag), .o_early(early), .i_match_addr(match_addr), .o_match(match)
     );
 
     // ---------------- the model engine ----------------
@@ -52,7 +57,8 @@ module qv_lsq_tb #(
         lsu_res_t r;
         r = '0;
         r.tval     = {a[59:0], 4'(t)};
-        r.mem_addr = ~a;
+        r.mem_addr = a ^ 64'hFFFF_0000_0000_0000;      // the dword (bits 31:3) is the request's own
+        r.posted   = a[63];                            // the test marks a posted store by the top bit of a
         return r;
     endfunction
 
@@ -181,6 +187,89 @@ module qv_lsq_tb #(
         check("after a flush: room", b(free), 64'd1);
         check("after a flush: nothing offered to the engine", b(eng_req.valid), 64'd0);
         repeat (4) tick();
+
+        // ---- barriers: an op dispatched while a barrier is unretired may not go early until it retires ----
+        flush = 1'b1; tick(); flush = 1'b0;
+        e_lat = 6;
+        present(t0, a0); #1;                             // no barrier yet
+        tick(); idle();
+        check("no barrier: the op in the engine may go early", b(early), 64'd1);
+        repeat (8) tick();
+        pop = 1'b1; pop_tag = t0; tick(); pop = 1'b0;
+        // a barrier is allocated (its own tag, the next one)
+        bar_alloc = 1'b1; bar_tag = next_tag; t2 = next_tag; next_tag = next_tag + 1'b1;
+        tick(); bar_alloc = 1'b0;
+        present(t0, a0); tick(); idle();
+        check("barrier older: the op in the engine may not go early", b(early), 64'd0);
+        present(t1, a1); tick(); idle();
+        // a second barrier, then a third op
+        bar_alloc = 1'b1; bar_tag = next_tag; next_tag = next_tag + 1'b1;
+        tick(); bar_alloc = 1'b0;
+        check("still the first op in the engine: may not", b(early), 64'd0);
+        // the first barrier retires: the first op may go
+        pop = 1'b1; pop_tag = t2; tick(); pop = 1'b0;
+        check("its barrier retired: the first op may go early", b(early), 64'd1);
+        repeat (8) tick();
+        check("the second op (behind the same barrier) is in the engine now and may go", b(early), 64'd1);
+        // the second op's barrier is the first one too (it was dispatched before the second barrier)
+        pop = 1'b1; pop_tag = t0; tick(); pop = 1'b0;
+        repeat (8) tick();                               // the second op completes
+        pop = 1'b1; pop_tag = t1; tick(); pop = 1'b0;
+        // an op dispatched now is behind the second barrier
+        present(t0, a0); tick(); idle();
+        check("behind the second barrier: may not", b(early), 64'd0);
+        pop = 1'b1; pop_tag = next_tag - 4'd2; tick(); pop = 1'b0;      // the second barrier's tag
+        check("the second barrier retired: may go", b(early), 64'd1);
+        repeat (8) tick();
+        pop = 1'b1; pop_tag = t0; tick(); pop = 1'b0;
+        // a barrier that retires in the very cycle an op is dispatched does not hold it
+        bar_alloc = 1'b1; bar_tag = next_tag; t2 = next_tag; next_tag = next_tag + 1'b1;
+        tick(); bar_alloc = 1'b0;
+        present(t0, a0); pop = 1'b1; pop_tag = t2; tick(); pop = 1'b0; idle();
+        check("barrier retiring as the op is dispatched: the op may go", b(early), 64'd1);
+        repeat (8) tick();
+        pop = 1'b1; pop_tag = t0; tick(); pop = 1'b0;
+        // a flush forgets the barrier
+        bar_alloc = 1'b1; bar_tag = next_tag; next_tag = next_tag + 1'b1;
+        tick(); bar_alloc = 1'b0;
+        flush = 1'b1; tick(); flush = 1'b0;
+        repeat (4) tick();
+        present(t0, a0); tick(); idle();
+        check("after a flush: no barrier", b(early), 64'd1);
+        repeat (8) tick();
+        pop = 1'b1; pop_tag = t0; tick(); pop = 1'b0;
+
+        // ---- the match: a posted store that is done and not retired, on the dword asked about ----
+        e_lat = 1;
+        next_a = 64'h8000_0000_0000_0200;                // posted (top bit) at 0x200
+        present(t0, a0); tick(); idle();
+        next_a = 64'h0000_0000_0000_0208;                // a plain op at 0x208, behind it
+        repeat (2) tick();                               // the store completes
+        match_addr = 29'(64'h200 >> 3); #1;
+        check("done posted store, copy pending: matches its dword", b(match), 64'd1);
+        tick();
+        check("... and once copied", b(match), 64'd1);
+        match_addr = 29'(64'h208 >> 3); #1;
+        check("... not another dword", b(match), 64'd0);
+        present(t1, a1); tick(); idle();
+        repeat (3) tick();
+        match_addr = 29'(64'h208 >> 3); #1;
+        check("a done entry that is not posted does not match", b(match), 64'd0);
+        match_addr = 29'(64'h200 >> 3);
+        pop = 1'b1; pop_tag = t0; tick(); pop = 1'b0;
+        check("the posted store retired (into the buffer): no longer the queue's to match", b(match), 64'd0);
+        pop = 1'b1; pop_tag = t1; tick(); pop = 1'b0;
+        // a posted store still in the engine (not done) does not match
+        e_lat = 5;
+        next_a = 64'h8000_0000_0000_0300;
+        present(t0, a0); tick(); idle();
+        match_addr = 29'(64'h300 >> 3); #1;
+        check("a posted store not done yet does not match", b(match), 64'd0);
+        repeat (8) tick();
+        check("... and does once done", b(match), 64'd1);
+        pop = 1'b1; pop_tag = t0; tick(); pop = 1'b0;
+        next_a = 64'h100;
+        match_addr = '0;
 
         // ---- random ----
         seen_tags.delete();
