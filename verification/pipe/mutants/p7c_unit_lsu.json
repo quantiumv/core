@@ -171,7 +171,7 @@
   },
   {
    "name": "the translated flag is not cleared for a new op",
-   "old": "                    phase_wr_q   <= 1'b0;\n                    xlated_q     <= 1'b0;",
+   "old": "                    phase_wr_q   <= 1'b0;\n                    xlated_q     <= i_req_xl;",
    "new": "                    phase_wr_q   <= 1'b0;"
   },
   {

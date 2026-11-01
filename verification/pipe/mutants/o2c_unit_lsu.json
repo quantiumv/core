@@ -1,0 +1,37 @@
+{
+ "dut": "design/pipe/qv_lsu.sv",
+ "tb": "design/pipe/qv_lsu_early_tb.sv",
+ "files": [
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_pmp.sv",
+  "design/pipe/qv_lsu.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench"
+ ],
+ "cwd": "design",
+ "timeout": 600,
+ "mutants": [
+  {
+   "name": "a translated op is taken untranslated",
+   "old": "                    xlated_q     <= i_req_xl;",
+   "new": "                    xlated_q     <= 1'b0;"
+  },
+  {
+   "name": "a translated op's page is not taken",
+   "old": "                    if (i_req_xl) pa_q <= {8'b0, i_req_ppn, req_addr[11:0]};",
+   "new": "                    if (i_req_xl) pa_q <= req_addr;"
+  },
+  {
+   "name": "every op is taken as translated",
+   "old": "                    xlated_q     <= i_req_xl;",
+   "new": "                    xlated_q     <= 1'b1;"
+  }
+ ]
+}

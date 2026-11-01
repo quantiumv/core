@@ -1,0 +1,77 @@
+{
+ "dut": "design/pipe/qv_lsq.sv",
+ "tb": "design/pipe/qv_lsq_tb.sv",
+ "files": [
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_lsq.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench",
+  "-Pqv_lsq_tb.PRE_XL=1"
+ ],
+ "cwd": "design",
+ "timeout": 600,
+ "mutants": [
+  {
+   "name": "an SC is looked up",
+   "old": "    assign o_xl_req  = PRE_XL && i_xl_active && has_q && !xl_q[send_i] && !p_sc && !p_mis && !i_flush;",
+   "new": "    assign o_xl_req  = PRE_XL && i_xl_active && has_q && !xl_q[send_i] && !p_mis && !i_flush;"
+  },
+  {
+   "name": "a misaligned op is looked up",
+   "old": "    assign o_xl_req  = PRE_XL && i_xl_active && has_q && !xl_q[send_i] && !p_sc && !p_mis && !i_flush;",
+   "new": "    assign o_xl_req  = PRE_XL && i_xl_active && has_q && !xl_q[send_i] && !p_sc && !i_flush;"
+  },
+  {
+   "name": "never looked up",
+   "old": "    assign o_xl_req  = PRE_XL && i_xl_active && has_q && !xl_q[send_i] && !p_sc && !p_mis && !i_flush;",
+   "new": "    assign o_xl_req  = 1'b0;"
+  },
+  {
+   "name": "a lookup taken while the engine holds the port",
+   "old": "    wire   pre_hit   = o_xl_req && i_xl_free && i_xl_done && !i_xl_pf && !i_xl_af;",
+   "new": "    wire   pre_hit   = o_xl_req && i_xl_done && !i_xl_pf && !i_xl_af;"
+  },
+  {
+   "name": "a lookup that faults is kept",
+   "old": "    wire   pre_hit   = o_xl_req && i_xl_free && i_xl_done && !i_xl_pf && !i_xl_af;",
+   "new": "    wire   pre_hit   = o_xl_req && i_xl_free && i_xl_done;"
+  },
+  {
+   "name": "a miss is kept",
+   "old": "    wire   pre_hit   = o_xl_req && i_xl_free && i_xl_done && !i_xl_pf && !i_xl_af;",
+   "new": "    wire   pre_hit   = o_xl_req && i_xl_free && !i_xl_pf && !i_xl_af;"
+  },
+  {
+   "name": "a slot used again keeps the old translation",
+   "old": "                xl_q[tail_i]      <= 1'b0;\n",
+   "new": ""
+  },
+  {
+   "name": "a dispatch straight to the engine counts as translated",
+   "old": "    assign o_eng_xl  = PRE_XL && has_q && xl_q[send_i];",
+   "new": "    assign o_eng_xl  = PRE_XL && xl_q[send_i];"
+  },
+  {
+   "name": "the page of the wrong entry",
+   "old": "    assign o_eng_ppn = ppn_q[send_i];",
+   "new": "    assign o_eng_ppn = ppn_q[send_i + 1'b1];"
+  },
+  {
+   "name": "a load looked up as a write",
+   "old": "    assign o_xl_wr   = p_atomic ? !p_lr : p_store;",
+   "new": "    assign o_xl_wr   = 1'b1;"
+  },
+  {
+   "name": "a store looked up as a read",
+   "old": "    assign o_xl_wr   = p_atomic ? !p_lr : p_store;",
+   "new": "    assign o_xl_wr   = p_atomic && !p_lr;"
+  }
+ ]
+}
