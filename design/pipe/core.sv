@@ -27,6 +27,7 @@
  *   X  qv_exu_alu  alu.sv
  *      qv_exu_div  divider.sv, one divide at a time
  *   C  qv_commit   in-order retirement, regfile0 write, RVFI; trains the predictors with architectural outcomes
+ *      qv_lsq      load/store queue: the memory ops between dispatch and retirement, for qv_lsu (O2)
  *      qv_sb       store buffer: stores to RAM retire before they reach the bus (P9d)
  *      qv_dbg      Debug Mode state (halted, single-stepping)
  *
@@ -70,7 +71,8 @@
  * jump, or a target-buffer hint that came to nothing) only restart fetch;
  * commit's wins a tie.
  *
- * Knobs (defines, each also a parameter): QV_PIPE_SB_DEPTH (store buffer, 0 = none),
+ * Knobs (defines, each also a parameter): QV_PIPE_SB_DEPTH (store buffer, 0 = none), QV_PIPE_LSQ_DEPTH (load/store
+ * queue, 0 = none: one memory op between dispatch and completion),
  * QV_PIPE_FETCH_STREAM (back-to-back fetch, bigger fetch buffer and queue), QV_PIPE_BP (the three predictors;
  * their sizes QV_PIPE_BTB_ENTRIES / QV_PIPE_RAS_DEPTH / QV_PIPE_BHT_ENTRIES). With every one off the timing is
  * the one of P8, cycle for cycle.
@@ -129,6 +131,15 @@
 `endif
 `ifndef QV_PIPE_PMA_RAM_BASE
 `define QV_PIPE_PMA_RAM_BASE 64'h0
+`endif
+// The load/store queue (O2). QV_PIPE_LSQ_DEPTH 0 leaves it out: issue then dispatches a memory op only into a free
+// LSU, which is the timing without it.
+`ifndef QV_PIPE_LSQ_DEPTH
+`ifdef QV_FORMAL_SMALL
+`define QV_PIPE_LSQ_DEPTH 2
+`else
+`define QV_PIPE_LSQ_DEPTH 4
+`endif
 `endif
 `ifndef QV_PIPE_PMA_RAM_SIZE
 `define QV_PIPE_PMA_RAM_SIZE 64'h0
@@ -191,6 +202,7 @@ module core
     parameter bit DTLB_PROBE = `QV_PIPE_DTLB_PROBE,   // the data side looks up its translation before the head
     parameter bit CSR_NOSER  = `QV_PIPE_CSR_NOSER,    // CSR ops that change nothing a younger one sees do not serialize
     parameter int SB_DEPTH  = `QV_PIPE_SB_DEPTH,     // store buffer entries, 0: none
+    parameter int LSQ_DEPTH = `QV_PIPE_LSQ_DEPTH,    // load/store queue entries (a power of 2), 0: none
     parameter logic [63:0] PMA_RAM_BASE = `QV_PIPE_PMA_RAM_BASE,   // physical window of RAM: stores into it are posted
     parameter logic [63:0] PMA_RAM_SIZE = `QV_PIPE_PMA_RAM_SIZE
 ) (
@@ -582,7 +594,7 @@ module core
 
     // slow-unit outputs, declared ahead of the ROB and commit, which take them
     wb_t      lsu_wb, div_wb;
-    lsu_res_t lsu_res;
+    lsu_res_t lsu_res;                     // the result of the memory op at the ROB head (commit, RVFI, the store buffer)
     logic     c_sfence;                    // commit: an SFENCE.VMA retires, empty the TLBs
 
     // ---------------- ROB ----------------
@@ -692,10 +704,15 @@ module core
 
     // No bypass from the LSU's writeback: a dependent reads the ROB the next cycle, which
     // keeps wb_mem_dat_i out of issue's combinational paths.
+    // With the load/store queue, issue dispatches into the queue and the queue hands lsu0 one op at a time (eng_*);
+    // without it, issue talks to lsu0 directly.
+    fu_req_t  eng_req;
+    logic     eng_free;
+    lsu_res_t eng_res;
     qv_lsu #(.SB_EN(SB_DEPTH > 0), .PMA_RAM_BASE(PMA_RAM_BASE), .PMA_RAM_SIZE(PMA_RAM_SIZE),
              .PROBE(SV39_EN && DTLB_PROBE)) lsu0 (
         .clk(clk), .rst(rst), .i_flush(flush),
-        .i_req(lsu_req), .o_free(lsu_free),
+        .i_req(eng_req), .o_free(eng_free),
         .i_head_valid(head_valid), .i_head_tag(head_tag),
         .i_res_valid(res_valid), .i_res_addr(res_addr),
         .i_priv(priv), .i_mprv(mstatus_mprv_w), .i_mpp(mstatus_mpp_w), .i_pmp_bypass(pb_active),
@@ -705,7 +722,7 @@ module core
         .wb_mem_we_o(lsu_we), .wb_mem_cyc_o(lsu_cyc), .wb_mem_stb_o(lsu_stb),
         .wb_mem_lock_o(lsu_lock),
         .wb_mem_dat_i(wb_mem_dat_i), .wb_mem_ack_i(wb_mem_ack_i), .wb_mem_err_i(wb_mem_err_i),
-        .o_wb(lsu_wb), .o_res(lsu_res),
+        .o_wb(lsu_wb), .o_res(eng_res),
         .o_head_started(lsu_head_started),
         .i_satp_on(satp_on),
         .o_xl_req(x_req), .o_xl_va(x_va), .o_xl_wr(x_wr), .o_xl_active(x_active), .o_xl_priv(x_priv),
@@ -715,6 +732,22 @@ module core
         .i_sb_empty(sb_empty), .i_sb_match(sb_match), .i_sb_beat(sb_beat), .i_sb_go(sb_go_idle), .i_fetch_start(fetch_start_q),
         .o_sb_addr(sb_match_addr), .o_load_near(lsu_load_near), .o_in_bus(lsu_in_bus)
     );
+
+    // ---------------- the load/store queue ----------------
+    generate
+        if (LSQ_DEPTH > 0) begin : g_lsq
+            qv_lsq #(.DEPTH(LSQ_DEPTH)) lsq0 (
+                .clk(clk), .rst(rst), .i_flush(flush),
+                .i_req(lsu_req), .o_free(lsu_free),
+                .o_eng_req(eng_req), .i_eng_free(eng_free), .i_eng_wb(lsu_wb), .i_eng_res(eng_res),
+                .i_pop(commit_pop), .i_pop_tag(head_tag), .o_head_res(lsu_res)
+            );
+        end else begin : g_nolsq
+            assign eng_req  = lsu_req;
+            assign lsu_free = eng_free;
+            assign lsu_res  = eng_res;
+        end
+    endgenerate
 
     // ---------------- the store buffer ----------------
     generate
