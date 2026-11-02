@@ -2,6 +2,7 @@
 # run.sh [--mutants] -- module-level SymbiYosys proofs for units of the pipelined core.
 # Run under WSL (sby, yosys-slang, boolector; see the riscv-formal README).
 #
+#   lsq.sby (the queue with the engine): bmc and cover only.
 #   fetch.sby, lsu.sby, dbg.sby, ptw.sby, sb.sby: prove (k-induction), bmc and cover tasks must all
 #   PASS (cover: every non-vacuity cover point reached).
 #   --mutants: each property set must also catch known-bad versions, each
@@ -36,6 +37,12 @@ for unit in fetch lsu dbg ptw sb fpu; do
         printf '%-12s %s\n' "$unit $task" "$r"
         [ "$r" == "PASS" ] || fail=1
     done
+done
+# the load/store queue with the engine (lsq.sby): bounded only, no k-induction (see lsq_props.sv)
+for task in bmc cover; do
+    r=$(sby -f lsq.sby $task 2>&1 | status)
+    printf '%-12s %s\n' "lsq $task" "$r"
+    [ "$r" == "PASS" ] || fail=1
 done
 
 if [ "${1:-}" == "--mutants" ]; then
@@ -159,6 +166,35 @@ EOF
     fpu_mutant fpu_ds_busy_short   qv_fpu_divsqrt 's/assign o_busy = st_q != S_IDLE;/assign o_busy = st_q == S_ITER;/'
     fpu_mutant fpu_tag_skips_stage qv_fpu_pipe 's/r2_tag <= r1_tag;/r2_tag <= r0.tag;/'
     fpu_mutant fpu_stage_skipped   qv_fpu_pipe 's/r3_valid <= r2_valid;/r3_valid <= r1_valid;/'
+    # lsq_mutant NAME FILE SED-EXPR: the queue proof is two units (qv_lsq, qv_lsu); one of them is mutated
+    lsq_mutant() {
+        local name=$1 file=$2 expr=$3
+        local d=$T/$name
+        mkdir -p "$d"
+        for f in qv_pkg qv_pmp qv_lsq qv_lsu; do cp "$REPO/design/pipe/$f.sv" "$d/"; done
+        cp "$HERE/lsq_props.sv" "$d/"
+        sed "$expr" "$REPO/design/pipe/$file.sv" > "$d/$file.sv"
+        if cmp -s "$d/$file.sv" "$REPO/design/pipe/$file.sv"; then
+            printf '%-30s %s\n' "mutant $name" "sed changed nothing"; fail=1; return
+        fi
+        sed -e 's#^\.\./\.\./\.\./design/pipe/##' "$HERE/lsq.sby" > "$d/lsq.sby"
+        local r
+        r=$(cd "$d" && sby -f lsq.sby bmc 2>&1 | status)
+        if [ "$r" == "FAIL" ]; then
+            printf '%-30s %s\n' "mutant $name" "caught"
+        else
+            printf '%-30s %s\n' "mutant $name" "NOT CAUGHT ($r)"; fail=1
+        fi
+    }
+    lsq_mutant lsq_early_ignores_bar  qv_lsu 's/wire early     = EARLY \&\& i_early \&\& /wire early     = EARLY \&\& /'
+    lsq_mutant lsq_early_outside_ram  qv_lsu 's/wire ram_ld    = pa_in_window \&\& /wire ram_ld    = /'
+    lsq_mutant lsq_early_atomic       qv_lsu 's/wire ram_ld    = pa_in_window \&\& !store_q \&\& !atomic_q/wire ram_ld    = pa_in_window \&\& !store_q/'
+    lsq_mutant lsq_no_match           qv_lsq 's/assign o_match = |posted_hit;/assign o_match = 1'"'"'b0;/'
+    lsq_mutant lsq_match_no_copy      qv_lsq 's/r    = (copy_q \&\& copy_idx_q == IW.(i)) ? i_eng_res : res_q\[i\];/r    = res_q[i];/'
+    lsq_mutant lsq_head_no_bypass     qv_lsq 's/assign o_head_res = (copy_q \&\& copy_idx_q == head_i) ? i_eng_res : res_q\[head_i\];/assign o_head_res = res_q[head_i];/'
+    lsq_mutant lsq_pop_any_tag        qv_lsq 's/ \&\& (i_pop_tag == tag_q\[head_i\])//'
+    lsq_mutant lsq_bar_ignored        qv_lsq 's/assign o_early  = (cmpl_q != send_q) \&\& !bar_q\[cmpl_i\];/assign o_early  = (cmpl_q != send_q);/'
+    lsq_mutant lsq_newest_first       qv_lsq 's/o_eng_req       = has_q ? send_e : i_req;/o_eng_req       = i_req.valid ? i_req : send_e;/'
     rm -rf "$T"
 fi
 
