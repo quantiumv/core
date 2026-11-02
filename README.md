@@ -9,8 +9,9 @@ Join the [Discord](https://discord.gg/sQjhBvWXjF) if you want to take part.
 Fetch, align (RVC), decode, in-order issue into a reorder buffer, ALU / branch / divide /
 floating-point / load-store units, and in-order commit, which owns every architectural effect (register
 writes, CSRs, traps, privilege changes, interrupts and debug entry). Single issue; fetch runs back to
-back and predicts branches (a target buffer, a history table, a return-address stack); loads execute at
-the head of the ROB, and stores to RAM retire into a store buffer that writes them out behind it.
+back and predicts branches (a target buffer, a history table, a return-address stack); memory ops wait in
+a load/store queue and are performed one at a time in program order, a plain load from RAM before it
+reaches the head of the ROB, and stores to RAM retire into a store buffer that writes them out behind it.
 Translated code runs at nearly untranslated speed (fetch reuses its last page, the data side looks up its
 TLB before the head), and CSR reads and trap-CSR writes do not flush the pipeline.
 

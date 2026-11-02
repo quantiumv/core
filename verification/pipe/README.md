@@ -283,6 +283,48 @@ The gate (2026-10-31), the core against the reference, Verilator, four memory co
     100 x 4 and REF vs REF 25 x 4, all clean.
 - riscv-formal: `../riscv-formal/quantiumv_pipe/README.md`.
 
+### O2: the load/store queue (branch `OOO`)
+
+What the head waited for in memory ops was 20-47 % of the kernels' cycles, and reservation stations alone (O1) would
+have recovered only a few per cent of it, so O2 came first. An oracle LSU that started plain RAM loads before the head
+(`run_perf.sh --oracle early`, `oracle_lsu.sv`) bounded the gain at 9-31 % on six kernels; then, each slice behind its
+own knob (every one off reproduces the core before it, cycle for cycle; all four perf CSVs are byte-identical with
+`QV_PIPE_LSQ_DEPTH=0`):
+- O2.1 (`d0b7ed0`): a FENCE ordering writes before reads drains the store buffer at commit.
+- O2a-0 (`641f437`): `qv_lsq` holds the memory ops from dispatch to retirement (4 entries) and hands `qv_lsu`, still
+  the one engine, one at a time; each op's result waits in its entry until it retires.
+- O2a-1 (`8637771`, `QV_PIPE_LSQ_EARLY`, `_EARLY_ST`): a plain load from RAM starts, and a plain store to RAM is
+  posted, before the head once no barrier is older; the queue's posted entries join the store buffer's match;
+  `o_debug_mode` waits for the port to be quiet.
+- O2b (`29764f7`, `QV_PIPE_LSQ_HANDOFF`): the LSU takes its next op in the cycle the last completes on the bus or is
+  posted.
+- O2c (`50591f0`, `QV_PIPE_LSQ_PRE_XL`): while the LSU leaves the data TLB's port free, the queue looks up its oldest
+  op there (no walk) and the LSU takes it translated.
+- O2d (`e2acd16`, `QV_PIPE_LSQ_BYPASS`): the LSU's writeback is a bypass source in issue.
+- O2e (forwarding from older stores) is not built: the queue's counters (`baseline_pipe*_lsq.csv`) show loads waiting
+  for an older store to their dword in one kernel only (trap, about 8 % of its cycles on the SoC).
+
+The gate (2026-11-01), the core against the reference, Verilator, four memory configurations, on a snapshot of
+`6b78b8b`:
+- Perf: with `QV_PIPE_LSQ_DEPTH=0` the four CSVs are byte-identical to the ones before O2; with the queue on no kernel
+  is slower in either build or configuration (`../perf/README.md`).
+- Regression: core 147/147 with the queue on, with it off, and with each of `QV_PIPE_LSQ_EARLY`, `_HANDOFF`,
+  `_PRE_XL` and `_BYPASS` off; reference 78/78. Lint clean. The RVFI diff: 150/150.
+- Lockstep, fresh seeds:
+  - the FP profile 500 x 4 = 2,000/2,000 (87.7 M retirements, 2.71 M interrupt entries); with `--mem-dense`
+    2,000/2,000 (186.4 M, 5.31 M); the late modes 2,000/2,000 (83.1 M, 2.45 M); an M-mode body with PMP 300 x 4 =
+    1,200/1,200;
+  - 100 x 4 each with the queue off, with early accesses and the handoff off, with early stores and the handoff off,
+    and with pre-translation and the bypass off: 400/400 each;
+  - the corpora x 4: act-fd 1,704/1,704, ACT + firmware + 100 random 1,228/1,228, dbg 800/800, smc and irq clean.
+- Mutation: `o21_unit_commit` 10/10, `o2a_unit_lsq` 24/24 (+2 equivalent), `o2a_unit_lsu` 16/16, `o2a_unit_lsu_ld`
+  1/1, `o2a_unit_lsu_nosb` 3/3, `o2b_unit_lsu` 7/7, the pre-translation specs 14/14, the bypass specs 8/8. The
+  older LSU and commit patterns that O2 moved are re-anchored, and every pattern of every spec still matches
+  (`check_patterns.py` 1,056/1,056).
+- Module proofs (`verification/formal/pipe/run.sh --mutants`): 20 of 20 tasks PASS, the queue's `bmc` and `cover`
+  among them, and all 68 known-bad versions are caught (9 of them the queue's).
+- riscv-formal: `../riscv-formal/quantiumv_pipe/README.md`.
+
 ## Where the core differs from ref_core.sv
 
 Architectural behavior is the same: the lockstep gate compares every retirement, a CSR snapshot, the bus
@@ -319,6 +361,21 @@ P9 (store buffer and branch prediction; the retired stream is the same, the timi
   checks; the aligner confirms or corrects a target-buffer hint, so an aliased or stale entry costs time only.
   The predictors are trained by retirements only (never in a Program Buffer run), so the fetch stream they
   produce is a function of the retired history, and a FENCE.I needs no special handling.
+
+O2 (the load/store queue; the retired stream is the same, the timing is not):
+- The memory ops between dispatch and retirement wait in `qv_lsq` (4 entries), and `qv_lsu` performs them one at a
+  time in program order, taking the next as the last completes on the bus or is posted. Once no barrier is older (a
+  FENCE, a serializing uop, a system op, a uop that traps or has a trigger), a plain load from RAM reads memory, and a
+  plain store to RAM is posted, before it is the head of the ROB; the FSM does every access at its head. So loads can
+  read RAM on a wrong path (the window must be safe to read as well as to write: it is in all three harnesses), and an
+  early load in flight when an interrupt or a halt is taken is drained and done again later: such a RAM word is read
+  twice. Faults, atomics, MMIO, Program Buffer accesses and page walks still wait for the head.
+- A load waits for an older store to its dword that is posted and not retired (in the queue), as for one in the store
+  buffer, then reads memory: no forwarding, as before. `o_debug_mode` is raised only once the port is quiet (an early
+  load drained) as well as the buffer empty.
+- A FENCE whose predecessor set has W and successor set has R (not FENCE.TSO) waits at commit for the store buffer to
+  be empty; before O2.1 a younger RAM load could read memory while an older store to another dword was still buffered,
+  which only the Debug Module's System Bus Access could have seen.
 
 Sv39 (the data side and the instruction side are both translated; same pages, same faults, same causes and
 mtvals per instruction):
