@@ -22,23 +22,24 @@ never do.
 (and `make clean` in this directory for the kernels): re-run from clean after any
 RTL change.
 
-## Results (after P10, 2026-10)
+## Results (after O2, 2026-11, branch `OOO`)
 
 CPI (cycles per retired instruction), M mode:
 
-| Kernel | reference, sram | core, sram | reference, cache | core, cache | core before P9, cache |
-|---|---|---|---|---|---|
-| memcpy | 3.77 | 1.84 | 4.28 | 1.74 | 2.36 |
-| crc32 | 3.03 | 1.13 | 3.03 | 1.12 | 1.25 |
-| qsort | 3.55 | 1.91 | 3.73 | 1.86 | 2.46 |
-| matmul | 3.62 | 1.66 | 3.69 | 1.63 | 1.78 |
-| sieve | 3.97 | 1.52 | 4.45 | 1.28 | 2.00 |
-| listchase | 3.80 | 1.80 | 3.90 | 1.90 | 1.91 |
-| mixedint | 3.99 | 1.78 | 4.33 | 1.58 | 2.14 |
-| trap (P10.0) | 4.00 | 2.29 | 4.43 | 2.40 | |
+| Kernel | reference, sram | core, sram | reference, cache | core, cache | core at P10, cache | core before P9, cache |
+|---|---|---|---|---|---|---|
+| memcpy | 3.77 | 1.70 | 4.28 | 1.53 | 1.74 | 2.36 |
+| crc32 | 3.03 | 1.12 | 3.03 | 1.11 | 1.12 | 1.25 |
+| qsort | 3.55 | 1.68 | 3.73 | 1.62 | 1.86 | 2.46 |
+| matmul | 3.62 | 1.38 | 3.69 | 1.16 | 1.63 | 1.78 |
+| sieve | 3.97 | 1.51 | 4.45 | 1.04 | 1.28 | 2.00 |
+| listchase | 3.80 | 1.60 | 3.90 | 1.09 | 1.90 | 1.91 |
+| mixedint | 3.99 | 1.62 | 4.33 | 1.37 | 1.58 | 2.14 |
+| trap (P10.0) | 4.00 | 1.86 | 4.43 | 2.25 | 2.40 | |
 
-The core is 2 to 3.5 times faster than the reference on every kernel, and 1.8 times on `trap` (an OS trap path)
-since P10c stopped CSR reads and trap-CSR writes from flushing the pipeline (it was 3.58 on the SoC at P10.0).
+The core is 2.1 to 4.3 times faster than the reference on every kernel, and 2.0 to 2.2 times on `trap` (an OS trap path)
+since P10c stopped CSR reads and trap-CSR writes from flushing the pipeline (it was 3.58 on the SoC at P10.0). The
+load/store queue (O2) is the step from the "at P10" column to the core's.
 
 ## F/D kernels
 
@@ -296,6 +297,44 @@ above, S mode:
   sieve's inner loop (`sb` and the closing `bge`, both 32-bit) straddles two dword boundaries in the M build
   (0x7e-0x89) and none in the S build (0x13c-0x147), which is why on the flat SRAM, where fetch shares the bus, it
   runs faster in S mode than in M mode (0.85).
+
+## The load/store queue (O2, branch `OOO`)
+
+`qv_lsq` queues up to four memory ops in program order in front of the LSU, which still performs them one at a time
+and in order, but now as soon as they reach it rather than at the ROB head: a plain load from RAM starts, and a plain
+store to RAM is posted (it goes to the store buffer at its commit, as before), once nothing older that could change
+the outcome is still unretired (a FENCE, a serializing or system op, a faulting or triggered one). Everything else
+(atomics, LR/SC, MMIO, faults, Program Buffer accesses) stays at the head. Four more pieces ride on it: the LSU takes
+its next op in the cycle the last one completes (O2b), the queue looks the next op's translation up while the LSU is
+on the bus (O2c), a load's value goes straight to issue (O2d), and a FENCE that orders writes before reads drains the
+store buffer (O2.1). Knobs: `QV_PIPE_LSQ_DEPTH` (0 is the core before O2, and gives byte-identical CSVs),
+`QV_PIPE_LSQ_EARLY`, `_EARLY_ST`, `_HANDOFF`, `_PRE_XL`, `_BYPASS`. Cycles against the core before O2, both modes:
+
+| kernel | M SoC | O2 | change | CPI | M SRAM | S SoC | S SRAM | early loads | early stores | handoffs |
+|---|---|---|---|---|---|---|---|---|---|---|
+| memcpy | 1148 | 1007 | -12.3 % | 1.528 | -7.4 % | -38.4 % | -13.3 % | 9 | 128 | 121 |
+| crc32 | 9913 | 9785 | -1.3 % | 1.107 | -1.3 % | 0.0 % | 0.0 % | 127 | 1 | 0 |
+| qsort | 8566 | 7461 | -12.9 % | 1.618 | -11.7 % | -12.0 % | -11.7 % | 582 | 361 | 400 |
+| matmul | 6972 | 4988 | -28.5 % | 1.164 | -16.6 % | -26.4 % | -22.6 % | 1088 | 64 | 576 |
+| sieve | 7540 | 6118 | -18.9 % | 1.038 | -0.2 % | -18.6 % | -0.2 % | 28 | 1391 | 0 |
+| listchase | 4883 | 2806 | -42.5 % | 1.094 | -11.2 % | -32.0 % | -22.2 % | 1025 | 0 | 544 |
+| mixedint | 6939 | 6035 | -13.0 % | 1.374 | -9.2 % | -36.2 % | -15.7 % | 124 | 720 | 600 |
+| trap | 13432 | 12632 | -6.0 % | 2.254 | -18.7 % | -5.8 % | -15.4 % | 800 | 1000 | 2000 |
+| fmatmul | 7740 | 4664 | -39.7 % | 1.236 | -27.2 % | -37.8 % | -28.7 % | 1152 | 61 | 576 |
+| fpmix | 4427 | 4356 | -1.6 % | 10.836 | -2.4 % | -0.9 % | -0.9 % | 34 | 3 | 2 |
+
+The last three columns are the M-mode SoC counts of `baseline_pipe_lsq.csv` (`PERF_LSQ`, one per event).
+
+- Geometric mean of the ten: 0.810 (M SoC), 0.890 (M SRAM), 0.779 (S SoC), 0.864 (S SRAM). No kernel is slower in
+  any of the four, and instret is unchanged on every row.
+- listchase and matmul beat the early-load oracle's figures (-31.4 % and -13.8 %): the oracle kept a lost cycle
+  between ops and stores at the head, which the handoff and early posting remove.
+- In S mode on the SoC memcpy and mixedint now run within 2 % of M mode (they were 1.43 and 1.39): the queue looks
+  the next op's translation up while the LSU is still on the bus. listchase (1.18) and matmul (1.11) gained more in
+  M mode than in S mode.
+- What is left: the flat SRAM gains less because fetch and data share one bus, and an early access only moves a
+  beat; sieve's stores are bound by the store buffer's drain; trap's restores read the dwords its saves just wrote
+  and wait for them (1,000 match-wait cycles, 8 % of its window), which forwarding would remove (not built).
 
 ## CPI stack
 
