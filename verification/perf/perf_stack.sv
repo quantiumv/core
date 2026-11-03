@@ -112,7 +112,28 @@ module perf_stack #(
     input logic             lsq_match_wait = 1'b0,  // a load waits for an older store to its dword (queue or buffer)
     input logic             lsq_qmatch = 1'b0,      // ... one in the queue (posted, not retired)
     input logic             lsq_handoff = 1'b0,     // the LSU takes its next op as the last completes
-    input logic             lsq_drain = 1'b0        // a flush finds an early load on the bus (it is drained)
+    input logic             lsq_drain = 1'b0,       // a flush finds an early load on the bus (it is drained)
+
+    // +ILPTRACE (O1.0): when each instruction entered the instruction queue, left it, was dispatched, reached the
+    // LSU, started its access and completed (any writeback port), for the trace model verification/perf/ilp.py
+    input logic             iq_push0 = 1'b0,
+    input logic             iq_push1 = 1'b0,
+    input logic             iq_pop = 1'b0,
+    input logic             alloc_valid = 1'b0,
+    input logic [TAG_W-1:0] alloc_tag = '0,
+    input logic             lsu_acc = 1'b0,         // the LSU takes an op ...
+    input logic [TAG_W-1:0] lsu_acc_tag = '0,       // ... with this tag
+    input logic             lsu_go = 1'b0,          // its access starts (on the bus, posted, or done without the bus) ...
+    input logic             lsu_go_early = 1'b0,    // ... before it is the head
+    input logic [TAG_W-1:0] lsu_go_tag = '0,
+    input logic             wb2_valid = 1'b0,       // the LSU's, the divider's and the FPU's writebacks
+    input logic [TAG_W-1:0] wb2_tag = '0,
+    input logic             wb3_valid = 1'b0,
+    input logic [TAG_W-1:0] wb3_tag = '0,
+    input logic             wb4_valid = 1'b0,
+    input logic [TAG_W-1:0] wb4_tag = '0,
+    input logic             trap = 1'b0,            // the retiring instruction takes a synchronous exception
+    input logic [63:0]      mem_addr = '0           // the head memory op's physical dword
 );
     localparam logic [2:0] FU_DIV = 3'd2;
     localparam logic [2:0] FU_LSU = 3'd3;
@@ -168,6 +189,66 @@ module perf_stack #(
     always @(posedge clk)
         if (brtrace && win_q == 1 && commit && head_cls == 3'd1)
             $display("BR %h %h %h", head_pc, head_raw, head_next_pc);
+
+    // +ILPTRACE: one line per instruction retired inside the window, with the cycles of its way through the core:
+    //   ILP pc raw push pop disp acc go cmpl commit early ared trap redir addr
+    // push/pop: entered/left the instruction queue; disp: issued (ROB allocation); acc/go: the LSU took it / started
+    // its access (0 for other ops); cmpl: its writeback; ared: the aligner redirected fetch after it (a taken branch
+    // or a hint it did not confirm); redir: the commit redirect it caused (0 none, 1 mispredict, 2 serializing,
+    // 3 other: a trap or xRET); addr: its physical dword (memory ops). Cycles count from reset.
+    bit ilptrace;
+    initial ilptrace = $test$plusargs("ILPTRACE");
+    localparam int IQ_MIRROR = 16;
+    longint unsigned iqm_push [0:IQ_MIRROR-1];       // the instruction queue's entries, mirrored
+    bit              iqm_ared [0:IQ_MIRROR-1];
+    int              iqm_rd, iqm_n;
+    longint unsigned dec_push, dec_pop;              // the uop decode holds
+    bit              dec_ared;
+    longint unsigned t_push [0:(1<<TAG_W)-1], t_pop [0:(1<<TAG_W)-1], t_disp [0:(1<<TAG_W)-1];
+    longint unsigned t_acc [0:(1<<TAG_W)-1], t_go [0:(1<<TAG_W)-1], t_cmpl [0:(1<<TAG_W)-1];
+    bit              t_early [0:(1<<TAG_W)-1], t_ared [0:(1<<TAG_W)-1];
+    initial begin iqm_rd = 0; iqm_n = 0; end
+    always @(posedge clk) if (ilptrace && !rst) begin
+        // retire first: the head's entry is read before this cycle's events touch it
+        if (win_q == 1 && commit)
+            $display("ILP %h %h %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %h", head_pc, head_raw,
+                     t_push[head_tag], t_pop[head_tag], t_disp[head_tag], t_acc[head_tag], t_go[head_tag],
+                     t_cmpl[head_tag], cycle_q, t_early[head_tag], t_ared[head_tag], trap,
+                     !flush ? 0 : head_mispredict ? 1 : head_serialize ? 2 : 3, mem_addr);
+        // dispatch takes the uop decode holds (before a pop this cycle replaces it)
+        if (alloc_valid) begin
+            t_push[alloc_tag] = dec_push; t_pop[alloc_tag] = dec_pop; t_disp[alloc_tag] = cycle_q;
+            t_ared[alloc_tag] = dec_ared; t_acc[alloc_tag] = 0; t_go[alloc_tag] = 0; t_cmpl[alloc_tag] = 0;
+            t_early[alloc_tag] = 0;
+        end
+        if (lsu_acc) t_acc[lsu_acc_tag] = cycle_q;
+        if (lsu_go)  begin t_go[lsu_go_tag] = cycle_q; t_early[lsu_go_tag] = lsu_go_early; end
+        // a writeback for a tag dispatched in this same cycle is a flushed op's (only the LSU's is not masked)
+        if (wb_valid  && cycle_q > t_disp[wb_tag])  t_cmpl[wb_tag]  = cycle_q;
+        if (wb2_valid && cycle_q > t_disp[wb2_tag]) t_cmpl[wb2_tag] = cycle_q;
+        if (wb3_valid && cycle_q > t_disp[wb3_tag]) t_cmpl[wb3_tag] = cycle_q;
+        if (wb4_valid && cycle_q > t_disp[wb4_tag]) t_cmpl[wb4_tag] = cycle_q;
+        // the instruction queue: decode pops its head into its register; pushes go to the tail
+        if (flush) begin
+            iqm_n = 0;
+        end else begin
+            if (iq_pop && iqm_n > 0) begin
+                dec_push = iqm_push[iqm_rd]; dec_ared = iqm_ared[iqm_rd]; dec_pop = cycle_q;
+                iqm_rd = (iqm_rd + 1) % IQ_MIRROR; iqm_n = iqm_n - 1;
+            end
+            if (iq_push0) begin
+                iqm_push[(iqm_rd + iqm_n) % IQ_MIRROR] = cycle_q; iqm_ared[(iqm_rd + iqm_n) % IQ_MIRROR] = 0;
+                iqm_n = iqm_n + 1;
+            end
+            if (iq_push1) begin
+                iqm_push[(iqm_rd + iqm_n) % IQ_MIRROR] = cycle_q; iqm_ared[(iqm_rd + iqm_n) % IQ_MIRROR] = 0;
+                iqm_n = iqm_n + 1;
+            end
+            // an align redirect follows the last instruction pushed (in this cycle or before)
+            if (fe_redirect && iqm_n > 0) iqm_ared[(iqm_rd + iqm_n - 1) % IQ_MIRROR] = 1;
+            else if (fe_redirect && (iq_pop || alloc_valid)) dec_ared = 1;
+        end
+    end
 
     // the kind of a mispredicted branch from its encoding (32-bit and RVC)
     function automatic int mp_kind(input logic [31:0] raw);

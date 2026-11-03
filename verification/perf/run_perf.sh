@@ -28,6 +28,7 @@ ORACLE=""
 DEFINES=""
 LABEL=""
 MODE=m
+ILPDIR=""
 
 usage() {
     cat <<EOF
@@ -44,6 +45,7 @@ Usage: run_perf.sh [options]
   --defines "A=1 B"    extra Verilog defines for the testbench builds (e.g. "QV_PIPE_SB_DEPTH=0" for the old timing)
   --label NAME        results go to baseline_<core>_<NAME>.csv (and its _stack.csv) and the builds are tagged, so the committed baselines stay
   --timeout N          per-run cycle budget passed as +TIMEOUT (default 2000000)
+  --ilptrace DIR       also write each run's +ILPTRACE lines (perf_stack.sv) to DIR/<kernel>[_s]_<config>.ilp
   --wall-timeout N      real seconds per run before it's killed (default 120)
   -h, --help
 EOF
@@ -60,6 +62,7 @@ while [ $# -gt 0 ]; do
         --label) LABEL="$2"; shift 2 ;;
         --timeout) MAX_CYCLES="$2"; shift 2 ;;
         --wall-timeout) WALL_TIMEOUT="$2"; shift 2 ;;
+        --ilptrace) ILPDIR="$2"; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "Unknown argument: $1" >&2; usage; exit 1 ;;
     esac
@@ -177,7 +180,14 @@ run_one() {
         return
     fi
     local out
-    out=$(timeout "$WALL_TIMEOUT" vvp "$vvp" +HEXFILE="$hex" +PERF_RESULT_ADDR="$addr" +TIMEOUT="$MAX_CYCLES" 2>&1 | grep -v "Unable to open")
+    local plus=""
+    [ -n "$ILPDIR" ] && plus="+ILPTRACE"
+    out=$(timeout "$WALL_TIMEOUT" vvp "$vvp" +HEXFILE="$hex" +PERF_RESULT_ADDR="$addr" +TIMEOUT="$MAX_CYCLES" $plus 2>&1 | grep -v "Unable to open")
+    if [ -n "$ILPDIR" ]; then
+        mkdir -p "$ILPDIR"
+        echo "$out" | grep "^ILP " > "$ILPDIR/${kernel}${SFX}_${cfg_name}.ilp"
+        out=$(echo "$out" | grep -v "^ILP ")
+    fi
     local line
     line=$(echo "$out" | grep "^PERF_RESULT:" | head -1)
     if [ -z "$line" ]; then

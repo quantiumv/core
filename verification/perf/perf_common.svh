@@ -52,7 +52,15 @@
         .lsq_match_wait(CORE.lsu0.state_q == 2'd1 && CORE.lsu0.match_case && CORE.lsu0.pa_valid && CORE.lsu0.i_sb_match), \
         .lsq_qmatch(CORE.lsu0.state_q == 2'd1 && CORE.lsu0.match_case && CORE.lsu0.pa_valid && CORE.lsq_match), \
         .lsq_handoff(CORE.lsu0.handoff && CORE.lsu0.accept), \
-        .lsq_drain(CORE.flush && CORE.lsu0.in_bus && CORE.lsu0.early_q) \
+        .lsq_drain(CORE.flush && CORE.lsu0.in_bus && CORE.lsu0.early_q), \
+        .iq_push0(CORE.p0_valid), .iq_push1(CORE.p1_valid), .iq_pop(CORE.iq_pop && CORE.iq_valid), \
+        .alloc_valid(CORE.alloc_valid), .alloc_tag(CORE.alloc_tag), \
+        .lsu_acc(CORE.lsu0.accept), .lsu_acc_tag(CORE.lsu0.i_req.tag), \
+        .lsu_go(CORE.lsu0.start || CORE.lsu0.post_done || CORE.lsu0.done_nobus), .lsu_go_early(!CORE.lsu0.at_head), \
+        .lsu_go_tag(CORE.lsu0.tag_q), \
+        .wb2_valid(CORE.lsu_wb.valid), .wb2_tag(CORE.lsu_wb.tag), .wb3_valid(CORE.div_wb.valid), .wb3_tag(CORE.div_wb.tag), \
+        .wb4_valid(CORE.fpu_wb.valid), .wb4_tag(CORE.fpu_wb.tag), \
+        .trap(CORE.trap_taken), .mem_addr(CORE.lsu_res.mem_addr) \
     );
 `define PERF_STACK_REPORT(STACK, MEM_ARRAY, ADDR) \
     begin \
