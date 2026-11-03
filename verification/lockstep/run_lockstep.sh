@@ -350,10 +350,11 @@ build_random_entries() {
         local tag="random_${seed}"
         local base="$OUTDIR/rand_${DUT}_${gen_hash}_${tag}"
         if [ ! -e "${base}.hex" ] || [ "$FORCE" == "1" ]; then
+            # (the defaults go first, so a profile's own --len or --dep-bias wins)
             # shellcheck disable=SC2086
             python3 "$REPO_ROOT/verification/lockstep/gen/qvgen.py" \
-                $RANDOM_PROFILE --len 500 --seed "$seed" \
-                --dep-bias 0.3 -o "$base" --build > "$OUTDIR/gen_${DUT}_${tag}.log" 2>&1
+                --len 500 --dep-bias 0.3 $RANDOM_PROFILE --seed "$seed" \
+                -o "$base" --build > "$OUTDIR/gen_${DUT}_${tag}.log" 2>&1
         fi
         [ -e "${base}.elf" ] || { echo "WARN: qvgen seed $seed failed to build, skipping" >&2; continue; }
         local tohost
