@@ -479,3 +479,50 @@ branch's bubble is mostly hidden by the queues; a mispredict costs about 4.5 cyc
 
 `check_cpi.py` compares a run's `baseline_pipe.csv` with the committed one: it fails when a kernel's
 instret changes or its cycles rise on the SoC configuration.
+
+### What out-of-order issue and two-wide would buy (O1.0)
+
+`run_perf.sh --ilptrace DIR` writes one line per instruction retired in each window (`+ILPTRACE`: the cycles it
+entered and left the instruction queue, was issued, reached the LSU, started its access, wrote back and committed),
+and `ilp.py --traces DIR` replays the traces through a dataflow model of the core: in-order dispatch into the ROB and
+the load/store queue, issue in order or (with a reservation station) out of order, one memory engine in order with the
+handoff, the D$ shared by loads and the store buffer's drain (a beat holds the D$ for 5 cycles, and a load that is
+ready, or waiting near the ROB head, holds the drain off until the buffer is full or 16 cycles have passed), commit in
+order, and the refill after each commit redirect. What the structure does not explain is kept as a per-instruction
+residual measured on the core as it is, so the traced configuration replays exactly.
+
+The model was checked against runs of the core with one knob changed (`--validate`, the SoC configuration, M mode):
+it predicts the cycle change of every kernel within 0.3 percentage points for the queue off
+(`QV_PIPE_LSQ_DEPTH=0`: memcpy +14.0 %, listchase +74 %, fmatmul +66 %), early accesses off, the handoff off, the
+bypass off (crc32 +23.5 %) and a store buffer of 2 (mixedint +6.9 %). It does not predict the frontend: with
+`QV_PIPE_FETCH_STREAM=0` sieve measures +47 % and the model says +1 %, so the two-wide figures below are given with
+the frontend's measured gaps kept (`res`, pessimistic) and with an ideal streaming frontend (`ideal`: a dword a cycle,
+two instructions a cycle into the queue). The SRAM harness, where fetch and data share one bus, is not modelled.
+
+Change in cycles against the core, SoC configuration (S mode in brackets where it differs by more than 2 points):
+
+| kernel | OOO, RS 8 | + ROB 16 | D$ write 3 cycles | 2-wide in order | 2-wide OOO (res .. ideal) | 2-wide OOO + D$ write 3 |
+|---|---|---|---|---|---|---|
+| memcpy | 0.0 % | 0.0 % | -23.5 % | -1.2 % | -1.2 % | -24.3 % |
+| crc32 | 0.0 % | 0.0 % | 0.0 % | -30.2 % (-20.6 %) | -30.2 .. -31.5 % | -31.5 % |
+| qsort | -0.1 % | -0.1 % | -3.6 % | -15.2 % | -15.3 .. -17.1 % | -19.7 % |
+| matmul | -0.4 % (-8.4 %) | -0.4 % (-8.4 %) | 0.0 % | -13.1 % | -18.6 .. -30.7 % | -30.7 % |
+| sieve | 0.0 % | 0.0 % | 0.0 % | -1.0 % | -1.1 .. -3.1 % | -46.5 % |
+| listchase | -0.7 % | -0.7 % | 0.0 % | -17.2 % (-0.1 %) | -17.2 % (-0.1 %) | -17.2 % |
+| mixedint | 0.0 % | 0.0 % | -19.8 % | -5.0 % | -5.0 .. -6.1 % | -25.0 % |
+| trap | 0.0 % | 0.0 % | -19.0 % | -4.7 % | -4.7 .. -4.8 % | -23.8 % |
+| fmatmul | -0.8 % (-9.0 %) | -1.4 % (-9.0 %) | 0.0 % | -8.4 % | -9.3 .. -19.7 % | -19.7 % |
+| fpmix | -5.5 % | -10.7 % | 0.0 % | -0.8 % | -10.8 .. -11.0 % | -11.0 % |
+| geomean | -0.8 % (-2.4 %) | -1.4 % (-3.0 %) | -7.1 % | -10.2 % (-7.2 %) | -11.8 .. -14.9 % | -25.6 % |
+
+(2-wide: two dispatches, two ALU pipes, two commits a cycle, a pair only behind a plain retirement, ROB 16, one memory
+engine; "D$ write 3 cycles": a drain beat holds the D$ for 3 cycles instead of 5.)
+
+What it says:
+- Out-of-order issue alone buys almost nothing: dispatch and commit stay one a cycle, and what the head waits for is
+  mostly memory, which the queue already starts early. Only fpmix (the divides overlap the work behind them, more with
+  a bigger ROB) and, in S mode, matmul and fmatmul gain.
+- The single biggest lever at one-wide is the D$ write path: memcpy, mixedint and trap are bound by the blocking
+  write-through D$ (a store's drain holds it for 5 cycles, a load for 2: memcpy's loop is exactly those 7 cycles).
+- Two-wide in order gains about 10 % (crc32 and listchase most); out of order adds 2 to 4 points on top, almost all of
+  it on matmul, fmatmul and fpmix. Store-heavy code gains from two-wide only once the D$ write path is faster.
