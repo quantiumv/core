@@ -135,6 +135,7 @@ module cache_complex_tb #(
     int   mem_base, ties_base;
     int   ties = 0, tie_violations = 0, dn_violations = 0;
     logic both_busy_seen = 1'b0;
+    logic dc_refused_seen = 1'b0;     // a write dcache0 passes through waited for the bus (slow rows only)
 
     /*
      * Downstream request stability. A request starts in a cycle with cyc
@@ -182,6 +183,8 @@ module cache_complex_tb #(
         // passing a write through).
         if (dut.icache0.state_q != 0 && (dut.dcache0.state_q != 0 || dut.dcache0.mem_cyc_o || dut.dcache0.wr_pend_q))
             both_busy_seen = 1'b1;
+        if (dut.want_dc && !dut.grant_dc && dut.dcache0.mem_we_o)
+            dc_refused_seen = 1'b1;
         // Priority invariant: whenever both sub-caches request the shared bus
         // in a cycle where it is free to choose (no beat outstanding), the
         // bus must carry dcache0's request.
@@ -459,11 +462,14 @@ module cache_complex_tb #(
         // S4: a partial-sel D$ store (hit on the S1 line) lands mid-I$-refill:
         // the store's single write beat must reach SRAM intact, the I$ line too.
         fill_line(32'h100, 64'h5555_0000_0000_0000); // I$ line (index 0, evicts 0x80)
-        mem_base = mem_resps; both_busy_seen = 1'b0;
+        mem_base = mem_resps; both_busy_seen = 1'b0; dc_refused_seen = 1'b0;
         fork
             fetch_cycle(32'h118);
             begin
                 wait (mem_resps >= mem_base + 1);
+                // behind a slow slave, a cycle later: the I$'s next beat has the bus by then, so the write
+                // presented now has to wait for its grant
+                if (DN_WAIT > 0) @(negedge clk);
                 data_cycle(32'h68, 64'h1234_5678_CAFE_F00D, 8'h0F, 1'b1);
             end
         join
@@ -473,6 +479,10 @@ module cache_complex_tb #(
         check("S4 store mid-I$-refill: fetch port err clear", {63'b0, fp_rerr}, 64'd0);
         check("S4 store mid-I$-refill: data port err clear", {63'b0, dp_rerr}, 64'd0);
         check("S4 store mid-I$-refill: both sub-caches were busy at once", {63'b0, both_busy_seen}, 64'd1);
+        // behind a slow slave the I$'s beat holds the bus, so the write waits for its grant (and is then
+        // performed and acknowledged once: check_port_counts below)
+        if (DN_WAIT > 0)
+            check("S4 store mid-I$-refill: the passed-through write waited for the bus", {63'b0, dc_refused_seen}, 64'd1);
         repeat (2) @(negedge clk);
         check("S4 store mid-I$-refill: exactly 5 downstream beats (4-beat refill + 1 write)", mem_resps - mem_base, 5);
         check("S4 store mid-I$-refill: sel-merged store reached SRAM",

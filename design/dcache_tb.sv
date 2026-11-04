@@ -18,7 +18,12 @@
  * address counts) -- see that file's own header for the full reasoning,
  * not repeated here. This file's own incremental coverage is the write
  * path: write-through propagation, byte-lane-qualified write-hit update,
- * and no-write-allocate on a write-miss.
+ * and no-write-allocate on a write-miss -- and how a write passed straight
+ * through meets its masters: one downstream response per store even when
+ * the master holds cyc through the whole ack cycle (dm.sv's SBA does), no
+ * merge on an error response, and a merge from the copies latched while
+ * the request was presented, not from inputs the master zeroes in the ack
+ * cycle (ref_core.sv does).
  *
  * check() comes from testbench/check_lib.sv. wb_driver.sv's wb_cycle IS
  * usable here (unlike icache_tb.sv) since dcache's core-facing port is a
@@ -63,11 +68,15 @@ module dcache_tb;
         .ack_o(mem_ack), .err_o(mem_err), .cyc_i(mem_cyc), .stb_i(mem_stb), .we_i(mem_we)
     );
 
-    // Same white-box downstream-traffic counter as icache_tb.sv.
+    // Same white-box downstream-traffic counter as icache_tb.sv, and the
+    // downstream responses (a second response for one store is a second
+    // write that rising edges of cyc can't see).
     int mem_cyc_pulses = 0;
+    int mem_resps = 0;
     logic mem_cyc_q = 0;
     always @(posedge clk) begin
         if (mem_cyc && !mem_cyc_q) mem_cyc_pulses = mem_cyc_pulses + 1;
+        if (mem_ack || mem_err) mem_resps = mem_resps + 1;
         mem_cyc_q <= mem_cyc;
     end
 
@@ -76,6 +85,31 @@ module dcache_tb;
     logic quiet_on_pass = 1'b0;
     `include "check_lib.sv"
     `include "wb_driver.sv"
+
+    // wb_cycle as dm.sv's SBA master does it: cyc/stb stay high through the
+    // whole ack cycle and drop at the next edge.
+    task automatic wb_cycle_hold(logic [31:0] a, logic [63:0] d, logic [7:0] s, logic w);
+        @(negedge clk);
+        addr = a; dat_i = d; sel = s; we = w; cyc = 1; stb = 1;
+        @(posedge clk); #1;
+        while (!ack && !err) begin
+            @(posedge clk); #1;
+        end
+        @(posedge clk); #1;
+        cyc = 0; stb = 0;
+    endtask
+
+    // wb_cycle as ref_core.sv does it: every output goes to zero in the
+    // ack cycle, not only cyc/stb.
+    task automatic wb_cycle_zero(logic [31:0] a, logic [63:0] d, logic [7:0] s, logic w);
+        @(negedge clk);
+        addr = a; dat_i = d; sel = s; we = w; cyc = 1; stb = 1;
+        @(posedge clk); #1;
+        while (!ack && !err) begin
+            @(posedge clk); #1;
+        end
+        addr = 0; dat_i = 0; sel = 0; we = 0; cyc = 0; stb = 0;
+    endtask
 
     initial begin
         addr = 0; dat_i = 0; sel = 8'h00; we = 0; cyc = 0; stb = 0;
@@ -162,6 +196,49 @@ module dcache_tb;
         wb_cycle(32'h1000, 64'hDEAD, 8'hFF, 1'b1);
         check("out-of-range write: err_o asserted", {63'b0, err}, 64'd1);
         check("out-of-range write: exactly one downstream beat", 64'(mem_cyc_pulses), 64'd1);
+
+        // --- A master holding cyc through the ack cycle (the SBA): the
+        //     write to a cached word (0x88, line 0x80 from the conflict
+        //     miss above) reaches memory exactly once, and the hit merges.
+        //     (Settle first: the error above is answered in the cycle after
+        //     wb_cycle returns.) ---
+        repeat (2) @(posedge clk); #1;
+        mem_resps = 0;
+        wb_cycle_hold(32'h88, 64'h1111_2222_3333_4444, 8'hFF, 1'b1);
+        repeat (3) @(posedge clk);
+        check("held-cyc write: exactly one downstream response", 64'(mem_resps), 64'd1);
+        check("held-cyc write: reached SRAM", mem0.memory[32'h88 >> 3], 64'h1111_2222_3333_4444);
+        repeat (2) @(posedge clk); #1;
+        mem_resps = 0;
+        wb_cycle(32'h88, 64'h0, 8'h00, 1'b0);
+        check("held-cyc write: cached copy merged", dat_o, 64'h1111_2222_3333_4444);
+        check("held-cyc write: read-back is a hit", 64'(mem_resps), 64'd0);
+
+        // --- An error response to a write hit (forced: wb4_sram only errs
+        //     out of range, where nothing is cached): ack and err together,
+        //     and the cached copy is NOT merged. ---
+        @(negedge clk);
+        addr = 32'h90; dat_i = 64'h9999_9999_9999_9999; sel = 8'hFF; we = 1; cyc = 1; stb = 1;
+        @(posedge clk); #1;                           // the response cycle
+        force mem_ack = 1'b0;
+        force mem_err = 1'b1;
+        cyc = 0; stb = 0; we = 0;                     // the master drops its request in it, as the core's do
+        #1;
+        check("write error: err_o", {63'b0, err}, 64'd1);
+        check("write error: ack_o with it", {63'b0, ack}, 64'd1);
+        @(posedge clk); #1;
+        release mem_ack;
+        release mem_err;
+        wb_cycle(32'h90, 64'h0, 8'h00, 1'b0);
+        check("write error: cached copy not merged", dat_o, 64'hBBBB_0000_0000_0002);
+
+        // --- A master that zeroes every output in the ack cycle (ref_core):
+        //     the merge uses what was latched while the write was presented. ---
+        wb_cycle_zero(32'h98, 64'h0000_0000_00AB_CDEF, 8'h07, 1'b1);
+        wb_cycle(32'h98, 64'h0, 8'h00, 1'b0);
+        check("zeroed-in-ack write: merged from the latched copy",
+              dat_o, {mem0.memory[32'h98 >> 3][63:24], 24'hAB_CDEF});
+        check("zeroed-in-ack write: cache and SRAM agree", dat_o, mem0.memory[32'h98 >> 3]);
 
         $display("");
         $display("dcache_tb: %0d passed, %0d failed", pass_count, fail_count);

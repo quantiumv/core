@@ -9,9 +9,9 @@
 # "cores" names the builds a test is meaningful for (run_regress.sh --core):
 #   pipe  the main build, the pipelined core in design/pipe/ -- every row
 #   ref   the frozen multi-cycle reference, verification/reference/ref_core.sv
-#         (named `core` by -DQV_REF_AS_CORE) -- 78 rows
+#         (named `core` by -DQV_REF_AS_CORE) -- 79 rows
 # run_regress.sh --core X SKIPS any row not listing X, silently, so a row that
-# names neither core would just never run: there must be 147 rows listing pipe.
+# names neither core would just never run: there must be 148 rows listing pipe.
 #
 # The rows that omit ref are the design/*_tb.sv unit tests of a leaf module
 # (alu, c_expand, csr_file, divider, register_file) and of the divider's
@@ -36,6 +36,7 @@ design_csr_file_tb|design/csr_file_tb.sv||design|pipe|pass|
 design_csr_file_zicntr_tb|design/csr_file_tb.sv||design|pipe|pass||-Pcsr_file_tb.ZICNTR_EN=1
 design_csr_file_fp_tb|design/csr_file_fp_tb.sv||design|pipe|pass|
 design_dcache_random_tb|design/dcache_random_tb.sv||design|ref,pipe|pass|
+design_dcache_random_slow_tb|design/dcache_random_tb.sv||design|ref,pipe|pass||-Pdcache_random_tb.DN_WAIT_MAX=3
 design_dcache_tb|design/dcache_tb.sv||design|ref,pipe|pass|
 design_divider_random_tb|design/divider_random_tb.sv||design|pipe|pass|
 design_divider_tb|design/divider_tb.sv||design|pipe|pass|

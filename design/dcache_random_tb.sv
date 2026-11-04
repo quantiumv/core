@@ -31,10 +31,22 @@
  * uses (256 slots cycling through NUM_LINES=8 indices, 32 tags/index) --
  * see that file's header for the full reasoning.
  *
+ * Since dcache.sv passes a write straight through, two more things are
+ * random here: a quarter of the reads re-read the dword written last (so
+ * a write hit is followed by a read of the same dword at once), and a
+ * quarter of the writes come from a master that holds cyc through the
+ * whole ack cycle, as dm.sv's SBA does. Every downstream write response
+ * is counted against the writes issued: a store reaches memory exactly
+ * once. DN_WAIT_MAX > 0 puts a slave with 0..DN_WAIT_MAX random wait
+ * states between the D$ and wb4_sram (the latch-and-wait model of
+ * cache_complex_tb.sv).
+ *
  * Seeding: no explicit $srandom call, same as every other random_tb in
  * this project.
  */
-module dcache_random_tb;
+module dcache_random_tb #(
+    parameter int DN_WAIT_MAX = 0
+);
 
     localparam int NUM_ITER = 2000;
 
@@ -65,11 +77,54 @@ module dcache_random_tb;
         .mem_ack_i(mem_ack), .mem_err_i(mem_err)
     );
 
+    // Slow-slave model (DN_WAIT_MAX > 0): latch, wait a random 0..DN_WAIT_MAX
+    // cycles, then present the latched request to mem0 until it answers.
+    logic [31:0] dn_addr_q;
+    logic [63:0] dn_dat_q;
+    logic [7:0]  dn_sel_q;
+    logic        dn_we_q, dn_busy_q;
+    int          dn_cnt_q, dn_wait_q;
+    logic        s_ack, s_err;
+    wire         dn_go = dn_busy_q && dn_cnt_q == dn_wait_q && !s_ack && !s_err;
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            dn_busy_q <= 1'b0;
+        end else if (!dn_busy_q) begin
+            if (mem_cyc && mem_stb) begin
+                dn_busy_q <= 1'b1;
+                dn_cnt_q  <= 0;
+                dn_wait_q <= $urandom_range(0, DN_WAIT_MAX);
+                dn_addr_q <= mem_addr;
+                dn_dat_q  <= mem_dat_m2s;
+                dn_sel_q  <= mem_sel;
+                dn_we_q   <= mem_we;
+            end
+        end else if (s_ack || s_err) begin
+            dn_busy_q <= 1'b0;
+        end else if (dn_cnt_q < dn_wait_q) begin
+            dn_cnt_q <= dn_cnt_q + 1;
+        end
+    end
+
+    wire slow = (DN_WAIT_MAX > 0);
     wb4_sram #(.num_words(NUM_WORDS)) mem0 (
         .clk(clk), .rst(rst),
-        .addr_i(mem_addr), .dat_i(mem_dat_m2s), .dat_o(mem_dat_s2m), .sel_i(mem_sel),
-        .ack_o(mem_ack), .err_o(mem_err), .cyc_i(mem_cyc), .stb_i(mem_stb), .we_i(mem_we)
+        .addr_i(slow ? dn_addr_q : mem_addr), .dat_i(slow ? dn_dat_q : mem_dat_m2s),
+        .dat_o(mem_dat_s2m), .sel_i(slow ? dn_sel_q : mem_sel),
+        .ack_o(s_ack), .err_o(s_err),
+        .cyc_i(slow ? dn_go : mem_cyc), .stb_i(slow ? dn_go : mem_stb), .we_i(slow ? dn_we_q : mem_we)
     );
+    assign mem_ack = s_ack;
+    assign mem_err = s_err;
+
+    // the downstream write responses: one per write issued (straight to mem0, a response answers the request
+    // presented the cycle before, which the D$ has dropped by then)
+    int   wr_resps = 0, wr_issued = 0;
+    logic req_we_q = 1'b0;
+    always @(posedge clk) begin
+        if (!rst && (s_ack || s_err) && (slow ? dn_we_q : req_we_q)) wr_resps = wr_resps + 1;
+        if (mem_cyc) req_we_q <= mem_we;
+    end
 
     logic [63:0] shadow_mem [0:NUM_WORDS-1];
 
@@ -78,11 +133,15 @@ module dcache_random_tb;
     logic quiet_on_pass = 1'b1;   /* NUM_ITER checks would otherwise flood the log. */
     `include "check_lib.sv"
 
-    task automatic dc_cycle(logic [31:0] a, logic [63:0] d, logic [7:0] s, logic w);
+    // hold: keep cyc/stb through the ack cycle and drop them at the next edge (dm.sv's SBA)
+    task automatic dc_cycle(logic [31:0] a, logic [63:0] d, logic [7:0] s, logic w, logic hold = 1'b0);
         @(negedge clk);
         dc_addr = a; dc_dat_i = d; dc_sel = s; dc_we = w; dc_cyc = 1; dc_stb = 1;
         @(posedge clk); #1;
         while (!dc_ack && !dc_err) begin
+            @(posedge clk); #1;
+        end
+        if (hold) begin
             @(posedge clk); #1;
         end
         dc_cyc = 0; dc_stb = 0;
@@ -96,6 +155,7 @@ module dcache_random_tb;
         logic [7:0]  wsel;
         logic        is_write;
         logic [63:0] merged;
+        logic [31:0] last_waddr = 32'h0;
 
         dc_addr = 0; dc_dat_i = 0; dc_sel = 0; dc_we = 0; dc_cyc = 0; dc_stb = 0;
         @(posedge clk); #1;
@@ -114,12 +174,18 @@ module dcache_random_tb;
             w        = addr >> 3;
 
             is_write = $urandom_range(0, 1);
+            if (!is_write && $urandom_range(0, 3) == 0) begin
+                addr = last_waddr;                          // re-read the dword written last
+                w    = addr >> 3;
+            end
 
             if (is_write) begin
                 wdata = {$urandom(), $urandom()};
                 wsel  = 8'($urandom_range(1, 255)); // never all-zero -- a no-op write proves nothing
 
-                dc_cycle(addr, wdata, wsel, 1'b1);
+                dc_cycle(addr, wdata, wsel, 1'b1, $urandom_range(0, 3) == 0);
+                wr_issued++;
+                last_waddr = addr;
                 check($sformatf("iter %0d: addr=%h write err_o clear", i, addr), {63'b0, dc_err}, 64'd0);
 
                 // Independent byte-lane merge -- not shared code with
@@ -135,6 +201,9 @@ module dcache_random_tb;
                 check($sformatf("iter %0d: addr=%h read err_o clear", i, addr), {63'b0, dc_err}, 64'd0);
             end
         end
+
+        repeat (DN_WAIT_MAX + 4) @(posedge clk);
+        check("every write reached memory exactly once", 64'(wr_resps), 64'(wr_issued));
 
         $display("");
         $display("dcache_random_tb: %0d iterations, %0d checks passed, %0d checks failed",
