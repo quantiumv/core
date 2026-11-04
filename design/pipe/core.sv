@@ -75,7 +75,8 @@
  * queue, 0 = none: one memory op between dispatch and completion), QV_PIPE_LSQ_EARLY / _EARLY_ST (with the queue,
  * RAM loads / stores before the head), QV_PIPE_LSQ_HANDOFF (the LSU takes the next op as the last completes),
  * QV_PIPE_LSQ_PRE_XL (the queue looks up a queued op's translation while the LSU is busy), QV_PIPE_LSQ_BYPASS (a
- * load's value bypasses to issue),
+ * load's value bypasses to issue), QV_PIPE_RS_DEPTH (the reservation station, 0 = none: a uop goes to its unit only
+ * in its dispatch cycle),
  * QV_PIPE_FETCH_STREAM (back-to-back fetch, bigger fetch buffer and queue), QV_PIPE_BP (the three predictors;
  * their sizes QV_PIPE_BTB_ENTRIES / QV_PIPE_RAS_DEPTH / QV_PIPE_BHT_ENTRIES). With every one off the timing is
  * the one of P8, cycle for cycle.
@@ -166,6 +167,11 @@
 `ifndef QV_PIPE_LSQ_BYPASS
 `define QV_PIPE_LSQ_BYPASS 1
 `endif
+// The reservation station (O1). QV_PIPE_RS_DEPTH 0 leaves it out: issue then sends a uop to its unit only in its
+// dispatch cycle, stalling dispatch until it can, which is the timing without it.
+`ifndef QV_PIPE_RS_DEPTH
+`define QV_PIPE_RS_DEPTH 0
+`endif
 `ifndef QV_PIPE_PMA_RAM_SIZE
 `define QV_PIPE_PMA_RAM_SIZE 64'h0
 `endif
@@ -233,6 +239,7 @@ module core
     parameter bit LSQ_HANDOFF  = `QV_PIPE_LSQ_HANDOFF,   // (with the queue) the LSU takes the next op as the last completes
     parameter bit LSQ_PRE_XL   = `QV_PIPE_LSQ_PRE_XL,    // (with the queue and Sv39) queued ops are looked up in the TLB
     parameter bit LSQ_BYPASS   = `QV_PIPE_LSQ_BYPASS,    // (with the queue) the LSU's writeback is a bypass source
+    parameter int RS_DEPTH  = `QV_PIPE_RS_DEPTH,     // reservation-station entries, 0: none
     parameter logic [63:0] PMA_RAM_BASE = `QV_PIPE_PMA_RAM_BASE,   // physical window of RAM: stores into it are posted
     parameter logic [63:0] PMA_RAM_SIZE = `QV_PIPE_PMA_RAM_SIZE
 ) (
@@ -601,8 +608,9 @@ module core
 
     // slow-unit outputs, declared ahead of issue (the LSU's writeback is a bypass source, O2d), the ROB and commit
     wb_t      lsu_wb, div_wb;
+    wb_t      c_bus;                       // commit's regfile write, with the committing tag: wakes the station's late operands
     qv_issue #(.SERIALIZE(SERIALIZE), .BYPASS_EN(BYPASS_EN), .CSR_LATE(CSR_NOSER),
-               .LSU_BYPASS(LSQ_DEPTH > 0 && LSQ_BYPASS)) issue0 (
+               .LSU_BYPASS(LSQ_DEPTH > 0 && LSQ_BYPASS), .RS_DEPTH(RS_DEPTH)) issue0 (
         .clk(clk), .rst(rst), .i_flush(flush),
         .i_uop_valid(uop_valid), .i_uop(uop), .o_issue(issue_fire),
         .o_rs1_sel(rs1_sel), .o_rs2_sel(rs2_sel), .i_rs1_data(rs1_data), .i_rs2_data(rs2_data),
@@ -621,7 +629,7 @@ module core
         .i_frs1_data(frs1_data), .i_frs2_data(frs2_data), .i_frs3_data(frs3_data),
         .i_wbf(fpu_wb), .o_fpu_req(fpu_req), .i_fpu_ds_free(fpu_ds_free), .i_wbl(lsu_wb),
         .i_commit_valid(c_valid), .i_commit_rd(c_rd), .i_commit_rd_wen(c_rd_wen), .i_commit_rd_fp(c_rd_fp),
-        .i_commit_tag(c_tag)
+        .i_commit_tag(c_tag), .i_wbd(div_wb), .i_wbc(c_bus)
     );
 
     lsu_res_t lsu_res;                     // the result of the memory op at the ROB head (commit, RVFI, the store buffer)
@@ -914,6 +922,12 @@ module core
     logic        rf_we;
     logic [4:0]  rf_sel;
     logic [63:0] rf_data;
+    always_comb begin                            // the commit bus (declared ahead of issue)
+        c_bus       = '0;
+        c_bus.valid = rf_we;
+        c_bus.tag   = c_tag;
+        c_bus.value = rf_data;
+    end
     logic        c_fprf_we;                  // F/D: the FP register write, and fflags' accrual
     logic [4:0]  c_fprf_sel, c_fp_accrue;
     logic [63:0] c_fprf_data;
@@ -1215,6 +1229,30 @@ module core
         assert (lsu0.EARLY && lsq_early && lsu0.pa_in_window && !lsu0.atomic_q && !pb_active && lsu0.pa_valid
                 && !lsu0.misaligned_q && !lsu0.pmp_deny && (lsu0.store_q || !(sb_match || lsq_match)));
     always @* if (!rst && lsu0.in_bus && lsu0.early_q) assert (!lsu0.store_q && !lsu0.atomic_q);
+
+    // (O1) Every request to a unit and every writeback names an entry the ROB holds, and a writeback one that is not
+    // complete yet: each uop goes to its unit once and completes once, also when the reservation station sends it
+    // out of order. The ALU and the BRU never get a request in one cycle (they share the writeback bus).
+    localparam int RIW = $clog2(ROB_DEPTH);
+    function automatic logic rob_holds(input logic [QV_ROB_TAG_W-1:0] t, input logic [RIW:0] h, input logic [RIW:0] tl);
+        logic [RIW:0] p;
+        p = t[RIW:0];
+        return ((t >> (RIW + 1)) == '0) && ((p - h) < (tl - h));
+    endfunction
+    wire [RIW:0] rob_h = rob0.head_q;
+    wire [RIW:0] rob_t = rob0.tail_q;
+    always @* if (!rst) begin
+        assert (!(alu_req.valid && bru_req.valid));
+        if (alu_req.valid) assert (rob_holds(alu_req.tag, rob_h, rob_t));
+        if (bru_req.valid) assert (rob_holds(bru_req.tag, rob_h, rob_t));
+        if (div_req.valid) assert (rob_holds(div_req.tag, rob_h, rob_t));
+        if (lsu_req.valid) assert (rob_holds(lsu_req.tag, rob_h, rob_t));
+        if (fpu_req.valid) assert (rob_holds(fpu_req.tag, rob_h, rob_t));
+        if (wb_bus.valid) assert (rob_holds(wb_bus.tag, rob_h, rob_t) && !rob0.complete_q[wb_bus.tag[RIW-1:0]]);
+        if (lsu_wb.valid) assert (rob_holds(lsu_wb.tag, rob_h, rob_t) && !rob0.complete_q[lsu_wb.tag[RIW-1:0]]);
+        if (div_wb.valid) assert (rob_holds(div_wb.tag, rob_h, rob_t) && !rob0.complete_q[div_wb.tag[RIW-1:0]]);
+        if (fpu_wb.valid) assert (rob_holds(fpu_wb.tag, rob_h, rob_t) && !rob0.complete_q[fpu_wb.tag[RIW-1:0]]);
+    end
 
     // The translators are safe only while a client keeps to one rule: a request it holds does not change (what it
     // asks for, the context it asks in) except in the cycle after a cancel, so that the answer of a walk that was

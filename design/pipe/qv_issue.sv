@@ -42,12 +42,23 @@
  * marked late: paths 3 and 4 never apply to it, and a dependent waits until
  * the claim clears at the commit, then reads regfile0. (Without it, every CSR
  * op serializes and nothing younger survives to read the claim.)
+ *
+ * RS_DEPTH (O1): a reservation station (qv_rs) of that many entries. Dispatch (ROB allocation, the claim, the
+ * operands resolved as above) stays in order, one uop a cycle; what changes is that a uop which cannot go to its unit
+ * in the dispatch cycle -- an operand at step 5, or its unit's port taken -- goes into the station instead of
+ * stalling dispatch, and leaves it when its operands exist and its unit is free, possibly before older uops. A uop
+ * goes straight to its unit, exactly as without the station, when its operands are ready, its unit is free and the
+ * station does not take that unit's port in this cycle (for a divide or an FP divide/square root: holds none of its
+ * kind, so those keep program order). The station takes in every writeback bus and the commit bus (i_wbc: commit's
+ * regfile write, which is what wakes a late operand). Memory ops do not use it: they still dispatch only with their
+ * operands ready and the LSU (or the load/store queue) free. RS_DEPTH 0 is the core without it, cycle for cycle.
  */
 module qv_issue #(
     parameter bit SERIALIZE = 1'b0,
     parameter bit BYPASS_EN = 1'b1,
     parameter bit CSR_LATE  = 1'b0,
-    parameter bit LSU_BYPASS = 1'b0             // path 3 also takes the LSU's writeback (O2d)
+    parameter bit LSU_BYPASS = 1'b0,            // path 3 also takes the LSU's writeback (O2d)
+    parameter int RS_DEPTH  = 0                 // reservation-station entries (O1); 0: none
 ) (
     input  logic                             clk,
     input  logic                             rst,
@@ -98,6 +109,10 @@ module qv_issue #(
     input  qv_pkg::wb_fp_t                   i_wbf = '0,
     // (LSU_BYPASS) the LSU's writeback: a load's value in its completion cycle
     input  qv_pkg::wb_t                      i_wbl = '0,
+    // (RS_DEPTH) the divider's writeback and the commit bus (commit's regfile write and the committing tag): they
+    // wake the station's operands
+    input  qv_pkg::wb_t                      i_wbd = '0,
+    input  qv_pkg::wb_t                      i_wbc = '0,
     /* verilator lint_on UNUSEDSIGNAL */
     output qv_pkg::fpu_req_t                 o_fpu_req,
     input  logic                             i_fpu_ds_free = 1'b1,   // registered: one divide/sqrt at a time
@@ -197,9 +212,27 @@ module qv_issue #(
     wire to_fpu = (i_uop.fu == QV_FU_FPU);
     wire fpu_ds = (qv_fp_op_e'(i_uop.fp_op) == QV_FP_DIV) || (qv_fp_op_e'(i_uop.fp_op) == QV_FP_SQRT);
 
-    assign o_issue = i_uop_valid && a_ready && b_ready && i_alloc_ready && (!to_lsu || i_lsu_free)
-                  && (!to_div || i_div_free) && (!SERIALIZE || i_rob_empty) && !i_flush
-                  && c_ready && (!(to_fpu && fpu_ds) || i_fpu_ds_free);
+    // the station's view of the ports (all 0 without one)
+    logic     rs_room, rs_has_div, rs_has_fds, rs_sel_ab, rs_sel_div, rs_sel_fpu;
+    fu_req_t  rs_alu_req, rs_bru_req, rs_div_req;
+    fpu_req_t rs_fpu_req;
+
+    // straight to the unit: operands ready and the unit's port free (not taken by the station; a divide or an FP
+    // divide/square root also waits for every one of its kind in the station, which keeps them in program order)
+    wire direct = a_ready && b_ready && c_ready
+               && (to_lsu ? i_lsu_free
+                   : to_div ? (i_div_free && !rs_has_div)
+                   : to_fpu ? (!rs_sel_fpu && (!fpu_ds || (i_fpu_ds_free && !rs_has_fds)))
+                   :          !rs_sel_ab);
+    wire to_rs  = (RS_DEPTH > 0) && !to_lsu && !direct;
+
+    assign o_issue = i_uop_valid && i_alloc_ready && (!SERIALIZE || i_rob_empty) && !i_flush
+                  && (direct || (to_rs && rs_room));
+
+    // (read by the CPI stack) the uop waits for room in a full station
+    /* verilator lint_off UNUSEDSIGNAL */
+    wire rs_full = i_uop_valid && to_rs && !rs_room;
+    /* verilator lint_on UNUSEDSIGNAL */
 
     // ---------------- ROB allocation ----------------
     assign o_alloc_valid   = o_issue;
@@ -264,17 +297,17 @@ module qv_issue #(
         req.fp        = i_uop.rd_fp;
 
         o_alu_req       = req;
-        o_alu_req.valid = o_issue && !to_bru && !to_lsu && !to_div && !to_fpu;
+        o_alu_req.valid = o_issue && direct && !to_bru && !to_lsu && !to_div && !to_fpu;
         o_bru_req       = req;
-        o_bru_req.valid = o_issue && to_bru;
+        o_bru_req.valid = o_issue && direct && to_bru;
         o_lsu_req       = req;
         o_lsu_req.valid = o_issue && to_lsu;
         o_div_req       = req;
-        o_div_req.valid = o_issue && to_div;
+        o_div_req.valid = o_issue && direct && to_div;
 
         // F/D: a = rs1 (an integer for FMV.W.X/D.X and the conversions from an integer), b = rs2, c = rs3
         o_fpu_req       = '0;
-        o_fpu_req.valid = o_issue && to_fpu;
+        o_fpu_req.valid = o_issue && direct && to_fpu;
         o_fpu_req.tag   = i_alloc_tag;
         o_fpu_req.op    = qv_fp_op_e'(i_uop.fp_op);
         o_fpu_req.fmt   = i_uop.fp_fmt;
@@ -283,7 +316,60 @@ module qv_issue #(
         o_fpu_req.a     = opa;
         o_fpu_req.b     = opb;
         o_fpu_req.c     = opc;
+
+        // the station's picks take their ports (the dispatching uop then went into the station, or to another unit)
+        if (rs_sel_ab) begin
+            o_alu_req = rs_alu_req;
+            o_bru_req = rs_bru_req;
+        end
+        if (rs_sel_div) o_div_req = rs_div_req;
+        if (rs_sel_fpu) o_fpu_req = rs_fpu_req;
     end
+
+    // ---------------- the reservation station ----------------
+    generate
+        if (RS_DEPTH > 0) begin : g_rs
+            rs_entry_t pe;                      // the dispatching uop, as the station holds it
+            always_comb begin
+                pe           = '0;
+                pe.kind      = qv_rs_kind_e'(to_bru ? QV_RS_BRU : to_div ? QV_RS_DIV
+                             : to_fpu ? (fpu_ds ? QV_RS_FDS : QV_RS_FPU) : QV_RS_ALU);
+                pe.tag       = i_alloc_tag;
+                pe.op        = to_fpu ? i_uop.fp_op : req.op;
+                pe.is_word   = i_uop.is_word;
+                pe.pc        = i_uop.pc;
+                pe.imm       = i_uop.imm3;
+                pe.rvc       = i_uop.rvc;
+                pe.pred_next = pred_next;
+                pe.fmt       = i_uop.fp_fmt;
+                pe.ityp      = i_uop.fp_ityp;
+                pe.rm        = i_uop.fp_rm;
+                pe.a.rdy     = a_ready;  pe.a.late = p1_late;  pe.a.tag = p1_tag;  pe.a.value = opa;
+                pe.b.rdy     = b_ready;  pe.b.late = p2_late;  pe.b.tag = p2_tag;  pe.b.value = opb;
+                pe.c.rdy     = c_ready;  pe.c.late = 1'b0;     pe.c.tag = p3_tag;  pe.c.value = opc;
+            end
+            qv_rs #(.DEPTH(RS_DEPTH), .BYPASS_EN(BYPASS_EN), .LSU_BYPASS(LSU_BYPASS)) rs0 (
+                .clk(clk), .rst(rst), .i_flush(i_flush),
+                .i_push(o_issue && to_rs), .i_push_e(pe), .o_room(rs_room),
+                .o_has_div(rs_has_div), .o_has_fds(rs_has_fds),
+                .i_wb(i_wb), .i_wbl(i_wbl), .i_wbd(i_wbd), .i_wbf(i_wbf), .i_wbc(i_wbc),
+                .i_div_free(i_div_free), .i_fpu_ds_free(i_fpu_ds_free),
+                .o_sel_ab(rs_sel_ab), .o_sel_div(rs_sel_div), .o_sel_fpu(rs_sel_fpu),
+                .o_alu_req(rs_alu_req), .o_bru_req(rs_bru_req), .o_div_req(rs_div_req), .o_fpu_req(rs_fpu_req)
+            );
+        end else begin : g_nors
+            assign rs_room    = 1'b0;
+            assign rs_has_div = 1'b0;
+            assign rs_has_fds = 1'b0;
+            assign rs_sel_ab  = 1'b0;
+            assign rs_sel_div = 1'b0;
+            assign rs_sel_fpu = 1'b0;
+            assign rs_alu_req = '0;
+            assign rs_bru_req = '0;
+            assign rs_div_req = '0;
+            assign rs_fpu_req = '0;
+        end
+    endgenerate
 
     // ---------------- producer table update ----------------
     always_ff @(posedge clk) begin

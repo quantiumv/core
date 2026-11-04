@@ -37,6 +37,7 @@
         .fb_valid(CORE.fb_valid), .iq_valid(CORE.iq_valid), .uop_valid(CORE.uop_valid), .uop_fu(CORE.uop.fu), \
         .issue_fire(CORE.issue_fire), .a_ready(CORE.issue0.a_ready), .b_ready(CORE.issue0.b_ready), .c_ready(CORE.issue0.c_ready), \
         .alloc_ready(CORE.alloc_ready), .lsu_free(CORE.lsu_free), .div_free(CORE.div_free), \
+        .rs_full(CORE.issue0.rs_full), \
         .wb_valid(CORE.wb_bus.valid), .wb_mispredict(CORE.wb_bus.mispredict), .wb_tag(CORE.wb_bus.tag), \
         .lsu_bus_wait(BUSWAIT), \
         .f_issue(CORE.fetch0.can_issue), .f_issue_pc(CORE.fetch0.issue_pc), .f_xl_on(CORE.fetch_xl_on), \
