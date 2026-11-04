@@ -189,6 +189,14 @@ module dcache_tb;
         check("conflict miss: correct word", dat_o, 64'hBBBB_0000_0000_0002);
         check("conflict miss: LINE_WORDS downstream beats", 64'(mem_cyc_pulses), 64'(LINE_WORDS));
 
+        // --- A write miss to an index holding another tag's line (0x08
+        //     against the 0x80 line just installed): the line is left
+        //     alone -- its word at the same offset (0x88) still reads as
+        //     memory has it. ---
+        wb_cycle(32'h08, 64'h5A5A_5A5A_5A5A_5A5A, 8'hFF, 1'b1);
+        wb_cycle(32'h88, 64'h0, 8'h00, 1'b0);
+        check("write miss: the other tag's line at the index is untouched", dat_o, mem0.memory[32'h88 >> 3]);
+
         // --- Out-of-range write: err_o propagates, exactly one
         //     downstream beat attempted (matches icache_tb.sv's read-side
         //     error-abort behavior). ---

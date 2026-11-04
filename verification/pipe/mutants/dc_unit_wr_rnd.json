@@ -1,0 +1,81 @@
+{
+ "dut": "design/dcache.sv",
+ "files": [
+  "design/wb4_sram.sv",
+  "design/dcache.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench",
+  "-Pdcache_random_tb.DN_WAIT_MAX=3"
+ ],
+ "cwd": "design",
+ "timeout": 300,
+ "tb": "design/dcache_random_tb.sv",
+ "mutants": [
+  {
+   "name": "ack without the memory's ack (a cycle after the write is presented)",
+   "old": "    wire  wr_ack = wr_pend_q && (mem_ack_i || mem_err_i);\n",
+   "new": "    wire  wr_ack = wr_pend_q;\n"
+  },
+  {
+   "name": "merge from the live core-facing inputs, not the latched copies",
+   "old": "                                if (write_sel_q[lane])\n                                    data_q[write_index_q][write_offset_q][(8*lane) +: 8] <= write_dat_q[(8*lane) +: 8];\n",
+   "new": "                                if (sel_i[lane])\n                                    data_q[req_index][req_offset][(8*lane) +: 8] <= dat_i[(8*lane) +: 8];\n"
+  },
+  {
+   "name": "merge on an error response",
+   "old": "                        if (!mem_err_i && write_hit_q) begin\n",
+   "new": "                        if (write_hit_q) begin\n",
+   "equivalent": true,
+   "note": "no error responses here: killed by dcache_unit_wr (forced error)"
+  },
+  {
+   "name": "the write's downstream request is not dropped in its response cycle",
+   "old": "        end else if (state_q == CACHE_IDLE && cyc_i && stb_i && we_i && !mem_ack_i && !mem_err_i) begin\n",
+   "new": "        end else if (state_q == CACHE_IDLE && cyc_i && stb_i && we_i) begin\n",
+   "equivalent": true,
+   "note": "the slow slave is busy in the ack cycle and never re-samples: killed by dcache_unit_wr (held cyc)"
+  },
+  {
+   "name": "a write miss merges into whatever line sits at its index",
+   "old": "                        if (!mem_err_i && write_hit_q) begin\n",
+   "new": "                        if (!mem_err_i) begin\n"
+  },
+  {
+   "name": "a response in CACHE_IDLE is taken without a write outstanding (wr_pend_q unused)",
+   "old": "    wire  wr_ack = wr_pend_q && (mem_ack_i || mem_err_i);\n",
+   "new": "    wire  wr_ack = (state_q == CACHE_IDLE) && (mem_ack_i || mem_err_i);\n",
+   "equivalent": true,
+   "note": "no response ever reaches the D$ in CACHE_IDLE without a write outstanding; wr_pend_q only guards against one"
+  },
+  {
+   "name": "err without ack",
+   "old": "    assign ack_o = ack_q || wr_ack;\n",
+   "new": "    assign ack_o = ack_q || (wr_pend_q && mem_ack_i);\n",
+   "equivalent": true,
+   "note": "no error responses here: killed by dcache_unit_wr (forced error)"
+  },
+  {
+   "name": "a request is sampled in a write's response cycle",
+   "old": "                    end else if (cyc_i && stb_i) begin\n",
+   "new": "                    end\n                    if (cyc_i && stb_i && !(wr_ack && we_i)) begin\n"
+  },
+  {
+   "name": "the hit is not latched with the write (every write merges)",
+   "old": "                            write_hit_q    <= req_hit;\n",
+   "new": "                            write_hit_q    <= 1'b1;\n"
+  },
+  {
+   "name": "the downstream write carries the latched data, not the request's",
+   "old": "            mem_dat_o  = dat_i;\n",
+   "new": "            mem_dat_o  = write_dat_q;\n"
+  }
+ ],
+ "pass_re": "0 checks failed"
+}
