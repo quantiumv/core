@@ -14,7 +14,10 @@
  *     a reader, swept across every bubble length so the reader lands in
  *     the window between the older writer's commit and the younger's;
  *   - a long random stream over few registers (dense hazards) with
- *     random bubbles.
+ *     random bubbles;
+ *   - at every retirement, RVFI's source registers and the values
+ *     regfile0 holds for them in the commit cycle (O1.1: RVFI reads them
+ *     there), against the golden model's operands in program order.
  *
  * Run once per configuration via -P overrides (BYPASS_EN, SERIALIZE,
  * ROB_DEPTH, CSR_LATE).
@@ -145,6 +148,10 @@ module qv_backend_tb #(
     uop_t        script     [0:MAXN-1];
     int          bubble     [0:MAXN-1];   // idle cycles before presenting this uop
     logic [63:0] exp_wdata  [0:MAXN-1];
+    logic [4:0]  exp_rs1    [0:MAXN-1];   // RVFI's source registers (0 when unused) and their values in program order
+    logic [4:0]  exp_rs2    [0:MAXN-1];
+    logic [63:0] exp_rs1_v  [0:MAXN-1];
+    logic [63:0] exp_rs2_v  [0:MAXN-1];
     logic [63:0] issue_cyc  [0:MAXN-1];
     logic [63:0] G [0:31];                // golden regfile
     int n_uops;
@@ -193,6 +200,10 @@ module qv_backend_tb #(
         y = golden_alu(u.alu_op, a, b);
         if (u.is_word) y = {{32{y[31]}}, y[31:0]};
         if (u.fu == QV_FU_CSR) y = CSR_VAL;                 // a read: rd is the CSR's value
+        exp_rs1[n_uops]   = u.rs1;
+        exp_rs2[n_uops]   = u.rs2;
+        exp_rs1_v[n_uops] = u.rs1_used ? G[u.rs1] : 64'd0;
+        exp_rs2_v[n_uops] = u.rs2_used ? G[u.rs2] : 64'd0;
         if (u.rd_wen && u.rd != 0) G[u.rd] = y;
         exp_wdata[n_uops] = (u.rd_wen && u.rd != 0) ? y : 64'd0;
         script[n_uops]    = u;
@@ -221,15 +232,24 @@ module qv_backend_tb #(
     end
 
     // ---------------- retirement checker ----------------
+    // RVFI's source values are what core.sv's RISCV_FORMAL read ports give: regfile0 at the source registers in the
+    // commit cycle, before the edge writes this instruction's rd (read here in the active region, ahead of the NBA).
+    function automatic logic [63:0] rf_val(input logic [4:0] a);
+        return (a == 5'd0) ? 64'd0 : regfile0.gp_registers[a];
+    endfunction
     int n_ret, ret_errs;
     always @(posedge clk) begin
         if (!rst && run_en && commit_now) begin
             if (r_order != 64'(n_ret) || r_pc_rdata != 64'(4 * n_ret) || r_insn != 32'(n_ret)
-                    || r_rd_wdata != exp_wdata[n_ret] || r_pc_wdata != 64'(4 * n_ret + 4)) begin
+                    || r_rd_wdata != exp_wdata[n_ret] || r_pc_wdata != 64'(4 * n_ret + 4)
+                    || r_rs1_addr != exp_rs1[n_ret] || r_rs2_addr != exp_rs2[n_ret]
+                    || rf_val(r_rs1_addr) != exp_rs1_v[n_ret] || rf_val(r_rs2_addr) != exp_rs2_v[n_ret]) begin
                 ret_errs++;
                 if (ret_errs <= 5)
-                    $display("RETIRE MISMATCH #%0d: order=%0d pc=%h insn=%h rd_wdata=%h (exp %h)",
-                             n_ret, r_order, r_pc_rdata, r_insn, r_rd_wdata, exp_wdata[n_ret]);
+                    $display("RETIRE MISMATCH #%0d: order=%0d pc=%h insn=%h rd_wdata=%h (exp %h) rs1 x%0d=%h (exp x%0d=%h) rs2 x%0d=%h (exp x%0d=%h)",
+                             n_ret, r_order, r_pc_rdata, r_insn, r_rd_wdata, exp_wdata[n_ret],
+                             r_rs1_addr, rf_val(r_rs1_addr), exp_rs1[n_ret], exp_rs1_v[n_ret],
+                             r_rs2_addr, rf_val(r_rs2_addr), exp_rs2[n_ret], exp_rs2_v[n_ret]);
             end
             n_ret <= n_ret + 1;
         end
