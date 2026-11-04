@@ -29,6 +29,7 @@
  *   - the engine never takes an op before both its operands exist (delivered in an earlier cycle, or on a same-cycle
  *     source now: the ALU/BRU and FPU buses, the engine's own writeback), and it takes them with exactly those values;
  *   - an op dispatched and taken in one cycle (nothing queued) had its operands ready.
+ * Bounded at depth 10 (opw) with covers to depth 20 (opw_cover).
  */
 module lsq_props (
     input logic                             clk,
