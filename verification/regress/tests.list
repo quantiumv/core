@@ -11,7 +11,7 @@
 #   ref   the frozen multi-cycle reference, verification/reference/ref_core.sv
 #         (named `core` by -DQV_REF_AS_CORE) -- 79 rows
 # run_regress.sh --core X SKIPS any row not listing X, silently, so a row that
-# names neither core would just never run: there must be 148 rows listing pipe.
+# names neither core would just never run: there must be 152 rows listing pipe.
 #
 # The rows that omit ref are the design/*_tb.sv unit tests of a leaf module
 # (alu, c_expand, csr_file, divider, register_file) and of the divider's
@@ -179,6 +179,10 @@ pipe_lsu_early_nosb_tb|design/pipe/qv_lsu_early_tb.sv||design|pipe|pass||-Pqv_ls
 pipe_rob_tb_d8|design/pipe/qv_rob_tb.sv||design|pipe|pass||-Pqv_rob_tb.ROB_DEPTH=8
 pipe_rob_tb_d4|design/pipe/qv_rob_tb.sv||design|pipe|pass||-Pqv_rob_tb.ROB_DEPTH=4
 pipe_rob_tb_d2|design/pipe/qv_rob_tb.sv||design|pipe|pass||-Pqv_rob_tb.ROB_DEPTH=2
+pipe_rs_tb_d4|design/pipe/qv_rs_tb.sv||design|pipe|pass|900|
+pipe_rs_tb_d2_b0|design/pipe/qv_rs_tb.sv||design|pipe|pass|900|-Pqv_rs_tb.DEPTH=2 -Pqv_rs_tb.BYPASS_EN=0 -Pqv_rs_tb.LSU_BYPASS=0 -Pqv_rs_tb.SEED=2
+pipe_rs_tb_d8_l0|design/pipe/qv_rs_tb.sv||design|pipe|pass|900|-Pqv_rs_tb.DEPTH=8 -Pqv_rs_tb.LSU_BYPASS=0 -Pqv_rs_tb.SEED=3
+pipe_rs_tb_d1|design/pipe/qv_rs_tb.sv||design|pipe|pass|900|-Pqv_rs_tb.DEPTH=1 -Pqv_rs_tb.SEED=4
 pipe_backend_tb_b1s0r8|design/pipe/qv_backend_tb.sv||design|pipe|pass||-Pqv_backend_tb.BYPASS_EN=1 -Pqv_backend_tb.SERIALIZE=0 -Pqv_backend_tb.ROB_DEPTH=8
 pipe_backend_tb_b0s0r8|design/pipe/qv_backend_tb.sv||design|pipe|pass||-Pqv_backend_tb.BYPASS_EN=0 -Pqv_backend_tb.SERIALIZE=0 -Pqv_backend_tb.ROB_DEPTH=8
 pipe_backend_tb_b1s0r8_csr|design/pipe/qv_backend_tb.sv||design|pipe|pass||-Pqv_backend_tb.BYPASS_EN=1 -Pqv_backend_tb.SERIALIZE=0 -Pqv_backend_tb.ROB_DEPTH=8 -Pqv_backend_tb.CSR_LATE=1
