@@ -77,6 +77,7 @@ module perf_stack #(
     input logic             alloc_ready,
     input logic             lsu_free,
     input logic             div_free,
+    input logic             rs_full = 1'b0,    // O1: the uop is for the reservation station, cannot go straight to its unit, and the station is full
 
     input logic             wb_valid,           // the fast writeback bus
     input logic             wb_mispredict,
@@ -157,7 +158,7 @@ module perf_stack #(
     int win_q;                       // 0: not opened yet, 1: open, 2: closed
     longint unsigned c_window, c_retire, c_blk_lsu, c_blk_div, c_blk_alu, c_blk_sys, c_blk_fpu;
     longint unsigned c_ear_align, c_ear_mispred, c_ear_serial, c_ear_other, c_empty_front;
-    longint unsigned c_iq_empty, c_fb_empty, c_is_oper, c_is_rob, c_is_lsu, c_is_div, c_no_uop;
+    longint unsigned c_iq_empty, c_fb_empty, c_is_oper, c_is_rob, c_is_lsu, c_is_div, c_no_uop, c_is_rs;
     longint unsigned c_lq_ld, c_lq_st, c_lq_bar, c_lq_match, c_lq_qmatch, c_lq_hand, c_lq_drain;
     longint unsigned c_re_align, c_re_mispred, c_re_serial, c_re_other;
     longint unsigned c_mp_cond, c_mp_jal, c_mp_jalr, c_mp_wait, c_mp_n;
@@ -269,6 +270,7 @@ module perf_stack #(
             c_window <= 0; c_retire <= 0; c_blk_lsu <= 0; c_blk_div <= 0; c_blk_alu <= 0; c_blk_sys <= 0; c_blk_fpu <= 0;
             c_ear_align <= 0; c_ear_mispred <= 0; c_ear_serial <= 0; c_ear_other <= 0; c_empty_front <= 0;
             c_iq_empty <= 0; c_fb_empty <= 0; c_is_oper <= 0; c_is_rob <= 0; c_is_lsu <= 0; c_is_div <= 0; c_no_uop <= 0;
+            c_is_rs <= 0;
             c_re_align <= 0; c_re_mispred <= 0; c_re_serial <= 0; c_re_other <= 0;
             c_mp_cond <= 0; c_mp_jal <= 0; c_mp_jalr <= 0; c_mp_wait <= 0; c_mp_n <= 0;
             c_bus_wait <= 0;
@@ -351,6 +353,7 @@ module perf_stack #(
                 if (!uop_valid) c_no_uop <= c_no_uop + 1;
                 if (uop_valid && !issue_fire) begin
                     if      (!alloc_ready)                        c_is_rob  <= c_is_rob + 1;
+                    else if (rs_full)                             c_is_rs   <= c_is_rs + 1;
                     else if (!a_ready || !b_ready || !c_ready)    c_is_oper <= c_is_oper + 1;
                     else if (uop_fu == FU_LSU && !lsu_free)       c_is_lsu  <= c_is_lsu + 1;
                     else if (uop_fu == FU_DIV && !div_free)       c_is_div  <= c_is_div + 1;
@@ -422,11 +425,12 @@ module perf_stack #(
         $display("PERF_STACK: window=%0d retire=%0d blk_lsu=%0d blk_div=%0d blk_alu=%0d blk_sys=%0d ear_align=%0d ear_mispred=%0d ear_serial=%0d ear_other=%0d empty_front=%0d blk_fpu=%0d",
                  c_window, c_retire, c_blk_lsu, c_blk_div, c_blk_alu, c_blk_sys, c_ear_align, c_ear_mispred, c_ear_serial,
                  c_ear_other, c_empty_front, c_blk_fpu);
-        $display("PERF_SIDE: iq_empty=%0d fb_empty=%0d no_uop=%0d is_rob=%0d is_oper=%0d is_lsu=%0d is_div=%0d re_align=%0d re_mispred=%0d re_serial=%0d re_other=%0d mp_cond=%0d mp_jal=%0d mp_jalr=%0d mp_wait=%0d bus_wait=%0d xl_req=%0d xl_reuse=%0d xl_cyc=%0d dx_n=%0d dx_hit=%0d dx_save=%0d re_ser_ro=%0d re_ser_trapw=%0d re_ser_csr=%0d re_ser_sys=%0d ear_ser_ro=%0d ear_ser_trapw=%0d ear_ser_csr=%0d ear_ser_sys=%0d",
+        $display("PERF_SIDE: iq_empty=%0d fb_empty=%0d no_uop=%0d is_rob=%0d is_oper=%0d is_lsu=%0d is_div=%0d re_align=%0d re_mispred=%0d re_serial=%0d re_other=%0d mp_cond=%0d mp_jal=%0d mp_jalr=%0d mp_wait=%0d bus_wait=%0d xl_req=%0d xl_reuse=%0d xl_cyc=%0d dx_n=%0d dx_hit=%0d dx_save=%0d re_ser_ro=%0d re_ser_trapw=%0d re_ser_csr=%0d re_ser_sys=%0d ear_ser_ro=%0d ear_ser_trapw=%0d ear_ser_csr=%0d ear_ser_sys=%0d is_rs=%0d",
                  c_iq_empty, c_fb_empty, c_no_uop, c_is_rob, c_is_oper, c_is_lsu, c_is_div, c_re_align, c_re_mispred, c_re_serial,
                  c_re_other, c_mp_cond, c_mp_jal, c_mp_jalr, c_mp_wait, c_bus_wait,
                  c_xl_req, c_xl_reuse, c_xl_cyc, c_dx_n, c_dx_hit, c_dx_save,
-                 c_re_ser[0], c_re_ser[1], c_re_ser[2], c_re_ser[3], c_ear_ser[0], c_ear_ser[1], c_ear_ser[2], c_ear_ser[3]);
+                 c_re_ser[0], c_re_ser[1], c_re_ser[2], c_re_ser[3], c_ear_ser[0], c_ear_ser[1], c_ear_ser[2], c_ear_ser[3],
+                 c_is_rs);
         $display("PERF_LSQ: early_ld=%0d early_st=%0d bar_wait=%0d match_wait=%0d qmatch_wait=%0d handoff=%0d drain=%0d",
                  c_lq_ld, c_lq_st, c_lq_bar, c_lq_match, c_lq_qmatch, c_lq_hand, c_lq_drain);
         if (win_q != 2)

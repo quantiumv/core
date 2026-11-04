@@ -157,7 +157,7 @@ if [ -n "$ORACLE" ]; then STACK_CSV="$SCRIPT_DIR/oracle_${ORACLE}_${CORE}${SFX}$
 STACK_KEYS="window retire blk_lsu blk_div blk_alu blk_sys ear_align ear_mispred ear_serial ear_other empty_front blk_fpu"
 SIDE_KEYS="iq_empty fb_empty no_uop is_rob is_oper is_lsu is_div re_align re_mispred re_serial re_other mp_cond mp_jal mp_jalr mp_wait bus_wait"
 SIDE_KEYS="$SIDE_KEYS xl_req xl_reuse xl_cyc dx_n dx_hit dx_save re_ser_ro re_ser_trapw re_ser_csr re_ser_sys"
-SIDE_KEYS="$SIDE_KEYS ear_ser_ro ear_ser_trapw ear_ser_csr ear_ser_sys"
+SIDE_KEYS="$SIDE_KEYS ear_ser_ro ear_ser_trapw ear_ser_csr ear_ser_sys is_rs"
 # the load/store queue's counters (O2), a file of their own so the stack's stays as it was
 LSQ_CSV="${STACK_CSV%_stack.csv}_lsq.csv"
 LSQ_KEYS="early_ld early_st bar_wait match_wait qmatch_wait handoff drain"
