@@ -39,7 +39,6 @@ module qv_rob #(
     input  logic [4:0]                       i_alloc_rd,
     input  logic                             i_alloc_rd_wen,
     input  logic [63:0]                      i_alloc_next_pc,
-    input  qv_pkg::rvfi_shadow_t             i_alloc_shadow,
     input  qv_pkg::rob_ctrl_t                i_alloc_ctrl,
     output logic [qv_pkg::QV_ROB_TAG_W-1:0]  o_alloc_tag,
     output logic                             o_alloc_ready,
@@ -77,7 +76,6 @@ module qv_rob #(
     output logic                             o_head_valid,
     output qv_pkg::rob_entry_t               o_head_entry,
     output logic [qv_pkg::QV_ROB_TAG_W-1:0]  o_head_tag,
-    output qv_pkg::rvfi_shadow_t             o_head_shadow,
     output qv_pkg::rob_ctrl_t                o_head_ctrl,
     input  logic                             i_commit_pop
 );
@@ -95,7 +93,6 @@ module qv_rob #(
     logic               mispredict_q[0:ROB_DEPTH-1];
     logic               complete_q[0:ROB_DEPTH-1];
     logic [4:0]         fflags_q  [0:ROB_DEPTH-1];
-    rvfi_shadow_t       shadow_q  [0:ROB_DEPTH-1];
     rob_ctrl_t          ctrl_q    [0:ROB_DEPTH-1];
 
     logic [PTR_W-1:0] head_q, tail_q;
@@ -137,7 +134,6 @@ module qv_rob #(
         o_head_entry.mispredict = mispredict_q[head_idx];
         o_head_entry.fflags     = fflags_q[head_idx];
     end
-    assign o_head_shadow = shadow_q[head_idx];
     assign o_head_ctrl   = ctrl_q[head_idx];
 
     wire [PTR_W-1:0] head_next = pop ? head_q + PTR_W'(1) : head_q;
@@ -162,7 +158,6 @@ module qv_rob #(
                 rd_q[tail_idx]         <= i_alloc_rd;
                 rd_wen_q[tail_idx]     <= i_alloc_rd_wen;
                 next_pc_q[tail_idx]    <= i_alloc_next_pc;
-                shadow_q[tail_idx]     <= i_alloc_shadow;
                 ctrl_q[tail_idx]       <= i_alloc_ctrl;
                 complete_q[tail_idx]   <= 1'b0;
                 mispredict_q[tail_idx] <= 1'b0;

@@ -575,7 +575,6 @@ module core
     logic [63:0]             alloc_pc, alloc_next_pc;
     logic [31:0]             alloc_raw;
     logic [4:0]              alloc_rd;
-    rvfi_shadow_t            alloc_shadow;
     rob_ctrl_t               alloc_ctrl;
     logic [QV_ROB_TAG_W-1:0] alloc_tag, l1_tag, l2_tag;
     logic                    l1_complete, l2_complete;
@@ -609,7 +608,7 @@ module core
         .o_rs1_sel(rs1_sel), .o_rs2_sel(rs2_sel), .i_rs1_data(rs1_data), .i_rs2_data(rs2_data),
         .o_alloc_valid(alloc_valid), .o_alloc_pc(alloc_pc), .o_alloc_raw(alloc_raw),
         .o_alloc_rd(alloc_rd), .o_alloc_rd_wen(alloc_rd_wen), .o_alloc_next_pc(alloc_next_pc),
-        .o_alloc_shadow(alloc_shadow), .o_alloc_ctrl(alloc_ctrl),
+        .o_alloc_ctrl(alloc_ctrl),
         .i_alloc_tag(alloc_tag), .i_alloc_ready(alloc_ready),
         .i_rob_empty(rob_empty),
         .o_lookup1_tag(l1_tag), .i_lookup1_complete(l1_complete), .i_lookup1_value(l1_value),
@@ -632,14 +631,13 @@ module core
     logic                    head_valid, commit_pop;
     rob_entry_t              head_entry;
     logic [QV_ROB_TAG_W-1:0] head_tag;
-    rvfi_shadow_t            head_shadow;
     rob_ctrl_t               head_ctrl;
 
     qv_rob #(.ROB_DEPTH(ROB_DEPTH)) rob0 (
         .clk(clk), .rst(rst), .i_flush(flush),
         .i_alloc_valid(alloc_valid), .i_alloc_pc(alloc_pc), .i_alloc_raw(alloc_raw),
         .i_alloc_rd(alloc_rd), .i_alloc_rd_wen(alloc_rd_wen), .i_alloc_next_pc(alloc_next_pc),
-        .i_alloc_shadow(alloc_shadow), .i_alloc_ctrl(alloc_ctrl),
+        .i_alloc_ctrl(alloc_ctrl),
         .o_alloc_tag(alloc_tag), .o_alloc_ready(alloc_ready),
         .o_empty(rob_empty), .i_wb(wb_bus), .i_wb2(lsu_wb), .i_wb3(div_wb),
         .i_lookup1_tag(l1_tag), .o_lookup1_complete(l1_complete), .o_lookup1_value(l1_value),
@@ -647,7 +645,7 @@ module core
         .i_wb4(fpu_wb),
         .i_lookup3_tag(l3_tag), .o_lookup3_complete(l3_complete), .o_lookup3_value(l3_value),
         .o_head_valid(head_valid), .o_head_entry(head_entry), .o_head_tag(head_tag),
-        .o_head_shadow(head_shadow), .o_head_ctrl(head_ctrl), .i_commit_pop(commit_pop)
+        .o_head_ctrl(head_ctrl), .i_commit_pop(commit_pop)
     );
 
     // ---------------- X: ALU, BRU -> writeback bus ----------------
@@ -933,7 +931,7 @@ module core
     // read only by the RISCV_FORMAL port block
     /* verilator lint_off UNUSEDSIGNAL */
     logic        c_rvfi_trap;
-    logic [63:0] c_order, c_rs1_rdata, c_rs2_rdata, c_rd_wdata, c_pc_rdata, c_pc_wdata;
+    logic [63:0] c_order, c_rd_wdata, c_pc_rdata, c_pc_wdata;
     logic [31:0] c_insn;
     logic        c_intr;
     logic [4:0]  c_rd_addr;
@@ -958,7 +956,7 @@ module core
     qv_commit #(.RESET_PC(RESET_PC)) commit0 (
         .clk(clk), .rst(rst),
         .i_head_valid(head_valid), .i_head_entry(head_entry), .i_head_tag(head_tag),
-        .i_head_shadow(head_shadow), .i_head_ctrl(head_ctrl), .i_lsu_res(lsu_res), .o_commit_pop(commit_pop),
+        .i_head_ctrl(head_ctrl), .i_lsu_res(lsu_res), .o_commit_pop(commit_pop),
         .o_res_valid(res_valid), .o_res_addr(res_addr),
         .o_regfile_we(rf_we), .o_regfile_sel(rf_sel), .o_regfile_data(rf_data),
         .o_commit_valid(c_valid), .o_commit_rd(c_rd), .o_commit_rd_wen(c_rd_wen), .o_commit_tag(c_tag),
@@ -987,7 +985,6 @@ module core
         .o_redirect_valid(redirect_valid), .o_redirect_pc(redirect_pc), .o_redirect_ctx(c_redirect_ctx),
         .o_rvfi_order(c_order), .o_rvfi_insn(c_insn), .o_rvfi_trap(c_rvfi_trap), .o_rvfi_intr(c_intr),
         .o_rvfi_rs1_addr(c_rs1_addr), .o_rvfi_rs2_addr(c_rs2_addr),
-        .o_rvfi_rs1_rdata(c_rs1_rdata), .o_rvfi_rs2_rdata(c_rs2_rdata),
         .o_rvfi_rd_addr(c_rd_addr), .o_rvfi_rd_wdata(c_rd_wdata),
         .o_rvfi_pc_rdata(c_pc_rdata), .o_rvfi_pc_wdata(c_pc_wdata),
         .o_rvfi_mem_addr(c_mem_addr), .o_rvfi_mem_rmask(c_mem_rmask), .o_rvfi_mem_wmask(c_mem_wmask),
@@ -1012,6 +1009,11 @@ module core
     // The Debug Module's GPR access shares read port B and the write port outright, as in ref_core.sv: while the
     // hart is halted (dm_access_active) nothing issues and nothing retires, so the two users are never live in
     // the same cycle. o_dm_gpr_rdata is the very same wire rs2_data, trusted by the Debug Module only then.
+    // Under RISCV_FORMAL, ports C and D read the retiring instruction's RVFI source values: in the commit cycle
+    // regfile0 holds exactly the state before it (the write lands at the edge).
+`ifdef RISCV_FORMAL
+    logic [63:0] c_rs1_rdata, c_rs2_rdata;
+`endif
     register_file regfile0 (
         .i_clk(clk),
         .i_read_gpr_A_sel(rs1_sel), .o_read_gpr_A_data(rs1_data),
@@ -1019,6 +1021,10 @@ module core
         .i_load_gpr(dm_access_active ? i_dm_gpr_we : rf_we),
         .i_load_gpr_sel(dm_access_active ? i_dm_gpr_sel : rf_sel),
         .i_load_gpr_data(dm_access_active ? i_dm_gpr_wdata : rf_data)
+`ifdef RISCV_FORMAL
+        , .i_read_gpr_C_sel(c_rs1_addr), .o_read_gpr_C_data(c_rs1_rdata),
+        .i_read_gpr_D_sel(c_rs2_addr), .o_read_gpr_D_data(c_rs2_rdata)
+`endif
     );
 
     // F/D: the FP register file (its array fp_registers is a name the lockstep harness reads in both cores), read by

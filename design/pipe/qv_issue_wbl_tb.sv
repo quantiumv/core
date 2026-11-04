@@ -38,7 +38,7 @@ module qv_issue_wbl_tb #(
         .i_uop_valid(uop_valid), .i_uop(uop), .o_issue(issue),
         .o_rs1_sel(), .o_rs2_sel(), .i_rs1_data(64'h0), .i_rs2_data(64'h0),
         .o_alloc_valid(), .o_alloc_pc(), .o_alloc_raw(), .o_alloc_rd(), .o_alloc_rd_wen(), .o_alloc_next_pc(),
-        .o_alloc_shadow(), .o_alloc_ctrl(),
+        .o_alloc_ctrl(),
         .i_alloc_tag(alloc_tag), .i_alloc_ready(1'b1), .i_rob_empty(1'b0),
         .o_lookup1_tag(l1_tag), .i_lookup1_complete(l_complete), .i_lookup1_value(l_value),
         .o_lookup2_tag(l2_tag), .i_lookup2_complete(l_complete), .i_lookup2_value(l_value),

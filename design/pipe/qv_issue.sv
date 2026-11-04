@@ -20,9 +20,9 @@
  * claim (the younger) wins. A flush clears every claim: everything in
  * flight is dead and regfile0 holds the architectural state.
  *
- * Source values for RVFI are captured here and carried in the ROB:
- * regfile0's two read ports belong to whatever is issuing, so they can't
- * be re-read for an older instruction at commit.
+ * RVFI's source registers are carried in the ROB; commit reads their
+ * values from regfile0, which then holds exactly the state before the
+ * retiring instruction.
  *
  * Debug knobs: SERIALIZE=1 issues only into an empty ROB (one
  * instruction in flight); BYPASS_EN=0 drops path 3, turning a back-to-
@@ -71,7 +71,6 @@ module qv_issue #(
     output logic [4:0]                       o_alloc_rd,
     output logic                             o_alloc_rd_wen,
     output logic [63:0]                      o_alloc_next_pc,
-    output qv_pkg::rvfi_shadow_t             o_alloc_shadow,
     output qv_pkg::rob_ctrl_t                o_alloc_ctrl,
     input  logic [qv_pkg::QV_ROB_TAG_W-1:0]  i_alloc_tag,
     input  logic                             i_alloc_ready,
@@ -213,14 +212,6 @@ module qv_issue #(
     assign o_alloc_next_pc = pred_next;
 
     always_comb begin
-        o_alloc_shadow           = '0;
-        o_alloc_shadow.rs1_addr  = i_uop.rs1_fp ? 5'b0 : i_uop.rs1;
-        o_alloc_shadow.rs1_rdata = (i_uop.rs1_used && !i_uop.rs1_fp) ? opa : 64'b0;
-        o_alloc_shadow.rs2_addr  = i_uop.rs2_fp ? 5'b0 : i_uop.rs2;
-        o_alloc_shadow.rs2_rdata = (i_uop.rs2_used && !i_uop.rs2_fp) ? opb : 64'b0;
-    end
-
-    always_comb begin
         o_alloc_ctrl           = '0;
         o_alloc_ctrl.cls       = i_uop.fu;
         o_alloc_ctrl.sys_op    = i_uop.sys_op;
@@ -239,6 +230,9 @@ module qv_issue #(
         o_alloc_ctrl.trig_debug = i_uop.trig_debug;
         o_alloc_ctrl.trig_exc   = i_uop.trig_exc;
         o_alloc_ctrl.rd_fp      = i_uop.rd_fp;
+        // decode makes an unused source register 0
+        o_alloc_ctrl.rvfi_rs1   = i_uop.rs1_fp ? 5'b0 : i_uop.rs1;
+        o_alloc_ctrl.rvfi_rs2   = i_uop.rs2_fp ? 5'b0 : i_uop.rs2;
     end
 
     // ---------------- dispatch: one request port per unit ----------------

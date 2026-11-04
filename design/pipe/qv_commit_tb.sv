@@ -67,7 +67,6 @@ module qv_commit_tb;
 
     logic                    head_valid = 1'b0;
     rob_entry_t              e = '0;
-    rvfi_shadow_t            sh = '0;
     rob_ctrl_t               c = '0;
     logic [QV_ROB_TAG_W-1:0] tag = '0;
     logic [63:0]             csr_rdata = '0, mtvec = '0, mepc = '0;
@@ -78,7 +77,7 @@ module qv_commit_tb;
     logic [QV_ROB_TAG_W-1:0] c_tag;
     logic [11:0]             csr_addr;
     logic [63:0]             rf_data, csr_wdata, trap_cause, trap_val, arch_pc, next_pc, redirect_pc;
-    logic [63:0]             r_order, r_rs1_rdata, r_rs2_rdata, r_rd_wdata, r_pc_rdata, r_pc_wdata;
+    logic [63:0]             r_order, r_rd_wdata, r_pc_rdata, r_pc_wdata;
     logic [31:0]             r_insn;
     lsu_res_t                lres = '0;
     logic [63:0]             r_mem_addr, r_mem_rdata, r_mem_wdata;
@@ -109,7 +108,7 @@ module qv_commit_tb;
     qv_commit #(.RESET_PC(64'h1000)) dut (
         .clk(clk), .rst(rst),
         .i_head_valid(head_valid), .i_head_entry(e), .i_head_tag(tag),
-        .i_head_shadow(sh), .i_head_ctrl(c), .i_lsu_res(lres), .o_commit_pop(pop),
+        .i_head_ctrl(c), .i_lsu_res(lres), .o_commit_pop(pop),
         .o_res_valid(res_valid), .o_res_addr(res_addr),
         .o_sret_taken(sret_taken), .o_trap_to_s(trap_to_s), .o_priv(priv),
         .i_stvec(stvec), .i_sepc(sepc), .i_medeleg(medeleg),
@@ -135,7 +134,6 @@ module qv_commit_tb;
         .o_redirect_valid(redirect), .o_redirect_pc(redirect_pc), .o_redirect_ctx(redirect_ctx),
         .o_rvfi_order(r_order), .o_rvfi_insn(r_insn), .o_rvfi_trap(r_trap), .o_rvfi_intr(r_intr),
         .o_rvfi_rs1_addr(r_rs1_addr), .o_rvfi_rs2_addr(r_rs2_addr),
-        .o_rvfi_rs1_rdata(r_rs1_rdata), .o_rvfi_rs2_rdata(r_rs2_rdata),
         .o_rvfi_rd_addr(r_rd_addr), .o_rvfi_rd_wdata(r_rd_wdata),
         .o_rvfi_pc_rdata(r_pc_rdata), .o_rvfi_pc_wdata(r_pc_wdata),
         .o_rvfi_mem_addr(r_mem_addr), .o_rvfi_mem_rmask(r_mem_rmask), .o_rvfi_mem_wmask(r_mem_wmask),
@@ -392,13 +390,14 @@ module qv_commit_tb;
 
         // ---- plain ALU result ----
         set_entry(64'h1000, 32'h0050_0293, 5, 1'b1, 64'hABCD);
-        sh.rs1_addr = 7; sh.rs1_rdata = 64'h77;
+        c.rvfi_rs1 = 5'd7; c.rvfi_rs2 = 5'd9;
         expect_plain("alu", 1'b0);
         check("alu: rd write", b(rf_we), 64'd1);
         check("alu: rd sel", {59'b0, rf_sel}, 64'd5);
         check("alu: rd data", rf_data, 64'hABCD);
         check("alu: rvfi rd", r_rd_wdata, 64'hABCD);
-        check("alu: rvfi rs1", r_rs1_rdata, 64'h77);
+        check("alu: rvfi rs1", {59'b0, r_rs1_addr}, 64'd7);
+        check("alu: rvfi rs2", {59'b0, r_rs2_addr}, 64'd9);
         check("alu: order 0", r_order, 64'd0);
         check("alu: not intr", b(r_intr), 64'd0);
         retire();

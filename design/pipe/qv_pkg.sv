@@ -172,19 +172,6 @@ package qv_pkg;
         logic [4:0]  fflags;       // F/D: the exception flags an FPU op raised, accrued into fflags at commit
     } rob_entry_t;
 
-    // RVFI source-operand capture, taken at issue: regfile0 has only two
-    // read ports and they belong to whatever is issuing that cycle, so an
-    // older instruction's rs1/rs2 values can't be re-read at commit.
-    // Always declared (not gated on RISCV_FORMAL) so module port lists
-    // stay identical with and without formal; it costs nothing when
-    // nothing reads it.
-    typedef struct packed {
-        logic [4:0]  rs1_addr;
-        logic [63:0] rs1_rdata;
-        logic [4:0]  rs2_addr;
-        logic [63:0] rs2_rdata;
-    } rvfi_shadow_t;
-
     // A memory op's outcome, held by the LSU from its completion until it
     // commits (only the ROB head ever sits in between): its exception, if
     // any, and the RVFI memory fields, following ref_core.sv's conventions
@@ -220,6 +207,10 @@ package qv_pkg;
         logic        trig_debug;   // see uop_t
         logic        trig_exc;
         logic        rd_fp;        // F/D: rd is an FP register (fprf0, the FP producer table)
+        // RVFI's source registers (0 when unused or an FP register). Commit reads their values from regfile0, which
+        // holds exactly the architectural state before the retiring instruction (O1.1).
+        logic [4:0]  rvfi_rs1;
+        logic [4:0]  rvfi_rs2;
     } rob_ctrl_t;
 
     // Issue -> functional unit.

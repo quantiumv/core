@@ -37,10 +37,11 @@
  * nonzero rd, pc_wdata is the real next pc (trap vector, mepc, or the
  * entry's own), intr flags a retirement whose pc doesn't follow the
  * previous one's pc_wdata, mode is the privilege the instruction ran at
- * and ixl is fixed (64-bit). Source
- * operands come from the values issue captured (rvfi_shadow_t), since
- * regfile0's read ports aren't free to re-read them here; memory fields
- * come from the LSU's result for a memory op and are 0 otherwise.
+ * and ixl is fixed (64-bit). The source registers come from the ROB, and
+ * core.sv reads their values from regfile0, which in the commit cycle
+ * still holds the state before this instruction (it is written at the
+ * edge); memory fields come from the LSU's result for a memory op and
+ * are 0 otherwise.
  *
  * Interrupts are sampled exactly as ref_core.sv does: only in the cycle after
  * a retirement (commit_q), from the live mip/mie/mideleg/mstatus/privilege
@@ -96,7 +97,6 @@ module qv_commit #(
     input  qv_pkg::rob_entry_t               i_head_entry,
     /* verilator lint_on UNUSEDSIGNAL */
     input  logic [qv_pkg::QV_ROB_TAG_W-1:0]  i_head_tag,
-    input  qv_pkg::rvfi_shadow_t             i_head_shadow,
     input  qv_pkg::rob_ctrl_t                i_head_ctrl,
     input  qv_pkg::lsu_res_t                 i_lsu_res,     // the head's, when it's a memory op
     output logic                             o_commit_pop,
@@ -226,8 +226,6 @@ module qv_commit #(
     output logic                             o_rvfi_intr,
     output logic [4:0]                       o_rvfi_rs1_addr,
     output logic [4:0]                       o_rvfi_rs2_addr,
-    output logic [63:0]                      o_rvfi_rs1_rdata,
-    output logic [63:0]                      o_rvfi_rs2_rdata,
     output logic [4:0]                       o_rvfi_rd_addr,
     output logic [63:0]                      o_rvfi_rd_wdata,
     output logic [63:0]                      o_rvfi_pc_rdata,
@@ -524,10 +522,8 @@ module qv_commit #(
     assign o_rvfi_insn      = i_head_entry.raw;
     assign o_rvfi_trap      = commit && trap_fx;
     assign o_rvfi_intr      = commit && (i_head_entry.pc != prev_pc_wdata_q);
-    assign o_rvfi_rs1_addr  = i_head_shadow.rs1_addr;
-    assign o_rvfi_rs2_addr  = i_head_shadow.rs2_addr;
-    assign o_rvfi_rs1_rdata = i_head_shadow.rs1_rdata;
-    assign o_rvfi_rs2_rdata = i_head_shadow.rs2_rdata;
+    assign o_rvfi_rs1_addr  = i_head_ctrl.rvfi_rs1;      // their values: regfile0, read by core.sv
+    assign o_rvfi_rs2_addr  = i_head_ctrl.rvfi_rs2;
     assign o_rvfi_rd_addr   = (writes_rd && !rd_fp) ? i_head_entry.rd : 5'b0;
     assign o_rvfi_rd_wdata  = (writes_rd && !rd_fp && i_head_entry.rd != 5'b0) ? rd_value : 64'b0;
     assign o_rvfi_frd_wvalid = commit && writes_rd && rd_fp;
