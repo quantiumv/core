@@ -169,7 +169,7 @@ def read_trace(path):
 # the machine
 
 BASE = dict(w=1, rs=0, rob=8, iq=8, lsq=4, sb=4, handoff=True, early=True, lsu_bypass=True, bypass=True,
-            alu_ports=1, fe='res', fe_rate=1, db=4)
+            alu_ports=1, fe='res', fe_rate=1, db=2)
 
 
 class DPort:
@@ -483,15 +483,15 @@ CONFIGS = [  # name, knobs
     ('ooo rs4', dict(rs=4)),
     ('ooo rs8', dict(rs=8)),
     ('ooo rs8 rob16', dict(rs=8, rob=16)),
-    ('db2', dict(db=2)),
+    ('db1', dict(db=1)),
     ('w2 io rob8', dict(w=2, alu_ports=2)),
     ('w2 io', dict(w=2, alu_ports=2, rob=16)),
     ('w2 io fe-ideal', dict(w=2, alu_ports=2, rob=16, fe='ideal')),
     ('w2 ooo', dict(w=2, alu_ports=2, rob=16, rs=8)),
     ('w2 ooo fe-ideal', dict(w=2, alu_ports=2, rob=16, rs=8, fe='ideal')),
     ('w2 ooo rob32 fe-ideal', dict(w=2, alu_ports=2, rob=32, rs=16, fe='ideal')),
-    ('w2 io db2', dict(w=2, alu_ports=2, rob=16, db=2)),
-    ('w2 ooo db2 fe-ideal', dict(w=2, alu_ports=2, rob=16, rs=8, db=2, fe='ideal')),
+    ('w2 io db1', dict(w=2, alu_ports=2, rob=16, db=1)),
+    ('w2 ooo db1 fe-ideal', dict(w=2, alu_ports=2, rob=16, rs=8, db=1, fe='ideal')),
 ]
 
 
@@ -503,7 +503,7 @@ def main():
     ap.add_argument('--config', default='cache')
     ap.add_argument('--mode', default='m')
     ap.add_argument('--kernels', default=' '.join(KERNELS))
-    ap.add_argument('--db', type=int, default=4, help='cycles from a drain beat to its response')
+    ap.add_argument('--db', type=int, default=2, help='cycles from a drain beat to its response (2: the D$ passes a store through)')
     a = ap.parse_args()
     sfx = '_s' if a.mode == 's' else ''
     base = load_csv(a.base)

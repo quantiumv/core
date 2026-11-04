@@ -1,10 +1,10 @@
 kernel,config,cycles,instret,cpi
 memcpy,sram,1162,659,1.763
-memcpy,cache,1013,659,1.537
+memcpy,cache,776,659,1.178
 crc32,sram,10129,8841,1.146
 crc32,cache,10041,8841,1.136
 qsort,sram,8255,4611,1.790
-qsort,cache,7842,4611,1.701
+qsort,cache,7596,4611,1.647
 matmul,sram,5890,4285,1.375
 matmul,cache,5516,4285,1.287
 sieve,sram,7549,5895,1.281
@@ -12,9 +12,9 @@ sieve,cache,6141,5895,1.042
 listchase,sram,3594,2564,1.402
 listchase,cache,3319,2564,1.294
 mixedint,sram,7114,4393,1.619
-mixedint,cache,6134,4393,1.396
+mixedint,cache,4934,4393,1.123
 trap,sram,11015,5605,1.965
-trap,cache,13046,5605,2.328
+trap,cache,10646,5605,1.899
 fmatmul,sram,5789,3773,1.534
 fmatmul,cache,5140,3773,1.362
 fpmix,sram,4346,402,10.811

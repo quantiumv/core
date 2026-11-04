@@ -22,24 +22,25 @@ never do.
 (and `make clean` in this directory for the kernels): re-run from clean after any
 RTL change.
 
-## Results (after O2, 2026-11, branch `OOO`)
+## Results (after the D$ store pass-through, 2026-11, branch `OOO`)
 
 CPI (cycles per retired instruction), M mode:
 
-| Kernel | reference, sram | core, sram | reference, cache | core, cache | core at P10, cache | core before P9, cache |
-|---|---|---|---|---|---|---|
-| memcpy | 3.77 | 1.70 | 4.28 | 1.53 | 1.74 | 2.36 |
-| crc32 | 3.03 | 1.12 | 3.03 | 1.11 | 1.12 | 1.25 |
-| qsort | 3.55 | 1.68 | 3.73 | 1.62 | 1.86 | 2.46 |
-| matmul | 3.62 | 1.38 | 3.69 | 1.16 | 1.63 | 1.78 |
-| sieve | 3.97 | 1.51 | 4.45 | 1.04 | 1.28 | 2.00 |
-| listchase | 3.80 | 1.60 | 3.90 | 1.09 | 1.90 | 1.91 |
-| mixedint | 3.99 | 1.62 | 4.33 | 1.37 | 1.58 | 2.14 |
-| trap (P10.0) | 4.00 | 1.86 | 4.43 | 2.25 | 2.40 | |
+| Kernel | reference, sram | core, sram | reference, cache | core, cache | core after O2, cache | core at P10, cache | core before P9, cache |
+|---|---|---|---|---|---|---|---|
+| memcpy | 3.77 | 1.70 | 3.90 | 1.17 | 1.53 | 1.74 | 2.36 |
+| crc32 | 3.03 | 1.12 | 3.03 | 1.11 | 1.11 | 1.12 | 1.25 |
+| qsort | 3.55 | 1.68 | 3.59 | 1.56 | 1.62 | 1.86 | 2.46 |
+| matmul | 3.62 | 1.38 | 3.66 | 1.16 | 1.16 | 1.63 | 1.78 |
+| sieve | 3.97 | 1.51 | 3.98 | 1.04 | 1.04 | 1.28 | 2.00 |
+| listchase | 3.80 | 1.60 | 3.90 | 1.09 | 1.09 | 1.90 | 1.91 |
+| mixedint | 3.99 | 1.62 | 4.01 | 1.10 | 1.37 | 1.58 | 2.14 |
+| trap (P10.0) | 4.00 | 1.86 | 4.00 | 1.83 | 2.25 | 2.40 | |
 
-The core is 2.1 to 4.3 times faster than the reference on every kernel, and 2.0 to 2.2 times on `trap` (an OS trap path)
+The core is 2.1 to 3.8 times faster than the reference on every kernel, and 2.2 times on `trap` (an OS trap path)
 since P10c stopped CSR reads and trap-CSR writes from flushing the pipeline (it was 3.58 on the SoC at P10.0). The
-load/store queue (O2) is the step from the "at P10" column to the core's.
+load/store queue (O2) is the step from the "at P10" column to the "after O2" one, and the D$ store pass-through the
+step from there to the core's (the reference runs behind the same D$, so its cache column moved too).
 
 ## F/D kernels
 
@@ -323,7 +324,8 @@ store buffer (O2.1). Knobs: `QV_PIPE_LSQ_DEPTH` (0 is the core before O2, and gi
 | fmatmul | 7740 | 4664 | -39.7 % | 1.236 | -27.2 % | -37.8 % | -28.7 % | 1152 | 61 | 576 |
 | fpmix | 4427 | 4356 | -1.6 % | 10.836 | -2.4 % | -0.9 % | -0.9 % | 34 | 3 | 2 |
 
-The last three columns are the M-mode SoC counts of `baseline_pipe_lsq.csv` (`PERF_LSQ`, one per event).
+The last three columns are the M-mode SoC counts of `baseline_pipe_lsq.csv` (`PERF_LSQ`, one per event) at O2; the
+D$ store pass-through (below) changed them.
 
 - Geometric mean of the ten: 0.810 (M SoC), 0.890 (M SRAM), 0.779 (S SoC), 0.864 (S SRAM). No kernel is slower in
   any of the four, and instret is unchanged on every row.
@@ -334,7 +336,41 @@ The last three columns are the M-mode SoC counts of `baseline_pipe_lsq.csv` (`PE
   M mode than in S mode.
 - What is left: the flat SRAM gains less because fetch and data share one bus, and an early access only moves a
   beat; sieve's stores are bound by the store buffer's drain; trap's restores read the dwords its saves just wrote
-  and wait for them (1,000 match-wait cycles, 8 % of its window), which forwarding would remove (not built).
+  and wait for them (1,000 match-wait cycles, 8 % of its window), which forwarding would remove (not built). (The
+  D$ store pass-through took memcpy, mixedint and trap off the drain, and trap's match waits to 0: below.)
+
+## The D$ store pass-through (branch `OOO`)
+
+`dcache.sv` used to take a store into a state of its own a cycle after it arrived, send it to memory from there and
+acknowledge it a cycle after memory did: four cycles a store, and with the store buffer's registered beat in front a
+drain beat held the LSU off for five. Now a store goes to memory in the cycle it arrives and is acknowledged in
+memory's response cycle (three cycles a beat); a hit is merged into its line from copies latched while the request was
+presented. A store is still in memory when it is acknowledged, so FENCE.I, the tests that read memory after an EBREAK
+and lockstep's end-of-test memory compare see what they saw before. Only the cache configuration has a D$; the flat
+SRAM rows are unchanged. Cycles, SoC:
+
+| kernel | M before | M after | change | S change | reference change |
+|---|---|---|---|---|---|
+| memcpy | 1007 | 770 | -23.5 % | -23.4 % | -9.1 % |
+| crc32 | 9785 | 9785 | 0.0 % | 0.0 % | -0.0 % |
+| qsort | 7461 | 7195 | -3.6 % | -3.1 % | -3.8 % |
+| matmul | 4988 | 4988 | 0.0 % | 0.0 % | -0.8 % |
+| sieve | 6118 | 6117 | -0.0 % | 0.0 % | -10.7 % |
+| listchase | 2806 | 2806 | 0.0 % | 0.0 % | 0.0 % |
+| mixedint | 6035 | 4839 | -19.8 % | -19.6 % | -7.6 % |
+| trap | 12632 | 10232 | -19.0 % | -18.4 % | -9.7 % |
+| fmatmul | 4664 | 4663 | -0.0 % | 0.0 % | -0.7 % |
+| fpmix | 4356 | 4356 | 0.0 % | 0.0 % | -0.1 % |
+| geomean | | | -7.1 % | -6.9 % | -4.3 % |
+
+- The O1.0 model below predicted exactly this before the RTL was written (its "D$ write 3 cycles" column: memcpy
+  -23.5 %, qsort -3.6 %, mixedint -19.8 %, trap -19.0 %, the geometric mean -7.1 %), to the tenth of a point on
+  every kernel. instret is unchanged on every row.
+- memcpy's loop was a 2-cycle load and a 5-cycle drain beat; mixedint and trap were bound the same way. The early
+  loads go up where a beat used to hold the LSU (`baseline_pipe_lsq.csv`, M SoC: memcpy 9 to 132, mixedint 124 to
+  780, trap 800 to 1,200), and trap's 1,000 match-wait cycles are gone: its restores no longer find the dwords they
+  read still in the buffer.
+- The reference runs behind the same D$, so its SoC rows gain too (sieve's stores each waited out the D$ there).
 
 ## CPI stack
 
@@ -486,20 +522,57 @@ instret changes or its cycles rise on the SoC configuration.
 entered and left the instruction queue, was issued, reached the LSU, started its access, wrote back and committed),
 and `ilp.py --traces DIR` replays the traces through a dataflow model of the core: in-order dispatch into the ROB and
 the load/store queue, issue in order or (with a reservation station) out of order, one memory engine in order with the
-handoff, the D$ shared by loads and the store buffer's drain (a beat holds the D$ for 5 cycles, and a load that is
-ready, or waiting near the ROB head, holds the drain off until the buffer is full or 16 cycles have passed), commit in
-order, and the refill after each commit redirect. What the structure does not explain is kept as a per-instruction
-residual measured on the core as it is, so the traced configuration replays exactly.
+handoff, the D$ shared by loads and the store buffer's drain (a beat holds the D$ for 3 cycles, 5 before the D$ store
+pass-through: `--db`; a load that is ready, or waiting near the ROB head, holds the drain off until the buffer is full
+or 16 cycles have passed), commit in order, and the refill after each commit redirect. What the structure does not
+explain is kept as a per-instruction residual measured on the core as it is, so the traced configuration replays
+exactly.
 
-The model was checked against runs of the core with one knob changed (`--validate`, the SoC configuration, M mode):
-it predicts the cycle change of every kernel within 0.3 percentage points for the queue off
-(`QV_PIPE_LSQ_DEPTH=0`: memcpy +14.0 %, listchase +74 %, fmatmul +66 %), early accesses off, the handoff off, the
-bypass off (crc32 +23.5 %) and a store buffer of 2 (mixedint +6.9 %). It does not predict the frontend: with
-`QV_PIPE_FETCH_STREAM=0` sieve measures +47 % and the model says +1 %, so the two-wide figures below are given with
-the frontend's measured gaps kept (`res`, pessimistic) and with an ideal streaming frontend (`ideal`: a dword a cycle,
-two instructions a cycle into the queue). The SRAM harness, where fetch and data share one bus, is not modelled.
+The model was checked against runs of the core with one knob changed (`--validate`, the SoC configuration, M mode),
+before the D$ store pass-through and again after it: it predicts the cycle change of every kernel within 0.3
+percentage points (0.2 after) for the queue off (`QV_PIPE_LSQ_DEPTH=0`, now: memcpy +49.1 %, listchase +74 %,
+fmatmul +66 %), early accesses off, the handoff off, the bypass off (crc32 +23.5 %) and a store buffer of 2 (trap
++7.8 %); and it predicted the pass-through itself, before it was built, to the tenth of a point. It does not predict
+the frontend: with `QV_PIPE_FETCH_STREAM=0` sieve measures +47 % and the model says +1 %, so the two-wide figures
+below are given with the frontend's measured gaps kept (`res`, pessimistic) and with an ideal streaming frontend
+(`ideal`: a dword a cycle, two instructions a cycle into the queue). The SRAM harness, where fetch and data share one
+bus, is not modelled.
 
-Change in cycles against the core, SoC configuration (S mode in brackets where it differs by more than 2 points):
+Change in cycles against the core after the D$ store pass-through, SoC configuration (S mode in brackets where it
+differs by more than 2 points):
+
+| kernel | OOO, RS 8 | + ROB 16 | drain beat 2 cycles | 2-wide in order | 2-wide OOO (res .. ideal) | 2-wide OOO + beat 2 cycles |
+|---|---|---|---|---|---|---|
+| memcpy | 0.0 % | 0.0 % | -0.9 % | -1.0 % | -1.0 % | -16.5 % |
+| crc32 | 0.0 % | 0.0 % | 0.0 % | -30.2 % (-20.6 %) | -30.2 .. -31.5 % (-20.8 .. -30.7 %) | -31.5 % |
+| qsort | -0.1 % | -0.1 % | -0.2 % | -14.8 % | -14.8 .. -16.7 % | -18.2 % |
+| matmul | -0.4 % (-8.4 %) | -0.4 % (-8.4 %) | 0.0 % | -15.0 % | -18.6 .. -30.7 % (-26.3 .. -29.1 %) | -30.7 % |
+| sieve | 0.0 % | 0.0 % | 0.0 % | -1.0 % (-44.7 %) | -1.1 .. -46.5 % (-44.7 .. -46.2 %) | -46.5 % |
+| listchase | -0.7 % | -0.7 % | 0.0 % | -17.2 % (-0.1 %) | -17.2 % (-0.1 %) | -17.2 % (-0.1 %) |
+| mixedint | 0.0 % | 0.0 % | 0.0 % | -2.5 % | -2.5 .. -6.5 % | -15.2 % |
+| trap | -2.0 % | -2.0 % | -2.0 % | -7.8 % (-5.6 %) | -5.8 .. -5.9 % | -19.6 % |
+| fmatmul | -0.8 % (-9.0 %) | -1.4 % (-9.0 %) | 0.0 % | -8.4 % (-11.6 %) | -9.3 .. -19.7 % (-18.8 .. -23.5 %) | -19.7 % (-23.5 %) |
+| fpmix | -5.5 % | -10.7 % | 0.0 % | -0.8 % | -10.8 .. -11.0 % | -11.0 % |
+| geomean | -1.0 % (-2.6 %) | -1.6 % (-3.2 %) | -0.3 % | -10.4 % (-12.6 %) | -11.6 .. -19.9 % (-15.7 .. -18.5 %) | -23.4 % (-22.1 %) |
+
+(2-wide: two dispatches, two ALU pipes, two commits a cycle, a pair only behind a plain retirement, ROB 16, one memory
+engine; "drain beat 2 cycles": the store buffer presents a beat in the cycle it decides it, where `qv_sb` registers it
+today; the last column has the ideal frontend.)
+
+What it says:
+- Out-of-order issue alone still buys about 1 % (2.6 % in S mode): dispatch and commit stay one a cycle, and what the
+  head waits for is mostly memory, which the queue already starts early. fpmix (the divides overlap the work behind
+  them, more with a bigger ROB), trap and, in S mode, matmul and fmatmul gain.
+- The drain no longer binds at one-wide: a 2-cycle beat buys 0.3 %.
+- Two-wide in order gains 10.4 % (12.6 % in S mode); out of order adds 1 to 9 points on top (the measured frontend ..
+  an ideal one), almost all of it on matmul, fmatmul and fpmix. sieve's M build gains 46 % only with an ideal frontend:
+  its loop straddles two dwords (the S build's does not). trap is the one kernel where out of order is worse than in
+  order at two-wide, by 2 points.
+- At two-wide the drain binds again on the store-heavy kernels: with a 2-cycle beat memcpy goes from -1 % to -16.5 %,
+  mixedint from -6.5 % to -15.2 %, trap from -5.9 % to -19.6 %.
+
+Before the D$ store pass-through (the run that chose it; "D$ write 3 cycles" is the pass-through, with the ideal
+frontend in the last column):
 
 | kernel | OOO, RS 8 | + ROB 16 | D$ write 3 cycles | 2-wide in order | 2-wide OOO (res .. ideal) | 2-wide OOO + D$ write 3 |
 |---|---|---|---|---|---|---|
@@ -515,14 +588,5 @@ Change in cycles against the core, SoC configuration (S mode in brackets where i
 | fpmix | -5.5 % | -10.7 % | 0.0 % | -0.8 % | -10.8 .. -11.0 % | -11.0 % |
 | geomean | -0.8 % (-2.4 %) | -1.4 % (-3.0 %) | -7.1 % | -10.2 % (-7.2 %) | -11.8 .. -14.9 % | -25.6 % |
 
-(2-wide: two dispatches, two ALU pipes, two commits a cycle, a pair only behind a plain retirement, ROB 16, one memory
-engine; "D$ write 3 cycles": a drain beat holds the D$ for 3 cycles instead of 5.)
-
-What it says:
-- Out-of-order issue alone buys almost nothing: dispatch and commit stay one a cycle, and what the head waits for is
-  mostly memory, which the queue already starts early. Only fpmix (the divides overlap the work behind them, more with
-  a bigger ROB) and, in S mode, matmul and fmatmul gain.
-- The single biggest lever at one-wide is the D$ write path: memcpy, mixedint and trap are bound by the blocking
-  write-through D$ (a store's drain holds it for 5 cycles, a load for 2: memcpy's loop is exactly those 7 cycles).
-- Two-wide in order gains about 10 % (crc32 and listchase most); out of order adds 2 to 4 points on top, almost all of
-  it on matmul, fmatmul and fpmix. Store-heavy code gains from two-wide only once the D$ write path is faster.
+Then the D$ write path was the biggest lever at one-wide (a store's drain held the D$ for 5 cycles, a load for 2:
+memcpy's loop was exactly those 7 cycles), and store-heavy code gained from two-wide only with it.

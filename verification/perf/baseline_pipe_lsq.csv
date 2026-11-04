@@ -1,10 +1,10 @@
 kernel,config,early_ld,early_st,bar_wait,match_wait,qmatch_wait,handoff,drain
 memcpy,sram,36,128,0,0,0,68,3
-memcpy,cache,9,128,0,0,0,121,0
+memcpy,cache,132,128,0,0,0,31,4
 crc32,sram,127,1,0,0,0,0,0
 crc32,cache,127,1,0,0,0,0,0
 qsort,sram,613,360,0,6,0,320,52
-qsort,cache,582,361,0,53,0,400,54
+qsort,cache,656,323,0,2,0,291,67
 matmul,sram,960,64,0,0,0,512,0
 matmul,cache,1088,64,0,0,0,576,0
 sieve,sram,29,934,0,0,0,0,0
@@ -12,9 +12,9 @@ sieve,cache,28,1391,0,0,0,0,0
 listchase,sram,1024,0,0,0,0,2,1
 listchase,cache,1025,0,0,0,0,544,0
 mixedint,sram,241,720,0,0,0,720,0
-mixedint,cache,124,720,0,0,0,600,0
+mixedint,cache,780,720,0,0,0,2,59
 trap,sram,1200,1000,0,0,0,2000,0
-trap,cache,800,1000,0,1000,0,2000,0
+trap,cache,1200,1000,0,0,0,2000,0
 fmatmul,sram,961,64,0,0,0,512,0
 fmatmul,cache,1152,61,0,0,0,576,64
 fpmix,sram,35,3,0,0,0,2,0
