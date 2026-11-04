@@ -11,7 +11,7 @@
 #   ref   the frozen multi-cycle reference, verification/reference/ref_core.sv
 #         (named `core` by -DQV_REF_AS_CORE) -- 79 rows
 # run_regress.sh --core X SKIPS any row not listing X, silently, so a row that
-# names neither core would just never run: there must be 152 rows listing pipe.
+# names neither core would just never run: there must be 159 rows listing pipe.
 #
 # The rows that omit ref are the design/*_tb.sv unit tests of a leaf module
 # (alu, c_expand, csr_file, divider, register_file) and of the divider's
@@ -172,6 +172,8 @@ pipe_lsq_prexl_tb|design/pipe/qv_lsq_tb.sv||design|pipe|pass||-Pqv_lsq_tb.PRE_XL
 pipe_issue_wbl_tb|design/pipe/qv_issue_wbl_tb.sv||design|pipe|pass|
 pipe_issue_wbl_off_tb|design/pipe/qv_issue_wbl_tb.sv||design|pipe|pass||-Pqv_issue_wbl_tb.LSU_BYPASS=0
 pipe_issue_wbl_b0_tb|design/pipe/qv_issue_wbl_tb.sv||design|pipe|pass||-Pqv_issue_wbl_tb.BYPASS_EN=0
+pipe_issue_wbl_rs2_tb|design/pipe/qv_issue_wbl_tb.sv||design|pipe|pass||-Pqv_issue_wbl_tb.RS_DEPTH=2
+pipe_issue_wbl_rs2_off_tb|design/pipe/qv_issue_wbl_tb.sv||design|pipe|pass||-Pqv_issue_wbl_tb.RS_DEPTH=2 -Pqv_issue_wbl_tb.LSU_BYPASS=0
 pipe_lsu_early_tb|design/pipe/qv_lsu_early_tb.sv||design|pipe|pass|
 pipe_lsu_early_ld_tb|design/pipe/qv_lsu_early_tb.sv||design|pipe|pass||-Pqv_lsu_early_tb.EARLY_ST=0
 pipe_lsu_handoff_tb|design/pipe/qv_lsu_early_tb.sv||design|pipe|pass||-Pqv_lsu_early_tb.HANDOFF=1
@@ -190,3 +192,8 @@ pipe_backend_tb_b0s0r4_csr|design/pipe/qv_backend_tb.sv||design|pipe|pass||-Pqv_
 pipe_backend_tb_b1s1r8|design/pipe/qv_backend_tb.sv||design|pipe|pass||-Pqv_backend_tb.BYPASS_EN=1 -Pqv_backend_tb.SERIALIZE=1 -Pqv_backend_tb.ROB_DEPTH=8
 pipe_backend_tb_b1s0r4|design/pipe/qv_backend_tb.sv||design|pipe|pass||-Pqv_backend_tb.BYPASS_EN=1 -Pqv_backend_tb.SERIALIZE=0 -Pqv_backend_tb.ROB_DEPTH=4
 pipe_backend_tb_b0s0r4|design/pipe/qv_backend_tb.sv||design|pipe|pass||-Pqv_backend_tb.BYPASS_EN=0 -Pqv_backend_tb.SERIALIZE=0 -Pqv_backend_tb.ROB_DEPTH=4
+pipe_backend_tb_b1s0r8_rs4|design/pipe/qv_backend_tb.sv||design|pipe|pass||-Pqv_backend_tb.BYPASS_EN=1 -Pqv_backend_tb.SERIALIZE=0 -Pqv_backend_tb.ROB_DEPTH=8 -Pqv_backend_tb.RS_DEPTH=4
+pipe_backend_tb_b0s0r8_rs4|design/pipe/qv_backend_tb.sv||design|pipe|pass||-Pqv_backend_tb.BYPASS_EN=0 -Pqv_backend_tb.SERIALIZE=0 -Pqv_backend_tb.ROB_DEPTH=8 -Pqv_backend_tb.RS_DEPTH=4
+pipe_backend_tb_b1s0r8_csr_rs4|design/pipe/qv_backend_tb.sv||design|pipe|pass||-Pqv_backend_tb.BYPASS_EN=1 -Pqv_backend_tb.SERIALIZE=0 -Pqv_backend_tb.ROB_DEPTH=8 -Pqv_backend_tb.CSR_LATE=1 -Pqv_backend_tb.RS_DEPTH=4
+pipe_backend_tb_b0s0r4_csr_rs2|design/pipe/qv_backend_tb.sv||design|pipe|pass||-Pqv_backend_tb.BYPASS_EN=0 -Pqv_backend_tb.SERIALIZE=0 -Pqv_backend_tb.ROB_DEPTH=4 -Pqv_backend_tb.CSR_LATE=1 -Pqv_backend_tb.RS_DEPTH=2
+pipe_backend_tb_b1s1r8_rs4|design/pipe/qv_backend_tb.sv||design|pipe|pass||-Pqv_backend_tb.BYPASS_EN=1 -Pqv_backend_tb.SERIALIZE=1 -Pqv_backend_tb.ROB_DEPTH=8 -Pqv_backend_tb.RS_DEPTH=4

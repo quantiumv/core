@@ -154,10 +154,11 @@ def seed_reg(rng, r):
 
 
 class Gen:
-    def __init__(self, rng, dep_bias, div=True, amo=True):
+    def __init__(self, rng, dep_bias, div=True, amo=True, ooo=False):
         self.rng = rng
         self.dep_bias = dep_bias
         self.div = div
+        self.ooo_on = ooo
         self.amo = amo
         self.seg_divs = 0
         self.recent = []
@@ -369,6 +370,31 @@ class Gen:
         self.seg_divs += nd
         return items, 2 + nd
 
+    def ooo(self):
+        """--ooo: a long producer (a divide or a load), independent work that may go past it, then a consumer of it;
+        or a divide that waits for the long result followed by one that is ready first (the two still go in order).
+        Straight-line slots, entered only at the first."""
+        rng = self.rng
+        p = rng.choice(FREE_REGS)
+        others = [r for r in FREE_REGS if r != p]
+        if self.div and rng.random() < 0.5:
+            self.seg_divs += 1
+            items = [f"{rng.choice(DIV_OPS)} x{p}, x{self.src()}, x{self.src()}"]
+        else:
+            items = [f"ld x{p}, {rng.randint(-2048 // 8, 2047 // 8) * 8}(x27)"]
+        for _ in range(rng.randint(1, 3)):
+            items.append(f"{rng.choice(R_OPS)} x{rng.choice(others)}, x{rng.choice(others)}, x{rng.choice(others)}")
+        if self.div and rng.random() < 0.4:
+            self.seg_divs += 2
+            a, b = rng.sample(others, 2)
+            items.append(f"div x{a}, x{p}, x{rng.choice(others)}")
+            items.append(f"divu x{b}, x{rng.choice(others)}, x{rng.choice(others)}")
+            self.recent += [a, b]
+        else:
+            items.append(f"{rng.choice(R_OPS)} x{self.dst()}, x{p}, x{self.src()}")
+        self.recent.append(p)
+        return items
+
     def branch_srcs(self):
         a = self.src()
         b = a if self.rng.random() < 0.2 else self.src()   # equal operands: BEQ/BGE/BGEU taken
@@ -427,6 +453,10 @@ class Gen:
                 slots, used = self.div_shadow(i)
                 forbidden.update(range(i + 1, i + used))
                 items += slots; i += used
+            elif self.ooo_on and r < 0.60 and i + 7 < n:
+                slots = self.ooo()
+                forbidden.update(range(i + 1, i + len(slots)))
+                items += slots; i += len(slots)
             else:
                 items.append(self.alu()); i += 1
         # resolve targets now that every slot exists
@@ -476,10 +506,11 @@ def main():
     ap.add_argument("--dep-bias", type=float, default=0.6)
     ap.add_argument("--no-div", action="store_true", help="no DIV/DIVU/REM/REMU (or W forms)")
     ap.add_argument("--no-amo", action="store_true", help="no A extension")
+    ap.add_argument("--ooo", action="store_true", help="long producers with independent work and consumers behind them")
     ap.add_argument("-o", "--out", required=True)
     a = ap.parse_args()
     rng = random.Random(a.seed)
-    g = Gen(rng, a.dep_bias, div=not a.no_div, amo=not a.no_amo)
+    g = Gen(rng, a.dep_bias, div=not a.no_div, amo=not a.no_amo, ooo=a.ooo)
 
     lines = [(0, "lui x30, 8"), (1, "csrw mtvec, x30")]     # (slot, text); handler at 0x8000
     for r in range(1, 32):

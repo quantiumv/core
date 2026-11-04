@@ -9,8 +9,11 @@
 # interrupts, one program at a time). Run from WSL, any cwd.
 #
 #   run_rvfi_diff.sh [--seeds N] [--first S] [--len L]
-#                    [--serialize 0|1] [--bypass 0|1] [--no-div] [--no-amo] [--pipe-dir DIR] [--defines "A=1 B=0"]
+#                    [--serialize 0|1] [--bypass 0|1] [--no-div] [--no-amo] [--ooo] [--dep-bias P] [--pipe-dir DIR]
+#                    [--defines "A=1 B=0"]
 #
+# --ooo and --dep-bias go to gen_alu.py (long producers with work behind them; how often a source is a recent
+# destination);
 # --pipe-dir builds the pipelined core from a copy of design/pipe/ (for mutants);
 # --defines passes preprocessor defines to both builds (the QV_PIPE_* feature knobs, which the reference ignores,
 # and QV_FPU_EN, which both cores read), and puts a hash of them in the build name;
@@ -28,6 +31,8 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --no-div)    GEN_ARGS="$GEN_ARGS --no-div"; shift ;;
         --no-amo)    GEN_ARGS="$GEN_ARGS --no-amo"; shift ;;
+        --ooo)       GEN_ARGS="$GEN_ARGS --ooo"; shift ;;
+        --dep-bias)  GEN_ARGS="$GEN_ARGS --dep-bias $2"; shift 2 ;;
         --pipe-dir)  PIPE_DIR=$(cd "$2" && pwd); shift 2 ;;
         --outdir)    OUT=$2; shift 2 ;;
         --seeds)     SEEDS=$2; shift 2 ;;

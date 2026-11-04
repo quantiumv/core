@@ -6,11 +6,13 @@
  * A load claims its destination (x5 for an integer load, f7 for an FP one); an op that reads it then waits, and with
  * LSU_BYPASS (and BYPASS_EN) issues in the very cycle the LSU's writeback carries the load's tag, with that value as
  * its operand: rs1, rs2 and an FMA's rs3. A writeback of another tag, or of its tag but not valid, does not release it. Without LSU_BYPASS (or
- * without BYPASS_EN) it waits for the value in the ROB, the cycle after.
+ * without BYPASS_EN) it waits for the value in the ROB, the cycle after. With the reservation station (RS_DEPTH, O1) the
+ * reader goes into the station at once and the station takes the value the same way (case_rs).
  */
 module qv_issue_wbl_tb #(
     parameter bit LSU_BYPASS = 1'b1,
-    parameter bit BYPASS_EN  = 1'b1
+    parameter bit BYPASS_EN  = 1'b1,
+    parameter int RS_DEPTH   = 0
 );
     import qv_pkg::*;
 
@@ -33,7 +35,7 @@ module qv_issue_wbl_tb #(
     fpu_req_t                fpu_req;
 
     /* verilator lint_off PINCONNECTEMPTY */
-    qv_issue #(.BYPASS_EN(BYPASS_EN), .LSU_BYPASS(LSU_BYPASS)) dut (
+    qv_issue #(.BYPASS_EN(BYPASS_EN), .LSU_BYPASS(LSU_BYPASS), .RS_DEPTH(RS_DEPTH)) dut (
         .clk(clk), .rst(rst), .i_flush(1'b0),
         .i_uop_valid(uop_valid), .i_uop(uop), .o_issue(issue),
         .o_rs1_sel(), .o_rs2_sel(), .i_rs1_data(64'h0), .i_rs2_data(64'h0),
@@ -79,9 +81,63 @@ module qv_issue_wbl_tb #(
         uop_valid = 1'b1;
     endtask
 
+    // with the reservation station (RS_DEPTH): the reader goes into the station at once; it is sent to its unit in the
+    // load's writeback cycle (LSU_BYPASS and BYPASS_EN: the station takes the value off the bus) or the cycle after
+    // (woken by the writeback), with the load's value either way
+    task automatic case_rs(input int which, input logic [QV_ROB_TAG_W-1:0] tl, input logic [QV_ROB_TAG_W-1:0] tr,
+                           input logic [63:0] v);
+        logic [63:0] got;
+        logic        sent;
+        issue_load(which == 3, tl);
+        present_reader(which, tr);
+        #1;
+        check($sformatf("reader %0d: dispatched into the station at once", which), b(issue), 64'd1);
+        @(posedge clk); #1;
+        uop_valid = 1'b0;
+        #1;
+        sent = (which == 3) ? fpu_req.valid : alu_req.valid;
+        check($sformatf("reader %0d (station): waits for the load", which), b(sent), 64'd0);
+        wbl = '0; wbl.valid = 1'b1; wbl.tag = tl + 4'd3; wbl.value = ~v;
+        #1;
+        sent = (which == 3) ? fpu_req.valid : alu_req.valid;
+        check($sformatf("reader %0d (station): another tag's writeback: still waits", which), b(sent), 64'd0);
+        wbl.valid = 1'b0; wbl.tag = tl; wbl.value = ~v;
+        #1;
+        sent = (which == 3) ? fpu_req.valid : alu_req.valid;
+        check($sformatf("reader %0d (station): its tag, not valid: still waits", which), b(sent), 64'd0);
+        wbl.valid = 1'b1; wbl.tag = tl + 4'd3;
+        @(posedge clk); #1;
+        wbl.tag = tl; wbl.value = v;
+        #1;
+        sent = (which == 3) ? fpu_req.valid : alu_req.valid;
+        got  = (which == 1) ? alu_req.a : (which == 2) ? alu_req.b : fpu_req.c;
+        if (LSU_BYPASS && BYPASS_EN) begin
+            check($sformatf("reader %0d (station): sent in the load's writeback cycle", which), b(sent), 64'd1);
+            check($sformatf("reader %0d (station): with the load's value", which), got, v);
+        end else
+            check($sformatf("reader %0d (station): without the bypass, not in the writeback cycle", which), b(sent), 64'd0);
+        @(posedge clk); #1;
+        wbl = '0;
+        #1;
+        if (!(LSU_BYPASS && BYPASS_EN)) begin
+            sent = (which == 3) ? fpu_req.valid : alu_req.valid;
+            got  = (which == 1) ? alu_req.a : (which == 2) ? alu_req.b : fpu_req.c;
+            check($sformatf("reader %0d (station): sent the cycle after, woken by the writeback", which), b(sent), 64'd1);
+            check($sformatf("reader %0d (station): with the load's value", which), got, v);
+        end else begin
+            sent = (which == 3) ? fpu_req.valid : alu_req.valid;
+            check($sformatf("reader %0d (station): sent once", which), b(sent), 64'd0);
+        end
+        rst = 1'b1; @(posedge clk); #1; rst = 1'b0;
+    endtask
+
     task automatic case_one(input int which, input logic [QV_ROB_TAG_W-1:0] tl, input logic [QV_ROB_TAG_W-1:0] tr,
                             input logic [63:0] v);
         logic [63:0] got;
+        if (RS_DEPTH > 0) begin
+            case_rs(which, tl, tr, v);
+            return;
+        end
         issue_load(which == 3, tl);
         present_reader(which, tr);
         #1;

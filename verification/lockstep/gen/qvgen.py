@@ -491,6 +491,92 @@ def emit_mem_pair(p: Program, recent: list[int]):
     del recent[:-8]
 
 
+def emit_ooo(p: Program, recent: list[int]):
+    """--ooo: what out-of-order issue has to get right. A long-latency producer (a divide, a load, a CSR read whose rd
+    is made only at its commit), independent work that may go past it, then its consumers -- with, around it, the
+    hazards the producer table must keep: the producer's register written again in its shadow (WAW) or one of its
+    sources overwritten (WAR), an x0 destination, a branch on the long result (mispredicted while younger work ran),
+    two divides of which the younger is ready first (they must still go in order), a memory op whose address or data
+    comes from the long result, a CSR read feeding a load's address, and a short pointer chase."""
+    have_m = "m" in p.args.isa and not p.args.no_div
+
+    def fresh(*excl):
+        r = p.reg()
+        while r in excl:
+            r = p.reg()
+        return r
+
+    def to_sandbox(dst: int, src: int):
+        """dst = an aligned sandbox address made from src's value (and with a mask, then + x27)."""
+        mreg = fresh(dst, src)
+        p.li(mreg, (SANDBOX_SIZE - 1) & ~7)
+        p.e(f"    and     x{dst}, x{src}, x{mreg}")
+        p.e(f"    add     x{dst}, x{dst}, x27")
+
+    long_rd = p.reg()
+    src_a = p.reg_biased(recent)
+    k = p.rng.random()
+    if have_m and k < 0.35:
+        op = p.rng.choice(["div", "divu", "rem", "remu", "divw", "remw", "divuw"])
+        p.e(f"    {op:<7} x{long_rd}, x{src_a}, x{p.reg_biased(recent)}")
+    elif k < 0.75:
+        addr = fresh(long_rd)
+        _sandbox_addr(p, addr, width=8)
+        p.e(f"    {p.rng.choice(['ld', 'lw', 'lwu']):<7} x{long_rd}, 0(x{addr})")
+    else:
+        csr = "sscratch" if p.args.priv == "msu" else "mscratch"
+        if p.irq:
+            csr = "stval" if p.args.priv == "msu" else "mtval"
+        p.e(f"    csrr    x{long_rd}, {csr}")                  # read only: its value is made at commit
+    # independent work that may go first
+    for _ in range(p.rng.randint(1, 4)):
+        rd = fresh(long_rd)
+        p.e(f"    {p.rng.choice(['add', 'xor', 'sub', 'or']):<7} x{rd}, x{fresh(long_rd)}, x{fresh(long_rd)}")
+        recent.append(rd)
+    r = p.rng.random()
+    if r < 0.15:
+        p.e(f"    addi    x{long_rd}, x{fresh(long_rd)}, {p.rng.randint(-2047, 2047)}")   # WAW in the shadow
+    elif r < 0.30 and src_a != long_rd:
+        p.e(f"    addi    x{src_a}, x{fresh(src_a)}, {p.rng.randint(-2047, 2047)}")       # WAR: a source rewritten
+    elif r < 0.38:
+        p.e(f"    add     x0, x{long_rd}, x{fresh(long_rd)}")                            # an x0 destination
+    # its consumers
+    c = p.rng.random()
+    if c < 0.25:
+        rd = fresh(long_rd)
+        p.e(f"    {p.rng.choice(['add', 'sub', 'and', 'sltu']):<7} x{rd}, x{long_rd}, x{p.reg_biased(recent)}")
+        recent.append(rd)
+    elif c < 0.42 and not p.loop_nesting:
+        lbl = p.reserve_label("fwd")                                                      # a branch on the long result
+        p.e(f"    {p.rng.choice(['beqz', 'bnez', 'bltz', 'bgez'])}    x{long_rd}, {lbl}")
+    elif c < 0.57 and have_m:
+        older, younger = fresh(long_rd), fresh(long_rd)
+        while younger == older:
+            younger = fresh(long_rd)
+        p.e(f"    div     x{older}, x{long_rd}, x{p.reg()}")        # waits for the long result
+        p.e(f"    divu    x{younger}, x{fresh(long_rd, older)}, x{fresh(long_rd, older)}")   # ready first, goes second
+        recent += [older, younger]
+    elif c < 0.72:
+        addr = fresh(long_rd)
+        to_sandbox(addr, long_rd)                                 # an address from the long result
+        if p.rng.random() < 0.5:
+            rd = fresh(addr)
+            p.e(f"    ld      x{rd}, 0(x{addr})")
+            recent.append(rd)
+        else:
+            p.e(f"    sd      x{fresh(addr)}, 0(x{addr})")
+    elif c < 0.84:
+        p.e(f"    {p.rng.choice(['sd', 'sw']):<7} x{long_rd}, {p.rng.randrange(0, 0x400, 8)}(x27)")   # its data
+    else:
+        a1, a2 = fresh(long_rd), fresh(long_rd)                   # a short pointer chase from the long result
+        to_sandbox(a1, long_rd)
+        p.e(f"    ld      x{a2}, 0(x{a1})")
+        to_sandbox(a1, a2)
+        p.e(f"    ld      x{a2}, 0(x{a1})")
+        recent.append(a2)
+    del recent[:-8]
+
+
 def emit_amo(p: Program, recent: list[int]):
     addr_r = p.reg()
     _sandbox_addr(p, addr_r, misaligned=False, width=8)
@@ -2290,6 +2376,9 @@ def emit_main_body(p: Program):
     have_f = "f" in a.isa
 
     def one_instr():
+        if getattr(a, "ooo", False) and p.rng.random() < 0.25:
+            emit_ooo(p, recent)
+            return
         if getattr(a, "mem_dense", False) and p.rng.random() < 0.30:
             emit_mem_pair(p, recent)
             return
@@ -2489,6 +2578,9 @@ def main():
     ap.add_argument("--mem-dense", action="store_true", dest="mem_dense",
                     help="a third of the instructions are runs of stores and loads on the same, overlapping and "
                          "neighbouring bytes (see emit_mem_pair): for the store buffer")
+    ap.add_argument("--ooo", action="store_true",
+                    help="a quarter of the instructions are long-latency producers with independent work and their "
+                         "consumers behind them (see emit_ooo): for out-of-order issue")
     ap.add_argument("--no-div", action="store_true", dest="no_div",
                     help="keep M to the multiplies (for cores without a divider yet)")
     ap.add_argument("--len", type=int, default=200)

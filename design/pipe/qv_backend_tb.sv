@@ -20,18 +20,25 @@
  *     there), against the golden model's operands in program order.
  *
  * Run once per configuration via -P overrides (BYPASS_EN, SERIALIZE,
- * ROB_DEPTH, CSR_LATE).
+ * ROB_DEPTH, CSR_LATE, RS_DEPTH).
+ *
+ * Timing is measured where a uop reaches the ALU (exec_cyc): without the
+ * reservation station that is its dispatch cycle; with it a uop may
+ * dispatch into the station first.
  *
  * CSR_LATE (P10c): CSR reads that do not serialize, mixed into the stream. A
  * CSR op's rd value is the CSR file's, made at its commit (here a constant the
  * ALU's pass of the source never equals), so a dependent must wait for that
- * commit and read regfile0: never the bypass, never the ROB.
+ * commit and read regfile0: never the bypass, never the ROB. With the station
+ * (RS_DEPTH, O1) the dependent waits there instead, woken by the commit bus,
+ * and the independent uops behind it go first.
  */
 module qv_backend_tb #(
     parameter bit BYPASS_EN = 1'b1,
     parameter bit SERIALIZE = 1'b0,
     parameter int ROB_DEPTH = 8,
-    parameter bit CSR_LATE  = 1'b0
+    parameter bit CSR_LATE  = 1'b0,
+    parameter int RS_DEPTH  = 0
 );
     import qv_pkg::*;
 
@@ -72,7 +79,15 @@ module qv_backend_tb #(
     logic                    r_intr;
     logic [4:0]              r_rs1_addr, r_rs2_addr, r_rd_addr;
 
-    qv_issue #(.SERIALIZE(SERIALIZE), .BYPASS_EN(BYPASS_EN), .CSR_LATE(CSR_LATE)) issue0 (
+    wb_t c_bus;                           // commit's regfile write and tag: wakes the station's late operands
+    always_comb begin
+        c_bus       = '0;
+        c_bus.valid = rf_we;
+        c_bus.tag   = c_tag;
+        c_bus.value = rf_data;
+    end
+
+    qv_issue #(.SERIALIZE(SERIALIZE), .BYPASS_EN(BYPASS_EN), .CSR_LATE(CSR_LATE), .RS_DEPTH(RS_DEPTH)) issue0 (
         .clk(clk), .rst(rst), .i_flush(1'b0),
         .i_uop_valid(uop_valid), .i_uop(uop), .o_issue(issue),
         .o_rs1_sel(rs1_sel), .o_rs2_sel(rs2_sel), .i_rs1_data(rs1_data), .i_rs2_data(rs2_data),
@@ -85,7 +100,8 @@ module qv_backend_tb #(
         .o_lookup2_tag(l2_tag), .i_lookup2_complete(l2_complete), .i_lookup2_value(l2_value),
         .i_wb(wb), .o_alu_req(fu_req), .o_bru_req(), .o_lsu_req(), .i_lsu_free(1'b1),
         .o_div_req(), .i_div_free(1'b1),
-        .i_commit_valid(c_valid), .i_commit_rd(c_rd), .i_commit_rd_wen(c_rd_wen), .i_commit_tag(c_tag)
+        .i_commit_valid(c_valid), .i_commit_rd(c_rd), .i_commit_rd_wen(c_rd_wen), .i_commit_tag(c_tag),
+        .i_wbc(c_bus)
     );
 
     qv_rob #(.ROB_DEPTH(ROB_DEPTH)) rob0 (
@@ -152,7 +168,8 @@ module qv_backend_tb #(
     logic [4:0]  exp_rs2    [0:MAXN-1];
     logic [63:0] exp_rs1_v  [0:MAXN-1];
     logic [63:0] exp_rs2_v  [0:MAXN-1];
-    logic [63:0] issue_cyc  [0:MAXN-1];
+    logic [63:0] issue_cyc  [0:MAXN-1];   // dispatch (ROB allocation)
+    logic [63:0] exec_cyc   [0:MAXN-1];   // the request to the ALU
     logic [63:0] G [0:31];                // golden regfile
     int n_uops;
 
@@ -228,6 +245,16 @@ module qv_backend_tb #(
             bub_left <= (k + 1 < n_uops) ? bubble[k + 1] : 0;
         end else if (bub_left > 0) begin
             bub_left <= bub_left - 1;
+        end
+    end
+
+    // where each uop reaches the ALU: its ROB tag (taken at dispatch) names it
+    int idx_of_tag [0:(1 << QV_ROB_TAG_W) - 1];
+    always @(posedge clk) begin
+        if (!rst && run_en) begin
+            if (uop_valid && issue) idx_of_tag[alloc_tag] <= k;
+            if (fu_req.valid)                                   // (sent straight on: dispatched this very cycle)
+                exec_cyc[(uop_valid && issue && fu_req.tag == alloc_tag) ? k : idx_of_tag[fu_req.tag]] <= cyc;
         end
     end
 
@@ -313,13 +340,13 @@ module qv_backend_tb #(
         for (i = 1; i <= 3; i++) begin
             if (SERIALIZE)
                 check($sformatf("D1.%0d: serialized -- issues only after the producer retires", i),
-                      64'(issue_cyc[i] - issue_cyc[i-1] >= 3), 64'd1);
+                      64'(exec_cyc[i] - exec_cyc[i-1] >= 3), 64'd1);
             else if (BYPASS_EN)
                 check($sformatf("D1.%0d: bypass -- dependent issues the very next cycle", i),
-                      issue_cyc[i] - issue_cyc[i-1], 64'd1);
+                      exec_cyc[i] - exec_cyc[i-1], 64'd1);
             else
                 check($sformatf("D1.%0d: no bypass -- dependent stalls exactly one cycle", i),
-                      issue_cyc[i] - issue_cyc[i-1], 64'd2);
+                      exec_cyc[i] - exec_cyc[i-1], 64'd2);
         end
 
         // ---- D2: independent back-to-back -- never stalls ----
@@ -327,7 +354,7 @@ module qv_backend_tb #(
         for (i = 0; i < 8; i++) push(mk(`ADD, 5'(8 + i), 0, 0, 64'(i), 0, 0, 64'(100)), 0);
         run_script("D2", 200);
         if (!SERIALIZE)
-            check("D2: 8 independent uops issue on 8 consecutive cycles", issue_cyc[7] - issue_cyc[0], 64'd7);
+            check("D2: 8 independent uops issue on 8 consecutive cycles", exec_cyc[7] - exec_cyc[0], 64'd7);
 
         // ---- D3: WAW then a reader, swept across bubble lengths ----
         for (gap = 0; gap <= 6; gap++) begin
@@ -354,13 +381,13 @@ module qv_backend_tb #(
             push(mk(`ADD, 8, 0, 0, 64'd9, 0, 0, 64'd0), 0);       // independent
             run_script("C1", 200);
             check("C1: the dependent waits for the CSR op's commit (no bypass, no ROB read)",
-                  64'(issue_cyc[2] - issue_cyc[1] >= 3), 64'd1);
+                  64'(exec_cyc[2] - exec_cyc[1] >= 3), 64'd1);
             // the same through rs2 alone, right behind the CSR op
             begin_script();
             push(mk_csrr(5), 0);                                  // x5 = the CSR
             push(mk(`SUB, 7, 0, 0, 64'd0, 5, 1, 0), 0);           // x7 = 0 - x5   (rs2)
             run_script("C1b", 200);
-            check("C1b: the rs2 dependent waits for the CSR op's commit", 64'(issue_cyc[1] - issue_cyc[0] >= 3), 64'd1);
+            check("C1b: the rs2 dependent waits for the CSR op's commit", 64'(exec_cyc[1] - exec_cyc[0] >= 3), 64'd1);
             // a younger writer of the same register replaces the late claim
             begin_script();
             push(mk_csrr(5), 0);
@@ -369,7 +396,20 @@ module qv_backend_tb #(
             run_script("C2", 200);
             if (BYPASS_EN)
                 check("C2: a younger plain writer's claim is not late (bypassed the next cycle)",
-                      issue_cyc[2] - issue_cyc[1], 64'd1);
+                      exec_cyc[2] - exec_cyc[1], 64'd1);
+            // C4: the dependent of a CSR op behind it, then independent uops. In order they wait for it; with the
+            // station the dependent waits there (woken by the commit bus) and the independent ones go first.
+            begin_script();
+            push(mk_csrr(5), 0);                                  // x5 = the CSR
+            push(mk(`ADD, 6, 5, 1, 0, 0, 0, 64'd1), 0);           // x6 = x5 + 1, waits for the CSR op's commit
+            for (i = 0; i < 4; i++) push(mk(`ADD, 5'(8 + i), 0, 0, 64'(i), 0, 0, 64'd100), 0);
+            run_script("C4", 200);
+            if (RS_DEPTH > 0) begin
+                check("C4: the dependent dispatches right behind the CSR op (into the station)",
+                      issue_cyc[1] - issue_cyc[0], 64'd1);
+                check("C4: an independent uop behind it reaches the ALU first", 64'(exec_cyc[2] < exec_cyc[1]), 64'd1);
+            end else
+                check("C4: in order, the independent uops wait for the dependent", 64'(exec_cyc[2] > exec_cyc[1]), 64'd1);
             // a random stream with CSR reads among the ALU ops
             begin_script();
             for (i = 0; i < 1500; i++) begin
