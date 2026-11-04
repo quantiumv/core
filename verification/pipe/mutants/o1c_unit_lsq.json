@@ -1,0 +1,77 @@
+{
+ "dut": "design/pipe/qv_lsq.sv",
+ "tb": "design/pipe/qv_lsq_opw_tb.sv",
+ "files": [
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_lsq.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench",
+  "-Pqv_lsq_opw_tb.CYCLES=12000"
+ ],
+ "cwd": "design",
+ "timeout": 900,
+ "mutants": [
+  {
+   "name": "the oldest queued op is offered with an operand missing",
+   "old": "wire s_ok  = !OPW || ((sa.rdy || byp_hit(sa, i_wb, i_eng_wb, i_wbf)) && (sb.rdy || byp_hit(sb, i_wb, i_eng_wb, i_wbf)));",
+   "new": "wire s_ok  = !OPW || (sa.rdy || byp_hit(sa, i_wb, i_eng_wb, i_wbf));"
+  },
+  {
+   "name": "a dispatch passes straight through with its operands missing",
+   "old": "wire in_ok = !OPW || (i_opa.rdy && i_opb.rdy);",
+   "new": "wire in_ok = 1'b1;"
+  },
+  {
+   "name": "a younger queued op is offered when the oldest waits",
+   "old": "o_eng_req.valid = has_q ? s_ok : (i_req.valid && in_ok);",
+   "new": "o_eng_req.valid = has_q ? 1'b1 : (i_req.valid && in_ok);"
+  },
+  {
+   "name": "the offer takes the registered value only (no same-cycle source)",
+   "old": "o_eng_req.a = now_val(sa, i_wb, i_eng_wb, i_wbf);",
+   "new": "o_eng_req.a = sa.value;"
+  },
+  {
+   "name": "a late operand wakes on a unit's writeback",
+   "old": "end else if (!o.late) begin",
+   "new": "end else begin"
+  },
+  {
+   "name": "no same-cycle source off the LSU's writeback",
+   "old": "|| (LSU_BYPASS && wbl.valid && wbl.tag == o.tag));",
+   "new": ");"
+  },
+  {
+   "name": "the same-cycle value is taken off the LSU's writeback first",
+   "old": "if (wb.valid && wb.tag == o.tag)   return wb.value;",
+   "new": "if (wbl.valid && wbl.tag == o.tag) return wbl.value;"
+  },
+  {
+   "name": "a queued op's operand b never wakes",
+   "old": "opb_q[i] <= wake(opb_q[i], i_wb, i_eng_wb, i_wbd, i_wbf, i_wbc);",
+   "new": "opb_q[i] <= opb_q[i];"
+  },
+  {
+   "name": "no dispatch-cycle capture",
+   "old": "opa_q[tail_i] <= wake(i_opa, i_wb, i_eng_wb, i_wbd, i_wbf, i_wbc);",
+   "new": "opa_q[tail_i] <= i_opa;"
+  },
+  {
+   "name": "the divider's writeback wakes nothing",
+   "old": "else if (wbd.valid && wbd.tag == o.tag) begin n.rdy = 1'b1; n.value = wbd.value; end",
+   "new": ""
+  },
+  {
+   "name": "the commit bus wakes nothing",
+   "old": "if (wbc.valid && wbc.tag == o.tag) begin\n                n.rdy = 1'b1; n.value = wbc.value;",
+   "new": "if (1'b0) begin\n                n.rdy = 1'b1; n.value = wbc.value;"
+  }
+ ]
+}
