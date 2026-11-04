@@ -3,6 +3,7 @@
  "tb": "design/pipe/qv_issue_wbl_tb.sv",
  "files": [
   "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_rs.sv",
   "design/pipe/qv_issue.sv"
  ],
  "flags": [

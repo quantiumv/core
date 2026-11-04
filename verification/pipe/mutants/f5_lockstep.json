@@ -59,8 +59,8 @@
   {
    "name": "issue: a second divide or square root does not wait for the side unit",
    "file": "qv_issue.sv",
-   "old": "|| i_fpu_ds_free);",
-   "new": "|| 1'b1);"
+   "old": "(!fpu_ds || (i_fpu_ds_free && !rs_has_fds))",
+   "new": "(!fpu_ds || (1'b1 && !rs_has_fds))"
   },
   {
    "name": "issue: an FP destination is never claimed",

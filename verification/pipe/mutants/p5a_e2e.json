@@ -18,14 +18,14 @@
   {
    "name": "DIV also runs on the ALU (not excluded)",
    "file": "qv_issue.sv",
-   "old": "o_alu_req.valid = o_issue && !to_bru && !to_lsu && !to_div && !to_fpu;",
-   "new": "o_alu_req.valid = o_issue && !to_bru && !to_lsu && !to_fpu;"
+   "old": "o_alu_req.valid = o_issue && direct && !to_bru && !to_lsu && !to_div && !to_fpu;",
+   "new": "o_alu_req.valid = o_issue && direct && !to_bru && !to_lsu && !to_fpu;"
   },
   {
    "name": "issue ignores div_free",
    "file": "qv_issue.sv",
-   "old": "&& (!to_div || i_div_free)",
-   "new": ""
+   "old": ": to_div ? (i_div_free && !rs_has_div)",
+   "new": ": to_div ? (!rs_has_div)"
   },
   {
    "name": "DIV op bits swapped",

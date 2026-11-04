@@ -7,6 +7,7 @@
   "design/pipe/qv_pkg.sv",
   "design/pipe/qv_exu_alu.sv",
   "design/pipe/qv_rob.sv",
+  "design/pipe/qv_rs.sv",
   "design/pipe/qv_issue.sv",
   "design/pipe/qv_commit.sv"
  ],

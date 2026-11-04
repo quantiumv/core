@@ -1,0 +1,86 @@
+{
+ "dut": "design/pipe/qv_issue.sv",
+ "tb": "design/pipe/qv_backend_tb.sv",
+ "files": [
+  "design/alu.sv",
+  "design/register_file.sv",
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_exu_alu.sv",
+  "design/pipe/qv_rob.sv",
+  "design/pipe/qv_rs.sv",
+  "design/pipe/qv_issue.sv",
+  "design/pipe/qv_commit.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench",
+  "-Pqv_backend_tb.CSR_LATE=1",
+  "-Pqv_backend_tb.RS_DEPTH=2"
+ ],
+ "cwd": "design",
+ "timeout": 900,
+ "mutants": [
+  {
+   "name": "a uop goes straight to the ALU while the station takes the port",
+   "old": "                   :          !rs_sel_ab);",
+   "new": "                   :          1'b1);"
+  },
+  {
+   "name": "a uop goes into a full station",
+   "old": "                  && (direct || (to_rs && rs_room));",
+   "new": "                  && (direct || to_rs);"
+  },
+  {
+   "name": "a uop that could go straight on goes into the station and straight on",
+   "old": "    wire to_rs  = (RS_DEPTH > 0) && !to_lsu && !direct;",
+   "new": "    wire to_rs  = (RS_DEPTH > 0) && !to_lsu;"
+  },
+  {
+   "name": "a uop with an operand missing goes straight on",
+   "old": "    wire direct = a_ready && b_ready && c_ready",
+   "new": "    wire direct = a_ready && c_ready"
+  },
+  {
+   "name": "the station's operand is never late",
+   "old": "pe.a.late = p1_late;",
+   "new": "pe.a.late = 1'b0;"
+  },
+  {
+   "name": "the station's operand b is always ready",
+   "old": "pe.b.rdy     = b_ready;",
+   "new": "pe.b.rdy     = 1'b1;"
+  },
+  {
+   "name": "the station's operand a waits for the wrong producer",
+   "old": "pe.a.tag = p1_tag;",
+   "new": "pe.a.tag = p2_tag;"
+  },
+  {
+   "name": "the station's entry has the wrong tag",
+   "old": "pe.tag       = i_alloc_tag;",
+   "new": "pe.tag       = i_alloc_tag + 1'b1;"
+  },
+  {
+   "name": "the station's pick does not take the ALU port",
+   "old": "        if (rs_sel_ab) begin\n            o_alu_req = rs_alu_req;",
+   "new": "        if (1'b0) begin\n            o_alu_req = rs_alu_req;"
+  },
+  {
+   "name": "the station is not woken by the commit bus",
+   "old": ".i_wb(i_wb), .i_wbl(i_wbl), .i_wbd(i_wbd), .i_wbf(i_wbf), .i_wbc(i_wbc),",
+   "new": ".i_wb(i_wb), .i_wbl(i_wbl), .i_wbd(i_wbd), .i_wbf(i_wbf), .i_wbc('0),"
+  },
+  {
+   "name": "the station is not flushed",
+   "old": "                .clk(clk), .rst(rst), .i_flush(i_flush),\n                .i_push(",
+   "new": "                .clk(clk), .rst(rst), .i_flush(1'b0),\n                .i_push(",
+   "equivalent": true,
+   "why": "qv_backend_tb never flushes (i_flush is tied to 0); the flush is covered by qv_rs_tb, rs_props and the lockstep"
+  }
+ ]
+}
