@@ -3,7 +3,7 @@
 # Run under WSL (sby, yosys-slang, boolector; see the riscv-formal README).
 #
 #   lsq.sby (the queue with the engine): bmc and cover only.
-#   fetch.sby, lsu.sby, dbg.sby, ptw.sby, sb.sby: prove (k-induction), bmc and cover tasks must all
+#   fetch.sby, lsu.sby, dbg.sby, ptw.sby, sb.sby, rs.sby: prove (k-induction), bmc and cover tasks must all
 #   PASS (cover: every non-vacuity cover point reached).
 #   --mutants: each property set must also catch known-bad versions, each
 #   FAILing a BMC: the pre-fix qv_fetch whose 1-bit epoch let a stale
@@ -22,7 +22,10 @@
 #   the LSU is on the bus or the walker's beat is in flight, one that ignores the full-buffer rule, a cyc held into
 #   the response cycle, an answer taken that is not the buffer's own, an o_match that sees a dead entry, a beat
 #   with nothing to write, a push into a full buffer, an idle start that follows the response; for fetch a stream through a redirect, a yield or
-#   a full buffer, a request presented with the old address).
+#   a full buffer, a request presented with the old address; for the reservation station a late operand woken by a
+#   unit's writeback, no dispatch-cycle capture, the youngest entry first, a divide past an older one or to a busy
+#   divider, a select in a flush cycle, an entry that stays after it goes, a lost divider wakeup, an FMA that ignores
+#   its third operand, room in a full station, a flush that keeps the entries).
 set -u
 cd "$(dirname "$0")" || exit 1
 HERE=$(pwd)
@@ -31,7 +34,7 @@ fail=0
 
 status() { grep -o 'DONE ([A-Z]*' | head -1 | sed 's/DONE (//'; }
 
-for unit in fetch lsu dbg ptw sb fpu; do
+for unit in fetch lsu dbg ptw sb fpu rs; do
     for task in prove bmc cover; do
         r=$(sby -f $unit.sby $task 2>&1 | status)
         printf '%-12s %s\n' "$unit $task" "$r"
@@ -195,6 +198,36 @@ EOF
     lsq_mutant lsq_pop_any_tag        qv_lsq 's/ \&\& (i_pop_tag == tag_q\[head_i\])//'
     lsq_mutant lsq_bar_ignored        qv_lsq 's/assign o_early  = (cmpl_q != send_q) \&\& !bar_q\[cmpl_i\];/assign o_early  = (cmpl_q != send_q);/'
     lsq_mutant lsq_newest_first       qv_lsq 's/o_eng_req       = has_q ? send_e : i_req;/o_eng_req       = i_req.valid ? i_req : send_e;/'
+    # rs_mutant NAME SED-EXPR: the reservation station, at rs.sby's own BMC depth (the generic 24 is far too deep for it)
+    rs_mutant() {
+        local name=$1 expr=$2
+        local d=$T/$name
+        mkdir -p "$d"
+        cp "$REPO/design/pipe/qv_pkg.sv" "$HERE/rs_props.sv" "$d/"
+        sed "$expr" "$REPO/design/pipe/qv_rs.sv" > "$d/qv_rs.sv"
+        if cmp -s "$d/qv_rs.sv" "$REPO/design/pipe/qv_rs.sv"; then
+            printf '%-30s %s\n' "mutant $name" "sed changed nothing"; fail=1; return
+        fi
+        sed -e 's#^\.\./\.\./\.\./design/pipe/##' "$HERE/rs.sby" > "$d/rs.sby"
+        local r
+        r=$(cd "$d" && sby -f rs.sby bmc 2>&1 | status)
+        if [ "$r" == "FAIL" ]; then
+            printf '%-30s %s\n' "mutant $name" "caught"
+        else
+            printf '%-30s %s\n' "mutant $name" "NOT CAUGHT ($r)"; fail=1
+        fi
+    }
+    rs_mutant rs_late_wakes_on_unit  's/end else if (!o.late) begin/end else begin/'
+    rs_mutant rs_no_capture          's/^            x.a    = wake(x.a, i_wb, i_wbl, i_wbd, i_wbf, i_wbc);$/            x.a    = x.a;/'
+    rs_mutant rs_youngest_first      's/for (int i = DEPTH - 1; i >= 0; i--) begin             \/\/ the last hit is the oldest/for (int i = 0; i < DEPTH; i++) begin/'
+    rs_mutant rs_div_passes_older    's/if (v_q\[i\] \&\& kind\[i\] == QV_RS_DIV)/if (ready[i] \&\& kind[i] == QV_RS_DIV)/'
+    rs_mutant rs_div_when_busy       's/o_sel_div = !i_flush \&\& div_f \&\& ready\[div_i\] \&\& i_div_free;/o_sel_div = !i_flush \&\& div_f \&\& ready[div_i];/'
+    rs_mutant rs_sel_in_flush        's/o_sel_ab  = !i_flush \&\& ab_f;/o_sel_ab  = ab_f;/'
+    rs_mutant rs_issued_stays        's/issued\[i\] = (o_sel_ab \&\& i == ab_i) || /issued[i] = /'
+    rs_mutant rs_div_bus_lost        's/else if (wbd.valid \&\& wbd.tag == o.tag) begin n.rdy = 1.b1; n.value = wbd.value; end//'
+    rs_mutant rs_c_ignored           's/ \&\& (x.c.rdy || byp_hit(x.c, i_wb, i_wbl, i_wbf));/;/'
+    rs_mutant rs_room_when_full      's/assign o_room = !v_q\[DEPTH-1\];/assign o_room = 1;/'
+    rs_mutant rs_flush_keeps         's/v_q\[i\] <= (rst || i_flush) ? 1.b0 : n_v\[i\];/v_q[i] <= rst ? 0 : n_v[i];/'
     rm -rf "$T"
 fi
 

@@ -1,0 +1,167 @@
+{
+ "dut": "design/pipe/qv_rs.sv",
+ "tb": "design/pipe/qv_rs_tb.sv",
+ "files": [
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_rs.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench",
+  "-Pqv_rs_tb.CYCLES=20000"
+ ],
+ "cwd": "design",
+ "timeout": 900,
+ "mutants": [
+  {
+   "name": "the ALU/BRU bus wakes nothing",
+   "old": "if (wb.valid && wb.tag == o.tag)        begin n.rdy = 1'b1; n.value = wb.value;  end\n                else if",
+   "new": "if (1'b0) begin end\n                else if"
+  },
+  {
+   "name": "the LSU bus wakes nothing",
+   "old": "else if (wbl.valid && wbl.tag == o.tag) begin n.rdy = 1'b1; n.value = wbl.value; end",
+   "new": ""
+  },
+  {
+   "name": "the divider's bus wakes nothing",
+   "old": "else if (wbd.valid && wbd.tag == o.tag) begin n.rdy = 1'b1; n.value = wbd.value; end",
+   "new": ""
+  },
+  {
+   "name": "the FPU's bus wakes nothing",
+   "old": "else if (wbf.valid && wbf.tag == o.tag) begin n.rdy = 1'b1; n.value = wbf.value; end",
+   "new": ""
+  },
+  {
+   "name": "the commit bus wakes nothing",
+   "old": "if (wbc.valid && wbc.tag == o.tag) begin\n                n.rdy = 1'b1; n.value = wbc.value;",
+   "new": "if (1'b0) begin\n                n.rdy = 1'b1; n.value = wbc.value;"
+  },
+  {
+   "name": "a late operand wakes on a unit's writeback",
+   "old": "end else if (!o.late) begin",
+   "new": "end else begin"
+  },
+  {
+   "name": "a late operand is taken off a same-cycle bypass",
+   "old": "return !o.late && BYPASS_EN && (",
+   "new": "return BYPASS_EN && ("
+  },
+  {
+   "name": "no dispatch-cycle capture (operand a)",
+   "old": "x      = i_push_e;\n            x.a    = wake(x.a, i_wb, i_wbl, i_wbd, i_wbf, i_wbc);",
+   "new": "x      = i_push_e;"
+  },
+  {
+   "name": "no dispatch-cycle capture (operand c)",
+   "old": "x.c    = wake(x.c, i_wb, i_wbl, i_wbd, i_wbf, i_wbc);\n            n_e[j] = x;\n            n_v[j] = 1'b1;\n        end\n    end",
+   "new": "n_e[j] = x;\n            n_v[j] = 1'b1;\n        end\n    end"
+  },
+  {
+   "name": "a waiting entry's operand b never wakes",
+   "old": "x      = e_q[i];\n                x.a    = wake(x.a, i_wb, i_wbl, i_wbd, i_wbf, i_wbc);\n                x.b    = wake(x.b, i_wb, i_wbl, i_wbd, i_wbf, i_wbc);",
+   "new": "x      = e_q[i];\n                x.a    = wake(x.a, i_wb, i_wbl, i_wbd, i_wbf, i_wbc);"
+  },
+  {
+   "name": "ready ignores operand c",
+   "old": "&& (x.c.rdy || byp_hit(x.c, i_wb, i_wbl, i_wbf));",
+   "new": ";"
+  },
+  {
+   "name": "the same-cycle value is taken off the LSU bus first",
+   "old": "if (wb.valid && wb.tag == o.tag)   return wb.value;",
+   "new": "if (wbl.valid && wbl.tag == o.tag) return wbl.value;"
+  },
+  {
+   "name": "the youngest entry goes first",
+   "old": "for (int i = DEPTH - 1; i >= 0; i--) begin             // the last hit is the oldest",
+   "new": "for (int i = 0; i < DEPTH; i++) begin             // the last hit is the oldest"
+  },
+  {
+   "name": "the youngest pipelined FPU op goes first",
+   "old": "fpu_f = 1'b0; fpu_i = 0;\n        for (int i = DEPTH - 1; i >= 0; i--)",
+   "new": "fpu_f = 1'b0; fpu_i = 0;\n        for (int i = 0; i < DEPTH; i++)"
+  },
+  {
+   "name": "a younger divide passes an older one",
+   "old": "if (v_q[i] && kind[i] == QV_RS_DIV) begin div_f = 1'b1; div_i = i; end",
+   "new": "if (ready[i] && kind[i] == QV_RS_DIV) begin div_f = 1'b1; div_i = i; end"
+  },
+  {
+   "name": "a younger divide/square root passes an older one",
+   "old": "if (v_q[i] && kind[i] == QV_RS_FDS) begin fds_f = 1'b1; fds_i = i; end",
+   "new": "if (ready[i] && kind[i] == QV_RS_FDS) begin fds_f = 1'b1; fds_i = i; end"
+  },
+  {
+   "name": "a divide goes to a busy divider",
+   "old": "o_sel_div = !i_flush && div_f && ready[div_i] && i_div_free;",
+   "new": "o_sel_div = !i_flush && div_f && ready[div_i];"
+  },
+  {
+   "name": "a divide/square root goes to a busy unit",
+   "old": "(kind[i] == QV_RS_FDS && i == fds_i && i_fpu_ds_free)",
+   "new": "(kind[i] == QV_RS_FDS && i == fds_i)"
+  },
+  {
+   "name": "an ALU/BRU entry goes in a flush cycle",
+   "old": "o_sel_ab  = !i_flush && ab_f;",
+   "new": "o_sel_ab  = ab_f;"
+  },
+  {
+   "name": "an FPU entry goes in a flush cycle",
+   "old": "o_sel_fpu = !i_flush && fpu_f;",
+   "new": "o_sel_fpu = fpu_f;"
+  },
+  {
+   "name": "an ALU/BRU entry stays after it goes",
+   "old": "issued[i] = (o_sel_ab && i == ab_i) || ",
+   "new": "issued[i] = "
+  },
+  {
+   "name": "room with a full station",
+   "old": "assign o_room = !v_q[DEPTH-1];",
+   "new": "assign o_room = 1'b1;"
+  },
+  {
+   "name": "o_has_div never set",
+   "old": "o_has_div = div_f;",
+   "new": "o_has_div = 1'b0;"
+  },
+  {
+   "name": "o_has_fds never set",
+   "old": "o_has_fds = fds_f;",
+   "new": "o_has_fds = 1'b0;"
+  },
+  {
+   "name": "a BRU entry is sent as an ALU one",
+   "old": "o_bru_req.valid = o_sel_ab && x.kind == QV_RS_BRU;",
+   "new": "o_bru_req.valid = 1'b0;"
+  },
+  {
+   "name": "the ALU's operands swapped",
+   "old": "o_alu_req       = mk_req(x, va[i], vb[i]);",
+   "new": "o_alu_req       = mk_req(x, vb[i], va[i]);"
+  },
+  {
+   "name": "the FPU's third operand is the second",
+   "old": "o_fpu_req.c     = vc[i];",
+   "new": "o_fpu_req.c     = vb[i];"
+  },
+  {
+   "name": "the BRU loses its prediction",
+   "old": "r.pred_next = e.pred_next;",
+   "new": "r.pred_next = e.pc;"
+  },
+  {
+   "name": "a flush keeps the entries",
+   "old": "v_q[i] <= (rst || i_flush) ? 1'b0 : n_v[i];",
+   "new": "v_q[i] <= rst ? 1'b0 : n_v[i];"
+  }
+ ]
+}
