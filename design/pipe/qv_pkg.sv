@@ -357,6 +357,46 @@ package qv_pkg;
 
     // ---- F/D section end ----
 
+    // O1: one operand of a reservation-station entry: ready with its value, or waiting for the producer whose ROB
+    // tag is `tag`. A late producer (a CSR op: its rd value is made at commit) is woken only by the commit bus; its
+    // unit's writeback carries just the ALU's pass of its source.
+    typedef struct packed {
+        logic                    rdy;
+        logic                    late;
+        logic [QV_ROB_TAG_W-1:0] tag;
+        logic [63:0]             value;
+    } rs_opnd_t;
+
+    // O1: the issue port a reservation-station entry goes to. ALU and BRU share one (they share the writeback bus);
+    // the divider and the FPU's divide/square root (FDS) take their entries in program order.
+    typedef enum logic [2:0] {
+        QV_RS_ALU,
+        QV_RS_BRU,
+        QV_RS_DIV,
+        QV_RS_FPU,
+        QV_RS_FDS
+    } qv_rs_kind_e;
+
+    // O1: one reservation-station entry: the unit request it becomes, operands apart (fu_req_t's fields for ALU,
+    // BRU and DIV; fpu_req_t's for FPU and FDS, op being a qv_fp_op_e), and its three operands (c: the FMA's third).
+    // An operand the instruction does not use is ready, with its immediate (or 0).
+    typedef struct packed {
+        qv_rs_kind_e             kind;
+        logic [QV_ROB_TAG_W-1:0] tag;
+        logic [4:0]              op;
+        logic                    is_word;
+        logic [63:0]             pc;
+        logic [63:0]             imm;
+        logic                    rvc;
+        logic [63:0]             pred_next;
+        logic                    fmt;
+        logic [1:0]              ityp;
+        logic [2:0]              rm;
+        rs_opnd_t                a;
+        rs_opnd_t                b;
+        rs_opnd_t                c;
+    } rs_entry_t;
+
     // What kind of control-flow instruction an encoding is (32-bit, or RVC with raw[31:16] = 0), for the branch
     // predictors: 0 none, 1 direct (conditional branch, JAL, C.J, C.BEQZ/C.BNEZ: the target is in the encoding),
     // 2 an indirect jump that is not a return (JALR, C.JR, C.JALR: the target is a register; a call or a jump),

@@ -29,6 +29,7 @@ design/pipe/qv_ptw.sv
 design/pipe/qv_xlate.sv
 design/pipe/qv_csr_exists.sv
 design/pipe/qv_decode.sv
+design/pipe/qv_rs.sv
 design/pipe/qv_issue.sv
 design/pipe/qv_rob.sv
 design/pipe/qv_exu_alu.sv
