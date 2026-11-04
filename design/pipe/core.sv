@@ -1242,9 +1242,10 @@ module core
                 && !lsu0.misaligned_q && !lsu0.pmp_deny && (lsu0.store_q || !(sb_match || lsq_match)));
     always @* if (!rst && lsu0.in_bus && lsu0.early_q) assert (!lsu0.store_q && !lsu0.atomic_q);
 
-    // (O1) Every request to a unit and every writeback names an entry the ROB holds, and a writeback one that is not
-    // complete yet: each uop goes to its unit once and completes once, also when the reservation station sends it
-    // out of order. The ALU and the BRU never get a request in one cycle (they share the writeback bus).
+    // (O1) Every request to a unit and every writeback names an entry the ROB holds (a request sent in its uop's
+    // dispatch cycle names the entry being allocated), and a writeback one that is not complete yet: each uop goes to
+    // its unit once and completes once, also when the reservation station sends it out of order. The ALU and the BRU
+    // never get a request in one cycle (they share the writeback bus).
     localparam int RIW = $clog2(ROB_DEPTH);
     function automatic logic rob_holds(input logic [QV_ROB_TAG_W-1:0] t, input logic [RIW:0] h, input logic [RIW:0] tl);
         logic [RIW:0] p;
@@ -1253,13 +1254,15 @@ module core
     endfunction
     wire [RIW:0] rob_h = rob0.head_q;
     wire [RIW:0] rob_t = rob0.tail_q;
+    wire [RIW:0] rob_ta = rob0.tail_q + (RIW + 1)'(alloc_valid);
     always @* if (!rst) begin
         assert (!(alu_req.valid && bru_req.valid));
-        if (alu_req.valid) assert (rob_holds(alu_req.tag, rob_h, rob_t));
-        if (bru_req.valid) assert (rob_holds(bru_req.tag, rob_h, rob_t));
-        if (div_req.valid) assert (rob_holds(div_req.tag, rob_h, rob_t));
-        if (lsu_req.valid) assert (rob_holds(lsu_req.tag, rob_h, rob_t));
-        if (fpu_req.valid) assert (rob_holds(fpu_req.tag, rob_h, rob_t));
+        if (alu_req.valid) assert (rob_holds(alu_req.tag, rob_h, rob_ta));
+        if (bru_req.valid) assert (rob_holds(bru_req.tag, rob_h, rob_ta));
+        if (div_req.valid) assert (rob_holds(div_req.tag, rob_h, rob_ta));
+        if (lsu_req.valid) assert (rob_holds(lsu_req.tag, rob_h, rob_ta));
+        if (fpu_req.valid) assert (rob_holds(fpu_req.tag, rob_h, rob_ta));
+        if (eng_req.valid) assert (rob_holds(eng_req.tag, rob_h, rob_ta));
         if (wb_bus.valid) assert (rob_holds(wb_bus.tag, rob_h, rob_t) && !rob0.complete_q[wb_bus.tag[RIW-1:0]]);
         if (lsu_wb.valid) assert (rob_holds(lsu_wb.tag, rob_h, rob_t) && !rob0.complete_q[lsu_wb.tag[RIW-1:0]]);
         if (div_wb.valid) assert (rob_holds(div_wb.tag, rob_h, rob_t) && !rob0.complete_q[div_wb.tag[RIW-1:0]]);
