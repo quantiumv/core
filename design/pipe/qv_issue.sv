@@ -50,15 +50,18 @@
  * goes straight to its unit, exactly as without the station, when its operands are ready, its unit is free and the
  * station does not take that unit's port in this cycle (for a divide or an FP divide/square root: holds none of its
  * kind, so those keep program order). The station takes in every writeback bus and the commit bus (i_wbc: commit's
- * regfile write, which is what wakes a late operand). Memory ops do not use it: they still dispatch only with their
- * operands ready and the LSU (or the load/store queue) free. RS_DEPTH 0 is the core without it, cycle for cycle.
+ * regfile write, which is what wakes a late operand). Memory ops do not use it. Without LSQ_WAIT they still dispatch
+ * only with their operands ready and the LSU (or the load/store queue) free; with LSQ_WAIT (O1c: the station and the
+ * queue both there) a memory op needs only room in the queue, and its operands (o_lsu_opa, o_lsu_opb, in the station's
+ * form) wait there. RS_DEPTH 0 is the core without it, cycle for cycle.
  */
 module qv_issue #(
     parameter bit SERIALIZE = 1'b0,
     parameter bit BYPASS_EN = 1'b1,
     parameter bit CSR_LATE  = 1'b0,
     parameter bit LSU_BYPASS = 1'b0,            // path 3 also takes the LSU's writeback (O2d)
-    parameter int RS_DEPTH  = 0                 // reservation-station entries (O1); 0: none
+    parameter int RS_DEPTH  = 0,                // reservation-station entries (O1); 0: none
+    parameter bit LSQ_WAIT  = 1'b0              // a memory op's operands may wait in the load/store queue (O1c)
 ) (
     input  logic                             clk,
     input  logic                             rst,
@@ -124,6 +127,8 @@ module qv_issue #(
     output qv_pkg::fu_req_t                  o_alu_req,
     output qv_pkg::fu_req_t                  o_bru_req,
     output qv_pkg::fu_req_t                  o_lsu_req,
+    output qv_pkg::rs_opnd_t                 o_lsu_opa,    // (LSQ_WAIT) its operands: ready, or the producer's tag
+    output qv_pkg::rs_opnd_t                 o_lsu_opb,
     input  logic                             i_lsu_free,   // registered: one memory op at a time
     output qv_pkg::fu_req_t                  o_div_req,
     input  logic                             i_div_free,   // registered: one divide at a time
@@ -225,14 +230,30 @@ module qv_issue #(
                    : to_fpu ? (!rs_sel_fpu && (!fpu_ds || (i_fpu_ds_free && !rs_has_fds)))
                    :          !rs_sel_ab);
     wire to_rs  = (RS_DEPTH > 0) && !to_lsu && !direct;
+    // (LSQ_WAIT) a memory op needs only room in the queue: its operands may wait there
+    wire to_lsq = LSQ_WAIT && to_lsu && i_lsu_free;
 
     assign o_issue = i_uop_valid && i_alloc_ready && (!SERIALIZE || i_rob_empty) && !i_flush
-                  && (direct || (to_rs && rs_room));
+                  && (direct || to_lsq || (to_rs && rs_room));
 
     // (read by the CPI stack) the uop waits for room in a full station
     /* verilator lint_off UNUSEDSIGNAL */
     wire rs_full = i_uop_valid && to_rs && !rs_room;
     /* verilator lint_on UNUSEDSIGNAL */
+
+    // (LSQ_WAIT) the memory op's operands for the queue: ready with the value, or waiting for the producer's tag
+    always_comb begin
+        o_lsu_opa       = '0;
+        o_lsu_opa.rdy   = a_ready;
+        o_lsu_opa.late  = p1_late;
+        o_lsu_opa.tag   = p1_tag;
+        o_lsu_opa.value = opa;
+        o_lsu_opb       = '0;
+        o_lsu_opb.rdy   = b_ready;
+        o_lsu_opb.late  = p2_late;
+        o_lsu_opb.tag   = p2_tag;
+        o_lsu_opb.value = opb;
+    end
 
     // ---------------- ROB allocation ----------------
     assign o_alloc_valid   = o_issue;

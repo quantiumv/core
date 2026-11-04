@@ -172,6 +172,11 @@
 `ifndef QV_PIPE_RS_DEPTH
 `define QV_PIPE_RS_DEPTH 0
 `endif
+// With the station and the queue, a memory op dispatches with its address or data still to come and waits for them in
+// the queue (O1c). QV_PIPE_LSQ_WAIT 0: it dispatches only with its operands ready, as without the station.
+`ifndef QV_PIPE_LSQ_WAIT
+`define QV_PIPE_LSQ_WAIT 1
+`endif
 `ifndef QV_PIPE_PMA_RAM_SIZE
 `define QV_PIPE_PMA_RAM_SIZE 64'h0
 `endif
@@ -240,6 +245,7 @@ module core
     parameter bit LSQ_PRE_XL   = `QV_PIPE_LSQ_PRE_XL,    // (with the queue and Sv39) queued ops are looked up in the TLB
     parameter bit LSQ_BYPASS   = `QV_PIPE_LSQ_BYPASS,    // (with the queue) the LSU's writeback is a bypass source
     parameter int RS_DEPTH  = `QV_PIPE_RS_DEPTH,     // reservation-station entries, 0: none
+    parameter bit LSQ_WAIT  = `QV_PIPE_LSQ_WAIT,     // (with the station and the queue) memory ops wait there for operands
     parameter logic [63:0] PMA_RAM_BASE = `QV_PIPE_PMA_RAM_BASE,   // physical window of RAM: stores into it are posted
     parameter logic [63:0] PMA_RAM_SIZE = `QV_PIPE_PMA_RAM_SIZE
 ) (
@@ -588,6 +594,9 @@ module core
     logic [63:0]             l1_value, l2_value;
     wb_t                     wb_bus;
     fu_req_t                 alu_req, bru_req, lsu_req, div_req;
+    /* verilator lint_off UNUSEDSIGNAL */
+    rs_opnd_t                lsu_opa, lsu_opb;     // (O1c) a memory op's operands, as issue resolved them (read by the queue)
+    /* verilator lint_on UNUSEDSIGNAL */
     logic                    lsu_free, div_free;
     logic                    res_valid;      // the LR/SC reservation, kept by commit
     logic [63:0]             res_addr;
@@ -610,7 +619,8 @@ module core
     wb_t      lsu_wb, div_wb;
     wb_t      c_bus;                       // commit's regfile write, with the committing tag: wakes the station's late operands
     qv_issue #(.SERIALIZE(SERIALIZE), .BYPASS_EN(BYPASS_EN), .CSR_LATE(CSR_NOSER),
-               .LSU_BYPASS(LSQ_DEPTH > 0 && LSQ_BYPASS), .RS_DEPTH(RS_DEPTH)) issue0 (
+               .LSU_BYPASS(LSQ_DEPTH > 0 && LSQ_BYPASS), .RS_DEPTH(RS_DEPTH),
+               .LSQ_WAIT(RS_DEPTH > 0 && LSQ_DEPTH > 0 && LSQ_WAIT)) issue0 (
         .clk(clk), .rst(rst), .i_flush(flush),
         .i_uop_valid(uop_valid), .i_uop(uop), .o_issue(issue_fire),
         .o_rs1_sel(rs1_sel), .o_rs2_sel(rs2_sel), .i_rs1_data(rs1_data), .i_rs2_data(rs2_data),
@@ -622,7 +632,7 @@ module core
         .o_lookup1_tag(l1_tag), .i_lookup1_complete(l1_complete), .i_lookup1_value(l1_value),
         .o_lookup2_tag(l2_tag), .i_lookup2_complete(l2_complete), .i_lookup2_value(l2_value),
         .i_wb(wb_bus), .o_alu_req(alu_req), .o_bru_req(bru_req),
-        .o_lsu_req(lsu_req), .i_lsu_free(lsu_free),
+        .o_lsu_req(lsu_req), .o_lsu_opa(lsu_opa), .o_lsu_opb(lsu_opb), .i_lsu_free(lsu_free),
         .o_div_req(div_req), .i_div_free(div_free),
         .o_lookup3_tag(l3_tag), .i_lookup3_complete(l3_complete), .i_lookup3_value(l3_value),
         .o_frs1_sel(frs1_sel), .o_frs2_sel(frs2_sel), .o_frs3_sel(frs3_sel),
@@ -789,9 +799,11 @@ module core
                                      || (alloc_raw[6:0] == 7'b0001111 && alloc_raw[14:12] == 3'b000));
     generate
         if (LSQ_DEPTH > 0) begin : g_lsq
-            qv_lsq #(.DEPTH(LSQ_DEPTH), .PRE_XL(SV39_EN && LSQ_PRE_XL)) lsq0 (
+            qv_lsq #(.DEPTH(LSQ_DEPTH), .PRE_XL(SV39_EN && LSQ_PRE_XL), .OPW(RS_DEPTH > 0 && LSQ_WAIT),
+                     .BYPASS_EN(BYPASS_EN), .LSU_BYPASS(LSQ_BYPASS)) lsq0 (
                 .clk(clk), .rst(rst), .i_flush(flush),
-                .i_req(lsu_req), .o_free(lsu_free),
+                .i_req(lsu_req), .o_free(lsu_free), .i_opa(lsu_opa), .i_opb(lsu_opb),
+                .i_wb(wb_bus), .i_wbd(div_wb), .i_wbf(fpu_wb), .i_wbc(c_bus),
                 .o_eng_req(eng_req), .i_eng_take(eng_take), .i_eng_wb(lsu_wb), .i_eng_res(eng_res),
                 .i_pop(commit_pop), .i_pop_tag(head_tag), .o_head_res(lsu_res),
                 .i_bar_alloc(alloc_bar), .i_bar_tag(alloc_tag), .o_early(lsq_early),

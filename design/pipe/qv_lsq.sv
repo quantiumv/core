@@ -40,10 +40,23 @@
  * up again (and at the head walks). The page stays right until the op is performed for the reason the engine's own
  * early lookup does (qv_lsu, PROBE): every change of the privilege, MPRV, SUM, MXR or satp and every SFENCE.VMA
  * flushes the queue, and a TLB entry, once found, may be used until an SFENCE.VMA.
+ *
+ * Waiting operands (O1c, OPW): issue may dispatch a memory op whose address or store data does not exist yet. Its
+ * operands come as the reservation station's do (i_opa, i_opb: ready with the value, or the producer's tag, late for
+ * a CSR op's rd), and each entry's operands are woken the same way: every writeback bus (the LSU's own is i_eng_wb)
+ * and the commit bus, a late one only by the commit bus, and the entry pushed in a cycle takes in that cycle's buses.
+ * The oldest queued op goes to the engine only once both operands exist -- which may be in the cycle a same-cycle
+ * source carries one (the ALU/BRU and FPU writebacks with BYPASS_EN, the LSU's own with LSU_BYPASS as well), so a
+ * load whose address is the load before it is taken in that load's completion cycle, as with the load bypass in
+ * issue -- and never before: a younger op does not pass it, so the engine still takes the ops in program order.
+ * Issue's request passes straight through only when its operands are ready; pre-translation waits for the address.
  */
 module qv_lsq #(
     parameter int DEPTH  = 4,                   // a power of 2, >= 2
-    parameter bit PRE_XL = 1'b0                 // the oldest queued op's translation is looked up early (O2c)
+    parameter bit PRE_XL = 1'b0,                // the oldest queued op's translation is looked up early (O2c)
+    parameter bit OPW        = 1'b0,            // operands may wait in the queue (O1c)
+    parameter bit BYPASS_EN  = 1'b1,            // (OPW) the same-cycle sources, as issue's bypass
+    parameter bit LSU_BYPASS = 1'b0
 ) (
     input  logic                             clk,
     input  logic                             rst,
@@ -52,6 +65,16 @@ module qv_lsq #(
     // issue
     input  qv_pkg::fu_req_t                  i_req,
     output logic                             o_free,           // room for one more
+    // (OPW) the dispatching op's operands (a: rs1, b: rs2 or the I-immediate), and the buses that wake them (only
+    // valid, tag and value are read)
+    input  qv_pkg::rs_opnd_t                 i_opa = '0,
+    input  qv_pkg::rs_opnd_t                 i_opb = '0,
+    /* verilator lint_off UNUSEDSIGNAL */
+    input  qv_pkg::wb_t                      i_wb = '0,        // ALU/BRU
+    input  qv_pkg::wb_t                      i_wbd = '0,       // divider
+    input  qv_pkg::wb_fp_t                   i_wbf = '0,       // FPU
+    input  qv_pkg::wb_t                      i_wbc = '0,       // commit: an integer rd written to regfile0
+    /* verilator lint_on UNUSEDSIGNAL */
 
     // the engine (qv_lsu)
     output qv_pkg::fu_req_t                  o_eng_req,        // its i_req
@@ -115,12 +138,58 @@ module qv_lsq #(
 
     wire push = i_req.valid && !i_flush;
 
+    // ---------------- (OPW) waiting operands ----------------
+    // wake, byp_hit and now_val are the reservation station's rules (qv_rs.sv), the LSU's writeback being i_eng_wb
+    rs_opnd_t opa_q [DEPTH];
+    rs_opnd_t opb_q [DEPTH];
+
+    /* verilator lint_off UNUSEDSIGNAL */
+    function automatic rs_opnd_t wake(input rs_opnd_t o, input wb_t wb, input wb_t wbl, input wb_t wbd,
+                                      input wb_fp_t wbf, input wb_t wbc);
+        rs_opnd_t n;
+        n = o;
+        if (!o.rdy) begin
+            if (wbc.valid && wbc.tag == o.tag) begin
+                n.rdy = 1'b1; n.value = wbc.value;
+            end else if (!o.late) begin
+                if (wb.valid && wb.tag == o.tag)        begin n.rdy = 1'b1; n.value = wb.value;  end
+                else if (wbl.valid && wbl.tag == o.tag) begin n.rdy = 1'b1; n.value = wbl.value; end
+                else if (wbd.valid && wbd.tag == o.tag) begin n.rdy = 1'b1; n.value = wbd.value; end
+                else if (wbf.valid && wbf.tag == o.tag) begin n.rdy = 1'b1; n.value = wbf.value; end
+            end
+        end
+        return n;
+    endfunction
+
+    function automatic logic byp_hit(input rs_opnd_t o, input wb_t wb, input wb_t wbl, input wb_fp_t wbf);
+        return !o.late && BYPASS_EN && ((wb.valid && wb.tag == o.tag) || (wbf.valid && wbf.tag == o.tag)
+                                        || (LSU_BYPASS && wbl.valid && wbl.tag == o.tag));
+    endfunction
+
+    function automatic logic [63:0] now_val(input rs_opnd_t o, input wb_t wb, input wb_t wbl, input wb_fp_t wbf);
+        if (o.rdy)                         return o.value;
+        if (wb.valid && wb.tag == o.tag)   return wb.value;
+        if (wbf.valid && wbf.tag == o.tag) return wbf.value;
+        return wbl.value;
+    endfunction
+    /* verilator lint_on UNUSEDSIGNAL */
+
+    rs_opnd_t sa, sb;                                   // the oldest queued op's operands
+    assign sa = opa_q[send_i];
+    assign sb = opb_q[send_i];
+    wire s_ok  = !OPW || ((sa.rdy || byp_hit(sa, i_wb, i_eng_wb, i_wbf)) && (sb.rdy || byp_hit(sb, i_wb, i_eng_wb, i_wbf)));
+    wire in_ok = !OPW || (i_opa.rdy && i_opb.rdy);      // issue's request has its operands
+
     // the oldest queued op, or, with none, issue's own request
     fu_req_t send_e;
     assign send_e = req_q[send_i];
     always_comb begin
         o_eng_req       = has_q ? send_e : i_req;
-        o_eng_req.valid = has_q || i_req.valid;
+        if (OPW && has_q) begin
+            o_eng_req.a = now_val(sa, i_wb, i_eng_wb, i_wbf);
+            o_eng_req.b = now_val(sb, i_wb, i_eng_wb, i_wbf);
+        end
+        o_eng_req.valid = has_q ? s_ok : (i_req.valid && in_ok);
     end
     wire send = i_eng_take && !i_flush;                        // the engine takes it
 
@@ -156,10 +225,14 @@ module qv_lsq #(
     wire        p_sc     = p_atomic && (qv_amo_op_e'(send_e.op[3:0]) == QV_AMO_SC);
     wire        p_store  = !p_atomic && send_e.op[3];
     wire [1:0]  p_size   = p_atomic ? (send_e.is_word ? 2'd2 : 2'd3) : send_e.op[1:0];
-    wire [63:0] p_va     = p_atomic ? send_e.a : send_e.a + (p_store ? send_e.imm : send_e.b);
+    // (OPW) from the operands' registered values only: the address must exist already (no bus into the lookup)
+    wire [63:0] p_a      = OPW ? sa.value : send_e.a;
+    wire [63:0] p_b      = OPW ? sb.value : send_e.b;
+    wire        p_va_ok  = !OPW || (sa.rdy && (p_atomic || p_store || sb.rdy));
+    wire [63:0] p_va     = p_atomic ? p_a : p_a + (p_store ? send_e.imm : p_b);
     wire        p_mis    = (p_size == 2'd1) ? p_va[0] : (p_size == 2'd2) ? (p_va[1:0] != 2'd0)
                          : (p_size == 2'd3) ? (p_va[2:0] != 3'd0) : 1'b0;
-    assign o_xl_req  = PRE_XL && i_xl_active && has_q && !xl_q[send_i] && !p_sc && !p_mis && !i_flush;
+    assign o_xl_req  = PRE_XL && i_xl_active && has_q && !xl_q[send_i] && !p_sc && !p_mis && !i_flush && p_va_ok;
     assign o_xl_va   = p_va;
     assign o_xl_wr   = p_atomic ? !p_lr : p_store;
     wire   pre_hit   = o_xl_req && i_xl_free && i_xl_done && !i_xl_pf && !i_xl_af;
@@ -179,7 +252,16 @@ module qv_lsq #(
                 xl_q[send_i]  <= 1'b1;
                 ppn_q[send_i] <= i_xl_ppn;
             end
+            if (OPW)
+                for (int i = 0; i < DEPTH; i++) begin
+                    opa_q[i] <= wake(opa_q[i], i_wb, i_eng_wb, i_wbd, i_wbf, i_wbc);
+                    opb_q[i] <= wake(opb_q[i], i_wb, i_eng_wb, i_wbd, i_wbf, i_wbc);
+                end
             if (push) begin
+                if (OPW) begin                               // the dispatch-cycle capture: this cycle's buses too
+                    opa_q[tail_i] <= wake(i_opa, i_wb, i_eng_wb, i_wbd, i_wbf, i_wbc);
+                    opb_q[tail_i] <= wake(i_opb, i_wb, i_eng_wb, i_wbd, i_wbf, i_wbc);
+                end
                 xl_q[tail_i]      <= 1'b0;
                 req_q[tail_i]     <= i_req;
                 tag_q[tail_i]     <= i_req.tag;
