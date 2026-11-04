@@ -28,6 +28,8 @@
 #                AMO checks (needs the patch and isa_rv64ia.txt from
 #                quantiumv/README.md in the riscv-formal checkout)
 #
+# QV_FORMAL_DEFS="A=1 ..." adds defines to a pipe model's build (e.g. a knob that is off by default).
+#
 # Then run the checks with run_sweep.sh.
 set -eu
 cd "$(dirname "$0")/../.."
@@ -67,6 +69,13 @@ cp "$REPO/verification/riscv-formal/$NAME/checks.cfg" "$DST/"
 [ "$1" != "pipe-sv39" ] || sed -i 's/ -D QV_FORMAL_NO_SV39//' "$DST/checks.cfg"
 [ "$1" != "pipe-fpu" ] || sed -i 's/ -D QV_FORMAL_NO_FPU/ -D QV_FORMAL_FPU_ABSTRACT/' "$DST/checks.cfg"
 [ "$1" != "pipe-sb" ] || sed -i 's/ -D QV_FORMAL_SMALL/ -D QV_FORMAL_SMALL -D QV_PIPE_PMA_RAM_SIZE=2147483648/' "$DST/checks.cfg"
+# QV_FORMAL_DEFS="A=1 B=2": extra defines for a pipe model (a knob that is off by default, say)
+if [ -z "$REF" ] && [ -n "${QV_FORMAL_DEFS:-}" ]; then
+    XD=""
+    for d in $QV_FORMAL_DEFS; do XD="$XD -D $d"; done
+    sed -i "s/ -D RISCV_FORMAL / -D RISCV_FORMAL$XD /" "$DST/checks.cfg"
+    grep -q -- "$XD" "$DST/checks.cfg" || { echo "QV_FORMAL_DEFS: no read_slang line took them" >&2; exit 1; }
+fi
 if [ -z "$REF" ]; then
     # the cfg's read_slang line takes the file list from here, not a copy of its own
     RTL=""
