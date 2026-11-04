@@ -13,9 +13,11 @@
  * ORACLE, TESTBENCH ONLY (run_perf.sh --oracle store): a copy of design/dcache.sv whose
  * stores are ideal. A store is acknowledged like a load hit and written straight into
  * the SRAM array of perf_tb's cache configuration, with no downstream beat, so it costs
- * nothing and contends with nothing. Everything else is the real D$. The cycles it saves
- * bound what a store buffer can gain (P9d's go/no-go). It is compiled in place of
- * design/dcache.sv and only works under perf_tb.g_cache.
+ * nothing and contends with nothing. Everything else is the D$ as it was at P9d (it still
+ * has the CACHE_WRITE state the real one has since dropped for its pass-through, and
+ * merges a store when it samples it). The cycles it saves bound what a store buffer can
+ * gain (P9d's go/no-go). It is compiled in place of design/dcache.sv and only works under
+ * perf_tb.g_cache.
  *
  * Module: dcache -- direct-mapped, write-through, no-write-allocate data
  * cache

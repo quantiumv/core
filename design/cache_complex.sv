@@ -32,13 +32,15 @@
  * wb_mem_done before a new S_FETCH request can start), but P2's own end goal
  * (step 3b, not yet implemented) is real fetch/execute overlap: letting
  * instruction N+1's own fetch start while instruction N is still
- * draining a LOAD/STORE in dcache0. Both icache.sv's CACHE_REFILL and
- * dcache.sv's CACHE_REFILL/CACHE_WRITE run to completion once started
- * (sampled cyc_i&&stb_i while CACHE_IDLE), driven purely by their own
- * mem_ack_i/mem_err_i from that point on, with NO abort path and no
- * further dependence on their own core-facing cyc_i/stb_i staying
- * asserted (confirmed directly: icache.sv's own CACHE_IDLE arm only
- * consults cyc_i/stb_i for the exact one cycle it decides hit vs. miss).
+ * draining a LOAD/STORE in dcache0. Both icache.sv's and dcache.sv's
+ * CACHE_REFILL run to completion once started (sampled cyc_i&&stb_i while
+ * CACHE_IDLE), driven purely by their own mem_ack_i/mem_err_i from that
+ * point on, with NO abort path and no further dependence on their own
+ * core-facing cyc_i/stb_i staying asserted (confirmed directly:
+ * icache.sv's own CACHE_IDLE arm only consults cyc_i/stb_i for the exact
+ * one cycle it decides hit vs. miss). A WRITE is the exception: dcache.sv
+ * passes it straight through, so its downstream request lasts exactly as
+ * long as the core-facing one (which Wishbone holds until its ack anyway).
  * That autonomy is exactly what makes real overlap possible at the
  * core.sv level (a single shared core-facing port can safely hand off
  * to a different requester the cycle after a request was SAMPLED,

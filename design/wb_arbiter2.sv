@@ -125,8 +125,8 @@
  * THIRD real bug, pre-existing, found by the Pipelining P2 port-split
  * review. dm.sv's SBA master holds cyc/stb THROUGH its own ack cycle
  * (legal Wishbone classic), but every slave here treats cyc&&stb in that
- * cycle as a brand-new request: dcache.sv starts a ghost CACHE_WRITE
- * whose ack lands 3 cycles later -- after in_flight_q has already
+ * cycle as a brand-new request: dcache.sv (as it was then) started a
+ * ghost write whose ack landed 3 cycles later -- after in_flight_q had already
  * handed the bus to m0, so core.sv's next load/store completes on the
  * ghost's ack and is silently lost -- and uart16550.sv re-fires the
  * access (a THR write prints twice, an RBR read pops twice). With the
@@ -261,7 +261,9 @@ module wb_arbiter2 #(
 
     // The granted master's own response cycle -- see DROP_REQ_ON_RESP in
     // the module header. No combinational loop: every slave's ack/err is
-    // registered, and in_flight_q is a register.
+    // registered, or (dcache.sv's for a write it passes through) follows a
+    // registered ack further down without looking at cyc, and in_flight_q
+    // is a register.
     wire drop_req = DROP_REQ_ON_RESP && in_flight_q && (ack_i || err_i);
 
     assign cyc_o  = (grant ? m1_cyc_i : m0_cyc_i) && !drop_req;

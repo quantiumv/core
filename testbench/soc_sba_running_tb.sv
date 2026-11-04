@@ -16,9 +16,11 @@
  * DROP_REQ_ON_RESP (see that file's own header for the full mechanism):
  * dm0's SBA master holds cyc/stb through its own ack cycle, and without the
  * fix every slave behind decoder0 re-fires on that held request. Every
- * phase below FAILS against soc.sv with arb0's DROP_REQ_ON_RESP forced to
+ * phase below FAILED against soc.sv with arb0's DROP_REQ_ON_RESP forced to
  * 0 (confirmed by revert-and-recheck when this test was written), and
- * passes with it set.
+ * passes with it set. Since dcache0 passes a write straight through (it
+ * drops its downstream request in the response cycle and samples nothing
+ * then), phase 1 no longer depends on the fix; phases 2 and 3 still do.
  *
  * dm0's plain register interface is driven directly (forced dm0.i_reg_*
  * single-cycle write strobes, the same shape dm_dmi.sv produces) rather
@@ -76,11 +78,13 @@ module soc_sba_running_tb;
     end
 
     /*
-     * Mechanism-level monitor: dcache0 sampling cyc&&stb in CACHE_IDLE on
+     * Mechanism-level monitor: dcache0 seeing cyc&&stb in CACHE_IDLE on
      * the same cycle its OWN ack_o/err_o is high is exactly the ghost
      * request this test exists to catch (a correctly-behaving master has
-     * already dropped cyc by then). Counted independently of whether the
-     * ghost happens to corrupt anything observable.
+     * already dropped cyc by then: arb0 drops the SBA's in that very cycle,
+     * also for a write dcache0 passes through and acknowledges then).
+     * Counted independently of whether the ghost happens to corrupt
+     * anything observable.
      */
     always @(posedge clk) if (!rst) begin
         if (dut.core0.trap_taken && !dut.core0.is_ebreak)

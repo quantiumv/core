@@ -80,16 +80,16 @@ module core_a_ext_cache_tb;
      * no-write-allocate, hit or miss (see dcache.sv's own header) -- so
      * downstream traffic alone can't distinguish "the write phase hit"
      * from "the write phase missed", unlike the read phase above. Sample
-     * dcache0's own write_hit_q directly instead: it's captured once (on
-     * the CACHE_IDLE->CACHE_WRITE transition) and held stable for the
-     * whole CACHE_WRITE state's duration, so any sample taken while
-     * dcache0 is genuinely in CACHE_WRITE (state_q==2'd2, this module's
-     * own 3rd enum value) reflects the real answer for that beat.
+     * dcache0's own write_hit_q directly instead: it is latched while a
+     * write is presented (dcache0 passes it straight through) and is the
+     * answer the merge uses in the write's response cycle (wr_ack), so a
+     * sample taken in that cycle reflects the real answer for that beat
+     * (the last one taken is the AMO's: the sw before it is a miss).
      */
     logic write_phase_was_hit = 1'b0;
     logic write_phase_observed = 1'b0;
     always @(posedge clk) begin
-        if (dut.cache0.dcache0.state_q == 2'd2 /* CACHE_WRITE */) begin
+        if (dut.cache0.dcache0.state_q == 2'd0 && dut.cache0.dcache0.wr_ack) begin
             write_phase_was_hit  <= dut.cache0.dcache0.write_hit_q;
             write_phase_observed <= 1'b1;
         end

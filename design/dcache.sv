@@ -24,10 +24,23 @@
  * Write policy -- write-through, no-write-allocate:
  *  - A store is ALWAYS forwarded to SRAM as a single downstream beat,
  *    hit or miss -- writes are never slower than the cacheless baseline.
+ *  - It goes straight through: while CACHE_IDLE, a write request drives the
+ *    memory-facing port in the very cycle it arrives, and its ack/err is
+ *    the memory's, in the memory's response cycle. A store therefore takes
+ *    the D$ for exactly as long as memory takes to answer it, and is in
+ *    memory when it is acknowledged, as before. ack_o/err_o depend only on
+ *    registers and mem_ack_i/mem_err_i (wr_pend_q says a write is being
+ *    presented), never on the core-facing request itself: every master
+ *    upstream drops cyc on ack, so anything else would close a
+ *    combinational loop.
  *  - A store HIT also updates the cached copy in place, using the same
  *    sel-qualified byte-lane merge wb4_sram.sv's own write path already
  *    does -- keeps the cache and SRAM in lockstep without ever needing a
- *    dirty bit or a write-back-on-evict path.
+ *    dirty bit or a write-back-on-evict path. The merge happens in the
+ *    response cycle, from copies latched while the request was presented
+ *    (a master may change or zero its outputs in the ack cycle), and no
+ *    request is sampled in that cycle (a read sampled then would miss the
+ *    merge).
  *  - A store MISS does NOT allocate a line -- the cache stays exactly as
  *    it was; only a later READ to that address would install it. This
  *    sidesteps having to refill a whole line just to service one write.
@@ -50,12 +63,11 @@ module dcache #(
 
     /*
      * Core-facing port -- this module is a Wishbone SLAVE from the
-     * core's side. Bits [2:0] of addr_i (the byte offset within a dword)
-     * are genuinely unused, same reasoning as wb4_sram.sv's own addr_i.
+     * core's side. A write's address goes downstream whole; a read uses
+     * only bits [31:3] (the dword), same reasoning as wb4_sram.sv's own
+     * addr_i.
      */
-    /* verilator lint_off UNUSEDSIGNAL */
     input  logic [31:0] addr_i,
-    /* verilator lint_on UNUSEDSIGNAL */
     input  logic [63:0] dat_i,
     output logic [63:0] dat_o,
     input  logic [7:0]  sel_i,
@@ -105,8 +117,7 @@ module dcache #(
 
     typedef enum logic [1:0] {
         CACHE_IDLE,
-        CACHE_REFILL,
-        CACHE_WRITE
+        CACHE_REFILL
     } cache_state_t;
     cache_state_t state_q;
 
@@ -116,15 +127,22 @@ module dcache #(
     reg [OFFSET_WIDTH-1:0] refill_word_q;
     reg [OFFSET_WIDTH-1:0] refill_beat_q;
 
-    // CACHE_WRITE's own latched state -- everything needed to drive the
-    // single downstream write beat and, on completion, update the cached
-    // copy IF this was a hit (no-write-allocate: a miss updates nothing).
-    reg [31:0]              write_addr_q;
+    // A write being passed through: latched every cycle it is presented, for
+    // the merge into the cached copy in its response cycle IF it is a hit
+    // (no-write-allocate: a miss updates nothing).
     reg [63:0]               write_dat_q;
     reg [7:0]                write_sel_q;
     reg                      write_hit_q;
     reg [INDEX_WIDTH-1:0]  write_index_q;
     reg [OFFSET_WIDTH-1:0] write_offset_q;
+    reg                      wr_pend_q;   // a write was presented last cycle and not answered
+
+    // the registered acks (reads and refills); a write's are the memory's
+    logic ack_q, err_q;
+    wire  wr_ack = wr_pend_q && (mem_ack_i || mem_err_i);
+    wire  wr_err = wr_pend_q && mem_err_i;
+    assign ack_o = ack_q || wr_ack;
+    assign err_o = err_q || wr_err;
 
     wire [31:0] refill_addr = {refill_tag_q, refill_index_q, refill_beat_q, 3'b0};
 
@@ -132,7 +150,9 @@ module dcache #(
      * Memory-facing bus drive: same !mem_ack_i/!mem_err_i-gated
      * discipline icache.sv's own mem_master_drive uses (see that
      * module's comment for the full reasoning) -- extended with a second
-     * arm for CACHE_WRITE's single downstream beat.
+     * arm for a write passed straight through while CACHE_IDLE (dropped
+     * in its response cycle, so a slave that re-samples never sees it
+     * twice).
      */
     always_comb begin: mem_master_drive
         mem_cyc_o  = 1'b0;
@@ -146,50 +166,68 @@ module dcache #(
             mem_stb_o  = 1'b1;
             mem_addr_o = refill_addr;
             mem_sel_o  = 8'hFF; // full dword; refill always reads a whole line
-        end else if (state_q == CACHE_WRITE && !mem_ack_i && !mem_err_i) begin
+        end else if (state_q == CACHE_IDLE && cyc_i && stb_i && we_i && !mem_ack_i && !mem_err_i) begin
             mem_cyc_o  = 1'b1;
             mem_stb_o  = 1'b1;
             mem_we_o   = 1'b1;
-            mem_addr_o = write_addr_q;
-            mem_dat_o  = write_dat_q;
-            mem_sel_o  = write_sel_q;
+            mem_addr_o = addr_i;
+            mem_dat_o  = dat_i;
+            mem_sel_o  = sel_i;
         end
     end: mem_master_drive
 
     always_ff @(posedge clk) begin
         if (rst) begin
-            ack_o   <= 1'b0;
-            err_o   <= 1'b0;
-            dat_o   <= 64'b0;
-            state_q <= CACHE_IDLE;
+            ack_q     <= 1'b0;
+            err_q     <= 1'b0;
+            dat_o     <= 64'b0;
+            state_q   <= CACHE_IDLE;
+            wr_pend_q <= 1'b0;
             // Correctness-critical -- see icache.sv's identical comment
             // on why this diverges from wb4_sram.sv's own reset
             // philosophy.
             valid_q <= '0;
         end else begin
+            wr_pend_q <= (state_q == CACHE_IDLE) && cyc_i && stb_i && we_i && !mem_ack_i && !mem_err_i;
             case (state_q)
                 CACHE_IDLE: begin
-                    ack_o <= 1'b0;
-                    err_o <= 1'b0;
-                    if (cyc_i && stb_i) begin
+                    ack_q <= 1'b0;
+                    err_q <= 1'b0;
+                    if (wr_ack) begin
+                        // a write's response: merge a hit (an error merges
+                        // nothing -- the write never reached SRAM), and
+                        // sample nothing else this cycle
+                        if (!mem_err_i && write_hit_q) begin
+                            /*
+                             * Sel-qualified byte-lane merge into the
+                             * cached copy -- same idiom wb4_sram.sv's
+                             * own write path uses (design/wb4_sram.sv,
+                             * the variable-indexed +: part-select
+                             * form, not a constant bit-select, for
+                             * the same Icarus constant-select
+                             * limitation reason given there).
+                             */
+                            for (int lane = 0; lane < 8; lane = lane + 1) begin
+                                if (write_sel_q[lane])
+                                    data_q[write_index_q][write_offset_q][(8*lane) +: 8] <= write_dat_q[(8*lane) +: 8];
+                            end
+                        end
+                    end else if (cyc_i && stb_i) begin
                         if (we_i) begin
-                            // Write: always forwarded downstream as a
-                            // single beat (no-write-allocate), regardless
-                            // of hit/miss -- see this module's own header
-                            // for why.
-                            write_addr_q   <= addr_i;
+                            // Write: driven downstream right now (see
+                            // mem_master_drive), hit or miss; keep what
+                            // the merge needs
                             write_dat_q    <= dat_i;
                             write_sel_q    <= sel_i;
                             write_hit_q    <= req_hit;
                             write_index_q  <= req_index;
                             write_offset_q <= req_offset;
-                            state_q        <= CACHE_WRITE;
                         end else begin
                             // Read: identical hit/miss handling to
                             // icache.sv.
                             if (req_hit) begin
                                 dat_o <= data_q[req_index][req_offset];
-                                ack_o <= 1'b1;
+                                ack_q <= 1'b1;
                             end else begin
                                 refill_index_q <= req_index;
                                 refill_tag_q   <= req_tag;
@@ -207,8 +245,8 @@ module dcache #(
                     // order, the same-cycle-arrival dat_o special case).
                     if (mem_ack_i || mem_err_i) begin
                         if (mem_err_i) begin
-                            err_o   <= 1'b1;
-                            ack_o   <= 1'b1;
+                            err_q   <= 1'b1;
+                            ack_q   <= 1'b1;
                             state_q <= CACHE_IDLE;
                         end else begin
                             data_q[refill_index_q][refill_beat_q] <= mem_dat_i;
@@ -218,7 +256,7 @@ module dcache #(
                                 dat_o <= (refill_beat_q == refill_word_q)
                                          ? mem_dat_i
                                          : data_q[refill_index_q][refill_word_q];
-                                ack_o   <= 1'b1;
+                                ack_q   <= 1'b1;
                                 state_q <= CACHE_IDLE;
                             end else begin
                                 refill_beat_q <= refill_beat_q + 1'b1;
@@ -226,48 +264,30 @@ module dcache #(
                         end
                     end
                 end
-                CACHE_WRITE: begin
-                    if (mem_ack_i || mem_err_i) begin
-                        if (mem_err_i) begin
-                            // Downstream write failed -- don't touch the
-                            // cached copy even if write_hit_q, since the
-                            // write never actually reached SRAM (would
-                            // desync the cache from memory otherwise).
-                            err_o   <= 1'b1;
-                            ack_o   <= 1'b1;
-                            state_q <= CACHE_IDLE;
-                        end else begin
-                            if (write_hit_q) begin
-                                /*
-                                 * Sel-qualified byte-lane merge into the
-                                 * cached copy -- same idiom wb4_sram.sv's
-                                 * own write path uses (design/wb4_sram.sv,
-                                 * the variable-indexed +: part-select
-                                 * form, not a constant bit-select, for
-                                 * the same Icarus constant-select
-                                 * limitation reason given there).
-                                 */
-                                for (int lane = 0; lane < 8; lane = lane + 1) begin
-                                    if (write_sel_q[lane])
-                                        data_q[write_index_q][write_offset_q][(8*lane) +: 8] <= write_dat_q[(8*lane) +: 8];
-                                end
-                            end
-                            ack_o   <= 1'b1;
-                            state_q <= CACHE_IDLE;
-                        end
-                    end
-                end
                 default: begin
                     // Unreachable in practice (cache_state_t only ever
-                    // assigns the 3 named values above) -- present only
-                    // because a 2-bit state var has a 4th encoding
-                    // (2'b11) with no defined meaning. Recover to a known
-                    // good state rather than leaving behavior undefined.
+                    // assigns the 2 named values above) -- present only
+                    // because a 2-bit state var has two more encodings
+                    // with no defined meaning. Recover to a known good
+                    // state rather than leaving behavior undefined.
                     state_q <= CACHE_IDLE;
                 end
             endcase
         end
     end
+
+`ifndef SYNTHESIS
+    // the pass-through's contract: a response while idle answers a write
+    // presented since the cycle before (never in the cycle it first
+    // appears: every slave answers a cycle later at the earliest), and a
+    // write is held until it is answered (Wishbone never abandons one)
+    always @(posedge clk) if (!rst && state_q == CACHE_IDLE) begin
+        if ((mem_ack_i || mem_err_i) && !wr_pend_q)
+            $error("dcache: a response while idle with no write outstanding");
+        if (wr_pend_q && !(mem_ack_i || mem_err_i) && !(cyc_i && stb_i && we_i))
+            $error("dcache: a write was dropped before its response");
+    end
+`endif
 endmodule
 
 /* ------------------------------------------------------------------------- */

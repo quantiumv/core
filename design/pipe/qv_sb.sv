@@ -20,8 +20,9 @@
  * in flight (i_lsu_inflight), and, unless the buffer is full, not an LSU access that is ready to start
  * in this very cycle (i_lsu_busy: a load goes before a store that has already retired). The drain also
  * yields to a load that sits in the LSU slot among the oldest ROB entries (i_load_near): with the
- * blocking write-through D$ a beat takes the D$ for 3 cycles, and a load that follows the store would
- * otherwise wait out the very beat the store used to hold the ROB head for, which gains nothing. It
+ * blocking write-through D$ a beat holds the D$ until memory has taken the store (the D$ passes it
+ * straight through), and a load that follows the store would otherwise wait out the very beat the
+ * store used to hold the ROB head for, which gains nothing. It
  * yields for at most YIELD_MAX cycles, and never when the buffer is full (o_start_now then also tells
  * the LSU not to start in the same cycle).
  *

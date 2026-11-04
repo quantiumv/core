@@ -173,9 +173,8 @@ module lockstep_mem #(
      * MMIO), taken at the core-facing mem port. The request is latched on
      * its first cycle and logged on its own ack. A downstream tap of
      * cyc&&we&&ack, as this used to be, logs nothing: every master here
-     * drops cyc in its ack cycle, so the log stayed empty except where a
-     * delay shim holds cyc into the ack cycle (cache config, side B), and
-     * there wb4_sram also re-acks once more. Every core here holds a
+     * drops cyc in its ack cycle, and so do the delay shim and the D$
+     * downstream of it, so the log stayed empty. Every core here holds a
      * request until its ack and never starts the next one in that cycle,
      * so "outstanding" is just "cyc was high last cycle".
      */

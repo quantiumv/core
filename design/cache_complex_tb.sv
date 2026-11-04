@@ -173,8 +173,15 @@ module cache_complex_tb #(
         if (dp_ack) dp_acks++;
         if (dp_err) dp_errs++;
         if (mem_ack || mem_err) mem_resps++;
-        // Proof of genuine dual-outstanding: both sub-caches mid-transaction at once.
-        if (dut.icache0.state_q != 0 && dut.dcache0.state_q != 0) both_busy_seen = 1'b1;
+    end
+
+    // Sampled at posedge: dcache0 passes a write straight through, so its mem_cyc_o follows the data port's
+    // own drive (which the tasks change at negedge) within the cycle.
+    always @(posedge clk) begin
+        // Proof of genuine dual-outstanding: both sub-caches mid-transaction at once (dcache0 refilling, or
+        // passing a write through).
+        if (dut.icache0.state_q != 0 && (dut.dcache0.state_q != 0 || dut.dcache0.mem_cyc_o || dut.dcache0.wr_pend_q))
+            both_busy_seen = 1'b1;
         // Priority invariant: whenever both sub-caches request the shared bus
         // in a cycle where it is free to choose (no beat outstanding), the
         // bus must carry dcache0's request.
