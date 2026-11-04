@@ -21,6 +21,14 @@
  *   - a started access stays on the bus, unchanged, until it is answered; the queue never overflows.
  * Proven by bounded model checking (the bmc task) with covers; no k-induction (the ROB model and the per-tag ghosts
  * would need many strengthening lemmas).
+ *
+ * With LSQ_OPW (the opw tasks: O1c, operands that wait in the queue) a memory op is dispatched with each operand ready
+ * or waiting for a producer's tag (free, as issue would give them: an older uop's), and four outside buses (ALU/BRU,
+ * divider, FPU, commit) carry free values for free tags of uops that are not memory ops, besides the engine's own
+ * writeback. A ghost per ROB slot keeps each operand's first delivery (a late one only off the commit bus). Then:
+ *   - the engine never takes an op before both its operands exist (delivered in an earlier cycle, or on a same-cycle
+ *     source now: the ALU/BRU and FPU buses, the engine's own writeback), and it takes them with exactly those values;
+ *   - an op dispatched and taken in one cycle (nothing queued) had its operands ready.
  */
 module lsq_props (
     input logic                             clk,
@@ -45,6 +53,12 @@ module lsq_props (
     input logic                             sb_empty, sb_match_retired, sb_beat, sb_go,
     input logic [63:0]                      dat,
     input logic                             ack, err
+`ifdef LSQ_OPW
+    ,
+    input qv_pkg::rs_opnd_t                 opa_in, opb_in, // the dispatched op's operands
+    input qv_pkg::wb_t                      xwb, xwbd, xwbc, // outside buses: ALU/BRU, divider, commit
+    input qv_pkg::wb_fp_t                   xwbf             // ... FPU
+`endif
 );
     import qv_pkg::*;
 
@@ -88,9 +102,16 @@ module lsq_props (
     logic        cyc, stb, we, lock, head_started, load_near, in_bus, bus_busy;
     logic [31:3] sb_addr;
 
+`ifdef LSQ_OPW
+    qv_lsq #(.DEPTH(QD), .OPW(1'b1), .BYPASS_EN(1'b1), .LSU_BYPASS(1'b1)) lsq (
+        .clk(clk), .rst(rst), .i_flush(flush),
+        .i_req(req), .o_free(lsq_free), .i_opa(opa_in), .i_opb(opb_in),
+        .i_wb(xwb), .i_wbd(xwbd), .i_wbf(xwbf), .i_wbc(xwbc),
+`else
     qv_lsq #(.DEPTH(QD)) lsq (
         .clk(clk), .rst(rst), .i_flush(flush),
         .i_req(req), .o_free(lsq_free),
+`endif
         .o_eng_req(eng_req), .i_eng_take(eng_take), .i_eng_wb(wb), .i_eng_res(eng_res),
         .i_pop(pop), .i_pop_tag(head_t), .o_head_res(head_res),
         .i_bar_alloc(d_other && other_bar), .i_bar_tag(tail_t), .o_early(early),
@@ -232,6 +253,96 @@ module lsq_props (
             if (req.valid) assert (lsq_free);
         end
     end
+
+`ifdef LSQ_OPW
+    // ---------------- (LSQ_OPW) waiting operands ----------------
+    // per slot (tag[1:0]) of a memory op: its operands as dispatched, and their first delivery
+    rs_opnd_t  g_op  [2*ROB];                   // operand k of slot i at 2*i + k
+    reg        g_dl  [2*ROB];
+    reg [63:0] g_dv  [2*ROB];
+
+    // the bus o waits for carries its tag now (a late one: only the commit bus)
+    function automatic logic dv_now(input rs_opnd_t o, input wb_t ew);
+        if (xwbc.valid && xwbc.tag == o.tag) return 1'b1;
+        if (o.late) return 1'b0;
+        return (xwb.valid && xwb.tag == o.tag) || (xwbd.valid && xwbd.tag == o.tag)
+               || (xwbf.valid && xwbf.tag == o.tag) || (ew.valid && ew.tag == o.tag);
+    endfunction
+    function automatic logic [63:0] dv_val(input rs_opnd_t o, input wb_t ew);
+        if (xwbc.valid && xwbc.tag == o.tag) return xwbc.value;
+        if (xwb.valid && xwb.tag == o.tag)   return xwb.value;
+        if (xwbd.valid && xwbd.tag == o.tag) return xwbd.value;
+        if (xwbf.valid && xwbf.tag == o.tag) return xwbf.value;
+        return ew.value;
+    endfunction
+    // ... on a source the queue may take in this very cycle
+    function automatic logic same_now(input rs_opnd_t o, input wb_t ew);
+        return !o.late && ((xwb.valid && xwb.tag == o.tag) || (xwbf.valid && xwbf.tag == o.tag)
+                           || (ew.valid && ew.tag == o.tag));
+    endfunction
+    function automatic logic [63:0] same_val(input rs_opnd_t o, input wb_t ew);
+        if (xwb.valid && xwb.tag == o.tag)   return xwb.value;
+        if (xwbf.valid && xwbf.tag == o.tag) return xwbf.value;
+        return ew.value;
+    endfunction
+
+    always @(posedge clk) begin
+        if (!rst && !flush) begin
+            for (int x = 0; x < 2*ROB; x++)
+                if (!g_op[x].rdy && !g_dl[x] && dv_now(g_op[x], wb)) begin g_dl[x] <= 1'b1; g_dv[x] <= dv_val(g_op[x], wb); end
+            if (d_mem) begin
+                g_op[2*ti]     <= opa_in;
+                g_op[2*ti + 1] <= opb_in;
+                g_dl[2*ti]     <= !opa_in.rdy && dv_now(opa_in, wb);
+                g_dv[2*ti]     <= dv_val(opa_in, wb);
+                g_dl[2*ti + 1] <= !opb_in.rdy && dv_now(opb_in, wb);
+                g_dv[2*ti + 1] <= dv_val(opb_in, wb);
+            end
+        end
+    end
+
+    // the environment: an outside bus carries a live uop that is not a memory op; no two buses carry one tag; a
+    // waiting operand names a live uop older than its op
+    always @* begin
+        if (xwb.valid)  assume (alive(xwb.tag)  && !is_mem[xwb.tag[1:0]]);
+        if (xwbd.valid) assume (alive(xwbd.tag) && !is_mem[xwbd.tag[1:0]]);
+        if (xwbf.valid) assume (alive(xwbf.tag) && !is_mem[xwbf.tag[1:0]]);
+        if (xwbc.valid) assume (alive(xwbc.tag) && !is_mem[xwbc.tag[1:0]]);
+        if (xwb.valid && xwbd.valid)  assume (xwb.tag != xwbd.tag);
+        if (xwb.valid && xwbf.valid)  assume (xwb.tag != xwbf.tag);
+        if (xwb.valid && xwbc.valid)  assume (xwb.tag != xwbc.tag);
+        if (xwbd.valid && xwbf.valid) assume (xwbd.tag != xwbf.tag);
+        if (xwbd.valid && xwbc.valid) assume (xwbd.tag != xwbc.tag);
+        if (xwbf.valid && xwbc.valid) assume (xwbf.tag != xwbc.tag);
+        if (d_mem && !opa_in.rdy) assume (alive(opa_in.tag));
+        if (d_mem && !opb_in.rdy) assume (alive(opb_in.tag));
+        if (d_mem) assume (req.a == opa_in.value && req.b == opb_in.value);   // issue's request carries the values
+    end
+
+    // the engine takes an op only with its operands, and with their values
+    wire [1:0] ksl = eng_req.tag[1:0];
+    always @* begin
+        if (!rst && !init && eng_take) begin
+            if (n_take == n_disp) begin                           // dispatched in this cycle, straight through
+                assert (opa_in.rdy && opb_in.rdy);
+                assert (eng_req.a == opa_in.value && eng_req.b == opb_in.value);
+            end else begin
+                assert (g_op[2*ksl].rdy || g_dl[2*ksl] || same_now(g_op[2*ksl], wb));
+                assert (g_op[2*ksl+1].rdy || g_dl[2*ksl+1] || same_now(g_op[2*ksl+1], wb));
+                assert (eng_req.a == (g_op[2*ksl].rdy ? g_op[2*ksl].value : g_dl[2*ksl] ? g_dv[2*ksl]
+                                      : same_val(g_op[2*ksl], wb)));
+                assert (eng_req.b == (g_op[2*ksl+1].rdy ? g_op[2*ksl+1].value : g_dl[2*ksl+1] ? g_dv[2*ksl+1]
+                                      : same_val(g_op[2*ksl+1], wb)));
+            end
+        end
+    end
+    always @* begin
+        if (!rst && !init) begin
+            cover (eng_take && n_take != n_disp && !g_op[2*ksl].rdy && !g_dl[2*ksl] && wb.valid);  // a chase, no bubble
+            cover (eng_take && n_take != n_disp && g_op[2*ksl].late && g_dl[2*ksl]);              // woken by commit
+        end
+    end
+`endif
 
     // ---------------- non-vacuity (sby cover task) ----------------
     always @* begin

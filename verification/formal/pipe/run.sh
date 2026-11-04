@@ -42,7 +42,7 @@ for unit in fetch lsu dbg ptw sb fpu rs; do
     done
 done
 # the load/store queue with the engine (lsq.sby): bounded only, no k-induction (see lsq_props.sv)
-for task in bmc cover; do
+for task in bmc cover opw opw_cover; do
     r=$(sby -f lsq.sby $task 2>&1 | status)
     printf '%-12s %s\n' "lsq $task" "$r"
     [ "$r" == "PASS" ] || fail=1
