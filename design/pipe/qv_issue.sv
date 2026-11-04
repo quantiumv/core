@@ -20,9 +20,8 @@
  * claim (the younger) wins. A flush clears every claim: everything in
  * flight is dead and regfile0 holds the architectural state.
  *
- * RVFI's source registers are carried in the ROB; commit reads their
- * values from regfile0, which then holds exactly the state before the
- * retiring instruction.
+ * RVFI's source registers are carried in the ROB; their values are the
+ * operands the uop's unit takes, which core.sv keeps by ROB index.
  *
  * Debug knobs: SERIALIZE=1 issues only into an empty ROB (one
  * instruction in flight); BYPASS_EN=0 drops path 3, turning a back-to-

@@ -38,10 +38,9 @@
  * entry's own), intr flags a retirement whose pc doesn't follow the
  * previous one's pc_wdata, mode is the privilege the instruction ran at
  * and ixl is fixed (64-bit). The source registers come from the ROB, and
- * core.sv reads their values from regfile0, which in the commit cycle
- * still holds the state before this instruction (it is written at the
- * edge); memory fields come from the LSU's result for a memory op and
- * are 0 otherwise.
+ * their values are the operands the instruction's unit took, which core.sv
+ * keeps by ROB index (RISCV_FORMAL only); memory fields come from the
+ * LSU's result for a memory op and are 0 otherwise.
  *
  * Interrupts are sampled exactly as ref_core.sv does: only in the cycle after
  * a retirement (commit_q), from the live mip/mie/mideleg/mstatus/privilege
@@ -522,7 +521,7 @@ module qv_commit #(
     assign o_rvfi_insn      = i_head_entry.raw;
     assign o_rvfi_trap      = commit && trap_fx;
     assign o_rvfi_intr      = commit && (i_head_entry.pc != prev_pc_wdata_q);
-    assign o_rvfi_rs1_addr  = i_head_ctrl.rvfi_rs1;      // their values: regfile0, read by core.sv
+    assign o_rvfi_rs1_addr  = i_head_ctrl.rvfi_rs1;      // their values: kept by core.sv
     assign o_rvfi_rs2_addr  = i_head_ctrl.rvfi_rs2;
     assign o_rvfi_rd_addr   = (writes_rd && !rd_fp) ? i_head_entry.rd : 5'b0;
     assign o_rvfi_rd_wdata  = (writes_rd && !rd_fp && i_head_entry.rd != 5'b0) ? rd_value : 64'b0;

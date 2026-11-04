@@ -207,8 +207,8 @@ package qv_pkg;
         logic        trig_debug;   // see uop_t
         logic        trig_exc;
         logic        rd_fp;        // F/D: rd is an FP register (fprf0, the FP producer table)
-        // RVFI's source registers (0 when unused or an FP register). Commit reads their values from regfile0, which
-        // holds exactly the architectural state before the retiring instruction (O1.1).
+        // RVFI's source registers (0 when unused or an FP register); their values are the operands the uop's unit
+        // took, kept by core.sv (RISCV_FORMAL only).
         logic [4:0]  rvfi_rs1;
         logic [4:0]  rvfi_rs2;
     } rob_ctrl_t;

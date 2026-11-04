@@ -1035,11 +1035,6 @@ module core
     // The Debug Module's GPR access shares read port B and the write port outright, as in ref_core.sv: while the
     // hart is halted (dm_access_active) nothing issues and nothing retires, so the two users are never live in
     // the same cycle. o_dm_gpr_rdata is the very same wire rs2_data, trusted by the Debug Module only then.
-    // Under RISCV_FORMAL, ports C and D read the retiring instruction's RVFI source values: in the commit cycle
-    // regfile0 holds exactly the state before it (the write lands at the edge).
-`ifdef RISCV_FORMAL
-    logic [63:0] c_rs1_rdata, c_rs2_rdata;
-`endif
     register_file regfile0 (
         .i_clk(clk),
         .i_read_gpr_A_sel(rs1_sel), .o_read_gpr_A_data(rs1_data),
@@ -1047,11 +1042,29 @@ module core
         .i_load_gpr(dm_access_active ? i_dm_gpr_we : rf_we),
         .i_load_gpr_sel(dm_access_active ? i_dm_gpr_sel : rf_sel),
         .i_load_gpr_data(dm_access_active ? i_dm_gpr_wdata : rf_data)
-`ifdef RISCV_FORMAL
-        , .i_read_gpr_C_sel(c_rs1_addr), .o_read_gpr_C_data(c_rs1_rdata),
-        .i_read_gpr_D_sel(c_rs2_addr), .o_read_gpr_D_data(c_rs2_rdata)
-`endif
     );
+
+`ifdef RISCV_FORMAL
+    // RVFI's source values are the operands each uop's unit took: every uop sends exactly one request (ALU, BRU,
+    // divider, FPU, or the LSU engine, from issue, the station or the queue), with a = rs1 and b = rs2 whenever it
+    // reads them, and the request names a live entry (asserted below), so the head's slot holds its own. These are
+    // the values its result was computed from: the insn checks then follow one request to its retirement, and
+    // the reg check holds them to the architectural registers (a wrong forward or wakeup fails it).
+    localparam int SRCW = (ROB_DEPTH > 1) ? $clog2(ROB_DEPTH) : 1;
+    logic [63:0] src_a_q [0:ROB_DEPTH-1];
+    logic [63:0] src_b_q [0:ROB_DEPTH-1];
+    wire [SRCW-1:0] s_alu = alu_req.tag[SRCW-1:0], s_bru = bru_req.tag[SRCW-1:0], s_div = div_req.tag[SRCW-1:0];
+    wire [SRCW-1:0] s_fpu = fpu_req.tag[SRCW-1:0], s_eng = eng_req.tag[SRCW-1:0];
+    always_ff @(posedge clk) begin
+        if (alu_req.valid) begin src_a_q[s_alu] <= alu_req.a; src_b_q[s_alu] <= alu_req.b; end
+        if (bru_req.valid) begin src_a_q[s_bru] <= bru_req.a; src_b_q[s_bru] <= bru_req.b; end
+        if (div_req.valid) begin src_a_q[s_div] <= div_req.a; src_b_q[s_div] <= div_req.b; end
+        if (fpu_req.valid) begin src_a_q[s_fpu] <= fpu_req.a; src_b_q[s_fpu] <= fpu_req.b; end
+        if (eng_req.valid) begin src_a_q[s_eng] <= eng_req.a; src_b_q[s_eng] <= eng_req.b; end
+    end
+    wire [63:0] c_rs1_rdata = (c_rs1_addr != 5'b0) ? src_a_q[head_tag[SRCW-1:0]] : 64'b0;
+    wire [63:0] c_rs2_rdata = (c_rs2_addr != 5'b0) ? src_b_q[head_tag[SRCW-1:0]] : 64'b0;
+`endif
 
     // F/D: the FP register file (its array fp_registers is a name the lockstep harness reads in both cores), read by
     // issue and written at commit. The Debug Module's FPR access takes read port 3 and the write port while the hart

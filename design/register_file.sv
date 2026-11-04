@@ -18,8 +18,7 @@
  *
  * Features:
  *  - Size = num_regs x WORD_SIZE
- *  - Dual port combinational reads and single port synchronous write
- *    (under RISCV_FORMAL two more read ports, C and D, for RVFI).
+ *  - Dual port combinational reads and single port synchronous write.
  *  - x0 always reads as 0, regardless of what (if anything) is ever
  *    written to it -- writes to x0 are simply no-ops, as required by the
  *    ISA. (No PC or dedicated RA/SP ports here -- those live in core.sv;
@@ -52,14 +51,6 @@ module register_file #(
     input logic                         i_load_gpr,
     input logic [(l2_num_regs - 1):0]   i_load_gpr_sel,
     input logic [(`WORD_SIZE - 1):0]    i_load_gpr_data
-`ifdef RISCV_FORMAL
-    ,
-    /* Two more read ports for RVFI only: the source values of the instruction retiring. */
-    input logic     [(l2_num_regs - 1):0]   i_read_gpr_C_sel = '0,
-    output logic    [(`WORD_SIZE - 1):0]    o_read_gpr_C_data,
-    input logic     [(l2_num_regs - 1):0]   i_read_gpr_D_sel = '0,
-    output logic    [(`WORD_SIZE - 1):0]    o_read_gpr_D_data
-`endif
 );
     /* num_regs general purpose registers, each WORD_SIZE bit wide. */
     logic [(`WORD_SIZE - 1):0]  gp_registers [0:(num_regs - 1)];
@@ -85,10 +76,6 @@ module register_file #(
      */
     assign o_read_gpr_A_data = (i_read_gpr_A_sel == 0) ? '0 : gp_registers[i_read_gpr_A_sel];
     assign o_read_gpr_B_data = (i_read_gpr_B_sel == 0) ? '0 : gp_registers[i_read_gpr_B_sel];
-`ifdef RISCV_FORMAL
-    assign o_read_gpr_C_data = (i_read_gpr_C_sel == 0) ? '0 : gp_registers[i_read_gpr_C_sel];
-    assign o_read_gpr_D_data = (i_read_gpr_D_sel == 0) ? '0 : gp_registers[i_read_gpr_D_sel];
-`endif
 
 
     /* Write. */
