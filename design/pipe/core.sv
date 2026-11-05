@@ -170,7 +170,11 @@
 // The reservation station (O1). QV_PIPE_RS_DEPTH 0 leaves it out: issue then sends a uop to its unit only in its
 // dispatch cycle, stalling dispatch until it can, which is the timing without it.
 `ifndef QV_PIPE_RS_DEPTH
-`define QV_PIPE_RS_DEPTH 0
+`ifdef QV_FORMAL_SMALL
+`define QV_PIPE_RS_DEPTH 2
+`else
+`define QV_PIPE_RS_DEPTH 4
+`endif
 `endif
 // With the station and the queue, a memory op dispatches with its address or data still to come and waits for them in
 // the queue (O1c). QV_PIPE_LSQ_WAIT 0: it dispatches only with its operands ready, as without the station.
