@@ -1,6 +1,6 @@
 #!/bin/bash
 # run.sh [--mutants] -- module-level SymbiYosys proofs for units of the pipelined core.
-# Run under WSL (sby, yosys-slang, boolector; see the riscv-formal README).
+# Run under WSL (sby, yosys-slang, boolector, bitwuzla; see the riscv-formal README).
 #
 #   lsq.sby (the queue with the engine): bmc and cover only.
 #   fetch.sby, lsu.sby, dbg.sby, ptw.sby, sb.sby, rs.sby: prove (k-induction), bmc and cover tasks must all
@@ -30,6 +30,7 @@ set -u
 cd "$(dirname "$0")" || exit 1
 HERE=$(pwd)
 REPO=$(cd ../../.. && pwd)
+export PYTHONPATH="$HOME/yosys-py-patch${PYTHONPATH:+:$PYTHONPATH}"   # smtio.py fix for bitwuzla (the lsq opw tasks)
 fail=0
 
 status() { grep -o 'DONE ([A-Z]*' | head -1 | sed 's/DONE (//'; }

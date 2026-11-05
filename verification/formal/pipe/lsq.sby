@@ -1,6 +1,6 @@
 # qv_lsq with qv_lsu (EARLY, HANDOFF, SB_EN) and a ROB model (lsq_props.sv): deep BMC and covers.
-# opw, opw_cover: the same with operands that wait in the queue (LSQ_OPW, O1c); opw is BMC depth 10: the 64-bit operand
-# values make each step costly (step 9 alone took 88 minutes of boolector on a loaded machine).
+# opw, opw_cover: the same with operands that wait in the queue (LSQ_OPW, O1c), on bitwuzla (needs PYTHONPATH as run.sh
+# sets it): BMC depth 10 takes about 3 h of CPU (7 h on boolector), and narrowing the operand values does not help.
 # Run with run.sh, or: sby -f lsq.sby
 [tasks]
 bmc base
@@ -19,7 +19,8 @@ opw_cover: mode cover
 opw_cover: depth 20
 
 [engines]
-smtbmc boolector
+base: smtbmc boolector
+opwg: smtbmc bitwuzla
 
 [script]
 plugin -i /home/potato/yosys-slang-src/build/slang.so
