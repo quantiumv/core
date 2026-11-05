@@ -1,5 +1,5 @@
 #!/bin/bash
-# sync_core.sh ref|pipe|pipe-full|pipe-amo|pipe-sv39|pipe-sb -- copy a core's RTL, the shared
+# sync_core.sh ref|pipe|pipe-rs0|pipe-full|pipe-amo|pipe-sv39|pipe-sb -- copy a core's RTL, the shared
 # wrapper and its checks.cfg into the riscv-formal checkout and regenerate its
 # checks. Run under WSL. The checkout defaults to ~/riscv-formal (override
 # with RVFORMAL=...); it carries this repo's local patches, see
@@ -8,6 +8,10 @@
 #   ref       -> $RVFORMAL/cores/quantiumv       (the frozen multi-cycle reference,
 #                verification/reference/ref_*.sv built as `core` by -D QV_REF_AS_CORE)
 #   pipe      -> $RVFORMAL/cores/quantiumv_pipe  (the pipelined core, design/pipe/core.sv)
+#   pipe-rs0  -> $RVFORMAL/cores/quantiumv_pipe_rs0: the same with the reservation station off
+#                (QV_PIPE_RS_DEPTH=0): the opcode-by-opcode insn checks, about 10x cheaper than with the
+#                station, which treats every opcode of a unit alike; pipe keeps the checks that see
+#                the station and one instruction per class (see quantiumv_pipe/README.md)
 #   pipe-full -> $RVFORMAL/cores/quantiumv_pipe_full: the same without
 #                QV_FORMAL_SMALL (full-size ROB and IQ), for spot checks
 #   pipe-sv39 -> $RVFORMAL/cores/quantiumv_pipe_sv39: with address translation
@@ -44,8 +48,9 @@ case "${1:-}" in
         REF=1
         # the reference's own files (ref_design_files.list) and its macros header, flat in design/ (the cfg lists them)
         FILES="$(grep -E '^verification/reference/' verification/regress/ref_design_files.list) verification/reference/ref_macros.svh" ;;
-    pipe|pipe-full|pipe-amo|pipe-sv39|pipe-sb|pipe-fpu)
+    pipe|pipe-rs0|pipe-full|pipe-amo|pipe-sv39|pipe-sb|pipe-fpu)
         NAME=quantiumv_pipe
+        [ "$1" == "pipe-rs0" ] && SUFFIX=_rs0
         [ "$1" == "pipe-full" ] && SUFFIX=_full
         [ "$1" == "pipe-sb" ] && SUFFIX=_sb
         [ "$1" == "pipe-sv39" ] && SUFFIX=_sv39
@@ -53,7 +58,7 @@ case "${1:-}" in
         [ "$1" == "pipe-amo" ] && NAME=quantiumv_pipe_amo
         FILES=$(grep -E '^design/(pipe/|decoder\.sv|alu\.sv|c_expand\.sv|csr_file\.sv|register_file\.sv|divider\.sv)' \
                     verification/regress/design_files.list) ;;
-    *) echo "usage: sync_core.sh ref|pipe|pipe-full|pipe-amo|pipe-sv39|pipe-sb|pipe-fpu" >&2; exit 2 ;;
+    *) echo "usage: sync_core.sh ref|pipe|pipe-rs0|pipe-full|pipe-amo|pipe-sv39|pipe-sb|pipe-fpu" >&2; exit 2 ;;
 esac
 
 DST="$RVFORMAL/cores/$NAME$SUFFIX"
@@ -65,6 +70,7 @@ done
 cp -r "$REPO/design/defaults" "$DST/design/"
 cp "$REPO/verification/riscv-formal/quantiumv/wrapper.sv" "$DST/"
 cp "$REPO/verification/riscv-formal/$NAME/checks.cfg" "$DST/"
+[ "$1" != "pipe-rs0" ] || sed -i 's/ -D QV_FORMAL_SMALL/ -D QV_FORMAL_SMALL -D QV_PIPE_RS_DEPTH=0/' "$DST/checks.cfg"
 [ "$1" != "pipe-full" ] || sed -i 's/ -D QV_FORMAL_SMALL//' "$DST/checks.cfg"
 [ "$1" != "pipe-sv39" ] || sed -i 's/ -D QV_FORMAL_NO_SV39//' "$DST/checks.cfg"
 [ "$1" != "pipe-fpu" ] || sed -i 's/ -D QV_FORMAL_NO_FPU/ -D QV_FORMAL_FPU_ABSTRACT/' "$DST/checks.cfg"
