@@ -595,7 +595,7 @@ module core
     wb_t                     wb_bus;
     fu_req_t                 alu_req, bru_req, lsu_req, div_req;
     /* verilator lint_off UNUSEDSIGNAL */
-    rs_opnd_t                lsu_opa, lsu_opb;     // (O1c) a memory op's operands, as issue resolved them (read by the queue)
+    rs_opnd_t                lsu_opa, lsu_opb;     // the dispatching uop's operands, as issue resolved them (the queue reads a memory op's, O1c)
     /* verilator lint_on UNUSEDSIGNAL */
     logic                    lsu_free, div_free;
     logic                    res_valid;      // the LR/SC reservation, kept by commit
@@ -1045,22 +1045,38 @@ module core
     );
 
 `ifdef RISCV_FORMAL
-    // RVFI's source values are the operands each uop's unit took: every uop sends exactly one request (ALU, BRU,
-    // divider, FPU, or the LSU engine, from issue, the station or the queue), with a = rs1 and b = rs2 whenever it
-    // reads them, and the request names a live entry (asserted below), so the head's slot holds its own. These are
-    // the values its result was computed from: the insn checks then follow one request to its retirement, and
-    // the reg check holds them to the architectural registers (a wrong forward or wakeup fails it).
+    // RVFI's source values are the operands the uop computes with, by ROB index: recorded at dispatch when they are
+    // ready, and otherwise (with the station, a waiting one) when its unit takes them. Every uop sends exactly one
+    // request (ALU, BRU, divider, FPU, or the LSU engine), with a = rs1 and b = rs2 whenever it reads them, and the
+    // request names a live entry (asserted below), so the head's slot holds its own. The insn checks then follow its
+    // operands to its result, and the reg check holds them to the architectural registers (a wrong forward or wakeup
+    // fails it). Without the station everything is ready at dispatch, and only the first write exists.
     localparam int SRCW = (ROB_DEPTH > 1) ? $clog2(ROB_DEPTH) : 1;
-    logic [63:0] src_a_q [0:ROB_DEPTH-1];
-    logic [63:0] src_b_q [0:ROB_DEPTH-1];
+    logic [63:0]          src_a_q [0:ROB_DEPTH-1];
+    logic [63:0]          src_b_q [0:ROB_DEPTH-1];
+    logic [ROB_DEPTH-1:0] src_wait_a_q, src_wait_b_q;
+    wire [SRCW-1:0] s_new = alloc_tag[SRCW-1:0];
     wire [SRCW-1:0] s_alu = alu_req.tag[SRCW-1:0], s_bru = bru_req.tag[SRCW-1:0], s_div = div_req.tag[SRCW-1:0];
     wire [SRCW-1:0] s_fpu = fpu_req.tag[SRCW-1:0], s_eng = eng_req.tag[SRCW-1:0];
     always_ff @(posedge clk) begin
-        if (alu_req.valid) begin src_a_q[s_alu] <= alu_req.a; src_b_q[s_alu] <= alu_req.b; end
-        if (bru_req.valid) begin src_a_q[s_bru] <= bru_req.a; src_b_q[s_bru] <= bru_req.b; end
-        if (div_req.valid) begin src_a_q[s_div] <= div_req.a; src_b_q[s_div] <= div_req.b; end
-        if (fpu_req.valid) begin src_a_q[s_fpu] <= fpu_req.a; src_b_q[s_fpu] <= fpu_req.b; end
-        if (eng_req.valid) begin src_a_q[s_eng] <= eng_req.a; src_b_q[s_eng] <= eng_req.b; end
+        if (RS_DEPTH > 0) begin
+            if (alu_req.valid && src_wait_a_q[s_alu]) src_a_q[s_alu] <= alu_req.a;
+            if (alu_req.valid && src_wait_b_q[s_alu]) src_b_q[s_alu] <= alu_req.b;
+            if (bru_req.valid && src_wait_a_q[s_bru]) src_a_q[s_bru] <= bru_req.a;
+            if (bru_req.valid && src_wait_b_q[s_bru]) src_b_q[s_bru] <= bru_req.b;
+            if (div_req.valid && src_wait_a_q[s_div]) src_a_q[s_div] <= div_req.a;
+            if (div_req.valid && src_wait_b_q[s_div]) src_b_q[s_div] <= div_req.b;
+            if (fpu_req.valid && src_wait_a_q[s_fpu]) src_a_q[s_fpu] <= fpu_req.a;
+            if (fpu_req.valid && src_wait_b_q[s_fpu]) src_b_q[s_fpu] <= fpu_req.b;
+            if (eng_req.valid && src_wait_a_q[s_eng]) src_a_q[s_eng] <= eng_req.a;
+            if (eng_req.valid && src_wait_b_q[s_eng]) src_b_q[s_eng] <= eng_req.b;
+        end
+        if (alloc_valid) begin
+            src_a_q[s_new]      <= lsu_opa.value;
+            src_b_q[s_new]      <= lsu_opb.value;
+            src_wait_a_q[s_new] <= !lsu_opa.rdy;
+            src_wait_b_q[s_new] <= !lsu_opb.rdy;
+        end
     end
     wire [63:0] c_rs1_rdata = (c_rs1_addr != 5'b0) ? src_a_q[head_tag[SRCW-1:0]] : 64'b0;
     wire [63:0] c_rs2_rdata = (c_rs2_addr != 5'b0) ? src_b_q[head_tag[SRCW-1:0]] : 64'b0;
