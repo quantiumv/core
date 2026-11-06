@@ -38,11 +38,40 @@ module core_rv64_word_ops_tb;
     logic [7:0]  wb_sel;
     logic        wb_we, wb_cyc, wb_stb, wb_ack, wb_err;
 
+    // core's own two ports: wbf_* = fetch (read-only), wbm_* = mem.
+    logic [31:0] wbf_addr;
+    logic [63:0] wbf_dat_s2m;
+    logic        wbf_cyc, wbf_stb, wbf_ack, wbf_err;
+    logic [31:0] wbm_addr;
+    logic [63:0] wbm_dat_m2s, wbm_dat_s2m;
+    logic [7:0]  wbm_sel;
+    logic        wbm_we, wbm_cyc, wbm_stb, wbm_ack, wbm_err, wbm_lock;
+
     core dut (
         .clk(clk), .rst(rst),
-        .wb_addr_o(wb_addr), .wb_dat_o(wb_dat_m2s), .wb_dat_i(wb_dat_s2m),
-        .wb_sel_o(wb_sel), .wb_we_o(wb_we), .wb_cyc_o(wb_cyc), .wb_stb_o(wb_stb),
-        .wb_ack_i(wb_ack), .wb_err_i(wb_err)
+        .wb_fetch_addr_o(wbf_addr), .wb_fetch_cyc_o(wbf_cyc), .wb_fetch_stb_o(wbf_stb),
+        .wb_fetch_dat_i(wbf_dat_s2m), .wb_fetch_ack_i(wbf_ack), .wb_fetch_err_i(wbf_err),
+        .wb_mem_addr_o(wbm_addr), .wb_mem_dat_o(wbm_dat_m2s), .wb_mem_dat_i(wbm_dat_s2m),
+        .wb_mem_sel_o(wbm_sel), .wb_mem_we_o(wbm_we), .wb_mem_cyc_o(wbm_cyc),
+        .wb_mem_stb_o(wbm_stb), .wb_mem_ack_i(wbm_ack), .wb_mem_err_i(wbm_err),
+        .wb_mem_lock_o(wbm_lock)
+    );
+
+    /* core.sv now has separate fetch and mem ports; this merges them onto
+     * the harness's single SRAM (wb_* above = what sram0 sees). mem is m1
+     * so execute wins ties. Fetch never writes: sel mirrors the old core's
+     * 8'hFF-while-fetching, 0-when-idle behavior. */
+    wb_arbiter2 fetch_mem_arb0 (
+        .clk(clk), .rst(rst),
+        .m0_addr_i(wbf_addr), .m0_dat_i(64'b0), .m0_dat_o(wbf_dat_s2m),
+        .m0_sel_i({8{wbf_cyc}}), .m0_we_i(1'b0), .m0_cyc_i(wbf_cyc), .m0_stb_i(wbf_stb),
+        .m0_ack_o(wbf_ack), .m0_err_o(wbf_err),
+        .m1_addr_i(wbm_addr), .m1_dat_i(wbm_dat_m2s), .m1_dat_o(wbm_dat_s2m),
+        .m1_sel_i(wbm_sel), .m1_we_i(wbm_we), .m1_cyc_i(wbm_cyc), .m1_stb_i(wbm_stb),
+        .m1_ack_o(wbm_ack), .m1_err_o(wbm_err), .m1_lock_i(wbm_lock),
+        .addr_o(wb_addr), .dat_o(wb_dat_m2s), .dat_i(wb_dat_s2m), .sel_o(wb_sel),
+        .we_o(wb_we), .cyc_o(wb_cyc), .stb_o(wb_stb), .ack_i(wb_ack), .err_i(wb_err),
+        /* verilator lint_off PINCONNECTEMPTY */ .o_grant() /* verilator lint_on PINCONNECTEMPTY */
     );
 
     wb4_sram #(.num_words(128)) sram0 (

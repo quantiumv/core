@@ -1,0 +1,9 @@
+// A second --config-override for sail_riscv_sim, applied after verification/lockstep/sail_config_override.json:
+// it turns on what the F/D track implements (F, D and Zcd). Zfa, Zfh, Zfinx and the rest stay off.
+{
+  "extensions": {
+    "F": { "supported": true },
+    "D": { "supported": true },
+    "Zcd": { "supported": true }
+  }
+}

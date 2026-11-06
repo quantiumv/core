@@ -1,0 +1,66 @@
+{
+ "sim": "verilator",
+ "jobs": 3,
+ "inner_jobs": 2,
+ "counts": [
+  8,
+  24,
+  64
+ ],
+ "memcfg": "cache",
+ "delay": 8,
+ "profile": "--isa imac --priv msu --pmp --irq --smc --sv39",
+ "extra": [
+  "--irq-mode",
+  "2",
+  "--irq-density",
+  "1",
+  "--dbg-mode",
+  "1",
+  "--dbg-features",
+  "191",
+  "--timeout",
+  "3000000"
+ ],
+ "mutants": [
+  {
+   "from": "p7b_unit_ptw.json",
+   "only": [
+    3,
+    16,
+    18
+   ],
+   "unit_only": {
+    "3": "the generated programs cannot show it either: see the reason in p7_lockstep.json",
+    "16": "the generated programs cannot show it either: see the reason in p7_lockstep.json",
+    "18": "the generated programs cannot show it either: see the reason in p7_lockstep.json"
+   }
+  },
+  {
+   "from": "p7b_unit_xlate.json",
+   "only": [
+    13
+   ],
+   "unit_only": {
+    "13": "the generated programs cannot show it either: see the reason in p7_lockstep.json"
+   }
+  },
+  {
+   "from": "p7d_unit_fetch.json",
+   "only": [
+    0,
+    9
+   ],
+   "unit_only": {
+    "9": "the generated programs cannot show it either: see the reason in p7_lockstep.json"
+   }
+  },
+  {
+   "from": "p7b_unit_ptw.json",
+   "only": [
+    10
+   ],
+   "profile": "--isa imac --priv msu --irq --smc --sv39"
+  }
+ ]
+}

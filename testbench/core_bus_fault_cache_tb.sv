@@ -19,11 +19,11 @@
  *
  * Test J is the one that actually matters here: an AMO read-phase fault
  * through the cached path is the single scenario that distinguishes a
- * correct `wb_ok`-gated S_MEM -> S_AMO_WRITE decision from a buggy
- * bare-`wb_ack_i` one -- through the cache, a downstream error arrives
- * WITH wb_ack_i also asserted (icache.sv/dcache.sv's CACHE_REFILL error
+ * correct `wb_mem_ok`-gated S_MEM -> S_AMO_WRITE decision from a buggy
+ * bare-`wb_mem_ack_i` one -- through the cache, a downstream error arrives
+ * WITH wb_mem_ack_i also asserted (icache.sv/dcache.sv's CACHE_REFILL error
  * arm sets both together), so a buggy implementation that only checks
- * wb_ack_i would incorrectly see "success" and proceed into
+ * wb_mem_ack_i would incorrectly see "success" and proceed into
  * S_AMO_WRITE, issuing a real, bogus second bus write. The equivalent
  * test through core_wb4_sram_harness (core_bus_fault_trap_tb.sv's test
  * F) cannot catch this specific bug class at all, since wb4_sram.sv
@@ -58,10 +58,17 @@ module core_bus_fault_cache_tb;
      * ever legitimately reaches S_AMO_WRITE either.
      */
     logic amo_write_entered;
+`ifndef QV_REF_AS_CORE
+    // the pipelined core has no S_AMO_WRITE: an AMO's write is a locked bus write
+    initial amo_write_entered = 1'b0;
+    always @(posedge clk)
+        if (dut.core0.wb_mem_cyc_o && dut.core0.wb_mem_we_o && dut.core0.wb_mem_lock_o) amo_write_entered <= 1'b1;
+`else
     state_reached_monitor amo_write_monitor (
         .clk(clk), .i_state(dut.core0.state),
         .i_state_target(dut.core0.S_AMO_WRITE), .o_reached(amo_write_entered)
     );
+`endif
 
     localparam int unsigned HANDLER_I = 32'h40;
     /*

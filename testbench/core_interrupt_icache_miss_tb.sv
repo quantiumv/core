@@ -14,9 +14,9 @@
  * Testbench: core's interrupt-taking logic against the REAL cache fabric
  * (design/icache.sv/design/dcache.sv via design/cache_complex.sv, reached
  * through core_cache_harness.sv) -- the one case core_interrupt_tb.sv's
- * plain wb4_sram-only harness structurally cannot exercise:
- * fetch_redirect_q staying high across a genuine multi-cycle I$ refill of
- * the trap-vector fetch itself.
+ * plain wb4_sram-only harness structurally cannot exercise: a genuine
+ * multi-cycle I$ refill of the handler's own first fetch after an
+ * interrupt.
  *
  * mtvec is pointed at 0x1000 -- a dword the small main-flow program never
  * touches (it lives entirely under 0x20), and (since the I$ starts fully
@@ -29,27 +29,18 @@
  * Same deferred-i_mtip technique as core_interrupt_tb.sv: mie.MTIE/
  * mstatus.MIE enabled during setup (i_mtip=0, so nothing fires
  * prematurely), i_mtip asserts on the TRIGGER instruction's own commit
- * edge. fetch_redirect_q is sampled directly (white-box -- no
- * architectural way to observe "how many cycles did the redirected
- * fetch actually take") across the whole run; a genuine 4-beat refill
- * (line_words=4, core_cache_harness's default) must hold it high for
- * more than a couple of cycles.
+ * edge.
  *
- * IMPORTANT, review-confirmed caveat: this does NOT currently prove
- * fetch_redirect_q is load-bearing (mutating it away -- collapsing
- * fetch_from_trap_vector to just interrupt_taken -- still passes this
- * test unchanged, confirmed empirically). That's expected, not a bug:
- * fetch_paddr is today a pure pc passthrough (core.sv), and pc itself is
- * updated to trap_vector the cycle after interrupt_taken fires, so
- * fetch_addr alone already stays correct through the whole refill with
- * no help from fetch_redirect_q. fetch_redirect_q exists anyway as
- * deliberate, forward-compatible scaffolding for the future Sv39 stage
- * (once fetch_paddr becomes a real, possibly multi-cycle translation,
- * pc alone will no longer trivially "keep up") -- see the plan's own
- * FSM-timing-proof section. This test still legitimately proves
- * fetch_redirect_q's own *behavior* is correct (stays high for the
- * whole refill, clears at the right edge) even though it can't yet
- * prove *necessity*; read the check below with that in mind.
+ * White-box, via dut.core0's own fetch port: (1) the handler's own FIRST
+ * contiguous run of wb_fetch_cyc_o at 0x1000 must last more than a couple
+ * of cycles -- proves the genuine 4-beat refill (line_words=4,
+ * core_cache_harness's default) is actually exercised, not skipped or
+ * satisfied by a stale/aliased line; only the FIRST run is counted (0x1004
+ * shares that same dword, so a later hit-fetch there must not inflate the
+ * count). (2) wb_fetch_cyc_o must never be asserted in the SAME cycle
+ * interrupt_taken fires -- the interrupt-entry fetch-redirect fix's own
+ * "the fetch side does nothing in the redirect cycle itself" invariant,
+ * checked directly, not just inferred from correct results.
  */
 module core_interrupt_icache_miss_tb;
 
@@ -73,11 +64,23 @@ module core_interrupt_icache_miss_tb;
         if (dut.core0.commit_now && dut.core0.pc == TRIGGER_PC) i_mtip <= 1'b1;
     end
 
-    // White-box: fetch_redirect_q must stay high across a genuine
-    // multi-cycle refill, not just blip for one cycle.
-    int fetch_redirect_high_cycles = 0;
+    // White-box: the handler's own FIRST contiguous fetch run at 0x1000
+    // must last more than a couple of cycles (a genuine multi-beat
+    // refill), and the fetch port must never be driven in the same cycle
+    // interrupt_taken fires -- see this file's own header.
+    int  fetch_0x1000_run_cycles = 0;
+    int  fetch_0x1000_first_run_len = 0;
+    logic fetch_0x1000_run_done = 1'b0;
+    logic fetch_redirect_cycle_had_bus_req = 1'b0;
     always @(posedge clk) begin
-        if (dut.core0.fetch_redirect_q) fetch_redirect_high_cycles <= fetch_redirect_high_cycles + 1;
+        if (dut.core0.wb_fetch_cyc_o && dut.core0.wb_fetch_addr_o == 32'h1000) begin
+            if (!fetch_0x1000_run_done) fetch_0x1000_run_cycles <= fetch_0x1000_run_cycles + 1;
+        end else if (fetch_0x1000_run_cycles > 0 && !fetch_0x1000_run_done) begin
+            fetch_0x1000_first_run_len <= fetch_0x1000_run_cycles;
+            fetch_0x1000_run_done      <= 1'b1;
+        end
+        if (dut.core0.interrupt_taken && dut.core0.wb_fetch_cyc_o)
+            fetch_redirect_cycle_had_bus_req <= 1'b1;
     end
 
     logic halted = 1'b0;
@@ -121,10 +124,10 @@ module core_interrupt_icache_miss_tb;
         check("mcause == standard machine-timer-interrupt encoding", dut.core0.regfile0.gp_registers[11], 64'h8000_0000_0000_0007);
         check("handler ran (x12==1)", dut.core0.regfile0.gp_registers[12], 64'd1);
         check("current_priv == M", {62'b0, dut.core0.current_priv}, 64'(2'b11));
-        // NOT a necessity proof for fetch_redirect_q -- see this file's header. Confirms
-        // its own behavior (stays high the whole refill) is correct, not that removing
-        // it would break anything today.
-        check("fetch_redirect_q held across a genuine multi-cycle I$ refill (>2 cycles)", {63'b0, (fetch_redirect_high_cycles > 2)}, 64'd1);
+        check("handler's first fetch at 0x1000 held across a genuine multi-cycle I$ refill (>2 cycles)",
+              {63'b0, (fetch_0x1000_first_run_len > 2)}, 64'd1);
+        check("fetch port never driven in the same cycle interrupt_taken fires",
+              {63'b0, fetch_redirect_cycle_had_bus_req}, 64'd0);
         check("EBREAK trap fired", {63'b0, halted}, 64'd1);
 
         $display("");

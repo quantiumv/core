@@ -1,0 +1,19 @@
+# Self-modifying-code corpus for the lockstep harness's mutant kill
+# matrix -- proves QV_MUTANT==9 (FENCE.I doesn't flush, cache
+# configuration -- see verification/reference/ref_core.sv). Needs
+# --memcfg-b cache explicitly: side A is always flat SRAM (nothing to go
+# stale), so this mutant has no opportunity to manifest at all unless
+# side B is actually caching. Not part of --corpus all's aggregate for
+# the same reason irq.list isn't -- it needs a non-default flag passed
+# deliberately, same as --delay-max/--memcfg-b always have.
+#
+# MAX_RETIRE-based, matching irq.list's own convention (see that file's
+# header for the general rationale, though this particular mutant
+# doesn't skew timing -- it's a genuine per-retirement RVFI content
+# divergence, caught directly by the ordinary comparator at the second
+# self-modified call, confirmed empirically at retirement order=15).
+#
+# target | max_retire (hex file is always verification/lockstep/<target>.hex,
+# built via riscv64-unknown-elf-as/ld/objcopy against gen/link.ld,
+# matching repro_fencei_smc.s's own documented build commands)
+repro_fencei_smc|40

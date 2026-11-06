@@ -1,0 +1,107 @@
+{
+ "dut": "design/pipe/qv_exu_div.sv",
+ "tb": "design/pipe/qv_exu_div_tb.sv",
+ "files": [
+  "design/pipe/qv_pkg.sv",
+  "design/divider.sv",
+  "design/pipe/qv_exu_div.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench"
+ ],
+ "cwd": "design",
+ "timeout": 900,
+ "mutants": [
+  {
+   "name": "no kill to the divider",
+   "old": ".i_kill(i_flush),",
+   "new": ".i_kill(1'b0),"
+  },
+  {
+   "name": "busy not cleared by flush",
+   "old": "if (rst || i_flush) begin\n            busy_q <= 1'b0;\n            pend_q <= 1'b0;",
+   "new": "if (rst) begin\n            busy_q <= 1'b0;\n            pend_q <= 1'b0;"
+  },
+  {
+   "name": "pulse not masked in the flush cycle",
+   "old": "o_wb.valid = div_done && !i_flush;",
+   "new": "o_wb.valid = div_done;"
+  },
+  {
+   "name": "accept ignores busy",
+   "old": "wire accept = i_req.valid && !busy_q;",
+   "new": "wire accept = i_req.valid && !i_flush;"
+  },
+  {
+   "name": "quotient/remainder swapped",
+   "old": "wire [63:0] raw = quot_q ? quotient : remainder;",
+   "new": "wire [63:0] raw = quot_q ? remainder : quotient;"
+  },
+  {
+   "name": "signed bit taken from op[1]",
+   "old": "signed_q <= i_req.op[0];",
+   "new": "signed_q <= i_req.op[1];"
+  },
+  {
+   "name": "quot bit taken from op[0]",
+   "old": "quot_q   <= i_req.op[1];",
+   "new": "quot_q   <= i_req.op[0];"
+  },
+  {
+   "name": "op[2] leaks into signed",
+   "old": "signed_q <= i_req.op[0];",
+   "new": "signed_q <= i_req.op[0] | i_req.op[2];"
+  },
+  {
+   "name": "W operands always sign-extended",
+   "old": "wire [63:0] dividend = !word_q ? a_q : signed_q ? {{32{a_q[31]}}, a_q[31:0]} : {32'b0, a_q[31:0]};",
+   "new": "wire [63:0] dividend = !word_q ? a_q : {{32{a_q[31]}}, a_q[31:0]};"
+  },
+  {
+   "name": "W divisor always sign-extended",
+   "old": "wire [63:0] divisor  = !word_q ? b_q : signed_q ? {{32{b_q[31]}}, b_q[31:0]} : {32'b0, b_q[31:0]};",
+   "new": "wire [63:0] divisor  = !word_q ? b_q : {{32{b_q[31]}}, b_q[31:0]};"
+  },
+  {
+   "name": "W operands never extended (upper junk reaches the divider)",
+   "old": "wire [63:0] dividend = !word_q ? a_q : signed_q ? {{32{a_q[31]}}, a_q[31:0]} : {32'b0, a_q[31:0]};",
+   "new": "wire [63:0] dividend = a_q;"
+  },
+  {
+   "name": "W result not sign-extended",
+   "old": "o_wb.value = word_q ? {{32{raw[31]}}, raw[31:0]} : raw;",
+   "new": "o_wb.value = word_q ? {32'b0, raw[31:0]} : raw;"
+  },
+  {
+   "name": "W result sign-extended even for non-W",
+   "old": "o_wb.value = word_q ? {{32{raw[31]}}, raw[31:0]} : raw;",
+   "new": "o_wb.value = {{32{raw[31]}}, raw[31:0]};"
+  },
+  {
+   "name": "tag not latched",
+   "old": "tag_q    <= i_req.tag;",
+   "new": "tag_q    <= tag_q;"
+  },
+  {
+   "name": "word flag not latched",
+   "old": "word_q   <= i_req.is_word;",
+   "new": "word_q   <= 1'b0;"
+  },
+  {
+   "name": "free stays low one extra cycle",
+   "old": "if (div_done) busy_q <= 1'b0;",
+   "new": "if (o_wb.valid && 1'b0) busy_q <= 1'b0;\n            if (div_done) pend_q <= 1'b1;"
+  },
+  {
+   "name": "busy cleared at accept+1 (free during the divide)",
+   "old": "                pend_q   <= 1'b1;\n",
+   "new": "                pend_q   <= 1'b1;\n                busy_q   <= 1'b0;\n"
+  }
+ ]
+}

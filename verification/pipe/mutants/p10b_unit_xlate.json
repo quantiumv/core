@@ -1,0 +1,34 @@
+{
+ "dut": "design/pipe/qv_xlate.sv",
+ "tb": "design/pipe/qv_xlate_tb.sv",
+ "files": [
+  "design/pipe/qv_pmp.sv",
+  "design/pipe/qv_pte.sv",
+  "design/pipe/qv_tlb.sv",
+  "design/pipe/qv_ptw.sv",
+  "design/pipe/qv_xlate.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench"
+ ],
+ "cwd": "design",
+ "timeout": 1800,
+ "mutants": [
+  {
+   "name": "a lookup-only miss walks",
+   "old": "!t_hit && !i_w_done && !i_nowalk;",
+   "new": "!t_hit && !i_w_done;"
+  },
+  {
+   "name": "a lookup-only request is never answered",
+   "old": "        if (i_req) begin\n            if (!i_active) begin",
+   "new": "        if (i_req && !i_nowalk) begin\n            if (!i_active) begin"
+  }
+ ]
+}

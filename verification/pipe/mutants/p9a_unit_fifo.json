@@ -1,0 +1,33 @@
+{
+ "dut": "design/pipe/qv_fifo.sv",
+ "tb": "design/pipe/qv_align_fifo_tb.sv",
+ "files": [
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_align.sv",
+  "design/pipe/qv_fifo.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench",
+  "-Pqv_align_fifo_tb.ONE_OK=1"
+ ],
+ "cwd": "design",
+ "timeout": 900,
+ "mutants": [
+  {
+   "name": "room for one ignores the last slot",
+   "old": "assign o_push_ready1 = (count_q <= CNT_W'(DEPTH - 1));",
+   "new": "assign o_push_ready1 = (count_q <= CNT_W'(DEPTH - 2));"
+  },
+  {
+   "name": "room for one when full",
+   "old": "assign o_push_ready1 = (count_q <= CNT_W'(DEPTH - 1));",
+   "new": "assign o_push_ready1 = (count_q <= CNT_W'(DEPTH));"
+  }
+ ]
+}

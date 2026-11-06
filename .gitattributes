@@ -2,3 +2,7 @@
 # endings silently break them under WSL/Linux (a bug hit and fixed directly
 # during the ACT4 riscv-arch-test setup, see memory/act4-riscv-arch-test-setup.md).
 *.sh text eol=lf
+
+# The regression and lockstep runners read *.list files with bash `read`;
+# a CRLF checkout puts a stray carriage return in each row's last field.
+*.list text eol=lf

@@ -66,9 +66,11 @@
  *     monitor at its own PC, same reasoning as item 5.
  *  7. A final minstret read matching the exact known instruction count
  *     retired so far, plus a post-halt hierarchical check that
- *     minstret's storage ends at the full program length -- including
- *     ebreak itself, which retires (and so still increments minstret)
- *     even though it doesn't write a register.
+ *     minstret's storage stops one short of the full program length --
+ *     this EBREAK takes the ordinary synchronous-trap path (dcsr.ebreakm
+ *     is never set here), and a trapped instruction does not retire, so
+ *     it must not increment minstret either (a real, fixed bug: see
+ *     design/core.sv's i_instr_retired port comment).
  *  8. ebreak.
  *
  * Deliberately NOT re-proven here (already covered by core_wb_tb.sv):
@@ -111,6 +113,15 @@ module core_zicsr_tb;
      * declared order in core.sv is {S_FETCH, S_EXEC, S_MEM} = {0, 1, 2}
      * for its 2-bit enum, hence the literal 2'd1 below.
      */
+`ifndef QV_REF_AS_CORE
+    // the pipelined core has no state register: the monitors sample in the cycle the
+    // instruction retires, which is what "S_EXEC at this pc" means for the
+    // single-cycle instructions they watch
+    wire [1:0] exec_state = dut.core0.commit_now ? 2'd1 : 2'd0;
+`else
+    wire [1:0] exec_state = dut.core0.state;
+`endif
+
     localparam logic [63:0] PC_RS1_X0_CHECK       = 64'h2C;
     localparam logic [63:0] PC_CSRRSI_UIMM0_CHECK = 64'h30;
     localparam logic [63:0] PC_CSRRCI_UIMM0_CHECK = 64'h34;
@@ -118,7 +129,7 @@ module core_zicsr_tb;
     logic csr_we_sampled;
     logic csr_we_sample_captured;
     pc_trigger_sample_monitor rs1_x0_monitor (
-        .clk(clk), .i_state(dut.core0.state), .i_state_target(2'd1),
+        .clk(clk), .i_state(exec_state), .i_state_target(2'd1),
         .i_pc(dut.core0.pc), .i_pc_target(PC_RS1_X0_CHECK), .i_sample(dut.core0.csr_we),
         .o_sampled(csr_we_sampled), .o_captured(csr_we_sample_captured)
     );
@@ -126,7 +137,7 @@ module core_zicsr_tb;
     logic csrrsi_we_sampled;
     logic csrrsi_we_sample_captured;
     pc_trigger_sample_monitor csrrsi_uimm0_monitor (
-        .clk(clk), .i_state(dut.core0.state), .i_state_target(2'd1),
+        .clk(clk), .i_state(exec_state), .i_state_target(2'd1),
         .i_pc(dut.core0.pc), .i_pc_target(PC_CSRRSI_UIMM0_CHECK), .i_sample(dut.core0.csr_we),
         .o_sampled(csrrsi_we_sampled), .o_captured(csrrsi_we_sample_captured)
     );
@@ -134,7 +145,7 @@ module core_zicsr_tb;
     logic csrrci_we_sampled;
     logic csrrci_we_sample_captured;
     pc_trigger_sample_monitor csrrci_uimm0_monitor (
-        .clk(clk), .i_state(dut.core0.state), .i_state_target(2'd1),
+        .clk(clk), .i_state(exec_state), .i_state_target(2'd1),
         .i_pc(dut.core0.pc), .i_pc_target(PC_CSRRCI_UIMM0_CHECK), .i_sample(dut.core0.csr_we),
         .o_sampled(csrrci_we_sampled), .o_captured(csrrci_we_sample_captured)
     );
@@ -183,7 +194,8 @@ module core_zicsr_tb;
 
         wait_halted_or_timeout(`TIMEOUT_CYCLES_SMALL, "EBREAK trap never fired");
 
-        check("x3 (csrrs rd, misa exact bit pattern)", dut.core0.regfile0.gp_registers[3], 64'h8000_0000_0000_0100);
+        check("x3 (csrrs rd, misa exact bit pattern)", dut.core0.regfile0.gp_registers[3],
+              (`QV_FPU_EN != 0) ? 64'h8000_0000_0014_112D : 64'h8000_0000_0014_1105);   // F/D add the F and D letters
 
         check("x5 (csrrw rd, old mscratch before first write)", dut.core0.regfile0.gp_registers[5], 64'd0);
         check("x6 (mscratch read-back after csrrw)", dut.core0.regfile0.gp_registers[6], 64'h00F0);
@@ -218,8 +230,8 @@ module core_zicsr_tb;
 
         check("x14 (minstret read -- count of instructions retired strictly before this one)",
               dut.core0.regfile0.gp_registers[14], 64'd14);
-        check("minstret final storage -- full program length, including ebreak's own retirement",
-              dut.core0.csr_file0.minstret_q, 64'd16);
+        check("minstret final storage -- one short of full program length: EBREAK traps (cause 3) and a trapped instruction must not retire",
+              dut.core0.csr_file0.minstret_q, 64'd15);
 
         check("EBREAK trap fired", {63'b0, halted}, 64'd1);
 

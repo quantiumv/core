@@ -89,7 +89,7 @@ module csr_file_random_tb;
     localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_UNMAPPED_1 = 12'h000;
     localparam logic [(`CSR_ADDR_SIZE - 1):0] CSR_ADDR_UNMAPPED_2 = 12'h7FF;
 
-    localparam logic [(`WORD_SIZE - 1):0] MISA_VALUE = 64'h8000_0000_0000_0100;
+    localparam logic [(`WORD_SIZE - 1):0] MISA_VALUE = 64'h8000_0000_0014_1105;
 
     /* Shadow model -- plain variables, not clocked flops. Updated by hand
      * in the loop below with the same rules csr_file.sv's always_ff

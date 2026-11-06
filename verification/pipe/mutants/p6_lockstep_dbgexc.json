@@ -1,0 +1,56 @@
+{
+ "counts": [
+  10,
+  40,
+  200
+ ],
+ "sim": "verilator",
+ "memcfg": "sram",
+ "delay": 0,
+ "jobs": 3,
+ "inner_jobs": 2,
+ "profile": "--isa imac --priv msu --pmp --irq --smc",
+ "extra": [
+  "--irq-mode",
+  "0",
+  "--dbg-mode",
+  "1",
+  "--dbg-features",
+  "191"
+ ],
+ "corpus": "dbg",
+ "mutants": [
+  {
+   "from": "p6b_unit_commit.json",
+   "only": [
+    22,
+    23,
+    24,
+    25
+   ],
+   "unit_only": {
+    "24": "decode never sets trig_exc together with a fault marker, so the ranking in commit cannot show"
+   }
+  },
+  {
+   "from": "p6b_unit_decode.json",
+   "only": [
+    11,
+    13,
+    14,
+    15,
+    18,
+    19,
+    20,
+    22,
+    23,
+    24
+   ],
+   "unit_only": {
+    "14": "a trig_debug head enters Debug Mode first, so a trig_exc set beside it is never evaluated",
+    "15": "a fault marker outranks trig_exc in commit's cause and tval either way",
+    "18": "commit gates the register write again for a trap and an entry, so rd_wen is redundant here"
+   }
+  }
+ ]
+}

@@ -1,0 +1,32 @@
+{
+ "dut": "design/divider.sv",
+ "tb": "design/divider_kill_tb.sv",
+ "files": [
+  "design/divider.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults"
+ ],
+ "cwd": "design",
+ "mutants": [
+  {
+   "name": "kill ignored",
+   "old": "if (i_rst || i_kill) begin",
+   "new": "if (i_rst) begin"
+  },
+  {
+   "name": "kill does not cancel a same-cycle start",
+   "old": "if (i_rst || i_kill) begin",
+   "new": "if (i_rst || (i_kill && !i_start)) begin"
+  },
+  {
+   "name": "kill leaves done pending",
+   "old": "            busy_q        <= 1'b0;\n            cycles_left_q <= '0;\n            o_done        <= 1'b0;",
+   "new": "            busy_q        <= 1'b0;\n            cycles_left_q <= '0;\n            o_done        <= o_done && !i_rst;"
+  }
+ ]
+}

@@ -1,0 +1,126 @@
+{
+ "dut": "design/pipe/qv_commit.sv",
+ "tb": "design/pipe/qv_commit_tb.sv",
+ "files": [
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_commit.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench"
+ ],
+ "cwd": "design",
+ "timeout": 900,
+ "mutants": [
+  {
+   "name": "returns train",
+   "old": "(h_kind == 2'd1 || h_kind == 2'd2);",
+   "new": "(h_kind != 2'd0);"
+  },
+  {
+   "name": "indirect jumps do not train",
+   "old": "(h_kind == 2'd1 || h_kind == 2'd2);",
+   "new": "(h_kind == 2'd1);"
+  },
+  {
+   "name": "an indirect jump is not always taken",
+   "old": "assign o_btb_upd_taken = (h_kind == 2'd2) || (",
+   "new": "assign o_btb_upd_taken = ("
+  },
+  {
+   "name": "the target is the fall-through",
+   "old": "assign o_btb_upd_tgt   = i_head_entry.next_pc;",
+   "new": "assign o_btb_upd_tgt   = i_head_entry.pc + 64'd4;"
+  },
+  {
+   "name": "a Program Buffer run trains",
+   "old": "assign o_btb_upd_valid = commit && !faulted && !i_pb_active &&",
+   "new": "assign o_btb_upd_valid = commit && !faulted &&"
+  },
+  {
+   "name": "a faulted branch trains",
+   "old": "assign o_btb_upd_valid = commit && !faulted && !i_pb_active &&",
+   "new": "assign o_btb_upd_valid = commit && !i_pb_active &&"
+  },
+  {
+   "name": "training without a commit",
+   "old": "assign o_btb_upd_valid = commit && !faulted",
+   "new": "assign o_btb_upd_valid = !faulted"
+  },
+  {
+   "name": "a 16-bit branch is taken when it is not",
+   "old": "(h_rvc ? 64'd2 : 64'd4)",
+   "new": "64'd4"
+  },
+  {
+   "name": "a 16-bit jump is crossing",
+   "old": "assign o_btb_upd_cross = !h_rvc && i_head_entry.pc[2:1] == 2'b11;",
+   "new": "assign o_btb_upd_cross = i_head_entry.pc[2:1] == 2'b11;"
+  },
+  {
+   "name": "the pc is the target",
+   "old": "assign o_btb_upd_pc    = i_head_entry.pc;",
+   "new": "assign o_btb_upd_pc    = i_head_entry.next_pc;"
+  },
+  {
+   "name": "a jump trains the table",
+   "old": "assign o_bht_upd_valid = commit && !faulted && !i_pb_active && qv_is_cond(i_head_entry.raw);",
+   "new": "assign o_bht_upd_valid = commit && !faulted && !i_pb_active;"
+  },
+  {
+   "name": "a faulted branch trains the table",
+   "old": "assign o_bht_upd_valid = commit && !faulted && !i_pb_active && qv_is_cond(i_head_entry.raw);",
+   "new": "assign o_bht_upd_valid = commit && !i_pb_active && qv_is_cond(i_head_entry.raw);"
+  },
+  {
+   "name": "a Program Buffer run trains the table",
+   "old": "assign o_bht_upd_valid = commit && !faulted && !i_pb_active && qv_is_cond(i_head_entry.raw);",
+   "new": "assign o_bht_upd_valid = commit && !faulted && qv_is_cond(i_head_entry.raw);"
+  },
+  {
+   "name": "the table is trained with a 4-byte fall-through always",
+   "old": "assign o_bht_upd_taken = i_head_entry.next_pc != i_head_entry.pc + (h_rvc ? 64'd2 : 64'd4);",
+   "new": "assign o_bht_upd_taken = i_head_entry.next_pc != i_head_entry.pc + 64'd4;"
+  },
+  {
+   "name": "the table is trained with the inverse outcome",
+   "old": "assign o_bht_upd_taken = i_head_entry.next_pc != i_head_entry.pc + (h_rvc ? 64'd2 : 64'd4);",
+   "new": "assign o_bht_upd_taken = i_head_entry.next_pc == i_head_entry.pc + (h_rvc ? 64'd2 : 64'd4);"
+  },
+  {
+   "name": "a faulted call pushes",
+   "old": "wire h_retires = commit && !faulted && !i_pb_active;",
+   "new": "wire h_retires = commit && !i_pb_active;"
+  },
+  {
+   "name": "a Program Buffer run pushes and pops",
+   "old": "wire h_retires = commit && !faulted && !i_pb_active;",
+   "new": "wire h_retires = commit && !faulted;"
+  },
+  {
+   "name": "the committed return address ignores a 16-bit call",
+   "old": "assign o_ras_addr = i_head_entry.pc + (h_rvc ? 64'd2 : 64'd4);",
+   "new": "assign o_ras_addr = i_head_entry.pc + 64'd4;"
+  },
+  {
+   "name": "a return does not pop the committed stack",
+   "old": "assign o_ras_pop  = h_retires && h_kind == 2'd3;",
+   "new": "assign o_ras_pop  = 1'b0;"
+  },
+  {
+   "name": "a call does not push the committed stack",
+   "old": "assign o_ras_push = h_retires && qv_is_call(i_head_entry.raw);",
+   "new": "assign o_ras_push = 1'b0;"
+  },
+  {
+   "name": "an indirect jump pops",
+   "old": "assign o_ras_pop  = h_retires && h_kind == 2'd3;",
+   "new": "assign o_ras_pop  = h_retires && h_kind >= 2'd2;"
+  }
+ ]
+}

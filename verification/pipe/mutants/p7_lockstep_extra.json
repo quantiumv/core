@@ -1,0 +1,150 @@
+{
+ "sim": "verilator",
+ "jobs": 3,
+ "inner_jobs": 2,
+ "counts": [
+  8,
+  24,
+  64
+ ],
+ "memcfg": "sram",
+ "delay": 0,
+ "profile": "--isa imac --priv m --pmp --smc --sv39",
+ "extra": [
+  "--irq-mode",
+  "0",
+  "--dbg-mode",
+  "1",
+  "--dbg-features",
+  "191",
+  "--timeout",
+  "2000000"
+ ],
+ "mutants": [
+  {
+   "from": "p7c_unit_lsu.json",
+   "only": [
+    1,
+    10
+   ]
+  },
+  {
+   "from": "p7d_unit_decode.json",
+   "only": [
+    2
+   ]
+  },
+  {
+   "from": "p7c_unit_lsu.json",
+   "only": [
+    3
+   ],
+   "profile": "--isa imac --priv msu --pmp --irq --smc",
+   "extra": [
+    "--irq-mode",
+    "2",
+    "--irq-density",
+    "1",
+    "--dbg-mode",
+    "1",
+    "--dbg-features",
+    "191",
+    "--timeout",
+    "2000000"
+   ]
+  },
+  {
+   "from": "p7b_unit_ptw.json",
+   "only": [
+    9,
+    10,
+    11,
+    12
+   ],
+   "profile": "--isa imac --priv msu --irq --smc --sv39",
+   "extra": [
+    "--irq-mode",
+    "2",
+    "--irq-density",
+    "1",
+    "--dbg-mode",
+    "1",
+    "--dbg-features",
+    "191",
+    "--timeout",
+    "2000000"
+   ],
+   "unit_only": {
+    "10": "killed by p7_lockstep_slow.json (the caches answer with ack and err together)"
+   }
+  },
+  {
+   "from": "p7d_unit_fetch.json",
+   "only": [
+    22
+   ],
+   "profile": "--isa imac --priv msu --pmp --smc --sv39",
+   "extra": [
+    "--irq-mode",
+    "0",
+    "--dbg-mode",
+    "1",
+    "--dbg-features",
+    "191",
+    "--timeout",
+    "2000000"
+   ]
+  },
+  {
+   "from": "p7d_unit_align.json",
+   "only": [
+    0,
+    2,
+    3,
+    4,
+    6,
+    7,
+    11
+   ],
+   "unit_only": {
+    "3": "the generated programs cannot show it either: see the reason in p7_lockstep.json",
+    "7": "the generated programs cannot show it either: see the reason in p7_lockstep.json"
+   },
+   "profile": "--isa imac --priv msu --pmp --smc --sv39",
+   "extra": [
+    "--irq-mode",
+    "0",
+    "--dbg-mode",
+    "1",
+    "--dbg-features",
+    "191",
+    "--timeout",
+    "2000000"
+   ]
+  },
+  {
+   "from": "p7d_unit_decode.json",
+   "only": [
+    0,
+    1,
+    3,
+    6,
+    9
+   ],
+   "unit_only": {
+    "9": "the generated programs cannot show it either: see the reason in p7_lockstep.json"
+   },
+   "profile": "--isa imac --priv msu --pmp --smc --sv39",
+   "extra": [
+    "--irq-mode",
+    "0",
+    "--dbg-mode",
+    "1",
+    "--dbg-features",
+    "191",
+    "--timeout",
+    "2000000"
+   ]
+  }
+ ]
+}

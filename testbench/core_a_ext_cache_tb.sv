@@ -63,8 +63,13 @@ module core_a_ext_cache_tb;
      */
     int read_phase_beats = 0;
     logic mem_cyc_q = 0;
+`ifndef QV_REF_AS_CORE
+    wire core_in_mem = dut.core0.wb_mem_cyc_o;      // the pipelined core has no S_MEM: a data access is on its bus
+`else
+    wire core_in_mem = dut.core0.state == 2'd2 /* S_MEM */;
+`endif
     always @(posedge clk) begin
-        if (dut.cache0.mem_cyc_o && !mem_cyc_q && dut.core0.state == 2'd2 /* S_MEM */)
+        if (dut.cache0.mem_cyc_o && !mem_cyc_q && core_in_mem)
             read_phase_beats <= read_phase_beats + 1;
         mem_cyc_q <= dut.cache0.mem_cyc_o;
     end

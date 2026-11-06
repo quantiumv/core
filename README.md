@@ -1,201 +1,105 @@
 # QuantiumV
 
-A RISC-V SoC, built collaboratively from scratch in SystemVerilog.
+A 64-bit RISC-V SoC in SystemVerilog, built from scratch.
+Join the [Discord](https://discord.gg/sQjhBvWXjF) if you want to take part.
 
-Join on [Discord](https://discord.gg/sQjhBvWXjF) if you're interested in the project!
+## What's here
 
-**Contents:** [Current state](#current-state) · [Architecture](#architecture) ·
-[Verification](#verification) · [Building and simulating](#building-and-simulating) ·
-[Roadmap](#roadmap) · [Contributing](#contributing) · [License](#license)
+**Core** (`design/pipe/core.sv`, module `core`): a pipelined core that one hart runs on.
+Fetch, align (RVC), decode, in-order issue into a reorder buffer, ALU / branch / divide /
+floating-point / load-store units, and in-order commit, which owns every architectural effect (register
+writes, CSRs, traps, privilege changes, interrupts and debug entry). Single issue; fetch runs back to
+back and predicts branches (a target buffer, a history table, a return-address stack); loads execute at
+the head of the ROB, and stores to RAM retire into a store buffer that writes them out behind it.
+Translated code runs at nearly untranslated speed (fetch reuses its last page, the data side looks up its
+TLB before the head), and CSR reads and trap-CSR writes do not flush the pipeline.
 
----
+- RV64IMAFDC (RV64GC: also Zicsr, Zifencei), with Zcd and Zicntr (`cycle`, `instret`, and `time`, which reads
+  the CLINT's mtime)
+- An FPU with IEEE 754 single and double precision: a 4-stage pipeline (fused multiply-add, the other
+  arithmetic, conversions, compares) that takes one op per cycle, and divide/square root beside it
+- M, S and U modes, with trap delegation
+- Sv39 virtual memory (a 4-entry TLB each for instruction fetch and data, one page-table walker, superpages, A/D bits checked rather than updated)
+- PMP with 4 regions
+- Timer and external interrupts
+- RISC-V Debug Module over JTAG, which works with OpenOCD
 
-## Current state
+It doesn't have misaligned access support (those trap) or hardware performance counters beyond `mcycle` and
+`minstret`. An access to a CSR that doesn't exist traps. `QV_FPU_EN=0` builds it without F/D, `QV_ZICNTR_EN=0`
+without Zicntr.
 
-**RV64IMAC + Zicsr, full M/S/U privilege modes, real timer interrupts**,
-non-pipelined, single-hart, fully verified. The core is a multi-cycle
-Wishbone-master FSM (fetch → execute → memory, one instruction fully retires
-before the next begins -- no forwarding, no hazards to design around yet)
-driving a real Wishbone bus out through an L1 instruction/data cache pair to
-a real memory-mapped peripheral set.
+**SoC** (`design/soc.sv`): the core, write-through L1 I/D caches, and Wishbone
+peripherals.
 
-### Architecture
+| Address | Device |
+|---|---|
+| `0x0000_0000` | RAM, 64 MB |
+| `0x0400_8000` | UART (NS16550A) |
+| `0x0401_0000` | CLINT (SiFive layout) |
+| `0x0440_0000` | PLIC (SiFive layout; UART RX is the only source) |
 
-- `design/decoder.sv`, `design/alu.sv`, `design/register_file.sv`,
-  `design/divider.sv`, `design/c_expand.sv` -- the datapath: instruction
-  decode, ALU (full RV64I arithmetic/logic/shift ops including the `*W`
-  word-width family plus RV64M multiply/divide), a 32-entry general-purpose
-  register file, a standalone multi-cycle divider, and the RV64C
-  compressed-instruction decompressor.
-- `design/csr_file.sv` -- every CSR the current privilege/interrupt/cache/
-  debug feature set needs: the M-mode base set (`misa`, `mvendorid`/
-  `marchid`/`mimpid`/`mhartid`, `mscratch`, `mcycle`, `minstret`), the full
-  M/S trap stack (`mstatus`/`sstatus`, `mtvec`/`stvec`, `mepc`/`sepc`,
-  `mcause`/`scause`, `mtval`/`stval`, `medeleg`/`mideleg`), the real
-  interrupt CSRs (`mie`/`mip`, spliced live against the CLINT's
-  timer-pending signal), and the Debug-mode CSRs (`dcsr`/`dpc`/
-  `dscratch0`/`dscratch1`) -- storage and access-control exist, but
-  nothing can legally enter Debug Mode yet (see below).
-- `design/core.sv` -- ties the above together as a Wishbone bus master,
-  including real synchronous-trap and timer-interrupt-taking logic, atomic
-  memory operations (LR/SC/AMO), bus-error-to-access-fault trapping, and
-  FENCE.I. No private instruction/data memory of its own; every fetch and
-  load/store goes out over the bus (through the cache, see below).
-- `design/icache.sv`, `design/dcache.sv`, `design/cache_complex.sv` -- a
-  direct-mapped, physically-indexed/physically-tagged, write-through L1
-  instruction/data cache pair sitting between `core` and the address
-  decoder. FENCE.I (Zifencei) flushes the I$ for self-modifying-code
-  coherence; the D$ never needs an equivalent flush (write-through keeps a
-  store hit's cached copy and the backing SRAM in lockstep).
-- `design/wb4_sram.sv`, `design/uart_tx.sv`, `design/uart_rx.sv`,
-  `design/clint.sv`, `design/wb_addr_decoder.sv` -- the real Wishbone
-  slaves (a flat 64-bit-word memory; a simulation-only UART, transmit and
-  receive; an `mtime`/`mtimecmp` timer driving real machine-timer
-  interrupts) plus the address decoder routing between them.
-- `design/soc.sv` -- top-level integration: `core` + cache + address
-  decoder + `wb4_sram` + `uart_tx`/`uart_rx` + `clint`. `clk`/`rst` are its
-  only ports (no real serial pins exist yet -- the UART model transmits via
-  `$write` and receives via a testbench-only backdoor task).
+The core resets to address 0 in M-mode.
 
-Sv39 virtual memory doesn't exist yet -- every address currently runs
-untranslated. A hardware Debug Module (JTAG/DMI, in the spirit of the
-RISC-V External Debug Support spec) is in progress: `EBREAK` is already a
-real, resumable synchronous trap, UART RX is wired up as its planned
-transport, and the Debug-mode CSRs (`dcsr`/`dpc`/`dscratch0`/`dscratch1`)
-exist with real access control -- any access from anywhere currently
-traps, since there's no Debug Mode to legally be in yet. The halt/resume
-FSM and the DM/JTAG stack itself are still ahead. See `design/csr_file.sv`'s
-and `design/core.sv`'s own header comments for the exact current scope.
+**Reference core** (`verification/reference/ref_core.sv`): the multi-cycle core that
+`design/core.sv` used to be, frozen. Every retired instruction of the pipelined core is
+checked against it (lockstep, random programs, ACT, firmware), and the whole regression
+also runs against it (`make regress CORE=ref`). It is changed only to fix a bug, through
+the errata rule in [`verification/reference/README.md`](verification/reference/README.md).
 
-`verification/taxi/` also carries a standalone Wishbone-to-AXI4 bridge and
-behavioral DRAM timing model, built on a vendored `taxi` AXI4 IP submodule
--- proven independently via its own Verilator-only test flow, but not yet
-wired into `design/soc.sv` (that RTL is Verilator-only, since it
-instantiates a SystemVerilog `interface`, which Icarus cannot parse; `soc.sv`
-itself must stay 100% Icarus-compatible).
+## Requirements
 
-### Verification
+Linux or WSL with:
+- Icarus Verilog
+- `riscv64-unknown-elf-gcc`
+- Verilator, for lint and the OpenOCD test
 
-A large testbench suite (unit-level for every datapath/cache/peripheral
-module in isolation, integration-level driving the real Wishbone bus and
-the real cache hierarchy, several running real `riscv64-unknown-elf`
--assembled/toolchain-built programs), all passing, run through a
-non-committed regression script (there's no single top-level build script
-checked in yet -- see *Building and simulating* below). Shared
-infrastructure lives in `testbench/`: `check_lib.sv` (a `check()`
-primitive), `wb_driver.sv` (a Wishbone bus-cycle task), `halt_wait.sv`
-(timeout-guarded halt waiting), and several reusable harness/monitor
-modules -- pulled into new testbenches via `` `include `` rather than
-hand-rolled each time.
-
-Beyond the project's own testbenches, every ISA feature is additionally
-cross-checked against two independent, external references:
-
-- **`verification/riscv-arch-test/`** -- the official RISC-V Architecture
-  Test (ACT4) compliance suite, run as real self-checking ELFs through a
-  dedicated runner. The large majority pass; the handful that don't are
-  understood, documented, spec-legal config/UDB mismatches, not RTL bugs.
-- **`verification/riscv-formal/`** -- formal, unbounded-cycle-count
-  verification via SymbiYosys/RVFI taps on `design/core.sv`, covering the
-  base RV64I integer pipeline, the A-extension (atomics), and the
-  C-extension (compressed instructions).
-
-Real code coverage has also been measured (line/branch/toggle/expression,
-via Verilator) across the design, not just claimed -- see individual
-milestone notes for current numbers, which move as new features land.
-
----
-
-## Building and simulating
-
-Everything here is developed and verified against **Icarus Verilog**
-(`iverilog`/`vvp`) and **Verilator**, run through WSL on Windows. There is
-no single top-level build script checked into the repo yet -- compile the
-specific file set a given testbench needs directly, e.g.:
+## Running a program
 
 ```sh
-iverilog -g2012 -I design -I testbench -o /tmp/soc_tb.out \
-  design/decoder.sv design/alu.sv design/c_expand.sv design/csr_file.sv \
-  design/divider.sv design/register_file.sv design/uart_tx.sv \
-  design/uart_rx.sv design/wb4_sram.sv design/wb_addr_decoder.sv \
-  design/icache.sv design/dcache.sv design/cache_complex.sv \
-  design/clint.sv design/core.sv design/soc.sv testbench/soc_tb.sv
-cd design && vvp /tmp/soc_tb.out
+make run PROG=verification/run/examples/hello.c
 ```
 
-`-I design -I testbench` resolves every `` `include `` (Icarus does not
-resolve include paths relative to the including file, only via `-I`). Run
-from inside `design/` when a testbench instantiates `wb4_sram` directly, so
-its `$readmemh` of `../firmware/crt0.hex` resolves.
+This builds a bare-metal C or assembly program and runs it on the SoC in
+simulation, with UART output in your terminal. See
+[`verification/run/README.md`](verification/run/README.md).
 
-A Verilator lint pass over the full SoC:
+## Testing
 
-```sh
-verilator --lint-only -Wall -Idesign -Idesign/defaults --top-module soc \
-  design/decoder.sv design/alu.sv design/c_expand.sv design/csr_file.sv \
-  design/divider.sv design/register_file.sv design/uart_tx.sv \
-  design/uart_rx.sv design/wb4_sram.sv design/wb_addr_decoder.sv \
-  design/icache.sv design/dcache.sv design/cache_complex.sv \
-  design/clint.sv design/core.sv design/soc.sv
-```
+| Command | What it does |
+|---|---|
+| `make regress [CORE=pipe\|ref]` | The unit and integration testbenches (`pipe`, the default, is the core; `ref` is the frozen reference) |
+| `make lint [CORE=...]` | Verilator lint of the full SoC |
+| `make act` | The official RISC-V architecture tests, with Sv39 (Svade), PMP (4 entries) and Zicntr declared: 202/204 pass, and 426/430 with `CONFIG=quantiumv-rv64imafdc` (F, D, Zcd, A, Zifencei), the same on both cores. `sv39_satp_access_test` fails in both: Sail's `satp.ASID` has 16 bits, the core's none. `S-00` fails in both: the rv64im config leaves out letters `misa` reports, and in the F/D config it reaches the same `satp.ASID` check. `Zalrsc-sc.w`/`sc.d` fail because any store between LR and SC clears the reservation here. |
+| `make lockstep` | Runs the core and the reference side by side and compares every retired instruction |
+| `make openocd-smoke` | OpenOCD drives the Debug Module over JTAG |
 
-(Verilator wants `-Idesign`, no space; Icarus accepts either form.)
+riscv-formal passes all 91 `rv64ic` checks plus liveness and hang, and the 18 AMO checks, on the
+core; see [`verification/riscv-formal/quantiumv_pipe/README.md`](verification/riscv-formal/quantiumv_pipe/README.md).
+CPI benchmarks are in `verification/perf/`.
 
-`firmware/` holds a real C toolchain build (`riscv64-unknown-elf-gcc`/`-as`/
-`-ld`) producing the hex images some testbenches load -- see
-`firmware/Makefile`. `verification/taxi/` (the Wishbone-to-AXI4 bridge and
-DRAM model) is Verilator-only and has its own separate test runner --
-never add a `taxi`-touching testbench to the file lists above, it will not
-compile under Icarus.
+## Layout
 
----
+| Path | Contents |
+|---|---|
+| `design/` | RTL and its unit testbenches |
+| `design/pipe/` | The core (`core.sv`) and its pipeline stages (`qv_*.sv`) |
+| `testbench/` | Core-, SoC- and debug-level testbenches |
+| `firmware/` | Test programs used by the testbenches |
+| `verification/` | Regression, lockstep, compliance, formal, perf, `make run`, and the frozen reference core (`reference/`) |
+| `third_party/taxi/` | AXI4 IP used by the standalone Wishbone-to-AXI DRAM model in `verification/taxi/` (Verilator only) |
 
-## Roadmap
+## Linux
 
-RV64**IMAC** + Zicsr + U/S/M privilege + Sv39, non-pipelined and in-order,
-before any pipelining/OoO work starts -- deliberately, so out-of-order
-correctness has a trusted in-order reference to debug against.
-
-RV64IMAC + Zicsr + full U/S/M privilege modes + real timer interrupts are
-done, each verified via a multi-pillar pattern (unit test, hand-assembled
-end-to-end core testbench, real-toolchain encoder cross-check, real-
-toolchain end-to-end firmware test) and cross-checked against both the
-official riscv-arch-test compliance suite and formal (riscv-formal)
-verification. Sv39 virtual memory is next on the privilege/memory side --
-a different teammate's work, built on top of the U/S/M privilege seams
-(`fetch_paddr`/`mem_paddr`, `satp`, `mstatus.MPRV/SUM/MXR`) this core
-already carries specifically for that handoff.
-
-In parallel, a hardware Debug Module (JTAG/DMI) is being built out in
-staged milestones: `EBREAK` is now a real, resumable synchronous trap,
-UART RX exists as its planned transport, and the Debug-mode CSRs
-(`dcsr`/`dpc`/`dscratch0`/`dscratch1`) exist with real access control;
-the halt/resume FSM and the JTAG TAP/DMI/Program-Buffer stack itself are
-still ahead.
-
-Bus protocol stays Wishbone at the core; AXI4 is a fabric-edge concern (see
-the standalone bridge/DRAM model under `verification/taxi/`), not a
-core-level one.
-
----
+Linux doesn't boot on this RTL yet. The peripherals use the standard
+16550, CLINT and PLIC layouts, so stock OpenSBI and Linux drivers should
+work. What's missing is an SBI build and a device tree for this memory map.
+That work is tracked in [`quantiumv/sdk`](https://github.com/quantiumv/sdk).
 
 ## Contributing
 
-This is a collaborative, from-scratch build -- [Discord](https://discord.gg/sQjhBvWXjF)
-is where design decisions get discussed and work gets coordinated before a PR
-shows up, not an afterthought support channel. Come say what you're
-interested in; the *Roadmap* section above and the per-module header
-comments throughout `design/` are the best starting map of what's settled,
-what's in flight, and what's still open.
-
-A few conventions worth knowing before sending a change: every new RTL
-feature ships with real tests, not just a claim it works (see
-*Verification* above) -- a full local regression plus a Verilator lint
-pass, both clean, is the bar every prior milestone has held itself to, and
-new privilege/CSR/interrupt logic additionally gets cross-checked against
-riscv-arch-test and, where practical, riscv-formal. Module header comments
-explain *why*, not just *what* -- keep that up when you add or change one.
+Discuss changes on Discord first. Every RTL change comes with tests, and
+`make regress` and `make lint` must stay clean.
 
 ## License
 
-[MIT](LICENSE).
+[MIT](LICENSE)

@@ -4,7 +4,8 @@
 // core.sv itself carries native RVFI ports (gated by `ifdef RISCV_FORMAL,
 // see its own comment near those ports) -- this wrapper's only job is to
 // rename clk/rst to clock/reset, splice `RVFI_CONN into the instantiation,
-// and drive the Wishbone slave side (wb_dat_i/wb_ack_i/wb_err_i) as free/
+// and drive the Wishbone slave side of BOTH of core.sv's master ports
+// (wb_fetch_* and wb_mem_*, each with its own dat_i/ack_i/err_i) as free/
 // unconstrained formal inputs, matching every other riscv-formal core
 // integration's convention (see cores/nerv/wrapper.sv upstream): the
 // "insn" check family verifies architectural correctness of whatever the
@@ -28,19 +29,65 @@
 module rvfi_wrapper (
     input         clock,
     input         reset,
-    `RVFI_OUTPUTS
+    `RVFI_OUTPUTS,
+    // satp: NOT part of `RVFI_OUTPUTS -- riscv-formal's own macro generator
+    // has zero awareness of "satp" (grepped rvfi_macros.vh directly: no
+    // `rvformal_csr_satp_*` macro family exists at all, unlike mepc/mcause/
+    // medeleg/pmpcfg0/pmpaddr0 which all do), same gap as scause (see
+    // checks.cfg's own fault-exclusion comment for that one). Declared and
+    // connected by hand here instead, mirroring exactly what `RVFI_OUTPUTS/
+    // `RVFI_CONN would generate for a recognized name. See design/core.sv's
+    // own rvfi_csr_satp_* port-list comment for why this is needed at all
+    // (pinning satp to Bare mode for insn_*/c_* checks, so rvfi_mem_addr's
+    // post-Sv39-translation physical address can't diverge from the
+    // generic spec models' untranslated virtual-address expectation).
+    output logic [63:0] rvfi_csr_satp_rmask,
+    output logic [63:0] rvfi_csr_satp_wmask,
+    output logic [63:0] rvfi_csr_satp_rdata,
+    output logic [63:0] rvfi_csr_satp_wdata,
+    // rvfi_any_trap_taken: same hand-declared reasoning as satp above --
+    // see design/core.sv's own port-list comment for the full why (the
+    // real hardware condition gating mepc/sepc/mcause/scause's writes,
+    // exposed directly after two rounds of RVFI-level derived-signal
+    // exclusion each proved leaky).
+    output logic rvfi_any_trap_taken,
+    // rvfi_any_debug_entry: same hand-declared reasoning as satp/
+    // rvfi_any_trap_taken above -- see design/core.sv's own port-list
+    // comment for the full why (reg_ch0's own gap: the Debug Module's
+    // Access Register GPR port shares regfile0's read-B/write port with
+    // the normal decode path, gated on dm_access_active -- safe in real
+    // hardware since dm.sv never issues that access until the hart is
+    // genuinely halted, but dm.sv isn't instantiated in this formal
+    // loop at all, and i_debug_halt_req below is modeled fully free).
+    output logic rvfi_any_debug_entry
 );
-    (* keep *) wire [31:0] wb_addr;
-    (* keep *) wire [63:0] wb_dat_m2s;
-    (* keep *) `rvformal_rand_reg [63:0] wb_dat_s2m;
-    (* keep *) wire [7:0]  wb_sel;
-    (* keep *) wire        wb_we;
-    (* keep *) wire        wb_cyc;
-    (* keep *) wire        wb_stb;
-    (* keep *) `rvformal_rand_reg wb_ack;
-    (* keep *) `rvformal_rand_reg wb_err;
+    // Two INDEPENDENT free slave models, one per core.sv master port --
+    // duplicated, not shared: core.sv's fetch and mem ports are physically
+    // separate (see its own header comment), so a real system's two
+    // responders can each ack/err/return data on any cycle regardless of
+    // what the other is doing. Sharing one rand_reg group between them
+    // would silently forbid the solver from ever exploring the two streams
+    // terminating independently -- exactly the real behavior once
+    // fetch/execute overlap lands (Pipelining P2 step 3b).
+    (* keep *) wire [31:0] wb_fetch_addr;
+    (* keep *) wire        wb_fetch_cyc;
+    (* keep *) wire        wb_fetch_stb;
+    (* keep *) `rvformal_rand_reg [63:0] wb_fetch_dat_s2m;
+    (* keep *) `rvformal_rand_reg wb_fetch_ack;
+    (* keep *) `rvformal_rand_reg wb_fetch_err;
+
+    (* keep *) wire [31:0] wb_mem_addr;
+    (* keep *) wire [63:0] wb_mem_dat_m2s;
+    (* keep *) `rvformal_rand_reg [63:0] wb_mem_dat_s2m;
+    (* keep *) wire [7:0]  wb_mem_sel;
+    (* keep *) wire        wb_mem_we;
+    (* keep *) wire        wb_mem_cyc;
+    (* keep *) wire        wb_mem_stb;
+    (* keep *) `rvformal_rand_reg wb_mem_ack;
+    (* keep *) `rvformal_rand_reg wb_mem_err;
     // Free/unconstrained -- lets the solver assert the timer-interrupt-pending
-    // input on any cycle, same convention as wb_ack/wb_err above and matching
+    // input on any cycle, same convention as the wb_*_ack/wb_*_err groups
+    // above and matching
     // riscv-formal's own cores/nerv/wrapper.sv precedent for a free interrupt-
     // pending input (irq, wired the identical way). Without this, i_mtip
     // floats to core.sv's own ANSI default (1'b0) since core uut's own
@@ -49,21 +96,90 @@ module rvfi_wrapper (
     // real rvfi_intr logic in core.sv would be permanently dead code from
     // this formal model's perspective.
     (* keep *) `rvformal_rand_reg i_mtip;
+    // Same reasoning as i_mtip immediately above, applied to Milestone 4's
+    // new halt/resume debug-entry inputs: left unconnected (floating to
+    // core.sv's own ANSI default 1'b0), debug_halt_req_entry and
+    // stepping_q would be provably always-false under BMC, making
+    // S_DEBUG_HALTED (via the external-halt path) and interrupt_taken's
+    // new debug-halt exclusion guard both permanently dead code from this
+    // formal model's perspective. i_debug_resume_req is free too, even
+    // though it's a one-cycle pulse architecturally -- an unconstrained
+    // rand_reg can still coincidentally read 1 on any given cycle, which
+    // is exactly the "could this happen on some cycle" question BMC asks.
+    (* keep *) `rvformal_rand_reg i_debug_halt_req;
+    (* keep *) `rvformal_rand_reg i_debug_resume_req;
+    // Zicntr: the platform's mtime, any value on any cycle (no check reads time against a model)
+    (* keep *) `rvformal_rand_reg [63:0] i_time;
+
+`ifdef RISCV_FORMAL_FAIRNESS
+    // liveness/hang only (genchecks defines RISCV_FORMAL_FAIRNESS for
+    // them): every bus request is answered within 3 cycles, and no debug
+    // halt is requested -- a halted hart legitimately retires nothing.
+    reg [2:0] fetch_wait = 3'b0, mem_wait = 3'b0;
+    always @(posedge clock) begin
+        fetch_wait <= {fetch_wait[1:0], wb_fetch_cyc && wb_fetch_stb && !wb_fetch_ack && !wb_fetch_err};
+        mem_wait   <= {mem_wait[1:0],   wb_mem_cyc && wb_mem_stb && !wb_mem_ack && !wb_mem_err};
+    end
+    always @* begin
+        assume (fetch_wait != 3'b111);
+        assume (mem_wait != 3'b111);
+        assume (!i_debug_halt_req);
+        assume (!i_debug_resume_req);
+    end
+`ifdef QV_FORMAL_NO_DIV
+    // the pipelined core's liveness and hang configs, and the FSM's hang config: no
+    // divide reaches the divider. It takes ~66 cycles, longer than these
+    // windows, so with divides in the stream the properties would fail by
+    // design. (The FSM's liveness window is long enough to include them, so
+    // that one doesn't define this.)
+`ifndef QV_REF_AS_CORE
+    always @* assume (!uut.div_req.valid);
+    // and (the pipe-fpu model) no FP divide or square root: its side unit is a multi-cycle FSM too
+    always @* assume (!(uut.fpu_req.valid && (uut.fpu_req.op == qv_pkg::QV_FP_DIV || uut.fpu_req.op == qv_pkg::QV_FP_SQRT)));
+`else
+    always @* assume (!uut.is_div_family);
+`endif
+`endif
+`endif
+
+`ifdef QV_PIPE_PMA_RAM_SIZE
+    // the pipe-sb model (a RAM window is configured, so stores are posted to the store buffer): memory inside the
+    // window is RAM and cannot answer a drain beat with an error; the buffer asserts as much
+    always @* assume (!(uut.sb_beat && wb_mem_err));
+`endif
 
     core uut (
         .clk(clock),
         .rst(reset),
 
-        .wb_addr_o(wb_addr),
-        .wb_dat_o(wb_dat_m2s),
-        .wb_dat_i(wb_dat_s2m),
-        .wb_sel_o(wb_sel),
-        .wb_we_o(wb_we),
-        .wb_cyc_o(wb_cyc),
-        .wb_stb_o(wb_stb),
-        .wb_ack_i(wb_ack),
-        .wb_err_i(wb_err),
+        .wb_fetch_addr_o(wb_fetch_addr),
+        .wb_fetch_cyc_o(wb_fetch_cyc),
+        .wb_fetch_stb_o(wb_fetch_stb),
+        .wb_fetch_dat_i(wb_fetch_dat_s2m),
+        .wb_fetch_ack_i(wb_fetch_ack),
+        .wb_fetch_err_i(wb_fetch_err),
+
+        .wb_mem_addr_o(wb_mem_addr),
+        .wb_mem_dat_o(wb_mem_dat_m2s),
+        .wb_mem_dat_i(wb_mem_dat_s2m),
+        .wb_mem_sel_o(wb_mem_sel),
+        .wb_mem_we_o(wb_mem_we),
+        .wb_mem_cyc_o(wb_mem_cyc),
+        .wb_mem_stb_o(wb_mem_stb),
+        .wb_mem_ack_i(wb_mem_ack),
+        .wb_mem_err_i(wb_mem_err),
         .i_mtip(i_mtip),
+        .i_time(i_time),
+        .i_debug_halt_req(i_debug_halt_req),
+        .i_debug_resume_req(i_debug_resume_req),
+
+        // satp: hand-connected, same reason as the port-list declaration above.
+        .rvfi_csr_satp_rmask(rvfi_csr_satp_rmask),
+        .rvfi_csr_satp_wmask(rvfi_csr_satp_wmask),
+        .rvfi_csr_satp_rdata(rvfi_csr_satp_rdata),
+        .rvfi_csr_satp_wdata(rvfi_csr_satp_wdata),
+        .rvfi_any_trap_taken(rvfi_any_trap_taken),
+        .rvfi_any_debug_entry(rvfi_any_debug_entry),
 
         `RVFI_CONN
     );

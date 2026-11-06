@@ -1,0 +1,61 @@
+# The design (the SoC with the pipelined core, design/pipe/core.sv), in
+# required compile order. One path per line, relative to the repo root.
+# Blank lines and #-comments ignored. Never add a verification/taxi/-touching
+# file here -- that tree is Verilator-only and will not compile under Icarus.
+#
+# decoder.sv comes first: it defines INSTR_CODE, which qv_decode.sv uses, and
+# qv_pkg.sv comes before every module that imports it. The tools that need only
+# the core's own files (lockstep, the RVFI diff, ACT, the formal sync, the Sail
+# diff) take them from this list with
+#   grep -E '^design/(pipe/|decoder\.sv|alu\.sv|c_expand\.sv|csr_file\.sv|register_file\.sv|divider\.sv)'
+# so a new module is added here and nowhere else. The frozen multi-cycle
+# reference has its own list, ref_design_files.list.
+design/decoder.sv
+design/alu.sv
+design/c_expand.sv
+design/cache_complex.sv
+design/clint.sv
+design/pipe/qv_pkg.sv
+design/pipe/qv_fetch.sv
+design/pipe/qv_align.sv
+design/pipe/qv_fifo.sv
+design/pipe/qv_btb.sv
+design/pipe/qv_ras.sv
+design/pipe/qv_bht.sv
+design/pipe/qv_pmp.sv
+design/pipe/qv_pte.sv
+design/pipe/qv_tlb.sv
+design/pipe/qv_ptw.sv
+design/pipe/qv_xlate.sv
+design/pipe/qv_csr_exists.sv
+design/pipe/qv_decode.sv
+design/pipe/qv_issue.sv
+design/pipe/qv_rob.sv
+design/pipe/qv_exu_alu.sv
+design/pipe/qv_exu_bru.sv
+design/pipe/qv_exu_div.sv
+design/pipe/qv_fp_dec.sv
+design/pipe/qv_fpu_round.sv
+design/pipe/qv_fpu_pipe.sv
+design/pipe/qv_fpu_divsqrt.sv
+design/pipe/qv_exu_fpu.sv
+design/pipe/qv_fprf.sv
+design/pipe/qv_lsu.sv
+design/pipe/qv_sb.sv
+design/pipe/qv_commit.sv
+design/pipe/qv_dbg.sv
+design/pipe/core.sv
+design/csr_file.sv
+design/dcache.sv
+design/divider.sv
+design/dm.sv
+design/dm_dmi.sv
+design/icache.sv
+design/jtag_tap.sv
+design/plic.sv
+design/register_file.sv
+design/soc.sv
+design/uart16550.sv
+design/wb4_sram.sv
+design/wb_addr_decoder.sv
+design/wb_arbiter2.sv

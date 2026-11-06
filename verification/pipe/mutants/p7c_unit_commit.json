@@ -1,0 +1,72 @@
+{
+ "dut": "design/pipe/qv_commit.sv",
+ "tb": "design/pipe/qv_commit_tb.sv",
+ "files": [
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_commit.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench"
+ ],
+ "cwd": "design",
+ "timeout": 600,
+ "mutants": [
+  {
+   "name": "a trapped SFENCE.VMA flushes the TLBs",
+   "old": "assign o_sfence    = commit && is_sys && (i_head_ctrl.sys_op == QV_SYS_SFENCE_VMA) && !faulted;",
+   "new": "assign o_sfence    = commit && is_sys && (i_head_ctrl.sys_op == QV_SYS_SFENCE_VMA);"
+  },
+  {
+   "name": "a head that does not commit flushes the TLBs (incomplete, an interrupt, a debug entry)",
+   "old": "assign o_sfence    = commit && is_sys && (i_head_ctrl.sys_op == QV_SYS_SFENCE_VMA) && !faulted;",
+   "new": "assign o_sfence    = i_head_valid && i_head_entry.complete && is_sys && (i_head_ctrl.sys_op == QV_SYS_SFENCE_VMA) && !faulted;"
+  },
+  {
+   "name": "an incomplete head flushes the TLBs",
+   "old": "assign o_sfence    = commit && is_sys && (i_head_ctrl.sys_op == QV_SYS_SFENCE_VMA) && !faulted;",
+   "new": "assign o_sfence    = i_head_valid && is_sys && (i_head_ctrl.sys_op == QV_SYS_SFENCE_VMA) && !faulted;"
+  },
+  {
+   "name": "any system operation flushes the TLBs",
+   "old": "assign o_sfence    = commit && is_sys && (i_head_ctrl.sys_op == QV_SYS_SFENCE_VMA) && !faulted;",
+   "new": "assign o_sfence    = commit && is_sys && !faulted;"
+  },
+  {
+   "name": "FENCE.I flushes the TLBs too",
+   "old": "assign o_sfence    = commit && is_sys && (i_head_ctrl.sys_op == QV_SYS_SFENCE_VMA) && !faulted;",
+   "new": "assign o_sfence    = commit && is_sys && (i_head_ctrl.sys_op == QV_SYS_SFENCE_VMA || i_head_ctrl.sys_op == QV_SYS_FENCE_I) && !faulted;"
+  },
+  {
+   "name": "MRET flushes the TLBs",
+   "old": "assign o_sfence    = commit && is_sys && (i_head_ctrl.sys_op == QV_SYS_SFENCE_VMA) && !faulted;",
+   "new": "assign o_sfence    = commit && is_sys && (i_head_ctrl.sys_op == QV_SYS_SFENCE_VMA || i_head_ctrl.sys_op == QV_SYS_MRET) && !faulted;"
+  },
+  {
+   "name": "WFI flushes the TLBs",
+   "old": "assign o_sfence    = commit && is_sys && (i_head_ctrl.sys_op == QV_SYS_SFENCE_VMA) && !faulted;",
+   "new": "assign o_sfence    = commit && is_sys && (i_head_ctrl.sys_op == QV_SYS_SFENCE_VMA || i_head_ctrl.sys_op == QV_SYS_WFI) && !faulted;"
+  },
+  {
+   "name": "the TLBs are never flushed",
+   "old": "assign o_sfence    = commit && is_sys && (i_head_ctrl.sys_op == QV_SYS_SFENCE_VMA) && !faulted;",
+   "new": "assign o_sfence    = 1'b0;"
+  },
+  {
+   "name": "the SYS class is not required (redundant: a neutralized head, the only one with a sys_op outside its class, is a trap or a debug entry)",
+   "old": "assign o_sfence    = commit && is_sys && (i_head_ctrl.sys_op == QV_SYS_SFENCE_VMA) && !faulted;",
+   "new": "assign o_sfence    = commit && (i_head_ctrl.sys_op == QV_SYS_SFENCE_VMA) && !faulted;",
+   "equivalent": true
+  },
+  {
+   "name": "an SFENCE.VMA in a Program Buffer run does not flush",
+   "old": "assign o_sfence    = commit && is_sys && (i_head_ctrl.sys_op == QV_SYS_SFENCE_VMA) && !faulted;",
+   "new": "assign o_sfence    = commit && !i_pb_active && is_sys && (i_head_ctrl.sys_op == QV_SYS_SFENCE_VMA) && !faulted;"
+  }
+ ]
+}

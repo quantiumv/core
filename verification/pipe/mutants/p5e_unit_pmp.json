@@ -1,0 +1,145 @@
+{
+ "dut": "design/pipe/qv_pmp.sv",
+ "tb": "design/pipe/qv_pmp_tb.sv",
+ "files": [
+  "design/pipe/qv_pmp.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench"
+ ],
+ "cwd": "design",
+ "timeout": 900,
+ "mutants": [
+  {
+   "name": "a partial match counts as whole",
+   "old": "assign holds[i] = ranged && (lo <= as) && (ae <= hi);",
+   "new": "assign holds[i] = ranged;"
+  },
+  {
+   "name": "whole: only the end is compared",
+   "old": "assign holds[i] = ranged && (lo <= as) && (ae <= hi);",
+   "new": "assign holds[i] = ranged && (ae <= hi);"
+  },
+  {
+   "name": "whole: only the start is compared",
+   "old": "assign holds[i] = ranged && (lo <= as) && (ae <= hi);",
+   "new": "assign holds[i] = ranged && (lo <= as);"
+  },
+  {
+   "name": "touch: an access starting below the region does not touch it",
+   "old": "assign touch[i] = ranged && !(ae <= lo || hi <= as);",
+   "new": "assign touch[i] = ranged && !(as < lo || hi <= as);"
+  },
+  {
+   "name": "TOR lower bound is the region's own address",
+   "old": "wire [53:0] prev = (i == 0) ? 54'd0 : pa[(i == 0) ? 0 : i - 1];",
+   "new": "wire [53:0] prev = (i == 0) ? 54'd0 : pa[i];"
+  },
+  {
+   "name": "NA4 is 8 bytes",
+   "old": "hi = lo + 65'd4;",
+   "new": "hi = lo + 65'd8;"
+  },
+  {
+   "name": "NA4 is 2 bytes",
+   "old": "hi = lo + 65'd4;",
+   "new": "hi = lo + 65'd2;"
+  },
+  {
+   "name": "touch: the end is not checked",
+   "old": "assign touch[i] = ranged && !(ae <= lo || hi <= as);",
+   "new": "assign touch[i] = ranged && !(hi <= as);"
+  },
+  {
+   "name": "touch: the start is not checked",
+   "old": "assign touch[i] = ranged && !(ae <= lo || hi <= as);",
+   "new": "assign touch[i] = ranged && !(ae <= lo);"
+  },
+  {
+   "name": "NAPOT: mask one bit too small",
+   "old": "wire [53:0] wm   = pa[i] ^ (pa[i] + 54'd1);",
+   "new": "wire [53:0] wm   = (pa[i] ^ (pa[i] + 54'd1)) >> 1;"
+  },
+  {
+   "name": "NAPOT: the range ends one word short",
+   "old": "wire [54:0] ne   = nb + {1'b0, wm} + 55'd1;",
+   "new": "wire [54:0] ne   = nb + {1'b0, wm};"
+  },
+  {
+   "name": "NA4 base shifted by one bit",
+   "old": "2'b10: begin lo = {9'b0, pa[i], 2'b00};",
+   "new": "2'b10: begin lo = {8'b0, pa[i], 3'b000};"
+  },
+  {
+   "name": "NAPOT regions treated as OFF",
+   "old": "hi = {8'b0, ne, 2'b00};    ranged = 1'b1;",
+   "new": "hi = {8'b0, ne, 2'b00};    ranged = 1'b0;"
+  },
+  {
+   "name": "priority order reversed for read",
+   "old": "wire rperm   = touch[0] ? rp[0]    : touch[1] ? rp[1]    : touch[2] ? rp[2]    : rp[3];",
+   "new": "wire rperm   = touch[3] ? rp[3]    : touch[2] ? rp[2]    : touch[1] ? rp[1]    : rp[0];"
+  },
+  {
+   "name": "priority order reversed for the lock bit",
+   "old": "wire locked  = touch[0] ? lck[0]   : touch[1] ? lck[1]   : touch[2] ? lck[2]   : lck[3];",
+   "new": "wire locked  = touch[3] ? lck[3]   : touch[2] ? lck[2]   : touch[1] ? lck[1]   : lck[0];"
+  },
+  {
+   "name": "write permission read from the exec bit",
+   "old": "assign wp[i]  = cfg[1];",
+   "new": "assign wp[i]  = cfg[2];"
+  },
+  {
+   "name": "exec permission read from the read bit",
+   "old": "assign xp[i]  = cfg[2];",
+   "new": "assign xp[i]  = cfg[0];"
+  },
+  {
+   "name": "M mode is never denied (lock and partial matches ignored)",
+   "old": "wire m_free = is_m && (!touched || (whole && !locked));",
+   "new": "wire m_free = is_m;"
+  },
+  {
+   "name": "lock bit inverted",
+   "old": "assign lck[i] = cfg[7];",
+   "new": "assign lck[i] = !cfg[7];"
+  },
+  {
+   "name": "no match allowed below M",
+   "old": "wire m_free = is_m && (!touched || (whole && !locked));",
+   "new": "wire m_free = !touched || (is_m && whole && !locked);"
+  },
+  {
+   "name": "privilege 2'b10 treated as M",
+   "old": "wire is_m   = (i_priv == PRIV_M);",
+   "new": "wire is_m   = i_priv[1];"
+  },
+  {
+   "name": "M mode denied when nothing matches",
+   "old": "wire m_free = is_m && (!touched || (whole && !locked));",
+   "new": "wire m_free = is_m && whole && !locked;"
+  },
+  {
+   "name": "a partial match does not limit M (the rule before errata E5)",
+   "old": "wire m_free = is_m && (!touched || (whole && !locked));",
+   "new": "wire m_free = is_m && (!touched || !whole || !locked);"
+  },
+  {
+   "name": "an empty TOR region (bottom not below top) matches",
+   "old": "ranged = prev < pa[i]; end   // TOR",
+   "new": "ranged = 1'b1; end   // TOR"
+  },
+  {
+   "name": "any region holding the access whole decides (the rule before errata E5)",
+   "old": "wire whole   = touch[0] ? holds[0] : touch[1] ? holds[1] : touch[2] ? holds[2] : holds[3];",
+   "new": "wire whole   = |holds;"
+  }
+ ]
+}

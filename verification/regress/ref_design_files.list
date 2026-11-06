@@ -1,0 +1,44 @@
+# Frozen reference core (verification/reference/ref_core.sv) file list,
+# in required compile order (ref_decoder before ref_core, mirroring
+# the decoder-first ordering of design_files.list). One path per line, relative to
+# the repo root. Blank lines and #-comments ignored.
+#
+# The 6 leaf modules the main build shares with it (decoder/alu/c_expand/csr_file/
+# divider/register_file) are swapped for their ref_* counterparts under
+# verification/reference/; everything else (buses, caches, debug module,
+# peripherals, soc.sv itself) is SHARED, unmodified, identical to
+# design_files.list -- soc.sv instantiates a module literally named
+# `core`, and -DQV_REF_AS_CORE (passed by run_regress.sh/lint.sh's own
+# --core ref handling) is what makes ref_core.sv compile AS that name,
+# so soc.sv needs no ref-specific variant of its own.
+verification/reference/ref_decoder.sv
+verification/reference/ref_alu.sv
+verification/reference/ref_c_expand.sv
+# F/D (a feature addition, verification/reference/README.md): renamed copies of the pipelined core's FPU,
+# made by verification/reference/gen_copies.sh; the package before the modules that import it
+verification/reference/ref_fpu_pkg.sv
+verification/reference/ref_fp_dec.sv
+verification/reference/ref_fpu_round.sv
+verification/reference/ref_fpu_pipe.sv
+verification/reference/ref_fpu_divsqrt.sv
+verification/reference/ref_exu_fpu.sv
+verification/reference/ref_fprf.sv
+# errata E10: which CSRs exist (gen_copies.sh's copy of design/pipe/qv_csr_exists.sv)
+verification/reference/ref_csr_exists.sv
+design/cache_complex.sv
+design/clint.sv
+verification/reference/ref_core.sv
+verification/reference/ref_csr_file.sv
+design/dcache.sv
+verification/reference/ref_divider.sv
+design/dm.sv
+design/dm_dmi.sv
+design/icache.sv
+design/jtag_tap.sv
+design/plic.sv
+verification/reference/ref_register_file.sv
+design/soc.sv
+design/uart16550.sv
+design/wb4_sram.sv
+design/wb_addr_decoder.sv
+design/wb_arbiter2.sv

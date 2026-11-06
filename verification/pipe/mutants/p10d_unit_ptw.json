@@ -1,0 +1,65 @@
+{
+ "dut": "design/pipe/qv_ptw.sv",
+ "tb": "design/pipe/qv_ptw_tb.sv",
+ "files": [
+  "design/pipe/qv_pmp.sv",
+  "design/pipe/qv_pte.sv",
+  "design/pipe/qv_ptw.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench",
+  "-Pqv_ptw_tb.WINDOW=1"
+ ],
+ "cwd": "design",
+ "timeout": 1800,
+ "mutants": [
+  {
+   "name": "F reads outside the window off the real path",
+   "old": "wire go_beat = (st_q == W_GO) && !i_lsu_busy && !f_wait;",
+   "new": "wire go_beat = (st_q == W_GO) && !i_lsu_busy;"
+  },
+  {
+   "name": "a waiting F does not give the walker up to D",
+   "old": "end else if (f_wait && d_can) begin",
+   "new": "end else if (1'b0) begin"
+  },
+  {
+   "name": "a waiting F gives the walker up even with no D request",
+   "old": "end else if (f_wait && d_can) begin",
+   "new": "end else if (f_wait) begin"
+  },
+  {
+   "name": "D waits for the real path too",
+   "old": "wire f_wait  = cl_q && !pte_in_ram && !i_f_nonspec;",
+   "new": "wire f_wait  = !pte_in_ram && !i_f_nonspec;"
+  },
+  {
+   "name": "the window ignores PA bits 32 and up",
+   "old": "&& (pte_addr[55:32] == 24'b0));",
+   "new": ");",
+   "equivalent": true,
+   "note": "with the window inside the low 4 GB, a PTE address with a bit at 32 or up is already outside by the subtract-and-compare; the term only spells it out (as qv_lsu's compare does)"
+  },
+  {
+   "name": "the window one page short",
+   "old": "(({8'b0, pte_addr} - PMA_RAM_BASE) < PMA_RAM_SIZE)",
+   "new": "(({8'b0, pte_addr} - PMA_RAM_BASE) < PMA_RAM_SIZE - 64'h1000)"
+  },
+  {
+   "name": "every F read waits for the real path (the window ignored)",
+   "old": "wire f_wait  = cl_q && !pte_in_ram && !i_f_nonspec;",
+   "new": "wire f_wait  = cl_q && !i_f_nonspec;"
+  },
+  {
+   "name": "the PMP denial waits too (judged after the wait)",
+   "old": "                    end else if (pmp_deny) begin\n                        st_q    <= W_IDLE;                  // reported below\n                    end else if (f_wait && d_can) begin     // D's walk goes first; F is accepted again after it\n                        st_q    <= W_IDLE;\n",
+   "new": "                    end else if (f_wait && d_can) begin     // D's walk goes first; F is accepted again after it\n                        st_q    <= W_IDLE;\n                    end else if (pmp_deny && !f_wait) begin\n                        st_q    <= W_IDLE;                  // reported below\n"
+  }
+ ]
+}

@@ -1,0 +1,367 @@
+// SPDX-License-Identifier: MIT
+
+/*
+ * qv_align -- turns the fetched dword stream into instructions (RVC-aware).
+ *
+ * A dword holds four halfwords. A halfword whose low two bits aren't 11
+ * is a whole 16-bit (RVC) instruction; otherwise it's the low half of a
+ * 32-bit one, whose high half is the next halfword -- possibly the first
+ * halfword of the next dword (a "crossing" instruction).
+ *
+ * Up to two instructions leave per cycle, so a dword of four RVC
+ * instructions takes two cycles; the fetch buffer is popped once its
+ * last halfword is used. State between cycles:
+ *   - the halfword offset reached within the head dword (mid_q/off_q);
+ *     a fresh dword starts at its pc's halfword (pc[2:1] -- nonzero only
+ *     for the first dword after a redirect)
+ *   - the low half and pc of a 32-bit instruction that crosses into the
+ *     next dword (pend_q); the head dword is then always that next dword,
+ *     because a redirect flushes this state along with the fetch buffer
+ *
+ * A dword that came back with a fault (a bus error, or a translation fault
+ * fetch found: the cause comes with the dword) yields one instruction marked
+ * with that cause at the next pc -- the one whose bytes start in, or cross
+ * into, that dword (xcpt_hi for the latter) -- and is dropped. Nothing after
+ * it matters: that instruction traps at commit and everything younger is
+ * flushed.
+ *
+ * When fetch is translated every instruction also carries where it is: the
+ * physical page of the dword it starts in (pg_lo) and, if it crosses, of the
+ * next one (pg_hi); decode checks the PMP on those.
+ *
+ * Returns are predicted from a return-address stack (qv_ras, outside): a call that is emitted pushes the address behind
+ * it, a return pops, and a return with an entry on the stack is predicted taken to it (a redirect, like any other
+ * predicted-taken instruction here).
+ *
+ * Conditional branches are predicted from a branch history table (qv_bht, outside) once it has seen the branch: its
+ * two-bit counter decides; until then the static rule below does.
+ *
+ * Static prediction happens here too: JAL and C.J are predicted taken,
+ * conditional branches (including C.BEQZ/C.BNEZ) taken when their offset
+ * is negative -- loops. A predicted-taken instruction carries pred_taken
+ * and pred_tgt, is the last one emitted that cycle, and redirects fetch
+ * to the target (o_redirect); that drops the rest of the fetched stream
+ * and this module's own state, but nothing already in the IQ. JALR isn't
+ * predicted (its target is a register). The BRU checks every prediction
+ * and commit corrects a wrong one.
+ *
+ * Branch target buffer hints: fetch may have followed a taken branch inside this dword without waiting for us
+ * (the dword comes with i_buf_hint, the halfword i_buf_hoff the branch starts at and the target i_buf_htgt; the
+ * dwords behind it in the fetch buffer are the target's; with i_buf_hx the branch is a crossing 32-bit instruction
+ * whose second half is this dword's first halfword). The instruction that starts at that halfword is checked
+ * when it is emitted: a direct branch or jump whose own target is the hinted one, or an indirect jump that is not
+ * a return, is predicted taken to the hinted target, with no redirect (fetch is already there) and the rest of the
+ * dword dropped. Anything else makes the hint worthless: the dword's instructions are emitted as usual, and when
+ * it is used up fetch is sent back to the next sequential dword (a crossing instruction's first half stays
+ * pending: its second half is the first halfword of that dword). A hint costs only time, never correctness.
+ *
+ * Instructions are emitted only when the IQ has room for two -- or, with ONE_OK, room for one: then the
+ * first instruction of the cycle goes alone and the rest of the dword is taken the next cycle (the aligner
+ * already drains a dword over several cycles, so this adds no state). Without it a queue that holds all but
+ * two of its entries stalls the aligner for the cycles it is one short.
+ */
+module qv_align #(
+    parameter bit ONE_OK = 1'b0
+) (
+    input  logic              clk,
+    input  logic              rst,
+    input  logic              i_flush,
+
+    input  logic              i_buf_valid,
+    // bit 0 is always 0: instructions are 2-byte aligned
+    /* verilator lint_off UNUSEDSIGNAL */
+    input  logic [63:0]       i_buf_pc,
+    /* verilator lint_on UNUSEDSIGNAL */
+    input  logic [63:0]       i_buf_data,
+    input  logic              i_buf_err,                 // the dword is a fault marker, i_buf_cause its cause (1 or 12)
+    input  logic [3:0]        i_buf_cause = 4'd1,
+    input  logic              i_buf_xl    = 1'b0,        // fetch was translated: i_buf_pg is the dword's physical page
+    input  logic [43:0]       i_buf_pg    = 44'b0,
+    input  logic              i_buf_hint  = 1'b0,        // the BTB flagged this dword: a taken branch at halfword i_buf_hoff
+    input  logic [1:0]        i_buf_hoff  = 2'b0,
+    input  logic              i_buf_hx    = 1'b0,        // ... the branch is a crossing one that ends in this dword's halfword 0
+    input  logic [63:0]       i_buf_htgt  = 64'b0,
+    output logic              o_buf_pop,
+
+    // the return-address stack: its top, and the operations of this cycle's instructions (none for what was not emitted)
+    input  logic [63:0]       i_ras_top   = 64'b0,
+    input  logic              i_ras_has1  = 1'b0,
+    // the branch history table: looked up for the four halfword positions of the head dword and for a pending instruction
+    output logic [63:0]       o_bht_base,
+    output logic [63:0]       o_bht_ppc,
+    input  logic [3:0]        i_bht_known = 4'b0,
+    input  logic [3:0]        i_bht_taken = 4'b0,
+    input  logic              i_bht_pknown = 1'b0,
+    input  logic              i_bht_ptaken = 1'b0,
+    output logic [1:0]        o_ras_op0,                  // 2'b01 push, 2'b10 pop
+    output logic [63:0]       o_ras_addr0,
+    output logic [1:0]        o_ras_op1,
+    output logic [63:0]       o_ras_addr1,
+
+    output logic              o_push0_valid,
+    output qv_pkg::fe_instr_t o_push0_data,
+    output logic              o_push1_valid,
+    output qv_pkg::fe_instr_t o_push1_data,
+    input  logic              i_push_ready,
+    input  logic              i_push_ready1 = 1'b0,        // room for one (used with ONE_OK)
+
+    output logic              o_redirect_valid,
+    output logic [63:0]       o_redirect_pc
+);
+    import qv_pkg::*;
+
+    logic        mid_q;
+    logic [1:0]  off_q;
+    logic        pend_q;
+    logic [15:0] pend_hw_q;
+    logic [63:0] pend_pc_q;
+    logic        pend_xl_q;
+    logic [43:0] pend_pg_q;
+
+    wire [63:0] base  = {i_buf_pc[63:3], 3'b000};
+    assign o_bht_base = base;
+    assign o_bht_ppc  = pend_pc_q;
+    wire [1:0]  start = mid_q ? off_q : i_buf_pc[2:1];
+    wire        room1 = i_push_ready || (ONE_OK && i_push_ready1);
+    wire        go    = i_buf_valid && room1 && !i_flush;
+
+    function automatic logic [15:0] hw(input logic [63:0] d, input logic [1:0] i);
+        case (i)
+            2'd0:    hw = d[15:0];
+            2'd1:    hw = d[31:16];
+            2'd2:    hw = d[47:32];
+            default: hw = d[63:48];
+        endcase
+    endfunction
+
+    // Static prediction: JAL/C.J always taken, conditional branches
+    // (32-bit and C.BEQZ/C.BNEZ) taken when backward. Returns {taken, target}.
+    function automatic logic [64:0] predict(input logic [31:0] raw, input logic rvc, input logic [63:0] pc,
+                                            input logic bk = 1'b0, input logic bt = 1'b0);
+        logic        taken;
+        logic [63:0] off;
+        taken = 1'b0;
+        off   = '0;
+        if (rvc) begin
+            if (raw[1:0] == 2'b01 && raw[15:13] == 3'b101) begin                    // C.J
+                taken = 1'b1;
+                off   = {{52{raw[12]}}, raw[12], raw[8], raw[10:9], raw[6], raw[7], raw[2],
+                         raw[11], raw[5:3], 1'b0};
+            end else if (raw[1:0] == 2'b01 && raw[15:14] == 2'b11) begin            // C.BEQZ/C.BNEZ
+                taken = bk ? bt : raw[12];
+                off   = {{55{raw[12]}}, raw[12], raw[6:5], raw[2], raw[11:10], raw[4:3], 1'b0};
+            end
+        end else if (raw[6:0] == 7'b1101111) begin                                  // JAL
+            taken = 1'b1;
+            off   = {{43{raw[31]}}, raw[31], raw[19:12], raw[20], raw[30:21], 1'b0};
+        end else if (raw[6:0] == 7'b1100011 && raw[14:13] != 2'b01) begin           // branch
+            taken = bk ? bt : raw[31];
+            off   = {{51{raw[31]}}, raw[31], raw[7], raw[30:25], raw[11:8], 1'b0};
+        end
+        return {taken, pc + off};
+    endfunction
+
+    // Does the hint for this instruction hold? A direct branch or jump whose target is the hinted one, or an indirect
+    // jump that is not a return (its target is a guess the branch unit checks).
+    /* verilator lint_off UNUSEDSIGNAL */
+    function automatic logic hint_holds(input logic [31:0] raw, input logic rvc, input logic [63:0] pc,
+                                        input logic hint_here, input logic [63:0] htgt,
+                                        input logic bk = 1'b0, input logic bt = 1'b0);
+        logic [64:0] p;
+        logic [1:0]  k;
+        p = predict(raw, rvc, pc, bk, bt);
+        k = qv_ctl_kind(raw);
+        // a conditional branch the table has seen and expects not to be taken does not take the hint
+        return hint_here && ((k == 2'd1 && p[63:0] == htgt && !(qv_is_cond(raw) && bk && !bt)) || k == 2'd2);
+    endfunction
+    /* verilator lint_on UNUSEDSIGNAL */
+
+    function automatic fe_instr_t mk(input logic [63:0] pc, input logic [31:0] raw, input logic rvc,
+                                     input logic xl, input logic [43:0] pg_lo, input logic [43:0] pg_hi,
+                                     input logic hint_here = 1'b0, input logic [63:0] htgt = 64'b0,
+                                     input logic ras_ok = 1'b0, input logic [63:0] ras_tgt = 64'b0,
+                                     input logic bk = 1'b0, input logic bt = 1'b0);
+        logic [64:0] p;
+        p             = predict(raw, rvc, pc, bk, bt);
+        mk            = '0;
+        mk.pc         = pc;
+        mk.raw        = raw;
+        mk.rvc        = rvc;
+        mk.pred_taken = p[64];
+        mk.pred_tgt   = p[63:0];
+        if (hint_holds(raw, rvc, pc, hint_here, htgt, bk, bt)) begin
+            mk.pred_taken = 1'b1;
+            mk.pred_tgt   = (qv_ctl_kind(raw) == 2'd1) ? p[63:0] : htgt;
+        end
+        if (ras_ok && qv_ctl_kind(raw) == 2'd3) begin
+            mk.pred_taken = 1'b1;
+            mk.pred_tgt   = ras_tgt;
+        end
+        mk.xl         = xl;
+        mk.pg_lo      = pg_lo;
+        mk.pg_hi      = pg_hi;
+    endfunction
+
+    logic [2:0]  cur;            // next halfword of the head dword, 4 = used up
+    logic        stash;
+    logic [15:0] stash_hw;
+    logic [15:0] h;
+    logic        hint_here;      // the instruction being looked at starts at the hinted halfword
+    logic        conf0, conf1;   // ... and the hint holds for it (slot 0, slot 1)
+    logic        hint_redir;     // the dword's hint came to nothing: fetch goes back to the next sequential dword
+    logic        bk0, bt0, bk1, bt1;         // the table has seen the branch in this slot / expects it taken
+    logic        ras_ok0, ras_ok1;           // a return in this slot has a predicted address (the stack's, after the slot before)
+    logic [63:0] ras_tgt0, ras_tgt1;            // (slot 1 sees slot 0's call; slot 0 is never a predicted return when slot 1 is emitted)
+
+    function automatic logic [1:0] ras_op_of(input logic [31:0] raw);
+        return (qv_ctl_kind(raw) == 2'd3) ? 2'b10 : qv_is_call(raw) ? 2'b01 : 2'b00;
+    endfunction
+
+    always_comb begin
+        o_push0_valid = 1'b0;
+        o_push1_valid = 1'b0;
+        o_push0_data  = '0;
+        o_push1_data  = '0;
+        o_redirect_valid = 1'b0;
+        o_redirect_pc    = '0;
+        stash         = 1'b0;
+        stash_hw      = '0;
+        cur           = {1'b0, start};
+        h             = '0;
+        hint_here     = 1'b0;
+        conf0         = 1'b0;
+        conf1         = 1'b0;
+        hint_redir    = 1'b0;
+        bk0           = pend_q ? i_bht_pknown : i_bht_known[start];
+        bt0           = pend_q ? i_bht_ptaken : i_bht_taken[start];
+        bk1           = 1'b0;
+        bt1           = 1'b0;
+        o_ras_op0     = 2'b00;
+        o_ras_op1     = 2'b00;
+        o_ras_addr0   = '0;
+        o_ras_addr1   = '0;
+        ras_ok0       = i_ras_has1;
+        ras_tgt0      = i_ras_top;
+        ras_ok1       = i_ras_has1;
+        ras_tgt1      = i_ras_top;
+
+        if (go && i_buf_err) begin
+            o_push0_valid = 1'b1;
+            // (the page of a marker for the high dword is the pending low dword's: decode checks the PMP on it)
+            o_push0_data  = mk(pend_q ? pend_pc_q : base + {61'b0, start, 1'b0}, 32'b0, 1'b0,
+                               pend_q && pend_xl_q, pend_q ? pend_pg_q : 44'b0, 44'b0);
+            o_push0_data.xcpt       = 1'b1;
+            o_push0_data.xcpt_cause = i_buf_cause;
+            o_push0_data.xcpt_hi    = pend_q;
+            cur = 3'd4;
+        end else if (go) begin
+            // slot 0: finish a crossing instruction, or start at cur
+            if (pend_q) begin
+                hint_here = i_buf_hint && i_buf_hx;
+                o_push0_valid = 1'b1;
+                o_push0_data  = mk(pend_pc_q, {hw(i_buf_data, 2'd0), pend_hw_q}, 1'b0, pend_xl_q, pend_pg_q, i_buf_pg,
+                                   hint_here, i_buf_htgt, ras_ok0, ras_tgt0, bk0, bt0);
+                conf0 = hint_holds({hw(i_buf_data, 2'd0), pend_hw_q}, 1'b0, pend_pc_q, hint_here, i_buf_htgt, bk0, bt0);
+                cur = 3'd1;
+            end else begin
+                h = hw(i_buf_data, cur[1:0]);
+                hint_here = i_buf_hint && !i_buf_hx && (cur[1:0] == i_buf_hoff);
+                if (h[1:0] != 2'b11) begin
+                    o_push0_valid = 1'b1;
+                    o_push0_data  = mk(base + {61'b0, cur[1:0], 1'b0}, {16'b0, h}, 1'b1, i_buf_xl, i_buf_pg, i_buf_pg,
+                                       hint_here, i_buf_htgt, ras_ok0, ras_tgt0, bk0, bt0);
+                    conf0 = hint_holds({16'b0, h}, 1'b1, base + {61'b0, cur[1:0], 1'b0}, hint_here, i_buf_htgt, bk0, bt0);
+                    cur = cur + 3'd1;
+                end else if (cur == 3'd3) begin
+                    stash    = 1'b1;
+                    stash_hw = h;
+                    cur      = 3'd4;
+                end else begin
+                    o_push0_valid = 1'b1;
+                    o_push0_data  = mk(base + {61'b0, cur[1:0], 1'b0}, {hw(i_buf_data, cur[1:0] + 2'd1), h}, 1'b0,
+                                       i_buf_xl, i_buf_pg, i_buf_pg, hint_here, i_buf_htgt, ras_ok0, ras_tgt0, bk0, bt0);
+                    conf0 = hint_holds({hw(i_buf_data, cur[1:0] + 2'd1), h}, 1'b0, base + {61'b0, cur[1:0], 1'b0},
+                                       hint_here, i_buf_htgt, bk0, bt0);
+                    cur = cur + 3'd2;
+                end
+            end
+            if (o_push0_valid) begin
+                o_ras_op0   = ras_op_of(o_push0_data.raw);
+                o_ras_addr0 = o_push0_data.pc + (o_push0_data.rvc ? 64'd2 : 64'd4);
+                ras_ok1     = (o_ras_op0 == 2'b01) ? 1'b1 : i_ras_has1;
+                ras_tgt1    = (o_ras_op0 == 2'b01) ? o_ras_addr0 : i_ras_top;
+            end
+            if (o_push0_valid && o_push0_data.pred_taken) begin
+                if (conf0) begin
+                    cur = 3'd4;                      // fetch is already at the target: drop the rest of this dword
+                end else begin
+                    o_redirect_valid = 1'b1;
+                    o_redirect_pc    = o_push0_data.pred_tgt;
+                end
+            end
+            // slot 1: one more, if this dword has any left
+            if (o_push0_valid && !o_redirect_valid && cur != 3'd4 && i_push_ready) begin
+                h = hw(i_buf_data, cur[1:0]);
+                bk1 = i_bht_known[cur[1:0]];
+                bt1 = i_bht_taken[cur[1:0]];
+                hint_here = i_buf_hint && !i_buf_hx && (cur[1:0] == i_buf_hoff);
+                if (h[1:0] != 2'b11) begin
+                    o_push1_valid = 1'b1;
+                    o_push1_data  = mk(base + {61'b0, cur[1:0], 1'b0}, {16'b0, h}, 1'b1, i_buf_xl, i_buf_pg, i_buf_pg,
+                                       hint_here, i_buf_htgt, ras_ok1, ras_tgt1, bk1, bt1);
+                    conf1 = hint_holds({16'b0, h}, 1'b1, base + {61'b0, cur[1:0], 1'b0}, hint_here, i_buf_htgt, bk1, bt1);
+                    cur = cur + 3'd1;
+                end else if (cur == 3'd3) begin
+                    stash    = 1'b1;
+                    stash_hw = h;
+                    cur      = 3'd4;
+                end else begin
+                    o_push1_valid = 1'b1;
+                    o_push1_data  = mk(base + {61'b0, cur[1:0], 1'b0}, {hw(i_buf_data, cur[1:0] + 2'd1), h}, 1'b0,
+                                       i_buf_xl, i_buf_pg, i_buf_pg, hint_here, i_buf_htgt, ras_ok1, ras_tgt1, bk1, bt1);
+                    conf1 = hint_holds({hw(i_buf_data, cur[1:0] + 2'd1), h}, 1'b0, base + {61'b0, cur[1:0], 1'b0},
+                                       hint_here, i_buf_htgt, bk1, bt1);
+                    cur = cur + 3'd2;
+                end
+                if (o_push1_valid && o_push1_data.pred_taken) begin
+                    if (conf1) begin
+                        cur = 3'd4;
+                    end else begin
+                        o_redirect_valid = 1'b1;
+                        o_redirect_pc    = o_push1_data.pred_tgt;
+                    end
+                end
+            end
+            if (o_push1_valid) begin
+                o_ras_op1   = ras_op_of(o_push1_data.raw);
+                o_ras_addr1 = o_push1_data.pc + (o_push1_data.rvc ? 64'd2 : 64'd4);
+            end
+            // a hint that no instruction here confirmed, with the dword used up: fetch followed it for nothing
+            if (i_buf_hint && !conf0 && !conf1 && !o_redirect_valid && cur == 3'd4) begin
+                o_redirect_valid = 1'b1;
+                o_redirect_pc    = base + 64'd8;
+                hint_redir       = 1'b1;
+            end
+        end
+    end
+
+    // on a redirect, fetch drops the whole buffer itself
+    assign o_buf_pop = go && (cur == 3'd4) && !o_redirect_valid;
+
+    always_ff @(posedge clk) begin
+        if (rst || i_flush || (o_redirect_valid && !hint_redir)) begin
+            mid_q  <= 1'b0;
+            pend_q <= 1'b0;
+        end else if (go) begin
+            mid_q  <= (cur != 3'd4);
+            off_q  <= cur[1:0];
+            pend_q <= stash;
+            if (stash) begin
+                pend_hw_q <= stash_hw;
+                pend_pc_q <= base + 64'd6;
+                pend_xl_q <= i_buf_xl;
+                pend_pg_q <= i_buf_pg;
+            end
+        end
+    end
+endmodule

@@ -137,6 +137,8 @@ endfunction
 `define OPC_BRANCH    7'b1100011
 `define OPC_SYSTEM    7'b1110011
 `define OPC_FENCE     7'b0001111
+`define OPC_LOAD_FP   7'b0000111
+`define OPC_STORE_FP  7'b0100111
 
 /* SYSTEM-opcode funct3 encodings for the 6 Zicsr instructions, for readability at call sites. */
 `define FUNCT3_CSRRW  3'b001
@@ -195,6 +197,15 @@ endfunction
 `define CSR_MCAUSE     12'h342
 `define CSR_MTVAL      12'h343
 `define CSR_MIP        12'h344
+
+/* PMP (PMP+PLIC staged plan, Milestone 2). Real spec addresses,
+ * independently transcribed here (not read from design/csr_file.sv's
+ * own internals), same discipline as every other CSR_* macro above. */
+`define CSR_PMPCFG0    12'h3A0
+`define CSR_PMPADDR0   12'h3B0
+`define CSR_PMPADDR1   12'h3B1
+`define CSR_PMPADDR2   12'h3B2
+`define CSR_PMPADDR3   12'h3B3
 
 /*
  * A extension (atomics): R-type shaped, but funct7's role is split into

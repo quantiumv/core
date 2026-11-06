@@ -1,0 +1,131 @@
+{
+ "dut": "design/pipe/qv_commit.sv",
+ "tb": "design/pipe/qv_commit_tb.sv",
+ "files": [
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_commit.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench"
+ ],
+ "cwd": "design",
+ "timeout": 900,
+ "mutants": [
+  {
+   "name": "a trap is taken inside a run",
+   "old": "wire trap_fx   = is_trap && !i_pb_active; ",
+   "new": "wire trap_fx   = is_trap; "
+  },
+  {
+   "name": "MRET takes effect inside a run",
+   "old": "wire mret_fx   = is_mret && !i_pb_active;",
+   "new": "wire mret_fx   = is_mret;"
+  },
+  {
+   "name": "SRET takes effect inside a run",
+   "old": "wire sret_fx   = is_sret && !i_pb_active;",
+   "new": "wire sret_fx   = is_sret;"
+  },
+  {
+   "name": "an aborted instruction is counted by minstret",
+   "old": "wire faulted   = is_trap && !pb_ebreak; ",
+   "new": "wire faulted   = 1'b0; "
+  },
+  {
+   "name": "the run's EBREAK is not counted by minstret",
+   "old": "wire faulted   = is_trap && !pb_ebreak; ",
+   "new": "wire faulted   = is_trap; "
+  },
+  {
+   "name": "dcsr.stopcount is ignored",
+   "old": "(i_dbg_in_debug && i_dcsr[10]);   // dcsr.stopcount",
+   "new": "(1'b0);   // dcsr.stopcount"
+  },
+  {
+   "name": "dcsr.stopcount applies outside Debug Mode",
+   "old": "!(i_dbg_in_debug && i_dcsr[10]);   // dcsr.stopcount",
+   "new": "!(i_dcsr[10]);   // dcsr.stopcount"
+  },
+  {
+   "name": "the run's EBREAK is an abort",
+   "old": "assign o_pb_abort  = commit && i_pb_active && is_trap && !pb_ebreak;",
+   "new": "assign o_pb_abort  = commit && i_pb_active && is_trap;"
+  },
+  {
+   "name": "any system op ends a run",
+   "old": "wire pb_ebreak = i_pb_active && is_sys && (i_head_ctrl.sys_op == QV_SYS_EBREAK);",
+   "new": "wire pb_ebreak = i_pb_active && is_sys;"
+  },
+  {
+   "name": "an exception does not end the run",
+   "old": "assign o_pb_abort  = commit && i_pb_active && is_trap && !pb_ebreak;",
+   "new": "assign o_pb_abort  = 1'b0;"
+  },
+  {
+   "name": "an exception ends it, without a run too",
+   "old": "assign o_pb_abort  = commit && i_pb_active && is_trap && !pb_ebreak;",
+   "new": "assign o_pb_abort  = commit && is_trap && !pb_ebreak;"
+  },
+  {
+   "name": "the EBREAK ends a run that isn't one",
+   "old": "assign o_pb_done   = commit && pb_ebreak;",
+   "new": "assign o_pb_done   = commit && is_sys && (i_head_ctrl.sys_op == QV_SYS_EBREAK);"
+  },
+  {
+   "name": "the EBREAK doesn't end the run",
+   "old": "assign o_pb_done   = commit && pb_ebreak;",
+   "new": "assign o_pb_done   = 1'b0;"
+  },
+  {
+   "name": "no Program Buffer retirement is reported",
+   "old": "assign o_pb_commit = commit && i_pb_active;",
+   "new": "assign o_pb_commit = 1'b0;"
+  },
+  {
+   "name": "Program Buffer retirements are reported outside a run",
+   "old": "assign o_pb_commit = commit && i_pb_active;",
+   "new": "assign o_pb_commit = commit;"
+  },
+  {
+   "name": "a retirement is reported before it commits",
+   "old": "assign o_pb_commit = commit && i_pb_active;",
+   "new": "assign o_pb_commit = i_head_valid && i_pb_active;"
+  },
+  {
+   "name": "an aborted instruction reports as a trap to RVFI",
+   "old": "assign o_rvfi_trap      = commit && trap_fx;",
+   "new": "assign o_rvfi_trap      = commit && is_trap;"
+  },
+  {
+   "name": "an abort redirects to the trap vector",
+   "old": "        if (trap_fx)      actual_next_pc =",
+   "new": "        if (is_trap)      actual_next_pc ="
+  },
+  {
+   "name": "an abort changes the privilege",
+   "old": "            if (trap_fx)      priv_q <= trap_to_s ? QV_PRIV_S : QV_PRIV_M;",
+   "new": "            if (is_trap)      priv_q <= trap_to_s ? QV_PRIV_S : QV_PRIV_M;"
+  },
+  {
+   "name": "an abort still redirects (flushes)",
+   "old": "|| (commit && (trap_fx || mret_fx || sret_fx || i_head_entry.mispredict",
+   "new": "|| (commit && (is_trap || mret_fx || sret_fx || i_head_entry.mispredict"
+  },
+  {
+   "name": "an aborted instruction writes rd",
+   "old": "wire writes_rd = i_head_entry.rd_wen && !is_trap;",
+   "new": "wire writes_rd = i_head_entry.rd_wen && !trap_fx;"
+  },
+  {
+   "name": "an aborted LR sets the reservation",
+   "old": "end else if (commit && i_head_ctrl.is_lr && !is_trap) begin",
+   "new": "end else if (commit && i_head_ctrl.is_lr && !trap_fx) begin"
+  }
+ ]
+}

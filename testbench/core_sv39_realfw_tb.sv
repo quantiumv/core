@@ -1,0 +1,234 @@
+// SPDX-License-Identifier: MIT
+
+/* ------------------------------------------------------------------------- */
+
+
+/*
+ * Testbench: core's Sv39 virtual-memory support against a REAL
+ * toolchain-assembled and -linked program (firmware/sv39_real_test.s),
+ * as opposed to every prior Sv39 testbench (testbench/core_sv39_
+ * {fetch,mem,tlb,cache}_tb.sv), which all hand-pack page tables and
+ * instruction encodings directly into simulation memory. Same wiring
+ * spirit as core_priv_toolchain_tb.sv (a real wb4_sram instance, core
+ * wired directly to it as the sole Wishbone master, no cache -- this
+ * test is about proving the walker itself against real toolchain-
+ * generated code, not re-proving Milestone 6's own cache-integration
+ * story) and the SAME "second $readmemh, one time unit after wb4_sram's
+ * own time-0 init of crt0.hex" convention that file documents in full --
+ * see its own header comment for why the #1 delay is load-bearing here
+ * too.
+ *
+ * Instantiated at wb4_sram's default num_words (4096, 32KB), matching
+ * core_priv_toolchain_tb.sv and design/soc.sv's own instantiation --
+ * this test loads a real program linked against firmware/link.ld, which
+ * reserves the full 32KB RAM region (see firmware/sv39_real_test.s's own
+ * header for why its ~16KB footprint, all runtime-address-computed, has
+ * a large margin against both the image size and _stack_top).
+ *
+ * TIMEOUT_CYCLES_LARGE: this program includes a real 3-level page-table
+ * walk PLUS a real mem-side walk (or TLB hit), each costing several bus
+ * cycles beyond the plain instruction-issue cost every other toolchain
+ * testbench budgets for -- same tier core_sv39_fetch_tb.sv/
+ * core_sv39_mem_tb.sv/core_sv39_tlb_tb.sv already use for walker-
+ * involving tests, comfortably larger than TIMEOUT_CYCLES_SMALL (which
+ * core_priv_toolchain_tb.sv/core_csr_toolchain_tb.sv use for walker-free
+ * programs of a similar instruction count).
+ *
+ * What this test actually proves, beyond every hand-packed Sv39
+ * testbench: that the FULL real-toolchain pipeline (as/ld/objcopy,
+ * relocations, li/la pseudo-instruction expansion, real CSR mnemonics
+ * including the literal name "satp", and a real `sfence.vma`) produces
+ * a program that correctly builds its own page table at runtime and
+ * gets genuinely translated by the walker -- not just that the walker
+ * behaves correctly against a table the testbench itself constructed by
+ * hand. The white-box S_PTW-entry counter below (same technique
+ * core_sv39_tlb_tb.sv's own header comment documents in full: a walk
+ * stays in S_PTW continuously across all its levels, so counting
+ * TRANSITIONS into S_PTW -- not just "was S_PTW ever entered" -- counts
+ * "number of separate walks") additionally confirms BOTH streams were
+ * genuinely exercised: at least one walk whose ptw_reason_q was
+ * PTW_REASON_LO/PTW_REASON_HI (fetch-side, reaching s_mode_target) and
+ * at least one whose ptw_reason_q was PTW_REASON_MEM (mem-side, the
+ * store+load round trip through s_mode_data) -- the one check that
+ * rules out a silent untranslated fallback path succeeding for the
+ * wrong reason (e.g. a bug that let mem accesses through unchecked
+ * while translation was nominally active).
+ */
+module core_sv39_realfw_tb;
+
+    logic clk = 0;
+    always #5 clk = ~clk;
+    logic rst = 1;
+
+    logic [31:0] wb_addr;
+    logic [63:0] wb_dat_m2s, wb_dat_s2m;
+    logic [7:0]  wb_sel;
+    logic        wb_we, wb_cyc, wb_stb, wb_ack, wb_err;
+
+    // core's own two ports: wbf_* = fetch (read-only), wbm_* = mem.
+    logic [31:0] wbf_addr;
+    logic [63:0] wbf_dat_s2m;
+    logic        wbf_cyc, wbf_stb, wbf_ack, wbf_err;
+    logic [31:0] wbm_addr;
+    logic [63:0] wbm_dat_m2s, wbm_dat_s2m;
+    logic [7:0]  wbm_sel;
+    logic        wbm_we, wbm_cyc, wbm_stb, wbm_ack, wbm_err, wbm_lock;
+
+    core dut (
+        .clk(clk), .rst(rst),
+        .wb_fetch_addr_o(wbf_addr), .wb_fetch_cyc_o(wbf_cyc), .wb_fetch_stb_o(wbf_stb),
+        .wb_fetch_dat_i(wbf_dat_s2m), .wb_fetch_ack_i(wbf_ack), .wb_fetch_err_i(wbf_err),
+        .wb_mem_addr_o(wbm_addr), .wb_mem_dat_o(wbm_dat_m2s), .wb_mem_dat_i(wbm_dat_s2m),
+        .wb_mem_sel_o(wbm_sel), .wb_mem_we_o(wbm_we), .wb_mem_cyc_o(wbm_cyc),
+        .wb_mem_stb_o(wbm_stb), .wb_mem_ack_i(wbm_ack), .wb_mem_err_i(wbm_err),
+        .wb_mem_lock_o(wbm_lock)
+    );
+
+    /* core.sv now has separate fetch and mem ports; this merges them onto
+     * the harness's single SRAM (wb_* above = what sram0 sees). mem is m1
+     * so execute wins ties. Fetch never writes: sel mirrors the old core's
+     * 8'hFF-while-fetching, 0-when-idle behavior. */
+    wb_arbiter2 fetch_mem_arb0 (
+        .clk(clk), .rst(rst),
+        .m0_addr_i(wbf_addr), .m0_dat_i(64'b0), .m0_dat_o(wbf_dat_s2m),
+        .m0_sel_i({8{wbf_cyc}}), .m0_we_i(1'b0), .m0_cyc_i(wbf_cyc), .m0_stb_i(wbf_stb),
+        .m0_ack_o(wbf_ack), .m0_err_o(wbf_err),
+        .m1_addr_i(wbm_addr), .m1_dat_i(wbm_dat_m2s), .m1_dat_o(wbm_dat_s2m),
+        .m1_sel_i(wbm_sel), .m1_we_i(wbm_we), .m1_cyc_i(wbm_cyc), .m1_stb_i(wbm_stb),
+        .m1_ack_o(wbm_ack), .m1_err_o(wbm_err), .m1_lock_i(wbm_lock),
+        .addr_o(wb_addr), .dat_o(wb_dat_m2s), .dat_i(wb_dat_s2m), .sel_o(wb_sel),
+        .we_o(wb_we), .cyc_o(wb_cyc), .stb_o(wb_stb), .ack_i(wb_ack), .err_i(wb_err),
+        /* verilator lint_off PINCONNECTEMPTY */ .o_grant() /* verilator lint_on PINCONNECTEMPTY */
+    );
+
+    wb4_sram sram0 (
+        .clk(clk), .rst(rst),
+        .addr_i(wb_addr), .dat_i(wb_dat_m2s), .dat_o(wb_dat_s2m), .sel_i(wb_sel),
+        .ack_o(wb_ack), .err_o(wb_err), .cyc_i(wb_cyc), .stb_i(wb_stb), .we_i(wb_we)
+    );
+
+    int pass_count = 0;
+    int fail_count = 0;
+    logic quiet_on_pass = 1'b0;
+    `include "check_lib.sv"
+
+    logic halted = 1'b0;
+    always @(posedge clk) if (dut.trap_taken && dut.is_ebreak) halted <= 1'b1;
+    `include "halt_wait.sv"
+
+    /*
+     * White-box S_PTW-entry counter, split by stream (fetch vs mem),
+     * same negedge-sampling discipline testbench/core_sv39_tlb_tb.sv's
+     * own ptw_count_X uses (see that file's header for why negedge: it
+     * lets state/ptw_reason_q's own non-blocking updates from the DUT's
+     * posedge-triggered always_ff settle before this monitor reads
+     * them, avoiding a same-edge race against the DUT's own state
+     * transition).
+     */
+    logic ptw_prev = 1'b0;
+    int ptw_count_fetch = 0;
+    int ptw_count_mem   = 0;
+`ifndef QV_REF_AS_CORE
+    // the pipelined core has one walker with a data and a fetch client: a walk is a request it accepts
+    always @(negedge clk) begin
+        if (dut.g_sv39.ptw0.accept_d) ptw_count_mem   <= ptw_count_mem + 1;
+        if (dut.g_sv39.ptw0.accept_f) ptw_count_fetch <= ptw_count_fetch + 1;
+    end
+`else
+    always @(negedge clk) begin
+        if ((dut.state == dut.S_PTW) && !ptw_prev) begin
+            if (dut.ptw_reason_q[dut.cur_slot] == dut.PTW_REASON_MEM) ptw_count_mem   <= ptw_count_mem + 1;
+            else                                        ptw_count_fetch <= ptw_count_fetch + 1;
+        end
+        ptw_prev <= (dut.state == dut.S_PTW);
+    end
+`endif
+
+    /*
+     * current_priv snapshot, taken on the SAME edge the terminal
+     * ebreak's own trap_taken first fires -- NOT read live at check()
+     * time. Same technique/rationale as core_priv_toolchain_tb.sv's own
+     * final_priv_snap: EBREAK is a real trap (jumps to mtvec, resumes
+     * execution), and this program's own mtvec still points at
+     * m_fallback_handler, whose own trailing ebreak would corrupt a
+     * live post-halt read of current_priv if this test's own success
+     * path is ever reached a second time. Capturing pre-edge current_priv
+     * on the FIRST trap_taken&&is_ebreak pulse distinguishes the two
+     * possible halting paths outright: S means s_mode_target's own
+     * EBREAK fired (the real, translated S-mode success path -- current
+     * privilege was still S the instant that EBREAK committed); M means
+     * m_fallback_handler's EBREAK fired instead (an unexpected trap
+     * diverted control there, since that handler only ever runs in
+     * M-mode).
+     */
+    logic [1:0] final_priv_snap;
+    logic final_priv_captured = 1'b0;
+    always @(posedge clk) if (!final_priv_captured && dut.trap_taken && dut.is_ebreak) begin
+        final_priv_captured <= 1'b1;
+        final_priv_snap     <= dut.current_priv;
+    end
+
+    initial begin
+        #1; // see header comment: run after wb4_sram's own time-0 init of crt0.hex
+        $readmemh("../firmware/sv39_real_test.hex", sram0.memory);
+
+        @(posedge clk); #1;
+        rst = 0;
+
+        wait_halted_or_timeout(`TIMEOUT_CYCLES_LARGE, "EBREAK trap never fired -- is firmware/sv39_real_test.hex built?");
+
+        check("EBREAK trap fired", {63'b0, halted}, 64'd1);
+
+        /*
+         * s4 (x20) must stay 0 -- it is ONLY ever written by
+         * m_fallback_handler, which this program's own control flow
+         * should never reach. Checked FIRST and independently of the
+         * priv snapshot below: if this fails, s5 (x21, mcause) is the
+         * actionable diagnostic for why (not asserted on here -- its
+         * value is only meaningful when s4 is nonzero, and printing it
+         * unconditionally would just be noise on the success path).
+         */
+        check("s4 (fallback-handler marker) == 0 -- the defensive fallback was never reached",
+              dut.regfile0.gp_registers[20], 64'd0);
+
+        check("final current_priv == S at the terminal EBREAK -- halted via s_mode_target's own EBREAK, not the fallback handler's",
+              {62'b0, final_priv_snap}, 64'(2'b01));
+
+        check("s1 (x9) == 0xAA -- real, fetch-side-translated S-mode code genuinely executed",
+              dut.regfile0.gp_registers[9], 64'h0AA);
+
+        check("s2 (x18) == 0x12345678 -- the mem-side store+load round trip through the translated data page succeeded",
+              dut.regfile0.gp_registers[18], 64'h12345678);
+
+        check("s3 (x19) == 0xC0FFEE -- the whole real-toolchain S-mode sequence ran to completion",
+              dut.regfile0.gp_registers[19], 64'hC0FFEE);
+
+        /*
+         * The actual proof that real translation happened, not a silent
+         * untranslated fallback: the walker's own S_PTW state was
+         * genuinely entered at least once for EACH stream. (Exact
+         * counts aren't pinned down further than ">=1 each" -- the
+         * fetch stream alone could cost anywhere from one walk, if the
+         * whole s_mode_target sequence stays cache/TLB-resident for its
+         * VPN, up to several, depending on how many distinct dwords its
+         * instructions span; the point of this check is stream
+         * coverage, not an exact walk count, which the hand-packed
+         * Milestone 3/4/5 testbenches already pin down precisely against
+         * page tables THEY control.)
+         */
+        check("at least one real fetch-side S_PTW walk occurred", (ptw_count_fetch >= 1), 1'b1);
+        check("at least one real mem-side S_PTW walk occurred",   (ptw_count_mem   >= 1), 1'b1);
+
+        $display("");
+        $display("fetch-side S_PTW walks: %0d, mem-side S_PTW walks: %0d", ptw_count_fetch, ptw_count_mem);
+        $display("core_sv39_realfw_tb: %0d passed, %0d failed", pass_count, fail_count);
+        if (fail_count > 0) $display("core_sv39_realfw_tb: FAILURES PRESENT");
+        $finish;
+    end
+
+endmodule
+
+/* ------------------------------------------------------------------------- */
+
+
+/* End of file. */

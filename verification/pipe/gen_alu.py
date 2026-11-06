@@ -1,0 +1,542 @@
+#!/usr/bin/env python3
+"""gen_alu.py -- seeded random RV64IM + Zicsr programs with control flow, memory and traps.
+
+Bring-up corpus for design/pipe/core.sv: the integer class (RV64I
+register/immediate ops including the *W forms, LUI, AUIPC, MUL/MULH/
+MULHSU/MULHU/MULW, DIV/DIVU/REM/REMU and the W forms), conditional
+branches, JAL, JALR, loads, stores, FENCE, FENCE.I, Zicsr, M-mode traps and RVC.
+Assemble with -march=rv64imac_zicsr_zifencei. --no-div and --no-amo leave
+the divides / the A extension out (for a core without them).
+
+Everything runs in M-mode. A prologue points mtvec at a fixed handler
+(.text.handlers, 0x8000) that reads mcause/mtval and returns to
+mepc + 4; trap sources are ECALL, EBREAK, an all-zero word, writes to
+read-only CSRs, any access to debug/trigger CSRs, and misaligned or
+out-of-range loads and stores. CSR accesses
+otherwise stick to CSRs whose writes can't change control flow or
+privilege (see CSR_RW/CSR_RO), and MRET only ever runs in the handler,
+so mstatus.MPP and MIE never leave their M-mode, interrupts-off state.
+
+Every register is first seeded with a value from a mix of edge cases
+(0, 1, -1, INT64_MIN, INT64_MAX) and random 64-bit patterns. The body is
+a sequence of segments, each of which can only be entered at its first
+instruction, so every program terminates:
+
+  straight  ALU ops, forward branches, JAL, and auipc(+addi)+JALR
+            sequences, all targeting a later instruction of the same
+            segment or the segment's end
+  loop      li x31, K; body; addi x31, x31, -1; bne x31, x0, body
+            (body branches may target the decrement but never the bne;
+            x31 is written only here)
+
+Memory ops address a 4 KiB sandbox (.data.sandbox at 0x10000, random
+dwords) through bases set after seeding and never written again:
+x27 = 0x10800 (any 12-bit offset stays inside), x9 = 0x10400 and
+x2 = 0x10000 (so gas emits C.LW/C.LD/C.SW/C.SD and the sp-relative
+forms), and x26 = 0x200000, past the tracer's 1 MiB SRAM, whose
+accesses end in a bus error. A third form computes the address from a
+random source (andi; add x27; access), so address operands come through
+the bypass and ROB paths too.
+
+No branch may land after an auipc in the sequence that uses it, or
+inside an address computation. Sources
+favour recent destinations (--dep-bias), so the bypass path feeds
+branch operands as well as ALU ones.
+
+RVC is on: gas compresses whatever it can, so 16- and 32-bit
+instructions mix freely and 32-bit ones regularly straddle a dword. All
+addressing is by label (%pcrel_hi/%pcrel_lo for JALR). Trap sources
+stay 4 bytes long for the handler's mepc + 4 (EBREAK is emitted as
+.4byte so gas can't pick C.EBREAK; a reserved compressed encoding is
+paired with a C.NOP).
+
+The program ends at the end_of_test symbol; the pipelined core has no way to
+stop, so run_rvfi_diff.sh compares retirements up to the first one at
+that pc.
+
+Divides: random ones, plus two constructs aimed at what is hard about
+them -- operands at the spec's special cases (zero divisor, INT_MIN / -1 at
+64 and at 32 bits, 1), and a divide on the wrong path of an always-taken
+branch whose operand is a load, so the divide is well under way when the
+branch resolves and has to be killed.
+
+Atomics: the nine AMOs (.W and .D, with random .aq/.rl), LR/SC pairs that
+succeed, that a store, an AMO, an SC or a different address breaks (and a
+second SC after a successful one), SCs with no LR, and the faulting forms --
+misaligned and out-of-range (bus error) addresses, including an LR that
+faults followed by an SC to the same address. Each is a short group entered
+only at its first slot (an addi sets the address).
+
+Usage: gen_alu.py --seed N --len L [--no-div] [--no-amo] -o prog.s
+Prints "<static instruction count> <upper bound on dynamic count> <upper
+bound on dynamic divides>" (a divide takes ~70 cycles, the rest a few).
+"""
+import argparse
+import random
+
+R_OPS = ["add", "sub", "slt", "sltu", "xor", "or", "and", "sll", "srl", "sra",
+         "addw", "subw", "sllw", "srlw", "sraw",
+         "mul", "mulh", "mulhsu", "mulhu", "mulw"]
+DIV_OPS = ["div", "divu", "rem", "remu", "divw", "divuw", "remw", "remuw"]
+AMO_OPS = ["amoswap", "amoadd", "amoxor", "amoand", "amoor", "amomin", "amomax", "amominu", "amomaxu"]
+I_OPS = ["addi", "slti", "sltiu", "xori", "ori", "andi", "addiw"]
+SH_OPS = ["slli", "srli", "srai"]
+SHW_OPS = ["slliw", "srliw", "sraiw"]
+U_OPS = ["lui", "auipc"]
+B_OPS = ["beq", "bne", "blt", "bge", "bltu", "bgeu"]
+EDGE_IMM = [0, 1, -1, 2047, -2048, 0x555, -0x556]
+EDGE_SH = [0, 1, 31, 32, 33, 63]
+EDGE_SHW = [0, 1, 15, 16, 30, 31]
+EDGE_U = [0, 1, 0x7FFFF, 0x80000, 0xFFFFF]
+LOOP_REG = 31
+MAX_K = 4
+# memory bases (see the header): never a destination
+SANDBOX = 0x10000
+BASES = {27: SANDBOX + 0x800, 9: SANDBOX + 0x400, 2: SANDBOX, 26: 0x200000}
+FREE_REGS = [r for r in range(1, 32) if r not in BASES and r != LOOP_REG]
+LOADS = [("lb", 1), ("lbu", 1), ("lh", 2), ("lhu", 2), ("lw", 4), ("lwu", 4), ("ld", 8)]
+STORES = [("sb", 1), ("sh", 2), ("sw", 4), ("sd", 8)]
+FENCES = ["fence", "fence rw, rw", "fence r, r", "fence w, w", "fence iorw, iorw"]
+
+# CSRs safe to write in M-mode without changing control flow or enabling
+# anything: scratch/trap CSRs, interrupt enables (mstatus.MIE stays 0) and
+# delegation (never applies to M-mode traps).
+CSR_RW = [0x340, 0x341, 0x342, 0x343, 0x304, 0x302, 0x303]
+# read with write-suppressed forms only: mstatus/mtvec/mip are writable
+# but must not change, the rest are read-only; never cycle/time, whose
+# values depend on timing (instret, 0xC02, is Zicntr's: QV_ZICNTR_EN)
+CSR_RO = [0x300, 0x301, 0x305, 0x344, 0xF11, 0xF12, 0xF13, 0xF14, 0xF15, 0xB02, 0xC02]
+# illegal in M-mode outside debug mode: debug and trigger CSRs at all,
+# read-only CSRs when actually written
+CSR_DEBUG = [0x7B0, 0x7B1, 0x7A0, 0x7A4]
+CSR_READONLY = [0xF14, 0xC02, 0xC00]
+# reserved compressed encodings c_expand.sv flags illegal; each is
+# followed by a C.NOP so the trap source stays 4 bytes long
+C_RESERVED = [0x0008, 0x6101, 0x2001, 0x4002, 0x6002, 0x8002, 0x8000, 0x2000]
+HANDLER = [                      # .text.handlers at 0x8000 (mtvec, direct)
+    "csrr x29, mcause",
+    "csrr x28, mtval",
+    "csrr x30, mepc",
+    "addi x30, x30, 4",          # every trap source here is 4 bytes long
+    "csrw mepc, x30",
+    "mret",
+]
+
+
+def imm12(rng):
+    return rng.choice(EDGE_IMM) if rng.random() < 0.25 else rng.randint(-2048, 2047)
+
+
+def shamt(rng, edges, top):
+    return rng.choice(edges) if rng.random() < 0.25 else rng.randint(0, top)
+
+
+def imm20(rng):
+    return rng.choice(EDGE_U) if rng.random() < 0.25 else rng.randint(0, 0xFFFFF)
+
+
+def seed_reg(rng, r):
+    kind = rng.choice(["zero", "small", "m1", "min", "max", "rand", "rand", "rand"])
+    if kind == "zero":
+        return [f"addi x{r}, x0, 0"]
+    if kind == "small":
+        return [f"addi x{r}, x0, {imm12(rng)}"]
+    if kind == "m1":
+        return [f"addi x{r}, x0, -1"]
+    if kind == "min":
+        return [f"addi x{r}, x0, 1", f"slli x{r}, x{r}, 63"]
+    if kind == "max":
+        return [f"addi x{r}, x0, -1", f"srli x{r}, x{r}, 1"]
+    out = [f"addi x{r}, x0, {imm12(rng)}"]
+    for _ in range(5):
+        out += [f"slli x{r}, x{r}, 12", f"xori x{r}, x{r}, {rng.randint(0, 2047)}"]
+    return out
+
+
+class Gen:
+    def __init__(self, rng, dep_bias, div=True, amo=True):
+        self.rng = rng
+        self.dep_bias = dep_bias
+        self.div = div
+        self.amo = amo
+        self.seg_divs = 0
+        self.recent = []
+        self.nlabel = 0
+
+    def src(self):
+        if self.recent and self.rng.random() < self.dep_bias:
+            return self.rng.choice(self.recent[-3:])
+        return self.rng.randint(0, 31)
+
+    def dst(self):
+        rd = 0 if self.rng.random() < 0.05 else self.rng.choice(FREE_REGS)
+        self.recent.append(rd)
+        return rd
+
+    def mem(self, room):
+        """A load or store. Returns (slots, traps): one slot, or (when room
+        allows) three -- andi; add; access -- entered only at the first."""
+        rng = self.rng
+        store = rng.random() < 0.4
+        op, size = rng.choice(STORES if store else LOADS)
+        reg = self.src() if store else self.dst()
+        norvc = lambda t: f".option push\n    .option norvc\n    {t}\n    .option pop"
+        r = rng.random()
+        if r < 0.20 and room >= 3:
+            # t = (src & mask) + 0x10800 is in [0x10800, 0x10FFF]; off in
+            # [-2048, 0] keeps the access inside the sandbox. Mask 0x7FF
+            # leaves wider accesses misaligned at random.
+            t = rng.choice(FREE_REGS)
+            mis = size > 1 and rng.random() < 0.3
+            off = -rng.randint(0, 2048 // size) * size
+            acc = f"{op} x{reg}, {off}(x{t})"
+            self.recent.append(t)
+            return [f"andi x{t}, x{self.src()}, {0x7FF if mis or size == 1 else 0x7F8}",
+                    f"add x{t}, x{t}, x27",
+                    norvc(acc) if mis else acc], int(mis)
+        if r < 0.30:
+            # misaligned (sandbox) or bus error (x26); 4 bytes for mepc + 4
+            if size > 1 and rng.random() < 0.6:
+                base, off = 27, rng.randint(-256, 255) * size + rng.randint(1, size - 1)
+            else:
+                base, off = 26, imm12(rng)
+            return [norvc(f"{op} x{reg}, {off}(x{base})")], 1
+        if r < 0.60:
+            # x9 or sp with offsets in the C.LW/C.LD/C.SW/C.SD or C.*SP
+            # range; for x9, registers in x8-x15 make them compressible
+            base = rng.choice([9, 2])
+            if rng.random() < 0.5:           # the widths with a C form
+                op, size = rng.choice([("sw", 4), ("sd", 8)] if store else [("lw", 4), ("ld", 8)])
+            limit = (124 if size <= 4 else 248) if base == 9 else (252 if size <= 4 else 504)
+            off = rng.randint(0, limit // size) * size
+            if base == 9 and rng.random() < 0.6:
+                reg = rng.choice([8, 9, 10, 11, 12, 13, 14, 15] if store else [8, 10, 11, 12, 13, 14, 15])
+                if not store:
+                    self.recent.append(reg)
+            return [f"{op} x{reg}, {off}(x{base})"], 0
+        off = rng.randint(-2048 // size, 2047 // size) * size
+        return [f"{op} x{reg}, {off}(x27)"], 0
+
+    def alu(self):
+        rng = self.rng
+        cls = rng.random()
+        if cls < 0.5:
+            if self.div and rng.random() < 0.12:
+                self.seg_divs += 1
+                return f"{rng.choice(DIV_OPS)} x{self.dst()}, x{self.src()}, x{self.src()}"
+            return f"{rng.choice(R_OPS)} x{self.dst()}, x{self.src()}, x{self.src()}"
+        if cls < 0.75:
+            return f"{rng.choice(I_OPS)} x{self.dst()}, x{self.src()}, {imm12(rng)}"
+        if cls < 0.85:
+            return f"{rng.choice(SH_OPS)} x{self.dst()}, x{self.src()}, {shamt(rng, EDGE_SH, 63)}"
+        if cls < 0.95:
+            return f"{rng.choice(SHW_OPS)} x{self.dst()}, x{self.src()}, {shamt(rng, EDGE_SHW, 31)}"
+        return f"{rng.choice(U_OPS)} x{self.dst()}, {imm20(rng)}"
+
+    def system(self):
+        """A CSR access or a system instruction. Returns (text, traps)."""
+        rng = self.rng
+        r = rng.random()
+        if r < 0.55:
+            csr = rng.choice(CSR_RW)
+            op = rng.choice(["csrrw", "csrrs", "csrrc", "csrrwi", "csrrsi", "csrrci"])
+            if op.endswith("i"):
+                src = 0 if rng.random() < 0.3 else rng.randint(0, 31)
+            else:
+                src = "x0" if rng.random() < 0.3 else f"x{self.src()}"
+            return f"{op} x{self.dst()}, {csr:#x}, {src}", False
+        if r < 0.80:
+            csr = rng.choice(CSR_RO)
+            op = rng.choice(["csrrs x{rd}, {csr:#x}, x0", "csrrc x{rd}, {csr:#x}, x0",
+                             "csrrsi x{rd}, {csr:#x}, 0", "csrrci x{rd}, {csr:#x}, 0"])
+            return op.format(rd=self.dst(), csr=csr), False
+        if r < 0.85:
+            return f"csrrs x{self.dst()}, {rng.choice(CSR_DEBUG):#x}, x0", True
+        if r < 0.90:
+            return f"csrrw x{self.dst()}, {rng.choice(CSR_READONLY):#x}, x{self.src()}", True
+        if r < 0.93:
+            return rng.choice(FENCES), False
+        if r < 0.95:
+            return "fence.i", False
+        return rng.choice([
+            ("ecall", True),
+            (".4byte 0x00100073", True),                    # EBREAK, never C.EBREAK
+            (".4byte 0", True),
+            (f".2byte {rng.choice(C_RESERVED):#06x}\n    .2byte 0x0001", True),
+            ("wfi", False),
+        ])
+
+    def atomic(self):
+        """An atomic: one AMO, or an LR/SC sequence, or a faulting form.
+        Entered only at the first slot. Returns (slots, traps); traps counts
+        the faults the group can take (each is a 4-byte instruction)."""
+        rng = self.rng
+        w = rng.random() < 0.5
+        sfx = "w" if w else "d"
+        size = 4 if w else 8
+        aq = rng.choice(["", "", "", ".aq", ".rl", ".aqrl"])
+        ta, tb = rng.sample(FREE_REGS, 2)
+        off = rng.randint(-2048 // size, 2047 // size) * size
+        rs2 = lambda: "x0" if rng.random() < 0.1 else f"x{self.src()}"
+        rd = lambda: f"x{self.dst()}"
+
+        def amo(t):
+            return f"{rng.choice(AMO_OPS)}.{sfx}{aq} {rd()}, {rs2()}, (x{t})"
+
+        def lr(t):
+            return f"lr.{sfx}{aq} {rd()}, (x{t})"
+
+        def sc(t):
+            return f"sc.{sfx}{aq} {rd()}, {rs2()}, (x{t})"
+
+        def setaddr(t, o, base=27):
+            return f"addi x{t}, x{base}, {o}"
+
+        self.recent += [ta]
+        kind = rng.choices(
+            ["amo", "pair_ok", "pair_store", "pair_other", "sc_alone", "lr_only", "misaligned", "bus_error", "lr_fault_sc",
+             "pair_twice", "pair_amo", "pair_sc_other"],
+            [30, 14, 7, 5, 5, 4, 8, 6, 4, 6, 6, 5])[0]
+        if kind == "amo":
+            return [setaddr(ta, off), amo(ta)], 0
+        if kind == "pair_ok":
+            mid = [self.alu()] if rng.random() < 0.5 else []
+            return [setaddr(ta, off), lr(ta)] + mid + [sc(ta)], 0
+        if kind == "pair_store":
+            st = f"{'sw' if w else 'sd'} x{self.src()}, 0(x{ta})"
+            return [setaddr(ta, off), lr(ta), st, sc(ta)], 0
+        if kind == "pair_twice":                      # the first SC uses the reservation up
+            return [setaddr(ta, off), lr(ta), sc(ta), sc(ta)], 0
+        if kind == "pair_amo":                        # an AMO to the same address breaks it
+            return [setaddr(ta, off), lr(ta), amo(ta), sc(ta)], 0
+        if kind == "pair_sc_other":                   # an SC elsewhere fails, but still clears it
+            off2 = off + 8 if off + 8 <= 2040 else off - 8
+            return [setaddr(ta, off), setaddr(tb, off2), lr(ta), sc(tb), sc(ta)], 0
+        if kind == "pair_other":
+            off2 = off + 8 if off + 8 <= 2040 else off - 8
+            return [setaddr(ta, off), setaddr(tb, off2), lr(ta), sc(tb)], 0
+        if kind == "sc_alone":
+            return [setaddr(ta, off), sc(ta)], 0
+        if kind == "lr_only":
+            return [setaddr(ta, off), lr(ta)], 0
+        if kind == "misaligned":
+            mis = off + rng.randint(1, size - 1) if off + size - 1 <= 2047 else off - rng.randint(1, size - 1)
+            return [setaddr(ta, mis), rng.choice([amo, lr, sc])(ta)], 1
+        if kind == "bus_error":
+            bad = rng.choice([amo, lr, sc])
+            line = bad(ta)
+            return [setaddr(ta, off, 26), line], 0 if line.startswith("sc") else 1
+        # an LR that faults leaves no reservation: the SC after it must fail
+        return [setaddr(ta, off, 26), lr(ta), sc(ta)], 1
+
+    def edge_div(self):
+        """A divide on operands at one of the spec's special cases. Entered
+        only at the first slot. Returns the slots."""
+        rng = self.rng
+        ta, tb = rng.sample(FREE_REGS, 2)
+        op = rng.choice(DIV_OPS)
+        rd = self.dst()
+        kind = rng.choice(["min_m1", "min32_m1", "by_zero", "by_one", "m1_by_m1", "small_neg"])
+        if kind == "min_m1":                 # INT64_MIN / -1
+            pre = [f"addi x{ta}, x0, 1", f"slli x{ta}, x{ta}, 63", f"addi x{tb}, x0, -1"]
+        elif kind == "min32_m1":             # INT32_MIN (as a W operand) / -1
+            pre = [f"lui x{ta}, 0x80000", f"addi x{tb}, x0, -1"]
+        elif kind == "by_zero":
+            pre = [f"addi x{ta}, x0, {imm12(rng)}", f"addi x{tb}, x0, 0"]
+        elif kind == "by_one":
+            pre = [f"addi x{ta}, x0, {imm12(rng)}", f"addi x{tb}, x0, 1"]
+        elif kind == "m1_by_m1":
+            pre = [f"addi x{ta}, x0, -1", f"addi x{tb}, x0, -1"]
+        else:                                # a small negative over a small positive: rounding toward zero
+            pre = [f"addi x{ta}, x0, {-rng.randint(1, 2047)}", f"addi x{tb}, x0, {rng.randint(1, 9)}"]
+        self.recent += [ta, tb]
+        self.seg_divs += 1
+        return pre + [f"{op} x{rd}, x{ta}, x{tb}"]
+
+    def div_shadow(self, i):
+        """A load, then an always-taken branch on it, then 1-2 divides it
+        skips. Items for slots i.., with the branch aimed past the divides;
+        returns (items, slots used)."""
+        rng = self.rng
+        t = rng.choice(FREE_REGS)
+        nd = rng.randint(1, 2)
+        off = rng.randint(-2048 // 8, 2047 // 8) * 8
+        items = [f"ld x{t}, {off}(x27)",
+                 ("br", "beq", t, t, i + 2 + nd)]
+        for _ in range(nd):
+            items.append(f"{rng.choice(DIV_OPS)} x{self.dst()}, x{self.src()}, x{self.src()}")
+        self.recent.append(t)
+        self.seg_divs += nd
+        return items, 2 + nd
+
+    def branch_srcs(self):
+        a = self.src()
+        b = a if self.rng.random() < 0.2 else self.src()   # equal operands: BEQ/BGE/BGEU taken
+        return a, b
+
+    def segment(self, n):
+        """n slots of code: strings, or ('br'|'jal'|'jalr', ..., target_slot)
+        tuples whose target slot is a later slot of this segment, n meaning
+        the segment end."""
+        rng = self.rng
+        items, forbidden = [], set()
+        self.seg_traps = 0
+        self.seg_divs = 0
+        i = 0
+        while i < n:
+            r = rng.random()
+            if r < 0.08:
+                text, traps = self.system()
+                items.append(text); i += 1
+                self.seg_traps += traps
+            elif r < 0.15:
+                a, b = self.branch_srcs()
+                items.append(("br", rng.choice(B_OPS), a, b, None)); i += 1
+            elif r < 0.20:
+                items.append(("jal", self.dst(), None)); i += 1
+            elif r < 0.40:
+                slots, traps = self.mem(n - i)
+                forbidden.update(range(i + 1, i + len(slots)))
+                items += slots; i += len(slots)
+                self.seg_traps += traps
+            elif r < 0.45 and i + 2 < n:
+                # auipc %pcrel_hi(T) [; addi %pcrel_lo] ; jalr -- the odd
+                # form jumps to T+1, which JALR's bit-0 clear turns into T.
+                # Nothing may land after the auipc, whose base it needs.
+                base = rng.choice(FREE_REGS)
+                odd = rng.random() < 0.3
+                auipc = i
+                items.append(("auipc", base))
+                if odd:
+                    items.append(("addi_lo", base, auipc))
+                    forbidden.add(i + 1)
+                forbidden.add(i + 1 + odd)
+                items.append(("jalr", self.dst(), base, odd, auipc, None))
+                i += 2 + odd
+                self.recent.append(base)
+            elif self.amo and r < 0.48 and i + 6 < n:
+                slots, traps = self.atomic()
+                forbidden.update(range(i + 1, i + len(slots)))
+                items += slots; i += len(slots)
+                self.seg_traps += traps
+            elif self.div and r < 0.50 and i + 4 < n:
+                slots = self.edge_div()
+                forbidden.update(range(i + 1, i + len(slots)))
+                items += slots; i += len(slots)
+            elif self.div and r < 0.53 and i + 5 < n:
+                slots, used = self.div_shadow(i)
+                forbidden.update(range(i + 1, i + used))
+                items += slots; i += used
+            else:
+                items.append(self.alu()); i += 1
+        # resolve targets now that every slot exists
+        out = []
+        for slot, it in enumerate(items):
+            if isinstance(it, tuple) and it[0] in ("br", "jal", "jalr") and it[-1] is not None:
+                pass                          # target fixed by the construct that emitted it
+            elif isinstance(it, tuple) and it[0] in ("br", "jal", "jalr"):
+                cands = [t for t in range(slot + 1, min(slot + 8, n) + 1) if t not in forbidden]
+                t = rng.choice(cands) if cands else n
+                it = it[:-1] + (t,)
+            out.append(it)
+        return out
+
+
+def render(items, base_slot, labels):
+    """Turn a segment's items into asm lines; labels maps absolute slot -> name."""
+    lab = lambda s: labels.setdefault(s, f"L{s}")
+    # each auipc needs its jalr's target
+    jalr_tgt = {it[4]: it[-1] for it in items if isinstance(it, tuple) and it[0] == "jalr"}
+    lines = []
+    for k, it in enumerate(items):
+        slot = base_slot + k
+        if isinstance(it, str):
+            lines.append((slot, it))
+            continue
+        kind = it[0]
+        if kind == "auipc":
+            lines.append((slot, f"auipc x{it[1]}, %pcrel_hi({lab(base_slot + jalr_tgt[k])})"))
+        elif kind == "addi_lo":
+            lines.append((slot, f"addi x{it[1]}, x{it[1]}, %pcrel_lo({lab(base_slot + it[2])})"))
+        elif kind == "br":
+            lines.append((slot, f"{it[1]} x{it[2]}, x{it[3]}, {lab(base_slot + it[-1])}"))
+        elif kind == "jal":
+            lines.append((slot, f"jal x{it[1]}, {lab(base_slot + it[-1])}"))
+        else:  # jalr
+            _, rd, base, odd, auipc, _ = it
+            off = "1" if odd else f"%pcrel_lo({lab(base_slot + auipc)})"
+            lines.append((slot, f"jalr x{rd}, {off}(x{base})"))
+    return lines
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--seed", type=int, required=True)
+    ap.add_argument("--len", type=int, default=400, help="approximate body length")
+    ap.add_argument("--dep-bias", type=float, default=0.6)
+    ap.add_argument("--no-div", action="store_true", help="no DIV/DIVU/REM/REMU (or W forms)")
+    ap.add_argument("--no-amo", action="store_true", help="no A extension")
+    ap.add_argument("-o", "--out", required=True)
+    a = ap.parse_args()
+    rng = random.Random(a.seed)
+    g = Gen(rng, a.dep_bias, div=not a.no_div, amo=not a.no_amo)
+
+    lines = [(0, "lui x30, 8"), (1, "csrw mtvec, x30")]     # (slot, text); handler at 0x8000
+    for r in range(1, 32):
+        for t in seed_reg(rng, r):
+            lines.append((len(lines), t))
+    for r, v in BASES.items():
+        lines.append((len(lines), f"lui x{r}, {(v + 0x800) >> 12:#x}"))
+        if v & 0xFFF:
+            lines.append((len(lines), f"addi x{r}, x{r}, {(v & 0xFFF) - ((v & 0x800) << 1)}"))
+    labels = {}
+    dyn = len(lines)
+    ndiv = 0
+    body_start = len(lines)
+
+    while len(lines) - body_start < a.len:
+        base = len(lines)
+        if rng.random() < 0.3:
+            k = rng.randint(1, MAX_K)
+            body_n = rng.randint(3, 10)
+            # slots: 0 = li, 1..body_n = body, body_n+1 = addi, body_n+2 = bne
+            lines.append((base, f"addi x{LOOP_REG}, x0, {k}"))
+            body = g.segment(body_n)
+            lines += render(body, base + 1, labels)
+            labels.setdefault(base + 1, f"L{base + 1}")
+            lines.append((base + 1 + body_n, f"addi x{LOOP_REG}, x{LOOP_REG}, -1"))
+            lines.append((base + 2 + body_n, f"bne x{LOOP_REG}, x0, L{base + 1}"))
+            dyn += 1 + k * (body_n + 2 + g.seg_traps * len(HANDLER))
+            ndiv += k * g.seg_divs
+        else:
+            n = rng.randint(4, 16)
+            seg = g.segment(n)
+            lines += render(seg, base, labels)
+            dyn += n + g.seg_traps * len(HANDLER)
+            ndiv += g.seg_divs
+
+    count = len(lines)
+    if 4 * count > 0x8000:
+        raise SystemExit("program overflows .text.entry (0x8000 bytes)")
+
+    with open(a.out, "w") as f:
+        f.write(f"# gen_alu.py --seed {a.seed} --len {a.len} --dep-bias {a.dep_bias}\n")
+        f.write(".section .text.entry\n.globl _start\n_start:\n")
+        for slot, text in lines:
+            if slot in labels:
+                f.write(f"{labels[slot]}:\n")
+            f.write(f"    {text}\n")
+        if count in labels:
+            f.write(f"{labels[count]}:\n")
+        f.write(".globl end_of_test\nend_of_test:\n")
+        f.write(".section .text.handlers\ntrap_handler:\n")
+        for text in HANDLER:
+            f.write(f"    {text}\n")
+        f.write(".section .data.sandbox\n")
+        for _ in range(512):
+            f.write(f"    .dword {rng.getrandbits(64):#018x}\n")
+    print(count, dyn, ndiv)
+
+
+if __name__ == "__main__":
+    main()

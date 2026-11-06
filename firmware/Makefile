@@ -56,6 +56,14 @@ CFLAGS_C  = -march=rv64imac -mabi=lp64 -mno-relax -ffreestanding -nostdlib -O0 -
 #   self-documenting reason PRIV_ASFLAGS is.
 INTERRUPT_ASFLAGS = -march=rv64i_zicsr -mabi=lp64 -mno-relax
 
+# uart_plic_meip_test.s/uart_plic_seip_test.s (PMP+PLIC plan Milestone 6)
+#   use real CSR mnemonics (csrw), mret/sret, and plain lw/sw against the
+#   PLIC/UART MMIO windows -- same rv64i_zicsr requirement as
+#   INTERRUPT_ASFLAGS/PRIV_ASFLAGS above (sret needs no separate
+#   "privileged" march string either), kept as its own named variable for
+#   the same self-documenting reason.
+UART_PLIC_ASFLAGS = -march=rv64i_zicsr -mabi=lp64 -mno-relax
+
 all:
 	riscv64-unknown-elf-as $(ASFLAGS) crt0.s -o crt0.o
 	riscv64-unknown-elf-gcc $(CFLAGS) -c hello.c -o hello.o
@@ -184,3 +192,77 @@ interrupt_test:
 	riscv64-unknown-elf-ld -T link.ld -o interrupt_test.elf crt0.o interrupt_test.o
 	riscv64-unknown-elf-objdump -d interrupt_test.elf
 	riscv64-unknown-elf-objcopy -O verilog -j .text -j .rodata -j .data --verilog-data-width=8 interrupt_test.elf interrupt_test.hex
+
+# PMP+PLIC plan Milestone 6 (final): real-toolchain-encoded end-to-end
+#   UART-RX-through-PLIC tests, linked against the SAME crt0.o/link.ld as
+#   every other target above -- rebuilt here rather than assumed to
+#   already exist, so each target works standalone. Produce DISTINCT
+#   uart_plic_meip_test.hex/uart_plic_seip_test.hex -- every other
+#   target's hex output is untouched either way.
+uart_plic_meip_test:
+	riscv64-unknown-elf-as $(ASFLAGS) crt0.s -o crt0.o
+	riscv64-unknown-elf-as $(UART_PLIC_ASFLAGS) uart_plic_meip_test.s -o uart_plic_meip_test.o
+	riscv64-unknown-elf-ld -T link.ld -o uart_plic_meip_test.elf crt0.o uart_plic_meip_test.o
+	riscv64-unknown-elf-objdump -d uart_plic_meip_test.elf
+	riscv64-unknown-elf-objcopy -O verilog -j .text -j .rodata -j .data --verilog-data-width=8 uart_plic_meip_test.elf uart_plic_meip_test.hex
+
+uart_plic_seip_test:
+	riscv64-unknown-elf-as $(ASFLAGS) crt0.s -o crt0.o
+	riscv64-unknown-elf-as $(UART_PLIC_ASFLAGS) uart_plic_seip_test.s -o uart_plic_seip_test.o
+	riscv64-unknown-elf-ld -T link.ld -o uart_plic_seip_test.elf crt0.o uart_plic_seip_test.o
+	riscv64-unknown-elf-objdump -d uart_plic_seip_test.elf
+	riscv64-unknown-elf-objcopy -O verilog -j .text -j .rodata -j .data --verilog-data-width=8 uart_plic_seip_test.elf uart_plic_seip_test.hex
+
+# First real-toolchain-compiled Sv39 test (firmware/sv39_real_test.s),
+#   linked against the SAME crt0.o/link.ld as every other target above --
+#   rebuilt here (plain -march=rv64i, unchanged) rather than assumed to
+#   already exist, so this target works standalone. Produces a DISTINCT
+#   sv39_real_test.hex -- every other target's hex output is untouched
+#   either way. sv39_real_test.s itself confirmed empirically (see that
+#   file's own header) that mret/csrw/csrr/sfence.vma and the CSR name
+#   "satp" all assemble under the SAME rv64i_zicsr requirement every
+#   other CSR/privileged-mode target above already uses -- no separate
+#   "Sv39" march string is needed by this toolchain, so this reuses that
+#   same value rather than introducing a new one.
+SV39_ASFLAGS = -march=rv64i_zicsr -mabi=lp64 -mno-relax
+sv39_real_test:
+	riscv64-unknown-elf-as $(ASFLAGS) crt0.s -o crt0.o
+	riscv64-unknown-elf-as $(SV39_ASFLAGS) sv39_real_test.s -o sv39_real_test.o
+	riscv64-unknown-elf-ld -T link.ld -o sv39_real_test.elf crt0.o sv39_real_test.o
+	riscv64-unknown-elf-objdump -d sv39_real_test.elf
+	riscv64-unknown-elf-objcopy -O verilog -j .text -j .rodata -j .data --verilog-data-width=8 sv39_real_test.elf sv39_real_test.hex
+
+# Milestone 10b (EBREAK/JTAG staged plan, full-stack OpenOCD integration):
+#   the acceptance-test program (firmware/m10_debug_test.s), linked
+#   against the SAME crt0.o/link.ld as every other target above --
+#   rebuilt here (plain -march=rv64i, unchanged) rather than assumed to
+#   already exist, so this target works standalone. Produces a DISTINCT
+#   m10_debug_test.hex -- every other target's hex output is untouched
+#   either way. verification/openocd/sim_soc_top.sv reads THIS hex file
+#   directly (not crt0.hex).
+m10_debug_test:
+	riscv64-unknown-elf-as $(ASFLAGS) crt0.s -o crt0.o
+	riscv64-unknown-elf-as $(ASFLAGS) m10_debug_test.s -o m10_debug_test.o
+	riscv64-unknown-elf-ld -T link.ld -o m10_debug_test.elf crt0.o m10_debug_test.o
+	riscv64-unknown-elf-objdump -d m10_debug_test.elf
+	riscv64-unknown-elf-objcopy -O verilog -j .text -j .rodata -j .data --verilog-data-width=8 m10_debug_test.elf m10_debug_test.hex
+
+# Errata E4-E10 (E4-E9 from the ACT refresh that declared PMP and Sv39): firmware/pmp_spec_test.s checks the
+#   PMP CSR existence rule, xtvec MODE (WARL and vectored interrupts), PMP partial overlap, per-parcel fetch PMP,
+#   the bits mcounteren/scounteren and menvcfg/senvcfg keep, and that a CSR that does not exist is illegal;
+#   testbench/core_pmp_spec_tb.sv runs it on either core.
+pmp_spec_test:
+	riscv64-unknown-elf-as $(ASFLAGS) crt0.s -o crt0.o
+	riscv64-unknown-elf-as $(PRIV_ASFLAGS) pmp_spec_test.s -o pmp_spec_test.o
+	riscv64-unknown-elf-ld -T link.ld -o pmp_spec_test.elf crt0.o pmp_spec_test.o
+	riscv64-unknown-elf-objdump -d pmp_spec_test.elf
+	riscv64-unknown-elf-objcopy -O verilog -j .text -j .rodata -j .data --verilog-data-width=8 pmp_spec_test.elf pmp_spec_test.hex
+
+# Zicntr: firmware/zicntr_test.s reads cycle, time and instret at every privilege under the counter enables;
+#   testbench/core_zicntr_tb.sv runs it on either core.
+zicntr_test:
+	riscv64-unknown-elf-as $(ASFLAGS) crt0.s -o crt0.o
+	riscv64-unknown-elf-as -march=rv64i_zicsr_zicntr -mabi=lp64 -mno-relax zicntr_test.s -o zicntr_test.o
+	riscv64-unknown-elf-ld -T link.ld -o zicntr_test.elf crt0.o zicntr_test.o
+	riscv64-unknown-elf-objdump -d zicntr_test.elf
+	riscv64-unknown-elf-objcopy -O verilog -j .text -j .rodata -j .data --verilog-data-width=8 zicntr_test.elf zicntr_test.hex

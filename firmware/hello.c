@@ -11,7 +11,7 @@
  * tells it this address has an observable side effect.
  */
 
-#define UART_TX_DATA ((volatile unsigned char *)0x8000)
+#define UART_TX_DATA ((volatile unsigned char *)0x04008000)
 
 static const char msg[] = "Hello, World!\n";
 

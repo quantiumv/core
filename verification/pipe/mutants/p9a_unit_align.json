@@ -1,0 +1,38 @@
+{
+ "dut": "design/pipe/qv_align.sv",
+ "tb": "design/pipe/qv_align_fifo_tb.sv",
+ "files": [
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_align.sv",
+  "design/pipe/qv_fifo.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench",
+  "-Pqv_align_fifo_tb.ONE_OK=1"
+ ],
+ "cwd": "design",
+ "timeout": 900,
+ "mutants": [
+  {
+   "name": "slot 1 pushed without room for two",
+   "old": "cur != 3'd4 && i_push_ready) begin",
+   "new": "cur != 3'd4) begin"
+  },
+  {
+   "name": "goes with no room for even one",
+   "old": "wire        room1 = i_push_ready || (ONE_OK && i_push_ready1);",
+   "new": "wire        room1 = i_push_ready || ONE_OK;"
+  },
+  {
+   "name": "never takes the one-slot room",
+   "old": "wire        room1 = i_push_ready || (ONE_OK && i_push_ready1);",
+   "new": "wire        room1 = i_push_ready;"
+  }
+ ]
+}

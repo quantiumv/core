@@ -1,4 +1,11 @@
-# riscv-formal integration (started 2026-08-11, 56/56 isa=rv64i checks PASS; AMO 18/18 and C-extension 30/30 now added, M-extension in progress, first CSR trace ports added, rvfi_intr wired for real 2026-08-19)
+# riscv-formal integration (started 2026-08-11; full 91-check `isa=rv64ic` suite 91/91 PASS as of 2026-09-17, including all CSR trace-port checks — see "Full 91-check sweep" below for the current, authoritative status; M-extension deferred by explicit owner direction, see "Next steps")
+
+> **After P8 this directory is the reference configuration.** It proves the frozen FSM,
+> `verification/reference/ref_core.sv` (`sync_core.sh ref`; the module is built as `core` with `-D QV_REF_AS_CORE`),
+> and its `wrapper.sv`, AMO patch and `isa_rv64ia.txt` are shared with the pipelined core's configs
+> (`../quantiumv_pipe/`, which holds the core's results). The log below was written while the FSM was
+> `design/core.sv`: where it says `core.sv`, read `ref_core.sv` (see `verification/reference/README.md` on line
+> citations).
 
 Formal verification via [riscv-formal](https://github.com/YosysHQ/riscv-formal)
 (Yosys + SymbiYosys + a SAT/BMC solver), proving ISA correctness exhaustively
@@ -815,20 +822,96 @@ None of these rebuilt artifacts (`~/sby-src`, `~/yosys-slang-src`,
 for the full, updated build recipe for a future environment hitting the
 same nix-store garbage-collection issue.
 
+## Full 91-check sweep (2026-09-17) — 91/91 PASS, first fully clean run since the 2026-08-12 56/56 baseline
+
+**PMP (shipped 2026-09-08) and Sv39 (shipped 2026-09-08, same day) broke
+this suite** — confirmed via `insn_add_ch0` regressing on branch
+`pipelining`, well after this doc's own 56/56 claim above. Root-causing
+and re-closing the gap took most of a session and landed in two commits,
+`31f60fe` and `d93606f`. Every single finding below was a formal-scoping
+gap (the generic riscv-formal spec models, or riscv-formal's own generic
+checkers, having no way to know about a real core.sv/environment
+behavior) or a genuine bug in riscv-formal's own upstream code — **zero
+new RTL bugs in `design/`** across the whole investigation, a first for
+this integration's history (every earlier milestone above found at least
+one real RTL bug).
+
+**`insn_lb`/`insn_sb`/`insn_c_andi`/`insn_c_lw`** (commit `31f60fe`):
+1. Fetch- and mem-side bus/page faults (`wb_err_i`, Sv39 PTW faults) are
+   free/solver-chosen and the generic spec models have zero concept of
+   either — broadened an existing fetch-only mcause/medeleg exclusion to
+   cover mem-side causes 5/7/13/15 too (checks.cfg `[assume]`, no RTL
+   change).
+2. Sv39 translation: `rvfi_mem_addr` reports the post-translation
+   *physical* address (this project's own established convention) while
+   every generic spec model expects the untranslated *virtual* address —
+   with `satp` free, the solver can map to an unrelated physical address.
+   Fixed by pinning `satp` to Bare mode for `insn_*`/`c_*` checks (new
+   `rvfi_csr_satp_*` port).
+
+**`csrc_any_mepc`/`mcause`/`sepc`/`scause`** (commit `31f60fe`), five
+rounds:
+1. WARL bit-0 masking (`mepc`/`sepc`) via riscv-formal's own supported
+   `any_mask="..."` test-string suffix — no patch needed, already
+   existed upstream (closes "Next steps" item 4 from the original version
+   of this section).
+2. A genuine XLEN=64 portability bug in riscv-formal's own
+   `rvfi_csrc_any_check.sv` (a hardcoded 32-bit wire silently truncating
+   a 64-bit register-sourced CSR write) — one-line upstream patch.
+3. Async interrupts silently overwriting these CSRs mid-window, on
+   cycles with no retiring instruction at all — two narrower RVFI-level
+   exclusions (`!rvfi_trap`, then also `!rvfi_intr`) each proved
+   incomplete before landing on the real fix: a new `rvfi_any_trap_taken`
+   port exposing the actual gating condition (`trap_taken ||
+   interrupt_taken`) directly, excluded unconditionally every cycle.
+4. `sepc`/`scause` were entirely missing from riscv-formal's own CSR
+   database (`rvfi_macros.py`) — looked exactly like an S-mode-privilege
+   bug at first (a real dead end this investigation spent real effort
+   ruling out) before the actual cause (two missing `Csr(...)` entries)
+   was found.
+
+**`reg_ch0`** (commit `d93606f`): found via a 12-check due-diligence
+regression sample after `31f60fe`. `rvfi_rs2_rdata` is a bare
+combinational tap of the same physical wire the Debug Module's Access
+Register GPR port shares with normal decode, gated on `dm_access_active`
+— safe in real hardware (`dm.sv` gates on the hart being genuinely
+halted) but `dm.sv` isn't in this formal loop at all, and
+`i_debug_halt_req` is modeled fully free every cycle. Fixed the same way
+as `rvfi_any_trap_taken`: a new `rvfi_any_debug_entry` port ORing every
+path that can flip `dm_access_active` mid-instruction, excluded
+unconditionally for `reg_ch0`'s own window.
+
+**Four one-time hand-patches to riscv-formal's own shared checkout are
+now required** (`~/riscv-formal/checks/rvfi_testbench.sv` ×3 additions,
+`rvfi_csrc_any_check.sv`, `rvfi_macros.py`+regenerated `rvfi_macros.vh`)
+— none are part of this git repo; see "Environment setup" below for the
+exact diffs, and re-apply them on every fresh `riscv-formal` clone.
+
+**Full sweep, all 91 generated `isa=rv64ic` checks, confirmed 91/91
+PASS** (not a sample — every check, independently re-verified via a
+fresh `grep -l 'DONE (PASS' */logfile.txt` scan with zero `FAIL`/`ERROR`
+matches). Getting a trustworthy sweep needed two orchestration fixes,
+worth remembering: launching all 10 checks in a batch at the exact same
+instant reproducibly killed 9/10 within ~3 seconds of `yosys` starting
+(fixed with a 4-second stagger between launches); `bitwuzla` crashed
+with a genuine `BrokenPipeError` on multiple checks, not just the
+already-known `reg_ch0` — the sweep used `boolector` uniformly for all
+91 checks rather than chase which ones `bitwuzla` could handle (this
+doc's own `[options]` default `solver` stays `bitwuzla`, unchanged — the
+sweep's solver choice was a script-local override, not a project
+convention change).
+
 ## Next steps, roughly in order
 
 1. Resolve or accept-as-documented-limitation the M-extension
-   solver-hardness issues above.
+   solver-hardness issues above (still open, untouched by the 2026-09-17
+   sweep — `checks.cfg`'s `isa` is `rv64ic`, no `m`).
 2. Build the final combined `isa_rv64imac.txt` manifest (union of AMO + M +
    C instruction names) and confirm the full set passes together once all
    three stages are individually clean — catches anything stage-isolation
    might have missed.
-3. `mstatus` RVFI trace port — deferred from this round, see its own note
-   above.
-4. If ever revisited: try the `_mask="..."` suffix for `mepc`/`sepc` (fixes
-   the WARL self-consistency failure specifically) — `mcause`/`scause`
-   would still need a fundamentally different check (or a custom one) to
-   handle trap-driven writes, which `_mask` alone doesn't address.
+3. `mstatus` RVFI trace port — still deferred, untouched by the
+   2026-09-17 sweep.
 
 ## Environment setup (WSL)
 
@@ -973,6 +1056,132 @@ the riscv-formal checkout) rather than this repo's own absolute path — the
 `cp` line above is what makes that resolve; re-run it after editing any of
 the 7 listed design files, same as the existing `wrapper.sv`/`checks.cfg`
 copy step.
+
+**One-time hand-patch to riscv-formal's own `checks/rvfi_testbench.sv`**
+(required for every `insn_*`/`c_*` check on this core, added when the
+`satp`-pinning fix landed — see `checks.cfg`'s own `[assume !insn_.*_ch0
+!c_.*_ch0]` comment for `rvfi_csr_satp_*` for the full why). `satp` is not
+a CSR name riscv-formal's own macro generator recognizes at all (confirmed
+by grepping `~/riscv-formal/checks/rvfi_macros.vh` directly: zero
+`` `rvformal_csr_satp_*`` matches, unlike mepc/mcause/medeleg/pmpcfg0/
+pmpaddr0 which all have the full macro family) — same gap `scause` has
+(see the fault-exclusion comment). `` `RVFI_WIRES``/`` `RVFI_CONN`` can
+therefore never declare or wire an `rvfi_csr_satp_*` signal, no matter
+what's `` `define``d in `checks.cfg`, and unlike pmpcfg0/pmpaddr0/medeleg
+this can't be worked around inside `wrapper.sv` alone (already done there
+— see this dir's `wrapper.sv`) because `assume_stmts.vh` is `` `include``d
+into `rvfi_testbench.sv`'s own scope, which can only reference a BARE,
+non-hierarchical wire declared in that same scope — a hierarchical
+reference reaching into `wrapper` (a module the classic `read -sv`
+frontend never itself parsed — see `checks.cfg`'s own PMP comment for the
+full "why" on that constraint) silently resolves to a disconnected
+implicit wire and makes the check PREUNSAT, not a real counterexample.
+This file lives in the shared riscv-formal checkout, not this project's
+own git repo, so the patch below has to be reapplied after every fresh
+`git clone`:
+```sh
+# add a bare wire declaration right after `RVFI_WIRES (inside module
+# rvfi_testbench's own body), and an extra named port connection on the
+# `rvfi_wrapper wrapper (...)` instantiation immediately below it, in
+# ~/riscv-formal/checks/rvfi_testbench.sv:
+#
+#   `RVFI_WIRES
+#   `RVFI_BUS_WIRES
+#   wire [63:0] rvfi_csr_satp_rdata;             // <-- add this line
+#
+#   rvfi_wrapper wrapper (
+#       .clock (clock),
+#       .reset (reset),
+#       .rvfi_csr_satp_rdata(rvfi_csr_satp_rdata),   // <-- add this line
+#       `RVFI_CONN
+#       `RVFI_BUS_CONN
+#   );
+```
+Only `rdata` needs a testbench-scope wire (the only field `checks.cfg`'s
+assume ever reads) — `wrapper.sv`'s own `rvfi_csr_satp_rmask/wmask/wdata`
+ports are declared and driven for symmetry with the other hand-added CSR
+ports but are left unconnected on this instantiation, which is legal
+Verilog (an unconnected output port is simply left floating).
+
+**Third one-time hand-patch, same file, added when `csrc_any_mepc`'s own
+async-interrupt/trap gap (see `checks.cfg`'s own comment) needed a bare,
+non-hierarchical `rvfi_any_trap_taken` signal for the same reason `satp`
+needed one above** — one more wire, one more port connection, same file,
+applied on top of the satp patch (not instead of it). A THIRD addition to
+this same file/patch followed when `reg_ch0`'s own debug-halt/Access-
+Register gap (see `checks.cfg`'s own comment) needed a `rvfi_any_debug_
+entry` signal the identical way — cumulative state, all three additions
+shown together:
+```sh
+#   `RVFI_WIRES
+#   `RVFI_BUS_WIRES
+#   wire [63:0] rvfi_csr_satp_rdata;
+#   wire rvfi_any_trap_taken;                     // <-- add this line
+#   wire rvfi_any_debug_entry;                    // <-- add this line
+#
+#   rvfi_wrapper wrapper (
+#       .clock (clock),
+#       .reset (reset),
+#       .rvfi_csr_satp_rdata(rvfi_csr_satp_rdata),
+#       .rvfi_any_trap_taken(rvfi_any_trap_taken),   // <-- add this line
+#       .rvfi_any_debug_entry(rvfi_any_debug_entry), // <-- add this line
+#       `RVFI_CONN
+#       `RVFI_BUS_CONN
+#   );
+```
+
+**Fourth one-time hand-patch, a DIFFERENT shared file this time:
+`~/riscv-formal/checks/rvfi_macros.py`** — needed for `csrc_any_sepc`/
+`csrc_any_scause` specifically (see `checks.cfg`'s own comment on those
+two). Unlike `satp`/`rvfi_any_trap_taken` above (names riscv-formal's
+macro generator has never heard of, worked around by hand-declaring a
+bare wire), `sepc`/`scause` hit a DIFFERENT gap: they're genuinely
+missing from `rvfi_macros.py`'s own `csrs` list (the single source of
+truth for the WHOLE `` `rvformal_csr_<name>_*`` macro family AND the
+`csr_mindex_<name>` localparam the generic `csrc_any` checker's own
+internal `rvfi.csr_<name>_*` struct-field references need) -- confirmed
+via `grep -c 'rvformal_csr_sepc\|rvformal_csr_mepc' rvfi_macros.vh`
+returning `0`/`26`: `mepc` has the full generated macro family, `sepc`
+has none at all, not even a partial/broken one. This is a straightforward
+missing-entry gap, not a design flaw in the generator -- riscv-formal's
+own CSR database apparently never had S-mode trap CSRs added. Fix: add
+two entries to the `csrs` list (around line 228-229, right after the
+existing `mepc`/`mcause` entries, same `Csr("xlen", name, mindex, sindex,
+uindex)` shape -- `sepc`/`scause` are genuinely separate CSRs at their
+own distinct addresses, not S-mode ALIASES of mepc/mcause, so they use
+`mindex` for their own address with `sindex=None`, exactly mirroring how
+mepc/mcause themselves are registered, not the `sindex` field, which is
+for a single logical CSR reachable at different addresses per privilege
+level):
+```python
+# in ~/riscv-formal/checks/rvfi_macros.py's csrs list, add:
+    Csr("xlen", "sepc",              0x141,  None,  None),
+    Csr("xlen", "scause",            0x142,  None,  None),
+```
+then regenerate the checked-in `rvfi_macros.vh` (a plain generated
+artifact -- its own header says `// Generated by rvfi_macros.py`):
+```sh
+cd ~/riscv-formal/checks && python3 rvfi_macros.py > rvfi_macros.vh
+```
+Confirmed purely additive (0 removed/changed lines, only new `sepc`/
+`scause` macro-family blocks) via `diff` against the pre-patch file
+before applying -- safe to regenerate in place, no risk to any
+already-passing check that doesn't reference these two CSRs.
+
+**Second one-time hand-patch, to riscv-formal's own `checks/
+rvfi_csrc_any_check.sv`** (required for `csrc_any_mepc`/`csrc_any_sepc` on
+any XLEN=64 core — see `checks.cfg`'s own `[csrs]` comment for the full
+counterexample and why). This one is a genuine upstream bug, not a
+core-specific workaround: the checker's own `csr_rsval` wire is
+hand-declared `wire [31:0]` instead of `` `RISCV_FORMAL_XLEN-1:0`` like
+every other data-width wire in the same file, silently truncating a
+64-bit register-sourced CSR write before it's ever compared. One-line fix:
+```sh
+# in ~/riscv-formal/checks/rvfi_csrc_any_check.sv, change:
+#   wire [31:0] csr_rsval = rvfi.insn[14] ? rvfi.insn[19:15] : rvfi.rs1_rdata;
+# to:
+#   wire [`RISCV_FORMAL_XLEN-1:0] csr_rsval = rvfi.insn[14] ? rvfi.insn[19:15] : rvfi.rs1_rdata;
+```
 `reg_ch0` specifically needs `boolector`, not the `bitwuzla` every other
 check uses (see its own "Resolved finding" above for why this isn't just
 a `checks.cfg` setting) — swap solvers on its own generated `.sby` file:

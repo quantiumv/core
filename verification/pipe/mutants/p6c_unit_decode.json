@@ -1,0 +1,43 @@
+{
+ "dut": "design/pipe/qv_decode.sv",
+ "tb": "design/pipe/qv_decode_tb.sv",
+ "files": [
+  "design/decoder.sv",
+  "design/alu.sv",
+  "design/c_expand.sv",
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_pmp.sv",
+  "design/pipe/qv_fp_dec.sv",
+  "design/pipe/qv_csr_exists.sv",
+  "design/pipe/qv_decode.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench"
+ ],
+ "cwd": "design",
+ "timeout": 900,
+ "mutants": [
+  {
+   "name": "a Program Buffer run is PMP-checked",
+   "old": "!i_pb_active && ",
+   "new": "",
+   "count": 2
+  },
+  {
+   "name": "the PMP is off for everyone",
+   "old": "wire pmp_fault = lo_denied || hi_denied;",
+   "new": "wire pmp_fault = 1'b0;"
+  },
+  {
+   "name": "only the first parcel is exempt in a run",
+   "old": "wire hi_denied = !i_pb_active && !i_iq_data.rvc && !exec_ok_hi;",
+   "new": "wire hi_denied = !i_iq_data.rvc && !exec_ok_hi;"
+  }
+ ]
+}

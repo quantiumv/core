@@ -1,0 +1,30 @@
+# qv_exu_fpu properties (fpu_props.sv), with the datapath abstracted (QV_FORMAL_FPU_ABSTRACT): k-induction proof,
+# deep BMC, covers. Run with run.sh, or: sby -f fpu.sby
+[tasks]
+prove
+bmc
+cover
+
+[options]
+prove: mode prove
+prove: depth 12
+bmc: mode bmc
+bmc: depth 30
+cover: mode cover
+cover: depth 24
+
+[engines]
+smtbmc boolector
+
+[script]
+plugin -i /home/potato/yosys-slang-src/build/slang.so
+read_slang --single-unit -D QV_FORMAL_FPU_ABSTRACT qv_pkg.sv qv_fpu_round.sv qv_fpu_pipe.sv qv_fpu_divsqrt.sv qv_exu_fpu.sv fpu_props.sv --top fpu_props
+prep -top fpu_props
+
+[files]
+../../../design/pipe/qv_pkg.sv
+../../../design/pipe/qv_fpu_round.sv
+../../../design/pipe/qv_fpu_pipe.sv
+../../../design/pipe/qv_fpu_divsqrt.sv
+../../../design/pipe/qv_exu_fpu.sv
+fpu_props.sv

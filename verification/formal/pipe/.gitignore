@@ -1,0 +1,12 @@
+# SymbiYosys work directories
+*_prove/
+*_bmc/
+*_cover/
+/fetch/
+/lsu/
+/dbg/
+/ptw/
+/sb/
+*_prove_*/
+*_bmc_*/
+/fpu/

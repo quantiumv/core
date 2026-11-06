@@ -69,18 +69,35 @@ module core_c_ext_tb;
     `include "halt_wait.sv"
 
     /*
-     * White-box check: S_FETCH_HI (state 3'd4, the C extension's new
-     * 5th state_t value) must genuinely be visited while fetching the
-     * deliberately-crossing instruction at pc=0x16 -- mirrors
-     * core_a_ext_tb.sv's own hand-rolled S_AMO_WRITE-visit check.
+     * White-box check: the high halfword's own fetch phase must
+     * genuinely be visited while fetching the deliberately-crossing
+     * instruction at pc=0x16 -- mirrors core_a_ext_tb.sv's own
+     * hand-rolled S_AMO_WRITE-visit check.
+     *
+     * Pipelining P2 step 2: this is untranslated code (no Sv39), so the
+     * high half is now fetched via fstate's own F_REQ_HI (2'd2 --
+     * fstate_t's 3rd value: F_IDLE=0, F_REQ_LO=1, F_REQ_HI=2, F_VALID=3),
+     * NOT state's old S_FETCH_HI (3'd4) -- state itself no longer visits
+     * S_FETCH_HI at all on this fast path (see design/core.sv's own
+     * fstate declaration comment). Checking fstate_now (core.sv's own
+     * combinational "effective this-cycle phase" wire, not the fstate
+     * register) would also work but isn't needed here: unlike
+     * wb_master_drive/state's own S_FETCH arm, this check just needs to
+     * see F_REQ_HI on ANY cycle of the (possibly multi-cycle) high-half
+     * wait, which the plain registered fstate already does correctly.
      */
+`ifndef QV_REF_AS_CORE
+    // the pipelined core has no fstate: qv_align assembles a crossing instruction from two fetched dwords, and the
+    // instruction's own result (x12 below) is what shows that the high half was fetched.
+`else
     localparam logic [63:0] CROSSING_INSTR_PC = 64'h16;
     int fetch_hi_visit_count = 0;
     always @(posedge clk) begin
-        if (dut.core0.pc == CROSSING_INSTR_PC && dut.core0.state == 3'd4) begin
+        if (dut.core0.pc == CROSSING_INSTR_PC && dut.core0.fstate == 2'd2) begin
             fetch_hi_visit_count <= fetch_hi_visit_count + 1;
         end
     end
+`endif
 
     logic [15:0] hwq[$];
 
@@ -180,8 +197,12 @@ module core_c_ext_tb;
         check("C.SW/C.LW round trip (x15)", dut.core0.regfile0.gp_registers[15], 64'd78);
         check("C.BEQZ not taken -- fell through (x16)", dut.core0.regfile0.gp_registers[16], 64'd1);
         check("EBREAK trap fired (c.ebreak)", {63'b0, halted}, 64'd1);
+`ifndef QV_REF_AS_CORE
+        // (no fstate to look at: the x12 check above covers the crossing instruction)
+`else
         check("S_FETCH_HI genuinely visited for the crossing instruction",
             {63'b0, (fetch_hi_visit_count > 0)}, 64'd1);
+`endif
 
         $display("");
         $display("core_c_ext_tb: %0d passed, %0d failed", pass_count, fail_count);

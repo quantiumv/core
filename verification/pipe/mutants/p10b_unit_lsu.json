@@ -1,0 +1,52 @@
+{
+ "dut": "design/pipe/qv_lsu.sv",
+ "tb": "design/pipe/qv_lsu_xl_tb.sv",
+ "files": [
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_pmp.sv",
+  "design/pipe/qv_pte.sv",
+  "design/pipe/qv_tlb.sv",
+  "design/pipe/qv_ptw.sv",
+  "design/pipe/qv_xlate.sv",
+  "design/pipe/qv_lsu.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench",
+  "-Pqv_lsu_xl_tb.PROBE=1"
+ ],
+ "cwd": "design",
+ "timeout": 1800,
+ "mutants": [
+  {
+   "name": "the lookup before the head may walk",
+   "old": "    assign o_xl_nowalk = !x_req;",
+   "new": "    assign o_xl_nowalk = 1'b0;"
+  },
+  {
+   "name": "an SC is looked up before the head",
+   "old": "!at_head && !i_flush && xl_on && !misaligned_q && !sc_q && !xlated_q;",
+   "new": "!at_head && !i_flush && xl_on && !misaligned_q && !xlated_q;"
+  },
+  {
+   "name": "looked up with translation off",
+   "old": "!at_head && !i_flush && xl_on && !misaligned_q && !sc_q && !xlated_q;",
+   "new": "!at_head && !i_flush && !misaligned_q && !sc_q && !xlated_q;"
+  },
+  {
+   "name": "no lookup before the head",
+   "old": "wire x_probe = PROBE && (state_q == S_WAIT_HEAD)",
+   "new": "wire x_probe = 1'b0 && (state_q == S_WAIT_HEAD)"
+  },
+  {
+   "name": "the lookup before the head takes a faulting hit",
+   "old": "    wire x_ok    = (x_req || x_probe) && i_xl_done && !i_xl_pf && !i_xl_af;",
+   "new": "    wire x_ok    = (x_req || x_probe) && i_xl_done;"
+  }
+ ]
+}

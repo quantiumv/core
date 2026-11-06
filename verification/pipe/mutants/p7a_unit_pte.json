@@ -1,0 +1,255 @@
+{
+ "dut": "design/pipe/qv_pte.sv",
+ "tb": "design/pipe/qv_pte_tb.sv",
+ "files": [
+  "design/pipe/qv_pte.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench"
+ ],
+ "cwd": "design",
+ "timeout": 900,
+ "mutants": [
+  {
+   "name": "a leaf is R only (an execute-only PTE is a pointer)",
+   "old": "wire leaf           = r || x;",
+   "new": "wire leaf           = r;"
+  },
+  {
+   "name": "a leaf is R, W or X",
+   "old": "wire leaf           = r || x;",
+   "new": "wire leaf           = r || w || x;"
+  },
+  {
+   "name": "V is not checked",
+   "old": "wire malformed      = !v || (!r && w)",
+   "new": "wire malformed      = 1'b0 || (!r && w)"
+  },
+  {
+   "name": "W without R is not malformed",
+   "old": "|| (!r && w) || (|rsvd)",
+   "new": "|| (|rsvd)"
+  },
+  {
+   "name": "reserved bits are not checked",
+   "old": "|| (|rsvd) || (|pbmt)",
+   "new": "|| (|pbmt)"
+  },
+  {
+   "name": "PBMT is not checked",
+   "old": "|| (|pbmt) || n;",
+   "new": "|| n;"
+  },
+  {
+   "name": "N is not checked",
+   "old": "|| (|pbmt) || n;",
+   "new": "|| (|pbmt);"
+  },
+  {
+   "name": "a gigapage is checked for ppn1 only",
+   "old": "((i_level == 2'd2) ? (|{ppn1, ppn0}) : (|ppn0))",
+   "new": "((i_level == 2'd2) ? (|ppn1) : (|ppn0))"
+  },
+  {
+   "name": "a gigapage is checked for ppn0 only",
+   "old": "((i_level == 2'd2) ? (|{ppn1, ppn0}) : (|ppn0))",
+   "new": "((i_level == 2'd2) ? (|ppn0) : (|ppn0))"
+  },
+  {
+   "name": "a megapage is checked for ppn1",
+   "old": "((i_level == 2'd2) ? (|{ppn1, ppn0}) : (|ppn0))",
+   "new": "((i_level == 2'd2) ? (|{ppn1, ppn0}) : (|ppn1))"
+  },
+  {
+   "name": "a 4 KB leaf is checked for alignment",
+   "old": "wire misaligned     = leaf && (i_level != 2'd0) &&",
+   "new": "wire misaligned     = leaf &&"
+  },
+  {
+   "name": "a pointer at level 0 is fine",
+   "old": "wire no_more_levels = !leaf && (i_level == 2'd0);",
+   "new": "wire no_more_levels = 1'b0;"
+  },
+  {
+   "name": "a pointer at level 1 has no level left",
+   "old": "wire no_more_levels = !leaf && (i_level == 2'd0);",
+   "new": "wire no_more_levels = !leaf && (i_level != 2'd2);"
+  },
+  {
+   "name": "canonical check against bit 39",
+   "old": "i_va[63:39] != {25{i_va[38]}}",
+   "new": "i_va[63:39] != {25{i_va[39]}}"
+  },
+  {
+   "name": "canonical check missing",
+   "old": "wire noncanonical   = i_va[63:39] != {25{i_va[38]}};",
+   "new": "wire noncanonical   = 1'b0;"
+  },
+  {
+   "name": "canonical check skips bit 39",
+   "old": "wire noncanonical   = i_va[63:39] != {25{i_va[38]}};",
+   "new": "wire noncanonical   = i_va[63:40] != {24{i_va[38]}};"
+  },
+  {
+   "name": "SUM does not let S read a U page",
+   "old": "!(priv_u || (priv_s && i_sum))",
+   "new": "!(priv_u)"
+  },
+  {
+   "name": "S may always load a U page",
+   "old": "!(priv_u || (priv_s && i_sum))",
+   "new": "!(priv_u || priv_s)"
+  },
+  {
+   "name": "SUM lets S fetch from a U page",
+   "old": ": priv_s)",
+   "new": ": (priv_s && !i_sum))"
+  },
+  {
+   "name": "a non-U page is fine for U",
+   "old": ": priv_u);",
+   "new": ": 1'b0);"
+  },
+  {
+   "name": "a U page faults U-mode fetches",
+   "old": "(i_is_mem ? !(priv_u || (priv_s && i_sum)) : priv_s)",
+   "new": "(i_is_mem ? !(priv_u || (priv_s && i_sum)) : (priv_s || priv_u))"
+  },
+  {
+   "name": "privilege 2 counts as S",
+   "old": "wire priv_s    = (i_priv == 2'b01);",
+   "new": "wire priv_s    = (i_priv == 2'b01) || (i_priv == 2'b10);"
+  },
+  {
+   "name": "privilege 2 counts as U",
+   "old": "wire priv_u    = (i_priv == 2'b00);",
+   "new": "wire priv_u    = (i_priv == 2'b00) || (i_priv == 2'b10);"
+  },
+  {
+   "name": "M counts as U",
+   "old": "wire priv_u    = (i_priv == 2'b00);",
+   "new": "wire priv_u    = (i_priv == 2'b00) || (i_priv == 2'b11);"
+  },
+  {
+   "name": "MXR is ignored",
+   "old": "wire read_ok   = r || (i_mxr && x);",
+   "new": "wire read_ok   = r;"
+  },
+  {
+   "name": "MXR lets a store write an execute-only page",
+   "old": "(i_wr ? !w : !read_ok)",
+   "new": "(i_wr ? !(w || (i_mxr && x)) : !read_ok)"
+  },
+  {
+   "name": "a store needs only R",
+   "old": "(i_wr ? !w : !read_ok)",
+   "new": "(i_wr ? !read_ok : !read_ok)"
+  },
+  {
+   "name": "a load needs W",
+   "old": "(i_wr ? !w : !read_ok)",
+   "new": "(i_wr ? !w : !w)"
+  },
+  {
+   "name": "a fetch needs R, not X",
+   "old": "!read_ok) : !x);",
+   "new": "!read_ok) : !r);"
+  },
+  {
+   "name": "a fetch needs R and X",
+   "old": "!read_ok) : !x);",
+   "new": "!read_ok) : !(x && r));"
+  },
+  {
+   "name": "A is not required",
+   "old": "wire ad_fault  = leaf && (!a ||",
+   "new": "wire ad_fault  = leaf && (1'b0 ||"
+  },
+  {
+   "name": "A is not required for a fetch",
+   "old": "wire ad_fault  = leaf && (!a ||",
+   "new": "wire ad_fault  = leaf && ((!a && i_is_mem) ||"
+  },
+  {
+   "name": "D is required for loads as well",
+   "old": "(i_is_mem && i_wr && !d)",
+   "new": "(i_is_mem && !d)"
+  },
+  {
+   "name": "D is not required for stores",
+   "old": "(i_is_mem && i_wr && !d)",
+   "new": "(1'b0)"
+  },
+  {
+   "name": "D is required for a fetch",
+   "old": "(i_is_mem && i_wr && !d)",
+   "new": "(i_wr && !d)"
+  },
+  {
+   "name": "ppn1 always from the PTE",
+   "old": "(i_level <= 2'd1) ? ppn1 : vpn1",
+   "new": "ppn1"
+  },
+  {
+   "name": "ppn1 always from the VA",
+   "old": "(i_level <= 2'd1) ? ppn1 : vpn1",
+   "new": "vpn1"
+  },
+  {
+   "name": "ppn1 comes from the VA at level 1",
+   "old": "(i_level <= 2'd1) ? ppn1 : vpn1",
+   "new": "(i_level == 2'd0) ? ppn1 : vpn1"
+  },
+  {
+   "name": "ppn0 always from the VA",
+   "old": "(i_level == 2'd0) ? ppn0 : vpn0",
+   "new": "vpn0"
+  },
+  {
+   "name": "ppn0 always from the PTE",
+   "old": "(i_level == 2'd0) ? ppn0 : vpn0",
+   "new": "ppn0"
+  },
+  {
+   "name": "ppn2 from the VA",
+   "old": "assign o_ppn      = {ppn2,",
+   "new": "assign o_ppn      = {i_va[63:38],"
+  },
+  {
+   "name": "the next table loses its top bits",
+   "old": "assign o_next_ppn = i_pte[53:10];",
+   "new": "assign o_next_ppn = {18'b0, i_pte[35:10]};"
+  },
+  {
+   "name": "the next table is the PTE's ppn shifted",
+   "old": "assign o_next_ppn = i_pte[53:10];",
+   "new": "assign o_next_ppn = i_pte[54:11];"
+  },
+  {
+   "name": "the fault output ignores the permission checks",
+   "old": "|| no_more_levels || u_viol || perm_viol || ad_fault;",
+   "new": "|| no_more_levels || u_viol || ad_fault;"
+  },
+  {
+   "name": "the fault output ignores the U checks",
+   "old": "|| no_more_levels || u_viol || perm_viol || ad_fault;",
+   "new": "|| no_more_levels || perm_viol || ad_fault;"
+  },
+  {
+   "name": "the fault output ignores the A/D checks",
+   "old": "|| no_more_levels || u_viol || perm_viol || ad_fault;",
+   "new": "|| no_more_levels || u_viol || perm_viol;"
+  },
+  {
+   "name": "the fault output ignores misalignment",
+   "old": "assign o_fault = noncanonical || malformed || misaligned ||",
+   "new": "assign o_fault = noncanonical || malformed ||"
+  }
+ ]
+}

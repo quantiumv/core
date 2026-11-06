@@ -15,9 +15,10 @@
  * real core, via core_wb4_sram_harness -- wb4_sram.sv is the one real
  * Wishbone-B4-compliant slave in this project (ack/err mutually
  * exclusive, an out-of-range access sets err_o with ack_o held 0), so
- * this harness is what actually exercises wb_done/wb_ok's necessity --
- * see design/core.sv's own header comment on wb_done/wb_ok for why bare
- * wb_ack_i is ambiguous through the CACHED path but not through this one.
+ * this harness is what actually exercises wb_fetch_done/wb_fetch_ok and
+ * wb_mem_done/wb_mem_ok's necessity -- see design/core.sv's own comment
+ * on those wires for why bare wb_fetch_ack_i/wb_mem_ack_i are ambiguous
+ * through the CACHED path but not through this one.
  *
  * NUM_WORDS=64 (a power of 2, matching wb4_sram.sv's own $clog2-based
  * addr_valid check exactly -- a non-power-of-2 size leaves a gap between
@@ -74,10 +75,17 @@ module core_bus_fault_trap_tb;
      * anywhere in the whole run is equally damning.
      */
     logic amo_write_entered;
+`ifndef QV_REF_AS_CORE
+    // the pipelined core has no S_AMO_WRITE: an AMO's write is a locked bus write
+    initial amo_write_entered = 1'b0;
+    always @(posedge clk)
+        if (dut.core0.wb_mem_cyc_o && dut.core0.wb_mem_we_o && dut.core0.wb_mem_lock_o) amo_write_entered <= 1'b1;
+`else
     state_reached_monitor amo_write_monitor (
         .clk(clk), .i_state(dut.core0.state),
         .i_state_target(dut.core0.S_AMO_WRITE), .o_reached(amo_write_entered)
     );
+`endif
 
     /* Register allocation (all distinct, checked independently at the end):
      *   x2-x7:   resume markers, one per test (A-F), prove clean resume.
@@ -277,7 +285,12 @@ module core_bus_fault_trap_tb;
         @(posedge clk); #1;
         rst = 0;
 
+`ifndef QV_REF_AS_CORE
+        // ~330 cycles on the pipelined core: every CSR access serializes
+        wait_halted_or_timeout(`TIMEOUT_CYCLES_LARGE, "EBREAK trap never fired");
+`else
         wait_halted_or_timeout(`TIMEOUT_CYCLES_SMALL, "EBREAK trap never fired");
+`endif
 
         // ---- Test A: instruction fetch fault ----
         check("A: mcause == 1 (instruction access fault)", dut.core0.regfile0.gp_registers[8], 64'd1);
@@ -286,8 +299,9 @@ module core_bus_fault_trap_tb;
 
         // ---- Test B: dword-crossing fetch-hi fault ----
         check("B: mcause == 1 (instruction access fault)", dut.core0.regfile0.gp_registers[10], 64'd1);
-        check("B: mtval == mepc == the crossing instruction's own address (not the failed S_FETCH_HI address)",
-            dut.core0.regfile0.gp_registers[11], 64'h1FE);
+        // errata E6: a fault in the instruction's second parcel reports that parcel's address (pc + 2), mepc the pc
+        check("B: mtval == the crossing instruction's second parcel (pc + 2, the failed second dword's start)",
+            dut.core0.regfile0.gp_registers[11], 64'h200);
         check("B: resumed cleanly", dut.core0.regfile0.gp_registers[3], 64'd222);
 
         // ---- Test C: plain load fault ----

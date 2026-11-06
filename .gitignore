@@ -58,6 +58,33 @@ dkms.conf
 #Iverilog Simulation Files
 *.vcd
 *a.out
+*.vvp
+
+# Python bytecode cache (verification/lockstep/gen/qvgen.py and friends)
+__pycache__/
+*.pyc
+
+# sail_diff.py's own scratch output (generated .s/.o/.elf/.hex/.vvp per
+# seed) -- regenerated on every run, never meant to be tracked.
+verification/lockstep/gen/_sail_diff_scratch/
+
+# run_lockstep.sh's own build/run output (compiled .vvp binaries, hex
+# images, per-entry result files, build/gen logs) -- regenerated on
+# every run, never meant to be tracked.
+verification/lockstep/.results/
+
+# run_perf.sh's own build/run output (compiled .vvp binaries, build
+# logs) -- regenerated on every run, never meant to be tracked.
+# baseline_ref.csv and baseline_pipe.csv are NOT here -- those are the actual P3.5 deliverable.
+verification/perf/.results/
+*.lst
+
+# run_rvfi_diff.sh's build/run output
+verification/pipe/.results/
 
 # Internal-only reference documentation (not for the public repo)
 docs/internal/
+
+# Ad hoc scratch/repro directories (debugging sessions, not meant to be
+# tracked -- e.g. .scratch_amo_repro/ from the AMO/SBA race investigation)
+.scratch_*/
