@@ -20,17 +20,17 @@
  "mutants": [
   {
    "name": "an SC is looked up",
-   "old": "    assign o_xl_req  = PRE_XL && i_xl_active && has_q && !xl_q[send_i] && !p_sc && !p_mis && !i_flush;",
-   "new": "    assign o_xl_req  = PRE_XL && i_xl_active && has_q && !xl_q[send_i] && !p_mis && !i_flush;"
+   "old": "    assign o_xl_req  = PRE_XL && i_xl_active && has_q && !xl_q[send_i] && !p_sc && !p_mis && !i_flush && p_va_ok;",
+   "new": "    assign o_xl_req  = PRE_XL && i_xl_active && has_q && !xl_q[send_i] && !p_mis && !i_flush && p_va_ok;"
   },
   {
    "name": "a misaligned op is looked up",
-   "old": "    assign o_xl_req  = PRE_XL && i_xl_active && has_q && !xl_q[send_i] && !p_sc && !p_mis && !i_flush;",
-   "new": "    assign o_xl_req  = PRE_XL && i_xl_active && has_q && !xl_q[send_i] && !p_sc && !i_flush;"
+   "old": "    assign o_xl_req  = PRE_XL && i_xl_active && has_q && !xl_q[send_i] && !p_sc && !p_mis && !i_flush && p_va_ok;",
+   "new": "    assign o_xl_req  = PRE_XL && i_xl_active && has_q && !xl_q[send_i] && !p_sc && !i_flush && p_va_ok;"
   },
   {
    "name": "never looked up",
-   "old": "    assign o_xl_req  = PRE_XL && i_xl_active && has_q && !xl_q[send_i] && !p_sc && !p_mis && !i_flush;",
+   "old": "    assign o_xl_req  = PRE_XL && i_xl_active && has_q && !xl_q[send_i] && !p_sc && !p_mis && !i_flush && p_va_ok;",
    "new": "    assign o_xl_req  = 1'b0;"
   },
   {

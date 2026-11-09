@@ -32,8 +32,8 @@
   },
   {
    "name": "a uop goes into a full station",
-   "old": "                  && (direct || (to_rs && rs_room));",
-   "new": "                  && (direct || to_rs);"
+   "old": "                  && (direct || to_lsq || (to_rs && rs_room));",
+   "new": "                  && (direct || to_lsq || to_rs);"
   },
   {
    "name": "a uop that could go straight on goes into the station and straight on",
