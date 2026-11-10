@@ -27,7 +27,7 @@
  "mutants": [
   {
    "name": "a uop goes straight to the ALU while the station takes the port",
-   "old": "                   :          !rs_sel_ab);",
+   "old": "                   :          (!rs_sel_ab || p1_ok0));",
    "new": "                   :          1'b1);"
   },
   {
@@ -72,8 +72,8 @@
   },
   {
    "name": "the station is not woken by the commit bus",
-   "old": ".i_wb(i_wb), .i_wbl(i_wbl), .i_wbd(i_wbd), .i_wbf(i_wbf), .i_wbc(i_wbc),",
-   "new": ".i_wb(i_wb), .i_wbl(i_wbl), .i_wbd(i_wbd), .i_wbf(i_wbf), .i_wbc('0),"
+   "old": ".i_wb(i_wb), .i_wbp(i_wbp), .i_wbl(i_wbl), .i_wbd(i_wbd), .i_wbf(i_wbf), .i_wbc(i_wbc),",
+   "new": ".i_wb(i_wb), .i_wbp(i_wbp), .i_wbl(i_wbl), .i_wbd(i_wbd), .i_wbf(i_wbf), .i_wbc('0),"
   },
   {
    "name": "the station is not flushed",

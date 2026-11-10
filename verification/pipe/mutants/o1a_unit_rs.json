@@ -19,64 +19,24 @@
  "timeout": 900,
  "mutants": [
   {
-   "name": "the ALU/BRU bus wakes nothing",
-   "old": "if (wb.valid && wb.tag == o.tag)        begin n.rdy = 1'b1; n.value = wb.value;  end\n                else if",
-   "new": "if (1'b0) begin end\n                else if"
-  },
-  {
-   "name": "the LSU bus wakes nothing",
-   "old": "else if (wbl.valid && wbl.tag == o.tag) begin n.rdy = 1'b1; n.value = wbl.value; end",
-   "new": ""
-  },
-  {
-   "name": "the divider's bus wakes nothing",
-   "old": "else if (wbd.valid && wbd.tag == o.tag) begin n.rdy = 1'b1; n.value = wbd.value; end",
-   "new": ""
-  },
-  {
-   "name": "the FPU's bus wakes nothing",
-   "old": "else if (wbf.valid && wbf.tag == o.tag) begin n.rdy = 1'b1; n.value = wbf.value; end",
-   "new": ""
-  },
-  {
-   "name": "the commit bus wakes nothing",
-   "old": "if (wbc.valid && wbc.tag == o.tag) begin\n                n.rdy = 1'b1; n.value = wbc.value;",
-   "new": "if (1'b0) begin\n                n.rdy = 1'b1; n.value = wbc.value;"
-  },
-  {
-   "name": "a late operand wakes on a unit's writeback",
-   "old": "end else if (!o.late) begin",
-   "new": "end else begin"
-  },
-  {
-   "name": "a late operand is taken off a same-cycle bypass",
-   "old": "return !o.late && BYPASS_EN && (",
-   "new": "return BYPASS_EN && ("
-  },
-  {
    "name": "no dispatch-cycle capture (operand a)",
-   "old": "x      = i_push_e;\n            x.a    = wake(x.a, i_wb, i_wbl, i_wbd, i_wbf, i_wbc);",
+   "old": "x      = i_push_e;\n            x.a    = qv_opnd_wake(x.a, i_wb, i_wbp, i_wbl, i_wbd, i_wbf, i_wbc);",
    "new": "x      = i_push_e;"
   },
   {
    "name": "no dispatch-cycle capture (operand c)",
-   "old": "x.c    = wake(x.c, i_wb, i_wbl, i_wbd, i_wbf, i_wbc);\n            n_e[j] = x;\n            n_v[j] = 1'b1;\n        end\n        // (O4)",
+   "old": "x.c    = qv_opnd_wake(x.c, i_wb, i_wbp, i_wbl, i_wbd, i_wbf, i_wbc);\n            n_e[j] = x;\n            n_v[j] = 1'b1;\n        end\n        // (O4)",
    "new": "n_e[j] = x;\n            n_v[j] = 1'b1;\n        end\n        // (O4)"
   },
   {
    "name": "a waiting entry's operand b never wakes",
-   "old": "x      = e_q[i];\n                x.a    = wake(x.a, i_wb, i_wbl, i_wbd, i_wbf, i_wbc);\n                x.b    = wake(x.b, i_wb, i_wbl, i_wbd, i_wbf, i_wbc);",
-   "new": "x      = e_q[i];\n                x.a    = wake(x.a, i_wb, i_wbl, i_wbd, i_wbf, i_wbc);"
+   "old": "x      = e_q[i];\n                x.a    = qv_opnd_wake(x.a, i_wb, i_wbp, i_wbl, i_wbd, i_wbf, i_wbc);\n                x.b    = qv_opnd_wake(x.b, i_wb, i_wbp, i_wbl, i_wbd, i_wbf, i_wbc);",
+   "new": "x      = e_q[i];\n                x.a    = qv_opnd_wake(x.a, i_wb, i_wbp, i_wbl, i_wbd, i_wbf, i_wbc);"
   },
   {
    "name": "ready ignores operand c",
-   "old": "&& (x.c.rdy || byp_hit(x.c, i_wb, i_wbl, i_wbf));",
+   "old": "&& (x.c.rdy || qv_opnd_byp(x.c, i_wb, i_wbp, i_wbl, i_wbf, BYPASS_EN, LSU_BYPASS));",
    "new": ";"
-  },
-  {
-   "name": "the same-cycle value is taken off the LSU bus first",
-   "old": "if (wb.valid && wb.tag == o.tag)   return wb.value;",
-   "new": "if (wbl.valid && wbl.tag == o.tag) return wbl.value;"
   },
   {
    "name": "the youngest entry goes first",

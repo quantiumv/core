@@ -1,0 +1,47 @@
+{
+ "dut": "design/pipe/qv_pkg.sv",
+ "tb": "design/pipe/qv_lsq_opw_tb.sv",
+ "files": [
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_lsq.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench",
+  "-Pqv_lsq_opw_tb.CYCLES=12000"
+ ],
+ "cwd": "design",
+ "timeout": 900,
+ "mutants": [
+  {
+   "name": "a late operand wakes on a unit's writeback",
+   "old": "end else if (!o.late) begin",
+   "new": "end else begin"
+  },
+  {
+   "name": "no same-cycle source off the LSU's writeback",
+   "old": "|| (lsu_bypass && wbl.valid && wbl.tag == o.tag));",
+   "new": ");"
+  },
+  {
+   "name": "the same-cycle value is taken off the LSU's writeback first",
+   "old": "if (wb.valid && wb.tag == o.tag)   return wb.value;",
+   "new": "if (wbl.valid && wbl.tag == o.tag) return wbl.value;"
+  },
+  {
+   "name": "the divider's writeback wakes nothing",
+   "old": "else if (wbd.valid && wbd.tag == o.tag) begin n.rdy = 1'b1; n.value = wbd.value; end",
+   "new": ""
+  },
+  {
+   "name": "the commit bus wakes nothing",
+   "old": "if (wbc.valid && wbc.tag == o.tag) begin\n                n.rdy = 1'b1; n.value = wbc.value;",
+   "new": "if (1'b0) begin\n                n.rdy = 1'b1; n.value = wbc.value;"
+  }
+ ]
+}

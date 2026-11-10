@@ -98,13 +98,13 @@
   },
   {
    "name": "slot 1 takes the port the station picked",
-   "old": ":           (!rs_sel_ab && !s0_ab));",
-   "new": ":           (!s0_ab));"
+   "old": "wire p0_ok1  = !rs_sel_ab && !s0_p0;",
+   "new": "wire p0_ok1  = !s0_p0;"
   },
   {
    "name": "slot 1 takes slot 0's port",
-   "old": ":           (!rs_sel_ab && !s0_ab));",
-   "new": ":           (!rs_sel_ab));"
+   "old": "wire p0_ok1  = !rs_sel_ab && !s0_p0;",
+   "new": "wire p0_ok1  = !rs_sel_ab;"
   },
   {
    "name": "a slot-1 memory op ignores the LSU's room",

@@ -1,0 +1,84 @@
+{
+ "dut": "design/pipe/qv_rs.sv",
+ "tb": "design/pipe/qv_rs_tb.sv",
+ "files": [
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_rs.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench",
+  "-Pqv_rs_tb.CYCLES=20000",
+  "-Pqv_rs_tb.PUSH2=1",
+  "-Pqv_rs_tb.ALU_PORTS=2"
+ ],
+ "cwd": "design",
+ "timeout": 900,
+ "mutants": [
+  {
+   "name": "port 1 takes a multiply",
+   "old": " && !qv_is_mul(eop[i])",
+   "new": ""
+  },
+  {
+   "name": "port 1 takes port 0's entry",
+   "old": " && !(ab_f && i == ab_i)",
+   "new": ""
+  },
+  {
+   "name": "port 1 takes a branch",
+   "old": "if (ready[i] && kind[i] == QV_RS_ALU && !qv_is_mul",
+   "new": "if (ready[i] && (kind[i] == QV_RS_ALU || kind[i] == QV_RS_BRU) && !qv_is_mul"
+  },
+  {
+   "name": "port 1 takes an entry that is not ready",
+   "old": "if (ready[i] && kind[i] == QV_RS_ALU && !qv_is_mul",
+   "new": "if (v_q[i] && kind[i] == QV_RS_ALU && !qv_is_mul"
+  },
+  {
+   "name": "port 1's entry stays",
+   "old": "\n                     || (o_sel_p1 && i == p1_i);",
+   "new": ";"
+  },
+  {
+   "name": "port 1 selects in a flush cycle",
+   "old": "o_sel_p1  = !i_flush && p1_f;",
+   "new": "o_sel_p1  = p1_f;"
+  },
+  {
+   "name": "port 1 does not see the op",
+   "old": "eop[i]   = x.op;",
+   "new": "eop[i]   = 5'b0;"
+  },
+  {
+   "name": "port 1 takes the youngest",
+   "old": "        if (ALU_PORTS > 1)\n            for (int i = DEPTH - 1; i >= 0; i--)",
+   "new": "        if (ALU_PORTS > 1)\n            for (int i = 0; i < DEPTH; i++)"
+  },
+  {
+   "name": "port 1's operands swapped",
+   "old": "o_alu1_req       = mk_req(x, va[i], vb[i]);",
+   "new": "o_alu1_req       = mk_req(x, vb[i], va[i]);"
+  },
+  {
+   "name": "port 1's request never valid",
+   "old": "o_alu1_req.valid = o_sel_p1;",
+   "new": "o_alu1_req.valid = 1'b0;"
+  },
+  {
+   "name": "a waiting entry ignores port 1's bus",
+   "old": "x.a    = qv_opnd_wake(x.a, i_wb, i_wbp, i_wbl, i_wbd, i_wbf, i_wbc);",
+   "new": "x.a    = qv_opnd_wake(x.a, i_wb, '0, i_wbl, i_wbd, i_wbf, i_wbc);"
+  },
+  {
+   "name": "ready ignores port 1's same-cycle result for operand b",
+   "old": "qv_opnd_byp(x.b, i_wb, i_wbp, i_wbl, i_wbf, BYPASS_EN, LSU_BYPASS)",
+   "new": "qv_opnd_byp(x.b, i_wb, '0, i_wbl, i_wbf, BYPASS_EN, LSU_BYPASS)"
+  }
+ ]
+}

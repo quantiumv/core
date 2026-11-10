@@ -1,0 +1,113 @@
+{
+ "dut": "design/pipe/qv_issue.sv",
+ "tb": "design/pipe/qv_dispatch2_tb.sv",
+ "files": [
+  "design/alu.sv",
+  "design/register_file.sv",
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_exu_alu.sv",
+  "design/pipe/qv_rob.sv",
+  "design/pipe/qv_rs.sv",
+  "design/pipe/qv_issue.sv",
+  "design/pipe/qv_commit.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench",
+  "-Pqv_dispatch2_tb.ALU_PORTS=2",
+  "-Pqv_dispatch2_tb.COMMIT_W=2",
+  "-Pqv_dispatch2_tb.CSR_LATE=1",
+  "-Pqv_dispatch2_tb.RS_DEPTH=4"
+ ],
+ "cwd": "design",
+ "timeout": 900,
+ "mutants": [
+  {
+   "name": "a multiply in slot 0 may take port 1",
+   "old": "wire plain0 = !to_bru && !to_lsu && !to_div && !to_fpu && !qv_is_mul(i_uop.alu_op);",
+   "new": "wire plain0 = !to_bru && !to_lsu && !to_div && !to_fpu;"
+  },
+  {
+   "name": "slot 0 takes port 1 under the station's pick",
+   "old": "wire p1_ok0 = (ALU_PORTS > 1) && plain0 && !rs_sel_p1;",
+   "new": "wire p1_ok0 = (ALU_PORTS > 1) && plain0;"
+  },
+  {
+   "name": "slot 0 on port 1 is not sent",
+   "old": "        o_alu1_req.valid = s0_p1;",
+   "new": "        o_alu1_req.valid = 1'b0;"
+  },
+  {
+   "name": "slot 0 on port 1 also drives port 0",
+   "old": "o_alu_req.valid = o_issue && direct && !to_bru && !to_lsu && !to_div && !to_fpu && !s0_p1;",
+   "new": "o_alu_req.valid = o_issue && direct && !to_bru && !to_lsu && !to_div && !to_fpu;",
+   "equivalent": true,
+   "note": "slot 0 goes to port 1 only while the station holds port 0 (s0_p1 = s0_ab && rs_sel_ab), and the station's request then overrides o_alu_req: slot 0 never reaches port 0 there"
+  },
+  {
+   "name": "slot 1 takes port 0 after slot 0",
+   "old": "wire p0_ok1  = !rs_sel_ab && !s0_p0;",
+   "new": "wire p0_ok1  = !rs_sel_ab;"
+  },
+  {
+   "name": "a multiply in slot 1 may take port 1",
+   "old": "wire p1_ok1  = (ALU_PORTS > 1) && plain1 &&",
+   "new": "wire p1_ok1  = (ALU_PORTS > 1) &&"
+  },
+  {
+   "name": "slot 1 takes port 1 after slot 0",
+   "old": "plain1 && !rs_sel_p1 && !s0_p1;",
+   "new": "plain1 && !rs_sel_p1;"
+  },
+  {
+   "name": "slot 1 takes port 1 under the station's pick",
+   "old": "plain1 && !rs_sel_p1 && !s0_p1;",
+   "new": "plain1 && !s0_p1;"
+  },
+  {
+   "name": "slot 1 on port 1 is not sent",
+   "old": "            o_alu1_req = req1; o_alu1_req.valid = 1'b1;",
+   "new": "            o_alu1_req.valid = o_alu1_req.valid;"
+  },
+  {
+   "name": "slot 1 on port 1 also drives port 0",
+   "old": "if (o_issue2 && direct1 && !to_bru1 && !to_lsu1 && !to_fpu1 && p0_ok1) begin",
+   "new": "if (o_issue2 && direct1 && !to_bru1 && !to_lsu1 && !to_fpu1) begin"
+  },
+  {
+   "name": "the station's port-1 pick is not sent",
+   "old": "        if (rs_sel_p1)  o_alu1_req = rs_alu1_req;\n",
+   "new": ""
+  },
+  {
+   "name": "slot 0 rs1: no bypass from port 1",
+   "old": "            else if (BYPASS_EN && i_wbp.valid && i_wbp.tag == p1_tag) opa = i_wbp.value;\n",
+   "new": ""
+  },
+  {
+   "name": "slot 0 rs2: no bypass from port 1",
+   "old": "            else if (BYPASS_EN && i_wbp.valid && i_wbp.tag == p2_tag) opb = i_wbp.value;\n",
+   "new": ""
+  },
+  {
+   "name": "slot 1 rs1: no bypass from port 1",
+   "old": "            else if (BYPASS_EN && i_wbp.valid && i_wbp.tag == q1_tag) opa1 = i_wbp.value;\n",
+   "new": ""
+  },
+  {
+   "name": "slot 1 rs2: no bypass from port 1",
+   "old": "            else if (BYPASS_EN && i_wbp.valid && i_wbp.tag == q2_tag) opb1 = i_wbp.value;\n",
+   "new": ""
+  },
+  {
+   "name": "the station does not hear port 1",
+   "old": ".i_wb(i_wb), .i_wbp(i_wbp), .i_wbl(i_wbl),",
+   "new": ".i_wb(i_wb), .i_wbp('0), .i_wbl(i_wbl),"
+  }
+ ]
+}

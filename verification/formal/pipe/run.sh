@@ -199,14 +199,15 @@ EOF
     lsq_mutant lsq_pop_any_tag        qv_lsq 's/ \&\& (i_pop_tag == tag_q\[head_i\])//'
     lsq_mutant lsq_bar_ignored        qv_lsq 's/assign o_early  = (cmpl_q != send_q) \&\& !bar_q\[cmpl_i\];/assign o_early  = (cmpl_q != send_q);/'
     lsq_mutant lsq_newest_first       qv_lsq 's/o_eng_req       = has_q ? send_e : i_req;/o_eng_req       = i_req.valid ? i_req : send_e;/'
-    # rs_mutant NAME SED-EXPR: the reservation station, at rs.sby's own BMC depth (the generic 24 is far too deep for it)
+    # rs_mutant NAME SED-EXPR [FILE]: the reservation station, at rs.sby's own BMC depth (the generic 24 is far too deep
+    # for it); FILE (default qv_rs) is the one mutated: qv_pkg for the waiting-operand rules (qv_opnd_*, O4d)
     rs_mutant() {
-        local name=$1 expr=$2
+        local name=$1 expr=$2 f=${3:-qv_rs}
         local d=$T/$name
         mkdir -p "$d"
-        cp "$REPO/design/pipe/qv_pkg.sv" "$HERE/rs_props.sv" "$d/"
-        sed "$expr" "$REPO/design/pipe/qv_rs.sv" > "$d/qv_rs.sv"
-        if cmp -s "$d/qv_rs.sv" "$REPO/design/pipe/qv_rs.sv"; then
+        cp "$REPO/design/pipe/qv_pkg.sv" "$REPO/design/pipe/qv_rs.sv" "$HERE/rs_props.sv" "$d/"
+        sed "$expr" "$REPO/design/pipe/$f.sv" > "$d/$f.sv"
+        if cmp -s "$d/$f.sv" "$REPO/design/pipe/$f.sv"; then
             printf '%-30s %s\n' "mutant $name" "sed changed nothing"; fail=1; return
         fi
         sed -e 's#^\.\./\.\./\.\./design/pipe/##' "$HERE/rs.sby" > "$d/rs.sby"
@@ -218,15 +219,15 @@ EOF
             printf '%-30s %s\n' "mutant $name" "NOT CAUGHT ($r)"; fail=1
         fi
     }
-    rs_mutant rs_late_wakes_on_unit  's/end else if (!o.late) begin/end else begin/'
-    rs_mutant rs_no_capture          's/^            x.a    = wake(x.a, i_wb, i_wbl, i_wbd, i_wbf, i_wbc);$/            x.a    = x.a;/'
+    rs_mutant rs_late_wakes_on_unit  's/end else if (!o.late) begin/end else begin/' qv_pkg
+    rs_mutant rs_no_capture          's/^            x.a    = qv_opnd_wake(x.a, i_wb, i_wbp, i_wbl, i_wbd, i_wbf, i_wbc);$/            x.a    = x.a;/'
     rs_mutant rs_youngest_first      's/for (int i = DEPTH - 1; i >= 0; i--) begin             \/\/ the last hit is the oldest/for (int i = 0; i < DEPTH; i++) begin/'
     rs_mutant rs_div_passes_older    's/if (v_q\[i\] \&\& kind\[i\] == QV_RS_DIV)/if (ready[i] \&\& kind[i] == QV_RS_DIV)/'
     rs_mutant rs_div_when_busy       's/o_sel_div = !i_flush \&\& div_f \&\& ready\[div_i\] \&\& i_div_free;/o_sel_div = !i_flush \&\& div_f \&\& ready[div_i];/'
     rs_mutant rs_sel_in_flush        's/o_sel_ab  = !i_flush \&\& ab_f;/o_sel_ab  = ab_f;/'
     rs_mutant rs_issued_stays        's/issued\[i\] = (o_sel_ab \&\& i == ab_i) || /issued[i] = /'
-    rs_mutant rs_div_bus_lost        's/else if (wbd.valid \&\& wbd.tag == o.tag) begin n.rdy = 1.b1; n.value = wbd.value; end//'
-    rs_mutant rs_c_ignored           's/ \&\& (x.c.rdy || byp_hit(x.c, i_wb, i_wbl, i_wbf));/;/'
+    rs_mutant rs_div_bus_lost        's/else if (wbd.valid \&\& wbd.tag == o.tag) begin n.rdy = 1.b1; n.value = wbd.value; end//' qv_pkg
+    rs_mutant rs_c_ignored           's/ \&\& (x.c.rdy || qv_opnd_byp(x.c, i_wb, i_wbp, i_wbl, i_wbf, BYPASS_EN, LSU_BYPASS));/;/'
     rs_mutant rs_room_when_full      's/assign o_room = !v_q\[DEPTH-1\];/assign o_room = 1;/'
     rs_mutant rs_flush_keeps         's/v_q\[i\] <= (rst || i_flush) ? 1.b0 : n_v\[i\];/v_q[i] <= rst ? 0 : n_v[i];/'
     rm -rf "$T"

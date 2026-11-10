@@ -1,0 +1,89 @@
+{
+ "dut": "design/pipe/qv_pkg.sv",
+ "tb": "design/pipe/qv_rs_tb.sv",
+ "files": [
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_rs.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench",
+  "-Pqv_rs_tb.CYCLES=20000",
+  "-Pqv_rs_tb.PUSH2=1",
+  "-Pqv_rs_tb.ALU_PORTS=2"
+ ],
+ "cwd": "design",
+ "timeout": 900,
+ "mutants": [
+  {
+   "name": "the ALU/BRU bus wakes nothing",
+   "old": "if (wb.valid && wb.tag == o.tag)        begin n.rdy = 1'b1; n.value = wb.value;  end\n                else if",
+   "new": "if (1'b0) begin end\n                else if"
+  },
+  {
+   "name": "the LSU bus wakes nothing",
+   "old": "else if (wbl.valid && wbl.tag == o.tag) begin n.rdy = 1'b1; n.value = wbl.value; end",
+   "new": ""
+  },
+  {
+   "name": "the divider's bus wakes nothing",
+   "old": "else if (wbd.valid && wbd.tag == o.tag) begin n.rdy = 1'b1; n.value = wbd.value; end",
+   "new": ""
+  },
+  {
+   "name": "the FPU's bus wakes nothing",
+   "old": "else if (wbf.valid && wbf.tag == o.tag) begin n.rdy = 1'b1; n.value = wbf.value; end",
+   "new": ""
+  },
+  {
+   "name": "the commit bus wakes nothing",
+   "old": "if (wbc.valid && wbc.tag == o.tag) begin\n                n.rdy = 1'b1; n.value = wbc.value;",
+   "new": "if (1'b0) begin\n                n.rdy = 1'b1; n.value = wbc.value;"
+  },
+  {
+   "name": "a late operand wakes on a unit's writeback",
+   "old": "end else if (!o.late) begin",
+   "new": "end else begin"
+  },
+  {
+   "name": "a late operand is taken off a same-cycle bypass",
+   "old": "return !o.late && bypass_en && (",
+   "new": "return bypass_en && ("
+  },
+  {
+   "name": "the same-cycle value is taken off the LSU bus first",
+   "old": "if (wb.valid && wb.tag == o.tag)   return wb.value;",
+   "new": "if (wbl.valid && wbl.tag == o.tag) return wbl.value;"
+  },
+  {
+   "name": "port 1's bus wakes nothing",
+   "old": "                else if (wbp.valid && wbp.tag == o.tag) begin n.rdy = 1'b1; n.value = wbp.value; end\n",
+   "new": ""
+  },
+  {
+   "name": "port 1's bus is no same-cycle source",
+   "old": " || (wbp.valid && wbp.tag == o.tag)\n",
+   "new": "\n"
+  },
+  {
+   "name": "port 1's same-cycle value is not taken",
+   "old": "        if (wbp.valid && wbp.tag == o.tag) return wbp.value;\n",
+   "new": ""
+  },
+  {
+   "name": "MULHU counts as no multiply",
+   "old": "(op <= 5'b10001)",
+   "new": "(op <= 5'b10000)"
+  },
+  {
+   "name": "MUL counts as no multiply",
+   "old": "(op >= 5'b01110)",
+   "new": "(op >= 5'b01111)"
+  }
+ ]
+}
