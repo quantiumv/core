@@ -25,7 +25,9 @@
 #   a full buffer, a request presented with the old address; for the reservation station a late operand woken by a
 #   unit's writeback, no dispatch-cycle capture, the youngest entry first, a divide past an older one or to a busy
 #   divider, a select in a flush cycle, an entry that stays after it goes, a lost divider wakeup, an FMA that ignores
-#   its third operand, room in a full station, a flush that keeps the entries).
+#   its third operand, room in a full station, a flush that keeps the entries; and in a two-wide core (rs2: two
+#   pushes, two ALU ports) a multiply or port 0's entry on port 1, port 1 in a flush cycle or keeping its entry, a
+#   second push without the dispatch-cycle capture or ahead of the first, port 1's bus lost).
 set -u
 cd "$(dirname "$0")" || exit 1
 HERE=$(pwd)
@@ -35,7 +37,7 @@ fail=0
 
 status() { grep -o 'DONE ([A-Z]*' | head -1 | sed 's/DONE (//'; }
 
-for unit in fetch lsu dbg ptw sb fpu rs; do
+for unit in fetch lsu dbg ptw sb fpu rs rs2; do
     for task in prove bmc cover; do
         r=$(sby -f $unit.sby $task 2>&1 | status)
         printf '%-12s %s\n' "$unit $task" "$r"
@@ -230,6 +232,32 @@ EOF
     rs_mutant rs_c_ignored           's/ \&\& (x.c.rdy || qv_opnd_byp(x.c, i_wb, i_wbp, i_wbl, i_wbf, BYPASS_EN, LSU_BYPASS));/;/'
     rs_mutant rs_room_when_full      's/assign o_room = !v_q\[DEPTH-1\];/assign o_room = 1;/'
     rs_mutant rs_flush_keeps         's/v_q\[i\] <= (rst || i_flush) ? 1.b0 : n_v\[i\];/v_q[i] <= rst ? 0 : n_v[i];/'
+    # rs2_mutant NAME SED-EXPR [FILE]: the station in a two-wide core (rs2_props.sv: two pushes, two ALU ports)
+    rs2_mutant() {
+        local name=$1 expr=$2 f=${3:-qv_rs}
+        local d=$T/$name
+        mkdir -p "$d"
+        cp "$REPO/design/pipe/qv_pkg.sv" "$REPO/design/pipe/qv_rs.sv" "$HERE/rs2_props.sv" "$d/"
+        sed "$expr" "$REPO/design/pipe/$f.sv" > "$d/$f.sv"
+        if cmp -s "$d/$f.sv" "$REPO/design/pipe/$f.sv"; then
+            printf '%-30s %s\n' "mutant $name" "sed changed nothing"; fail=1; return
+        fi
+        sed -e 's#^\.\./\.\./\.\./design/pipe/##' "$HERE/rs2.sby" > "$d/rs2.sby"
+        local r
+        r=$(cd "$d" && sby -f rs2.sby bmc 2>&1 | status)
+        if [ "$r" == "FAIL" ]; then
+            printf '%-30s %s\n' "mutant $name" "caught"
+        else
+            printf '%-30s %s\n' "mutant $name" "NOT CAUGHT ($r)"; fail=1
+        fi
+    }
+    rs2_mutant rs2_p1_multiply        's/ \&\& !qv_is_mul(eop\[i\])//'
+    rs2_mutant rs2_p1_port0s_entry    's/ \&\& !(ab_f \&\& i == ab_i)//'
+    rs2_mutant rs2_p1_in_flush        's/o_sel_p1  = !i_flush \&\& p1_f;/o_sel_p1  = p1_f;/'
+    rs2_mutant rs2_p1_stays           's/|| (o_sel_p1 \&\& i == p1_i);/;/'
+    rs2_mutant rs2_push2_no_capture   's/y.a = qv_opnd_wake(y.a, i_wb, i_wbp, i_wbl, i_wbd, i_wbf, i_wbc);/y.a = y.a;/'
+    rs2_mutant rs2_push2_ahead        's/k   = j + (i_push ? 1 : 0);/k   = j;/'
+    rs2_mutant rs2_p1_bus_lost        's/else if (wbp.valid \&\& wbp.tag == o.tag) begin n.rdy = 1.b1; n.value = wbp.value; end//' qv_pkg
     rm -rf "$T"
 fi
 

@@ -1,0 +1,27 @@
+# qv_rs properties in a two-wide core (rs2_props.sv): k-induction proof, deep BMC, covers.
+# Run with run.sh, or: sby -f rs2.sby
+[tasks]
+prove
+bmc
+cover
+
+[options]
+prove: mode prove
+prove: depth 6
+bmc: mode bmc
+bmc: depth 8
+cover: mode cover
+cover: depth 16
+
+[engines]
+smtbmc boolector
+
+[script]
+plugin -i /home/potato/yosys-slang-src/build/slang.so
+read_slang --single-unit qv_pkg.sv qv_rs.sv rs2_props.sv --top rs2_props
+prep -top rs2_props
+
+[files]
+../../../design/pipe/qv_pkg.sv
+../../../design/pipe/qv_rs.sv
+rs2_props.sv
