@@ -74,6 +74,11 @@ module qv_rs_tb #(
     );
 
     function automatic logic [63:0] b(input logic x); return {63'b0, x}; endfunction
+    // the multiplies (defaults/alu_ops.sv's MUL, MULH, MULHSU, MULHU), listed here rather than taken from qv_pkg's
+    // qv_is_mul: the model must not share what it checks
+    function automatic logic m_mul(input logic [4:0] op);
+        return op == 5'b01110 || op == 5'b01111 || op == 5'b10000 || op == 5'b10001;
+    endfunction
 
     // ---------------- tags ----------------
     logic tag_used [0:NTAG-1];
@@ -201,7 +206,7 @@ module qv_rs_tb #(
     endtask
 
     // ---------------- coverage ----------------
-    int n_p1, n_p1_mul_skip;
+    int n_p1, n_p1_mul_skip, n_p1_flush;
     int n_push, n_push2, n_ab, n_alu, n_bru, n_div, n_fpu, n_fds, n_flush, n_capture, n_same, n_late, n_ooo, n_div_hold,
         n_fds_hold, n_full;
 
@@ -232,7 +237,7 @@ module qv_rs_tb #(
         for (int i = 0; i < NP; i++) p_live[i] = 1'b0;
         for (int bb = 0; bb < 6; bb++) for (int k = 0; k < RING; k++) begin s_p[bb][k] = -1; s_garb[bb][k] = 1'b0; end
         gn = 0;
-        n_p1 = 0; n_p1_mul_skip = 0;
+        n_p1 = 0; n_p1_mul_skip = 0; n_p1_flush = 0;
         n_push = 0; n_push2 = 0; n_ab = 0; n_alu = 0; n_bru = 0; n_div = 0; n_fpu = 0; n_fds = 0; n_flush = 0; n_capture = 0;
         n_same = 0; n_late = 0; n_ooo = 0; n_div_hold = 0; n_fds_hold = 0; n_full = 0;
         div_busy_until = -1; ds_busy_until = -1;
@@ -242,7 +247,7 @@ module qv_rs_tb #(
 
         for (t = 0; t < CYCLES; t++) begin
             // ---- inputs for cycle t ----
-            flush = ($urandom % 400) == 0;
+            flush = ($urandom % ((ALU_PORTS > 1) ? 100 : 400)) == 0;   // (two ports: more flushes, with a port-1 pick)
             wb = '0; wbl = '0; wbd = '0; wbf = '0; wbc = '0; wbp = '0;
             for (int bb = 0; bb < 6; bb++) begin
                 int s;
@@ -357,10 +362,11 @@ module qv_rs_tb #(
                 for (int i = gn - 1; i >= 0; i--) begin
                     gf = g_e[i];
                     if (g_ready(i, t) && g_kind[i] == 0 && !(f_ab && i == e_ab)) begin
-                        if (!qv_is_mul(gf.op)) begin f_p1 = 1'b1; e_p1 = i; end
+                        if (!m_mul(gf.op)) begin f_p1 = 1'b1; e_p1 = i; end
                         else n_p1_mul_skip++;
                     end
                 end
+            if (flush && f_p1) n_p1_flush++;
             if (flush) begin f_ab = 1'b0; x_div = 1'b0; f_fpu = 1'b0; f_p1 = 1'b0; end
             x_fpu = f_fpu;
 
@@ -471,6 +477,7 @@ module qv_rs_tb #(
             $display("qv_rs_tb: second ALU port %0d, a multiply passed over %0d times", n_p1, n_p1_mul_skip);
             check("coverage: the second ALU port issued", b(n_p1 > 200), 1);
             check("coverage: a multiply was passed over for it", b(n_p1_mul_skip > 20), 1);
+            if (DEPTH > 2) check("coverage: a flush with a port-1 candidate", b(n_p1_flush > 2), 1);
         end
         if (DEPTH > 1) begin                                  // (one entry: none of these can happen)
             check("coverage: issued past an older waiting entry", b(n_ooo > 50), 1);
