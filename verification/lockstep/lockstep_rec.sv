@@ -70,6 +70,30 @@ module lockstep_rec #(
     input logic         o_mstatus_mprv, o_mstatus_sum, o_mstatus_mxr, o_mstatus_tvm,
     input logic [15:0]  o_fp_word,      // F/D: {frd valid, frd, mstatus.FS, frm, fflags} (lockstep_side.sv)
     input logic [63:0]  o_fp_wdata,
+    // (O4) a second retirement in the same cycle (channel 1), pushed behind the first; its snapshot is the
+    // first's but for minstret and the FP word (lockstep_side.sv). Unconnected: one a cycle.
+    input logic         rvfi1_valid = 1'b0,
+    input logic [63:0]    rvfi1_order = '0,
+    input logic [63:0]    rvfi1_pc_rdata = '0,
+    input logic [63:0]    rvfi1_pc_wdata = '0,
+    input logic [31:0]    rvfi1_insn = '0,
+    input logic           rvfi1_trap = '0,
+    input logic           rvfi1_intr = '0,
+    input logic [1:0]     rvfi1_mode = '0,
+    input logic [4:0]     rvfi1_rd_addr = '0,
+    input logic [63:0]    rvfi1_rd_wdata = '0,
+    input logic [4:0]     rvfi1_rs1_addr = '0,
+    input logic [63:0]    rvfi1_rs1_rdata = '0,
+    input logic [4:0]     rvfi1_rs2_addr = '0,
+    input logic [63:0]    rvfi1_rs2_rdata = '0,
+    input logic [63:0]    rvfi1_mem_addr = '0,
+    input logic [7:0]     rvfi1_mem_rmask = '0,
+    input logic [7:0]     rvfi1_mem_wmask = '0,
+    input logic [63:0]    rvfi1_mem_rdata = '0,
+    input logic [63:0]    rvfi1_mem_wdata = '0,
+    input logic [63:0]  o1_minstret = '0,
+    input logic [15:0]  o1_fp_word = '0,
+    input logic [63:0]  o1_fp_wdata = '0,
 
     input logic         wr_valid_i,
     input logic [31:0]  wr_addr_i,
@@ -224,6 +248,7 @@ module lockstep_rec #(
     assign rec_total = rec_total_q;
     assign rec_avail = (rec_wp_q != rec_rp_q);
 
+    wire [$clog2(REC_DEPTH)-1:0] rec_wp1 = rec_wp_q + 1'b1;     // (O4) channel 1's slot
     always_ff @(posedge clk_push) begin
         if (rst) begin
             rec_wp_q <= '0; rec_total_q <= '0;
@@ -283,8 +308,65 @@ module lockstep_rec #(
             ring_mstatus_tvm[rec_wp_q]  <= o_mstatus_tvm;
             ring_fp_word[rec_wp_q]      <= o_fp_word;
             ring_fp_wdata[rec_wp_q]     <= o_fp_wdata;
-            rec_wp_q    <= rec_wp_q + 1'b1;
-            rec_total_q <= rec_total_q + 1'b1;
+            if (rvfi1_valid) begin
+                ring_order[rec_wp1] <= rvfi1_order;
+                ring_pc_rdata[rec_wp1] <= rvfi1_pc_rdata;
+                ring_pc_wdata[rec_wp1] <= rvfi1_pc_wdata;
+                ring_insn[rec_wp1] <= rvfi1_insn;
+                ring_trap[rec_wp1] <= rvfi1_trap;
+                ring_intr[rec_wp1] <= rvfi1_intr;
+                ring_mode[rec_wp1] <= rvfi1_mode;
+                ring_rd_addr[rec_wp1] <= rvfi1_rd_addr;
+                ring_rd_wdata[rec_wp1] <= rvfi1_rd_wdata;
+                ring_rs1_addr[rec_wp1] <= rvfi1_rs1_addr;
+                ring_rs1_rdata[rec_wp1] <= rvfi1_rs1_rdata;
+                ring_rs2_addr[rec_wp1] <= rvfi1_rs2_addr;
+                ring_rs2_rdata[rec_wp1] <= rvfi1_rs2_rdata;
+                ring_mem_addr[rec_wp1] <= rvfi1_mem_addr;
+                ring_mem_rmask[rec_wp1] <= rvfi1_mem_rmask;
+                ring_mem_wmask[rec_wp1] <= rvfi1_mem_wmask;
+                ring_mem_rdata[rec_wp1] <= rvfi1_mem_rdata;
+                ring_mem_wdata[rec_wp1] <= rvfi1_mem_wdata;
+                ring_cause[rec_wp1] <= 64'b0;
+                ring_tval[rec_wp1] <= 64'b0;
+                ring_current_priv[rec_wp1] <= o_current_priv;
+                ring_mtvec[rec_wp1] <= o_mtvec;
+                ring_stvec[rec_wp1] <= o_stvec;
+                ring_mepc[rec_wp1] <= o_mepc;
+                ring_sepc[rec_wp1] <= o_sepc;
+                ring_mcause[rec_wp1] <= o_mcause;
+                ring_scause[rec_wp1] <= o_scause;
+                ring_mtval[rec_wp1] <= o_mtval;
+                ring_stval[rec_wp1] <= o_stval;
+                ring_satp[rec_wp1] <= o_satp;
+                ring_medeleg[rec_wp1] <= o_medeleg;
+                ring_mideleg[rec_wp1] <= o_mideleg;
+                ring_mie[rec_wp1] <= o_mie;
+                ring_mip[rec_wp1] <= o_mip;
+                ring_mscratch[rec_wp1] <= o_mscratch;
+                ring_sscratch[rec_wp1] <= o_sscratch;
+                ring_minstret[rec_wp1] <= o1_minstret;
+                ring_pmpcfg0[rec_wp1] <= o_pmpcfg0;
+                ring_pmpaddr0[rec_wp1] <= o_pmpaddr0;
+                ring_pmpaddr1[rec_wp1] <= o_pmpaddr1;
+                ring_pmpaddr2[rec_wp1] <= o_pmpaddr2;
+                ring_pmpaddr3[rec_wp1] <= o_pmpaddr3;
+                ring_dcsr[rec_wp1] <= o_dcsr;
+                ring_dpc[rec_wp1] <= o_dpc;
+                ring_mstatus_mpp[rec_wp1] <= o_mstatus_mpp;
+                ring_mstatus_spp[rec_wp1] <= o_mstatus_spp;
+                ring_mstatus_tsr[rec_wp1] <= o_mstatus_tsr;
+                ring_mstatus_mie[rec_wp1] <= o_mstatus_mie;
+                ring_mstatus_sie[rec_wp1] <= o_mstatus_sie;
+                ring_mstatus_mprv[rec_wp1] <= o_mstatus_mprv;
+                ring_mstatus_sum[rec_wp1] <= o_mstatus_sum;
+                ring_mstatus_mxr[rec_wp1] <= o_mstatus_mxr;
+                ring_mstatus_tvm[rec_wp1] <= o_mstatus_tvm;
+                ring_fp_word[rec_wp1] <= o1_fp_word;
+                ring_fp_wdata[rec_wp1] <= o1_fp_wdata;
+            end
+            rec_wp_q    <= rec_wp_q + 1'b1 + (rvfi1_valid ? 1'b1 : 1'b0);
+            rec_total_q <= rec_total_q + 32'd1 + (rvfi1_valid ? 32'd1 : 32'd0);
         end
     end
 

@@ -42,31 +42,49 @@ module lockstep_irq (
     input  logic         rvfi_valid,       // this side's own retirement pulse
     input  logic         magic_clr_we,     // this side's own retired store to MAGIC_CLR
     input  logic [31:0]  magic_clr_wdata,
+    // a second retirement in the same cycle (a core that retires two, O4): the levels step for it too, after the first
+    input  logic         rvfi_valid2 = 1'b0,
+    input  logic         magic_clr_we2 = 1'b0,
+    input  logic [31:0]  magic_clr_wdata2 = 32'b0,
 
     output logic o_mtip,
     output logic o_meip,
     output logic o_seip
 );
     logic [31:0] lfsr_q;
-    wire  [31:0] lfsr_next = lfsr_q ^ (lfsr_q << 13) ^ (lfsr_q >> 17) ^ (lfsr_q << 5);
+    wire  [31:0] lfsr_next  = lfsr_q ^ (lfsr_q << 13) ^ (lfsr_q >> 17) ^ (lfsr_q << 5);
+    wire  [31:0] lfsr_next2 = lfsr_next ^ (lfsr_next << 13) ^ (lfsr_next >> 17) ^ (lfsr_next << 5);
 
     logic pending_mtip_q, pending_meip_q, pending_seip_q;
-    wire  do_clear = magic_clr_we && (magic_clr_wdata != 32'b0);
+    wire  do_clear  = magic_clr_we && (magic_clr_wdata != 32'b0);
+    wire  do_clear2 = magic_clr_we2 && (magic_clr_wdata2 != 32'b0);
 
-    // the levels after this cycle's retirement (a clear wins over a new assert)
-    logic n_mtip, n_meip, n_seip;
+    // the levels after this cycle's retirement, or retirements, each as one step (a clear wins over a new assert)
+    logic m_mtip, m_meip, m_seip, n_mtip, n_meip, n_seip;
     always_comb begin
-        n_mtip = pending_mtip_q;
-        n_meip = pending_meip_q;
-        n_seip = pending_seip_q;
+        m_mtip = pending_mtip_q;
+        m_meip = pending_meip_q;
+        m_seip = pending_seip_q;
         if (do_clear) begin
+            m_mtip = 1'b0;
+            m_meip = 1'b0;
+            m_seip = 1'b0;
+        end else if (irq_mode_i != 32'b0 && rvfi_valid) begin
+            if (lfsr_next[7:0] < density_i[7:0])                           m_mtip = 1'b1;
+            if (irq_mode_i >= 32'd2 && lfsr_next[15:8] < density_i[7:0])  m_meip = 1'b1;
+            if (irq_mode_i >= 32'd2 && lfsr_next[23:16] < density_i[7:0]) m_seip = 1'b1;
+        end
+        n_mtip = m_mtip;
+        n_meip = m_meip;
+        n_seip = m_seip;
+        if (do_clear2) begin
             n_mtip = 1'b0;
             n_meip = 1'b0;
             n_seip = 1'b0;
-        end else if (irq_mode_i != 32'b0 && rvfi_valid) begin
-            if (lfsr_next[7:0] < density_i[7:0])                           n_mtip = 1'b1;
-            if (irq_mode_i >= 32'd2 && lfsr_next[15:8] < density_i[7:0])  n_meip = 1'b1;
-            if (irq_mode_i >= 32'd2 && lfsr_next[23:16] < density_i[7:0]) n_seip = 1'b1;
+        end else if (irq_mode_i != 32'b0 && rvfi_valid2) begin
+            if (lfsr_next2[7:0] < density_i[7:0])                           n_mtip = 1'b1;
+            if (irq_mode_i >= 32'd2 && lfsr_next2[15:8] < density_i[7:0])  n_meip = 1'b1;
+            if (irq_mode_i >= 32'd2 && lfsr_next2[23:16] < density_i[7:0]) n_seip = 1'b1;
         end
     end
 
@@ -77,7 +95,7 @@ module lockstep_irq (
             pending_meip_q <= 1'b0;
             pending_seip_q <= 1'b0;
         end else begin
-            if (irq_mode_i != 32'b0 && rvfi_valid) lfsr_q <= lfsr_next;
+            if (irq_mode_i != 32'b0 && rvfi_valid) lfsr_q <= rvfi_valid2 ? lfsr_next2 : lfsr_next;
             pending_mtip_q <= n_mtip;
             pending_meip_q <= n_meip;
             pending_seip_q <= n_seip;

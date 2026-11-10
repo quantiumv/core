@@ -236,6 +236,15 @@ module lockstep_tb #(
     logic [63:0] b_ev_order, b_ev_a, b_ev_b;
     logic [15:0] b_fp_word;
     logic [63:0] b_fp_wdata;
+    // (O4) side B's second retirement in a cycle, channel 1 (lockstep_side.sv); never valid with one a cycle
+    logic        b1_valid, b1_trap, b1_intr;
+    logic [63:0] b1_order, b1_pc_rdata, b1_pc_wdata, b1_rd_wdata, b1_rs1_rdata, b1_rs2_rdata;
+    logic [63:0] b1_mem_addr, b1_mem_rdata, b1_mem_wdata, b1_minstret, b1_fp_wdata;
+    logic [31:0] b1_insn;
+    logic [1:0]  b1_mode;
+    logic [4:0]  b1_rs1_addr, b1_rs2_addr, b1_rd_addr;
+    logic [7:0]  b1_mem_rmask, b1_mem_wmask;
+    logic [15:0] b1_fp_word;
 
     lockstep_side #(
         .QV_MUTANT(QV_MUTANT_B), .CORE_PIPE(B_PIPE), .MEMCFG_CACHE(MEMCFG_B_CACHE),
@@ -265,6 +274,13 @@ module lockstep_tb #(
         .rvfi_csr_medeleg_rmask(), .rvfi_csr_medeleg_wmask(), .rvfi_csr_medeleg_rdata(), .rvfi_csr_medeleg_wdata(),
         .rvfi_csr_satp_rmask(), .rvfi_csr_satp_wmask(), .rvfi_csr_satp_rdata(), .rvfi_csr_satp_wdata(),
         .rvfi_any_trap_taken(b_rvfi_any_trap_taken), .rvfi_any_debug_entry(b_rvfi_any_debug_entry),
+        .rvfi1_valid(b1_valid), .rvfi1_order(b1_order), .rvfi1_insn(b1_insn), .rvfi1_trap(b1_trap),
+        .rvfi1_intr(b1_intr), .rvfi1_mode(b1_mode), .rvfi1_rs1_addr(b1_rs1_addr), .rvfi1_rs2_addr(b1_rs2_addr),
+        .rvfi1_rd_addr(b1_rd_addr), .rvfi1_rs1_rdata(b1_rs1_rdata), .rvfi1_rs2_rdata(b1_rs2_rdata),
+        .rvfi1_rd_wdata(b1_rd_wdata), .rvfi1_pc_rdata(b1_pc_rdata), .rvfi1_pc_wdata(b1_pc_wdata),
+        .rvfi1_mem_addr(b1_mem_addr), .rvfi1_mem_rdata(b1_mem_rdata), .rvfi1_mem_wdata(b1_mem_wdata),
+        .rvfi1_mem_rmask(b1_mem_rmask), .rvfi1_mem_wmask(b1_mem_wmask),
+        .o1_minstret(b1_minstret), .o1_fp_word(b1_fp_word), .o1_fp_wdata(b1_fp_wdata),
         .o_cause(b_cause), .o_tval(b_tval),
         .o_current_priv(b_current_priv),
         .o_mtvec(b_mtvec), .o_stvec(b_stvec), .o_mepc(b_mepc), .o_sepc(b_sepc),
@@ -405,6 +421,13 @@ module lockstep_tb #(
 
     lockstep_rec rec_b (
         .clk_push(clk_b), .clk_pop(clk_mon), .rst(rst),
+        .rvfi1_valid(b1_valid), .rvfi1_order(b1_order), .rvfi1_pc_rdata(b1_pc_rdata), .rvfi1_pc_wdata(b1_pc_wdata),
+        .rvfi1_insn(b1_insn), .rvfi1_trap(b1_trap), .rvfi1_intr(b1_intr), .rvfi1_mode(b1_mode),
+        .rvfi1_rd_addr(b1_rd_addr), .rvfi1_rd_wdata(b1_rd_wdata), .rvfi1_rs1_addr(b1_rs1_addr),
+        .rvfi1_rs1_rdata(b1_rs1_rdata), .rvfi1_rs2_addr(b1_rs2_addr), .rvfi1_rs2_rdata(b1_rs2_rdata),
+        .rvfi1_mem_addr(b1_mem_addr), .rvfi1_mem_rmask(b1_mem_rmask), .rvfi1_mem_wmask(b1_mem_wmask),
+        .rvfi1_mem_rdata(b1_mem_rdata), .rvfi1_mem_wdata(b1_mem_wdata),
+        .o1_minstret(b1_minstret), .o1_fp_word(b1_fp_word), .o1_fp_wdata(b1_fp_wdata),
         .rvfi_valid(b_rvfi_valid), .rvfi_order(b_rvfi_order),
         .rvfi_pc_rdata(b_rvfi_pc_rdata), .rvfi_pc_wdata(b_rvfi_pc_wdata), .rvfi_insn(b_rvfi_insn),
         .rvfi_trap(b_rvfi_trap), .rvfi_intr(b_rvfi_intr), .rvfi_mode(b_rvfi_mode),
@@ -546,20 +569,30 @@ module lockstep_tb #(
         if (!rst && !mode_b && tohost_store(a_rvfi_valid, a_rvfi_trap, a_rvfi_mem_wmask, a_rvfi_mem_addr, a_rvfi_mem_wdata)
                  && (stop_at == 0 || longint'(a_rvfi_order) + 1 < stop_at))
             stop_at = longint'(a_rvfi_order) + 1;
-    always @(posedge clk_b)
-        if (!rst && tohost_store(b_rvfi_valid, b_rvfi_trap, b_rvfi_mem_wmask, b_rvfi_mem_addr, b_rvfi_mem_wdata)
-                 && (stop_at == 0 || longint'(b_rvfi_order) + 1 < stop_at))
-            stop_at = longint'(b_rvfi_order) + 1;
-
-    // mode B: side B's boundaries (one channel: every retirement ends a group), and side A's wait for them
+    // Side B may retire two in a cycle (channel 1, O4): its stop is then the end of that group, never between the two
+    // (side B cannot stop there; in mode B only side B sets it, and a MAX_RETIRE that falls inside a group moves to
+    // its end).
+    wire [63:0] b_last_order = b1_valid ? b1_order : b_rvfi_order;
+    wire        b_tohost     = tohost_store(b_rvfi_valid, b_rvfi_trap, b_rvfi_mem_wmask, b_rvfi_mem_addr, b_rvfi_mem_wdata)
+                               || tohost_store(b1_valid, b1_trap, b1_mem_wmask, b1_mem_addr, b1_mem_wdata);
     always @(posedge clk_b)
         if (!rst && b_rvfi_valid) begin
-            if (mode_b && longint'(b_rvfi_order) - longint'(a_rec_total) >= 255) begin
+            if (b_tohost && (stop_at == 0 || longint'(b_rvfi_order) + 1 < stop_at))
+                stop_at = longint'(b_last_order) + 1;
+            else if (b1_valid && stop_at == longint'(b_rvfi_order) + 1)
+                stop_at = longint'(b_last_order) + 1;
+        end
+
+    // mode B: side B's boundaries (a retirement ends a group unless channel 1 retires behind it), and side A's wait
+    always @(posedge clk_b)
+        if (!rst && b_rvfi_valid) begin
+            if (mode_b && longint'(b_last_order) - longint'(a_rec_total) >= 255) begin
                 $display("LOCKSTEP_RESULT: FAIL (mode B: side B is too far ahead of side A for its boundary ring)");
                 $finish;
             end
-            bnd_ring[b_rvfi_order[7:0]] = 1'b1;
-            b_pub = longint'(b_rvfi_order) + 1;
+            bnd_ring[b_rvfi_order[7:0]] = !b1_valid;
+            if (b1_valid) bnd_ring[b1_order[7:0]] = 1'b1;
+            b_pub = longint'(b_last_order) + 1;
         end
     assign a_bnd    = mode_b ? bnd_ring[a_rvfi_order[7:0]] : 1'b1;
     assign a_wait_b = mode_b && a_rvfi_valid && (longint'(a_rvfi_order) >= b_pub);
@@ -597,6 +630,11 @@ module lockstep_tb #(
     longint intr_count_a;
     initial intr_count_a = 0;
     always @(posedge clk_a) if (!rst && a_rvfi_valid && a_rvfi_intr) intr_count_a = intr_count_a + 1;
+    // (O4) side B's retirements that were the second of a pair, shown in the PASS line: a two-wide run that never paired
+    // would pass as a one-wide one
+    longint pair_count_b;
+    initial pair_count_b = 0;
+    always @(posedge clk_b) if (!rst && b1_valid) pair_count_b = pair_count_b + 1;
 
     // synchronous traps by cause (retirements flagged rvfi_trap that are not interrupt entries), side A:
     // shown in the PASS line so a stimulus that is meant to provoke page faults or access faults can be
@@ -673,15 +711,15 @@ module lockstep_tb #(
                 end
                 check_final_state();
                 if (tohost_addr != 32'b0 && max_retire == 0)
-                    $display("LOCKSTEP_RESULT: PASS (%0d retirements matched, %0d interrupt entries, %0d debug events [entries: %0d ebreak %0d trigger %0d halt %0d step], traps [c1 %0d c2 %0d c3 %0d c4 %0d c5 %0d c6 %0d c7 %0d c8 %0d c9 %0d c11 %0d c12 %0d c13 %0d c15 %0d], tohost=%0h)",
-                             match_count, intr_count_a, ev_match_count, halt_cause_cnt[1], halt_cause_cnt[2], halt_cause_cnt[3], halt_cause_cnt[4],
+                    $display("LOCKSTEP_RESULT: PASS (%0d retirements matched, %0d interrupt entries, %0d paired, %0d debug events [entries: %0d ebreak %0d trigger %0d halt %0d step], traps [c1 %0d c2 %0d c3 %0d c4 %0d c5 %0d c6 %0d c7 %0d c8 %0d c9 %0d c11 %0d c12 %0d c13 %0d c15 %0d], tohost=%0h)",
+                             match_count, intr_count_a, pair_count_b, ev_match_count, halt_cause_cnt[1], halt_cause_cnt[2], halt_cause_cnt[3], halt_cause_cnt[4],
                              trap_cause_cnt[1], trap_cause_cnt[2], trap_cause_cnt[3], trap_cause_cnt[4], trap_cause_cnt[5], trap_cause_cnt[6],
                              trap_cause_cnt[7], trap_cause_cnt[8], trap_cause_cnt[9], trap_cause_cnt[11], trap_cause_cnt[12], trap_cause_cnt[13],
                              trap_cause_cnt[15],
                              side_a.mem0.sram0.memory[tohost_addr[31:3]]);
                 else
-                    $display("LOCKSTEP_RESULT: PASS (%0d retirements matched, %0d interrupt entries, %0d debug events [entries: %0d ebreak %0d trigger %0d halt %0d step], traps [c1 %0d c2 %0d c3 %0d c4 %0d c5 %0d c6 %0d c7 %0d c8 %0d c9 %0d c11 %0d c12 %0d c13 %0d c15 %0d], MAX_RETIRE reached)",
-                             match_count, intr_count_a, ev_match_count, halt_cause_cnt[1], halt_cause_cnt[2], halt_cause_cnt[3], halt_cause_cnt[4],
+                    $display("LOCKSTEP_RESULT: PASS (%0d retirements matched, %0d interrupt entries, %0d paired, %0d debug events [entries: %0d ebreak %0d trigger %0d halt %0d step], traps [c1 %0d c2 %0d c3 %0d c4 %0d c5 %0d c6 %0d c7 %0d c8 %0d c9 %0d c11 %0d c12 %0d c13 %0d c15 %0d], MAX_RETIRE reached)",
+                             match_count, intr_count_a, pair_count_b, ev_match_count, halt_cause_cnt[1], halt_cause_cnt[2], halt_cause_cnt[3], halt_cause_cnt[4],
                              trap_cause_cnt[1], trap_cause_cnt[2], trap_cause_cnt[3], trap_cause_cnt[4], trap_cause_cnt[5], trap_cause_cnt[6],
                              trap_cause_cnt[7], trap_cause_cnt[8], trap_cause_cnt[9], trap_cause_cnt[11], trap_cause_cnt[12], trap_cause_cnt[13],
                              trap_cause_cnt[15]);

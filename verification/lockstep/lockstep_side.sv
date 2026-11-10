@@ -91,6 +91,23 @@ module lockstep_side #(
     output logic        rvfi_any_trap_taken,
     output logic        rvfi_any_debug_entry,
 
+    // (O4) a second retirement in the same cycle: channel 1 of a core that retires two a cycle (0 otherwise). It is
+    // never a trap; its CSR snapshot is channel 0's (a pair writes none of those CSRs) except minstret and the FP
+    // state, which channel 0 may have moved.
+    output logic        rvfi1_valid,
+    output logic [63:0] rvfi1_order,
+    output logic [31:0] rvfi1_insn,
+    output logic        rvfi1_trap, rvfi1_intr,
+    output logic [1:0]  rvfi1_mode,
+    output logic [4:0]  rvfi1_rs1_addr, rvfi1_rs2_addr, rvfi1_rd_addr,
+    output logic [63:0] rvfi1_rs1_rdata, rvfi1_rs2_rdata, rvfi1_rd_wdata,
+    output logic [63:0] rvfi1_pc_rdata, rvfi1_pc_wdata,
+    output logic [63:0] rvfi1_mem_addr, rvfi1_mem_rdata, rvfi1_mem_wdata,
+    output logic [7:0]  rvfi1_mem_rmask, rvfi1_mem_wmask,
+    output logic [63:0] o1_minstret,
+    output logic [15:0] o1_fp_word,
+    output logic [63:0] o1_fp_wdata,
+
     // derived cause/tval, same technique as testbench/rvfi_tracer.sv
     output logic [63:0] o_cause,
     output logic [63:0] o_tval,
@@ -167,11 +184,34 @@ module lockstep_side #(
     logic [4:0]  rvfi_frd_addr;
     logic [63:0] rvfi_frd_wdata;
 
+    // The core's RVFI channels (the pipelined core retires QV_PIPE_COMMIT_W a cycle, ref_core one), packed as the
+    // core has them: channel 0, the oldest, in the low bits
+`ifndef QV_PIPE_COMMIT_W
+`define QV_PIPE_COMMIT_W 1
+`endif
+    localparam int NRET = CORE_PIPE ? `QV_PIPE_COMMIT_W : 1;
+    logic [NRET-1:0]    p_valid, p_trap, p_halt, p_intr, p_frd_wvalid;
+    logic [NRET*64-1:0] p_order, p_rs1_rdata, p_rs2_rdata, p_rd_wdata, p_pc_rdata, p_pc_wdata;
+    logic [NRET*64-1:0] p_mem_addr, p_mem_rdata, p_mem_wdata, p_frd_wdata;
+    logic [NRET*32-1:0] p_insn;
+    logic [NRET*2-1:0]  p_mode, p_ixl;
+    logic [NRET*5-1:0]  p_rs1_addr, p_rs2_addr, p_rd_addr, p_frd_addr;
+    logic [NRET*8-1:0]  p_mem_rmask, p_mem_wmask;
+    logic [NRET*64-1:0] p_csr_mepc_rmask, p_csr_mepc_wmask, p_csr_mepc_rdata, p_csr_mepc_wdata;
+    logic [NRET*64-1:0] p_csr_mcause_rmask, p_csr_mcause_wmask, p_csr_mcause_rdata, p_csr_mcause_wdata;
+    logic [NRET*64-1:0] p_csr_sepc_rmask, p_csr_sepc_wmask, p_csr_sepc_rdata, p_csr_sepc_wdata;
+    logic [NRET*64-1:0] p_csr_scause_rmask, p_csr_scause_wmask, p_csr_scause_rdata, p_csr_scause_wdata;
+    logic [NRET*64-1:0] p_csr_pmpcfg0_rmask, p_csr_pmpcfg0_wmask, p_csr_pmpcfg0_rdata, p_csr_pmpcfg0_wdata;
+    logic [NRET*64-1:0] p_csr_pmpaddr0_rmask, p_csr_pmpaddr0_wmask, p_csr_pmpaddr0_rdata, p_csr_pmpaddr0_wdata;
+    logic [NRET*64-1:0] p_csr_medeleg_rmask, p_csr_medeleg_wmask, p_csr_medeleg_rdata, p_csr_medeleg_wdata;
+    logic [1:0]         fs1;        // (channel 1) mstatus.FS and fflags as channel 0 left them
+    logic [4:0]         fflags1;
+
     // Zicntr: time on this side counts this side's own retirements (the value before this cycle's). Both cores read
     // a CSR in the cycle it retires, so a time read returns the same number on both sides at the same retirement;
     // the real mtime counts clock cycles, which the two cores spend differently.
     logic [63:0] time_q;
-    always_ff @(posedge clk) time_q <= rst ? 64'b0 : time_q + {63'b0, rvfi_valid};
+    always_ff @(posedge clk) time_q <= rst ? 64'b0 : time_q + {63'b0, rvfi_valid} + {63'b0, rvfi1_valid};
 
     // the port list both branches share
 `define LS_CORE_PORTS \
@@ -184,34 +224,34 @@ module lockstep_side #(
         .wb_mem_ack_i(wb_mem_ack), .wb_mem_err_i(wb_mem_err), .wb_mem_lock_o(wb_mem_lock), \
         .icache_flush_o(icache_flush), \
         .i_mtip(i_mtip), .i_meip(i_meip), .i_seip(i_seip), .i_time(time_q), \
-        .rvfi_valid(rvfi_valid), .rvfi_order(rvfi_order), .rvfi_insn(rvfi_insn), \
-        .rvfi_trap(rvfi_trap), .rvfi_halt(rvfi_halt), .rvfi_intr(rvfi_intr), \
-        .rvfi_mode(rvfi_mode), .rvfi_ixl(rvfi_ixl), \
-        .rvfi_rs1_addr(rvfi_rs1_addr), .rvfi_rs2_addr(rvfi_rs2_addr), \
-        .rvfi_rs1_rdata(rvfi_rs1_rdata), .rvfi_rs2_rdata(rvfi_rs2_rdata), \
-        .rvfi_rd_addr(rvfi_rd_addr), .rvfi_rd_wdata(rvfi_rd_wdata), \
-        .rvfi_pc_rdata(rvfi_pc_rdata), .rvfi_pc_wdata(rvfi_pc_wdata), \
-        .rvfi_mem_addr(rvfi_mem_addr), .rvfi_mem_rmask(rvfi_mem_rmask), \
-        .rvfi_mem_wmask(rvfi_mem_wmask), .rvfi_mem_rdata(rvfi_mem_rdata), \
-        .rvfi_mem_wdata(rvfi_mem_wdata), \
-        .rvfi_csr_mepc_rmask(rvfi_csr_mepc_rmask), .rvfi_csr_mepc_wmask(rvfi_csr_mepc_wmask), \
-        .rvfi_csr_mepc_rdata(rvfi_csr_mepc_rdata), .rvfi_csr_mepc_wdata(rvfi_csr_mepc_wdata), \
-        .rvfi_csr_mcause_rmask(rvfi_csr_mcause_rmask), .rvfi_csr_mcause_wmask(rvfi_csr_mcause_wmask), \
-        .rvfi_csr_mcause_rdata(rvfi_csr_mcause_rdata), .rvfi_csr_mcause_wdata(rvfi_csr_mcause_wdata), \
-        .rvfi_csr_sepc_rmask(rvfi_csr_sepc_rmask), .rvfi_csr_sepc_wmask(rvfi_csr_sepc_wmask), \
-        .rvfi_csr_sepc_rdata(rvfi_csr_sepc_rdata), .rvfi_csr_sepc_wdata(rvfi_csr_sepc_wdata), \
-        .rvfi_csr_scause_rmask(rvfi_csr_scause_rmask), .rvfi_csr_scause_wmask(rvfi_csr_scause_wmask), \
-        .rvfi_csr_scause_rdata(rvfi_csr_scause_rdata), .rvfi_csr_scause_wdata(rvfi_csr_scause_wdata), \
-        .rvfi_csr_pmpcfg0_rmask(rvfi_csr_pmpcfg0_rmask), .rvfi_csr_pmpcfg0_wmask(rvfi_csr_pmpcfg0_wmask), \
-        .rvfi_csr_pmpcfg0_rdata(rvfi_csr_pmpcfg0_rdata), .rvfi_csr_pmpcfg0_wdata(rvfi_csr_pmpcfg0_wdata), \
-        .rvfi_csr_pmpaddr0_rmask(rvfi_csr_pmpaddr0_rmask), .rvfi_csr_pmpaddr0_wmask(rvfi_csr_pmpaddr0_wmask), \
-        .rvfi_csr_pmpaddr0_rdata(rvfi_csr_pmpaddr0_rdata), .rvfi_csr_pmpaddr0_wdata(rvfi_csr_pmpaddr0_wdata), \
-        .rvfi_csr_medeleg_rmask(rvfi_csr_medeleg_rmask), .rvfi_csr_medeleg_wmask(rvfi_csr_medeleg_wmask), \
-        .rvfi_csr_medeleg_rdata(rvfi_csr_medeleg_rdata), .rvfi_csr_medeleg_wdata(rvfi_csr_medeleg_wdata), \
+        .rvfi_valid(p_valid), .rvfi_order(p_order), .rvfi_insn(p_insn), \
+        .rvfi_trap(p_trap), .rvfi_halt(p_halt), .rvfi_intr(p_intr), \
+        .rvfi_mode(p_mode), .rvfi_ixl(p_ixl), \
+        .rvfi_rs1_addr(p_rs1_addr), .rvfi_rs2_addr(p_rs2_addr), \
+        .rvfi_rs1_rdata(p_rs1_rdata), .rvfi_rs2_rdata(p_rs2_rdata), \
+        .rvfi_rd_addr(p_rd_addr), .rvfi_rd_wdata(p_rd_wdata), \
+        .rvfi_pc_rdata(p_pc_rdata), .rvfi_pc_wdata(p_pc_wdata), \
+        .rvfi_mem_addr(p_mem_addr), .rvfi_mem_rmask(p_mem_rmask), \
+        .rvfi_mem_wmask(p_mem_wmask), .rvfi_mem_rdata(p_mem_rdata), \
+        .rvfi_mem_wdata(p_mem_wdata), \
+        .rvfi_csr_mepc_rmask(p_csr_mepc_rmask), .rvfi_csr_mepc_wmask(p_csr_mepc_wmask), \
+        .rvfi_csr_mepc_rdata(p_csr_mepc_rdata), .rvfi_csr_mepc_wdata(p_csr_mepc_wdata), \
+        .rvfi_csr_mcause_rmask(p_csr_mcause_rmask), .rvfi_csr_mcause_wmask(p_csr_mcause_wmask), \
+        .rvfi_csr_mcause_rdata(p_csr_mcause_rdata), .rvfi_csr_mcause_wdata(p_csr_mcause_wdata), \
+        .rvfi_csr_sepc_rmask(p_csr_sepc_rmask), .rvfi_csr_sepc_wmask(p_csr_sepc_wmask), \
+        .rvfi_csr_sepc_rdata(p_csr_sepc_rdata), .rvfi_csr_sepc_wdata(p_csr_sepc_wdata), \
+        .rvfi_csr_scause_rmask(p_csr_scause_rmask), .rvfi_csr_scause_wmask(p_csr_scause_wmask), \
+        .rvfi_csr_scause_rdata(p_csr_scause_rdata), .rvfi_csr_scause_wdata(p_csr_scause_wdata), \
+        .rvfi_csr_pmpcfg0_rmask(p_csr_pmpcfg0_rmask), .rvfi_csr_pmpcfg0_wmask(p_csr_pmpcfg0_wmask), \
+        .rvfi_csr_pmpcfg0_rdata(p_csr_pmpcfg0_rdata), .rvfi_csr_pmpcfg0_wdata(p_csr_pmpcfg0_wdata), \
+        .rvfi_csr_pmpaddr0_rmask(p_csr_pmpaddr0_rmask), .rvfi_csr_pmpaddr0_wmask(p_csr_pmpaddr0_wmask), \
+        .rvfi_csr_pmpaddr0_rdata(p_csr_pmpaddr0_rdata), .rvfi_csr_pmpaddr0_wdata(p_csr_pmpaddr0_wdata), \
+        .rvfi_csr_medeleg_rmask(p_csr_medeleg_rmask), .rvfi_csr_medeleg_wmask(p_csr_medeleg_wmask), \
+        .rvfi_csr_medeleg_rdata(p_csr_medeleg_rdata), .rvfi_csr_medeleg_wdata(p_csr_medeleg_wdata), \
         .rvfi_csr_satp_rmask(rvfi_csr_satp_rmask), .rvfi_csr_satp_wmask(rvfi_csr_satp_wmask), \
         .rvfi_csr_satp_rdata(rvfi_csr_satp_rdata), .rvfi_csr_satp_wdata(rvfi_csr_satp_wdata), \
         .rvfi_any_trap_taken(rvfi_any_trap_taken), .rvfi_any_debug_entry(rvfi_any_debug_entry), \
-        .rvfi_frd_wvalid(rvfi_frd_wvalid), .rvfi_frd_addr(rvfi_frd_addr), .rvfi_frd_wdata(rvfi_frd_wdata), \
+        .rvfi_frd_wvalid(p_frd_wvalid), .rvfi_frd_addr(p_frd_addr), .rvfi_frd_wdata(p_frd_wdata), \
         .o_debug_mode(dbg_halted), .i_debug_halt_req(core_halt_req), .i_debug_resume_req(dm_resume_req), \
         .i_dm_gpr_we(dm_gpr_we), .i_dm_gpr_sel(dm_gpr_sel), .i_dm_gpr_wdata(dm_gpr_wdata), .o_dm_gpr_rdata(dm_gpr_rdata), \
         .i_dm_csr_we(dm_csr_we), .i_dm_csr_addr(dm_csr_addr), .i_dm_csr_wdata(dm_csr_wdata), .o_dm_csr_rdata(dm_csr_rdata), \
@@ -227,6 +267,16 @@ module lockstep_side #(
             // caches fetch has the instruction cache to itself.
             core #(.PMA_RAM_SIZE(64'(`QV_LOCKSTEP_RAM_WORDS) * 64'd8), .FETCH_YIELD(!MEMCFG_CACHE)) core0 (`LS_CORE_PORTS);
 `ifdef LS_HAVE_PIPE
+            // (O4) a pair writes FP state at most once: when channel 0 did, FS and fflags as csr_file0 is about to
+            // update them, else as they are
+            wire ch0_fp = core0.commit0.h_fpw;
+            assign fs1     = (ch0_fp && core0.csr_file0.fs_dirty) ? 2'b11 : core0.mstatus_fs_w;
+            assign fflags1 = ch0_fp ? (core0.fflags_w | core0.c_fp_accrue) : core0.fflags_w;
+`else
+            assign fs1     = 2'b0;
+            assign fflags1 = 5'b0;
+`endif
+`ifdef LS_HAVE_PIPE
             // the pipelined core takes an interrupt, a halt or an EBREAK/trigger entry without waiting for the LSU, which is
             // only safe because nothing can be on the data bus then (it asserts that too, but an assertion only
             // prints): make it fatal here. (Only when the pipelined core is in the build: Verilator checks the names even
@@ -241,10 +291,120 @@ module lockstep_side #(
 `endif
         end else begin : g_core
             ref_core #(.QV_MUTANT(QV_MUTANT)) core0 (`LS_CORE_PORTS);
+            assign fs1     = 2'b0;                   // one channel
+            assign fflags1 = 5'b0;
         end
     endgenerate
     `undef LS_CORE_PORTS
     /* verilator lint_on PINCONNECTEMPTY */
+
+    // channel 0: this side's retirement stream as before
+    assign rvfi_valid = p_valid[0];
+    assign rvfi_order = p_order[63:0];
+    assign rvfi_insn = p_insn[31:0];
+    assign rvfi_trap = p_trap[0];
+    assign rvfi_halt = p_halt[0];
+    assign rvfi_intr = p_intr[0];
+    assign rvfi_mode = p_mode[1:0];
+    assign rvfi_ixl = p_ixl[1:0];
+    assign rvfi_rs1_addr = p_rs1_addr[4:0];
+    assign rvfi_rs2_addr = p_rs2_addr[4:0];
+    assign rvfi_rs1_rdata = p_rs1_rdata[63:0];
+    assign rvfi_rs2_rdata = p_rs2_rdata[63:0];
+    assign rvfi_rd_addr = p_rd_addr[4:0];
+    assign rvfi_rd_wdata = p_rd_wdata[63:0];
+    assign rvfi_pc_rdata = p_pc_rdata[63:0];
+    assign rvfi_pc_wdata = p_pc_wdata[63:0];
+    assign rvfi_mem_addr = p_mem_addr[63:0];
+    assign rvfi_mem_rmask = p_mem_rmask[7:0];
+    assign rvfi_mem_wmask = p_mem_wmask[7:0];
+    assign rvfi_mem_rdata = p_mem_rdata[63:0];
+    assign rvfi_mem_wdata = p_mem_wdata[63:0];
+    assign rvfi_frd_wvalid = p_frd_wvalid[0];
+    assign rvfi_frd_addr = p_frd_addr[4:0];
+    assign rvfi_frd_wdata = p_frd_wdata[63:0];
+    assign rvfi_csr_mepc_rmask = p_csr_mepc_rmask[63:0];
+    assign rvfi_csr_mepc_wmask = p_csr_mepc_wmask[63:0];
+    assign rvfi_csr_mepc_rdata = p_csr_mepc_rdata[63:0];
+    assign rvfi_csr_mepc_wdata = p_csr_mepc_wdata[63:0];
+    assign rvfi_csr_mcause_rmask = p_csr_mcause_rmask[63:0];
+    assign rvfi_csr_mcause_wmask = p_csr_mcause_wmask[63:0];
+    assign rvfi_csr_mcause_rdata = p_csr_mcause_rdata[63:0];
+    assign rvfi_csr_mcause_wdata = p_csr_mcause_wdata[63:0];
+    assign rvfi_csr_sepc_rmask = p_csr_sepc_rmask[63:0];
+    assign rvfi_csr_sepc_wmask = p_csr_sepc_wmask[63:0];
+    assign rvfi_csr_sepc_rdata = p_csr_sepc_rdata[63:0];
+    assign rvfi_csr_sepc_wdata = p_csr_sepc_wdata[63:0];
+    assign rvfi_csr_scause_rmask = p_csr_scause_rmask[63:0];
+    assign rvfi_csr_scause_wmask = p_csr_scause_wmask[63:0];
+    assign rvfi_csr_scause_rdata = p_csr_scause_rdata[63:0];
+    assign rvfi_csr_scause_wdata = p_csr_scause_wdata[63:0];
+    assign rvfi_csr_pmpcfg0_rmask = p_csr_pmpcfg0_rmask[63:0];
+    assign rvfi_csr_pmpcfg0_wmask = p_csr_pmpcfg0_wmask[63:0];
+    assign rvfi_csr_pmpcfg0_rdata = p_csr_pmpcfg0_rdata[63:0];
+    assign rvfi_csr_pmpcfg0_wdata = p_csr_pmpcfg0_wdata[63:0];
+    assign rvfi_csr_pmpaddr0_rmask = p_csr_pmpaddr0_rmask[63:0];
+    assign rvfi_csr_pmpaddr0_wmask = p_csr_pmpaddr0_wmask[63:0];
+    assign rvfi_csr_pmpaddr0_rdata = p_csr_pmpaddr0_rdata[63:0];
+    assign rvfi_csr_pmpaddr0_wdata = p_csr_pmpaddr0_wdata[63:0];
+    assign rvfi_csr_medeleg_rmask = p_csr_medeleg_rmask[63:0];
+    assign rvfi_csr_medeleg_wmask = p_csr_medeleg_wmask[63:0];
+    assign rvfi_csr_medeleg_rdata = p_csr_medeleg_rdata[63:0];
+    assign rvfi_csr_medeleg_wdata = p_csr_medeleg_wdata[63:0];
+
+    // channel 1 (O4): the second retirement of a pair, and its snapshot fields (minstret counts channel 0)
+    generate
+        if (NRET > 1) begin : g_ch1
+            assign rvfi1_valid = p_valid[1];
+            assign rvfi1_order = p_order[127:64];
+            assign rvfi1_insn = p_insn[63:32];
+            assign rvfi1_trap = p_trap[1];
+            assign rvfi1_intr = p_intr[1];
+            assign rvfi1_mode = p_mode[3:2];
+            assign rvfi1_rs1_addr = p_rs1_addr[9:5];
+            assign rvfi1_rs2_addr = p_rs2_addr[9:5];
+            assign rvfi1_rd_addr = p_rd_addr[9:5];
+            assign rvfi1_rs1_rdata = p_rs1_rdata[127:64];
+            assign rvfi1_rs2_rdata = p_rs2_rdata[127:64];
+            assign rvfi1_rd_wdata = p_rd_wdata[127:64];
+            assign rvfi1_pc_rdata = p_pc_rdata[127:64];
+            assign rvfi1_pc_wdata = p_pc_wdata[127:64];
+            assign rvfi1_mem_addr = p_mem_addr[127:64];
+            assign rvfi1_mem_rdata = p_mem_rdata[127:64];
+            assign rvfi1_mem_wdata = p_mem_wdata[127:64];
+            assign rvfi1_mem_rmask = p_mem_rmask[15:8];
+            assign rvfi1_mem_wmask = p_mem_wmask[15:8];
+            assign o1_fp_wdata = p_frd_wdata[127:64];
+            assign o1_fp_word  = {p_frd_wvalid[1], p_frd_addr[9:5], fs1, g_core.core0.frm_w, fflags1};
+            assign o1_minstret = g_core.core0.csr_file0.minstret_q + 64'd1;
+        end else begin : g_noch1
+            assign rvfi1_valid = '0;
+            assign rvfi1_order = '0;
+            assign rvfi1_insn = '0;
+            assign rvfi1_trap = '0;
+            assign rvfi1_intr = '0;
+            assign rvfi1_mode = '0;
+            assign rvfi1_rs1_addr = '0;
+            assign rvfi1_rs2_addr = '0;
+            assign rvfi1_rd_addr = '0;
+            assign rvfi1_rs1_rdata = '0;
+            assign rvfi1_rs2_rdata = '0;
+            assign rvfi1_rd_wdata = '0;
+            assign rvfi1_pc_rdata = '0;
+            assign rvfi1_pc_wdata = '0;
+            assign rvfi1_mem_addr = '0;
+            assign rvfi1_mem_rdata = '0;
+            assign rvfi1_mem_wdata = '0;
+            assign rvfi1_mem_rmask = '0;
+            assign rvfi1_mem_wmask = '0;
+            assign o1_fp_wdata = 64'b0;
+            assign o1_fp_word  = 16'b0;
+            assign o1_minstret = 64'b0;
+            /* verilator lint_off UNUSEDSIGNAL */
+            wire   fs1_unused  = |{fs1, fflags1};
+            /* verilator lint_on UNUSEDSIGNAL */
+        end
+    endgenerate
 
     logic        magic_set_we, magic_clr_we;
     logic [31:0] magic_set_wdata, magic_clr_wdata;
@@ -277,6 +437,9 @@ module lockstep_side #(
     wire        ret_clr_we    = rvfi_valid && !rvfi_trap && (rvfi_mem_wmask[7:4] != 4'b0)
                                 && (rvfi_mem_addr[31:3] == MAGIC_DWORD[31:3]);
     wire [31:0] ret_clr_wdata = rvfi_mem_wdata[63:32];
+    wire        ret_clr_we1    = rvfi1_valid && !rvfi1_trap && (rvfi1_mem_wmask[7:4] != 4'b0)
+                                 && (rvfi1_mem_addr[31:3] == MAGIC_DWORD[31:3]);
+    wire [31:0] ret_clr_wdata1 = rvfi1_mem_wdata[63:32];
 
     lockstep_irq irq0 (
         .clk(clk), .rst(rst),
@@ -284,6 +447,7 @@ module lockstep_side #(
         .bnd_mode_i(bnd_mode_i), .bnd_i(bnd_i),
         .rvfi_valid(rvfi_valid),
         .magic_clr_we(ret_clr_we), .magic_clr_wdata(ret_clr_wdata),
+        .rvfi_valid2(rvfi1_valid), .magic_clr_we2(ret_clr_we1), .magic_clr_wdata2(ret_clr_wdata1),
         .o_mtip(i_mtip), .o_meip(i_meip), .o_seip(i_seip)
     );
 
@@ -318,7 +482,7 @@ module lockstep_side #(
         .clk(clk), .rst(rst),
         .mode_i(dbg_mode_i), .seed_i(dbg_seed_i), .density_i(dbg_density_i), .feat_i(dbg_feat_i),
         .late_i(dbg_late_i), .max_retire_i(dbg_max_retire_i),
-        .rvfi_valid(rvfi_valid), .debug_mode_i(dbg_halted), .bnd_mode_i(bnd_mode_i), .last_bnd_i(last_bnd_q),
+        .rvfi_valid(rvfi_valid), .rvfi_valid2(rvfi1_valid), .debug_mode_i(dbg_halted), .bnd_mode_i(bnd_mode_i), .last_bnd_i(last_bnd_q),
         .o_reg_addr(dmi_addr), .o_reg_wdata(dmi_wdata), .o_reg_we(dmi_we), .i_reg_rdata(dmi_rdata),
         .o_halt_req(script_halt_req),
         .o_ev_valid(ev_valid_raw), .o_ev_kind(o_ev_kind), .o_ev_order(o_ev_order),

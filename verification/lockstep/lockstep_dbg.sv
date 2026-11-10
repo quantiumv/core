@@ -78,6 +78,7 @@ module lockstep_dbg (
     input  logic [63:0] max_retire_i,  // 0 = the run ends at a tohost store, not at a count
 
     input  logic        rvfi_valid,
+    input  logic        rvfi_valid2 = 1'b0,   // a second retirement in the same cycle (a core that retires two)
     input  logic        debug_mode_i,  // core.o_debug_mode
     // mode B (lockstep_side.sv): this side halts only where the other side ended a group of retirements, so the
     // halt is raised only after a retirement that ended one (last_bnd_i); with late_i that is a sample point the
@@ -156,7 +157,7 @@ module lockstep_dbg (
     logic [63:0] retired_q;
     always @(posedge clk) begin
         if (rst)             retired_q <= 64'b0;
-        else if (rvfi_valid) retired_q <= retired_q + 64'b1;
+        else if (rvfi_valid) retired_q <= retired_q + (rvfi_valid2 ? 64'd2 : 64'd1);
     end
 
     // xorshift32. Called as a statement-level step, never inside an
