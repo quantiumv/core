@@ -11,8 +11,13 @@
  * cycle to take it through issue's bypass (zero-cycle stall), or, with
  * bypass disabled, for the ROB to capture it at the end of the cycle
  * (one-cycle stall).
+ *
+ * HAS_MUL 0 (O4d): a second ALU port's, without the multipliers. Issue sends it no multiply and no branch (R6 of
+ * the O4 plan): those go to port 0.
  */
-module qv_exu_alu (
+module qv_exu_alu #(
+    parameter bit HAS_MUL = 1'b1
+) (
     input  logic            clk,
     input  logic            rst,
     input  logic            i_flush,
@@ -32,7 +37,7 @@ module qv_exu_alu (
         else                req_q <= i_req;
     end
 
-    alu alu0 (
+    alu #(.HAS_MUL(HAS_MUL)) alu0 (
         .i_operand_A(req_q.a),
         .i_operation(req_q.op),
         .i_operand_B(req_q.b),
@@ -45,4 +50,10 @@ module qv_exu_alu (
         o_wb.tag   = req_q.tag;
         o_wb.value = req_q.is_word ? {{32{result[31]}}, result[31:0]} : result;
     end
+
+`ifndef SYNTHESIS
+    always @(posedge clk)
+        if (!rst && !HAS_MUL && req_q.valid && qv_is_mul(req_q.op))
+            $error("qv_exu_alu: a multiply on a port without a multiplier");
+`endif
 endmodule

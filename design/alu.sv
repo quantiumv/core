@@ -27,7 +27,9 @@
  * Output port:
  *  o_result: Result of (A op B).
  */
-module alu (
+module alu #(
+    parameter bit HAS_MUL = 1'b1     // O4d: 0 for a second ALU port, which is never sent a multiply
+) (
     input logic [(`WORD_SIZE - 1):0]        i_operand_A,
     input logic [(`ALU_OPSIZE - 1):0]       i_operation,
     input logic [(`WORD_SIZE - 1):0]        i_operand_B,
@@ -119,9 +121,18 @@ module alu (
     assign product_ss = {i_operand_A, ~i_operand_B};
     assign product_su = {mulhsu_a_ext, mulhsu_b_ext};
 `else
-    assign product_uu = i_operand_A * i_operand_B;
-    assign product_ss = $signed(i_operand_A) * $signed(i_operand_B);
-    assign product_su = mulhsu_a_ext * mulhsu_b_ext;
+    generate
+        if (HAS_MUL) begin : g_mul
+            assign product_uu = i_operand_A * i_operand_B;
+            assign product_ss = $signed(i_operand_A) * $signed(i_operand_B);
+            assign product_su = mulhsu_a_ext * mulhsu_b_ext;
+        end else begin : g_nomul
+            // a second ALU port (O4d, qv_exu_alu): no multipliers; issue never sends it a multiply
+            assign product_uu = '0;
+            assign product_ss = '0;
+            assign product_su = '0;
+        end
+    endgenerate
 `endif
 
     /*

@@ -30,11 +30,16 @@
  *
  * o_room is registered (the last slot is free), so nothing selected in a cycle reaches issue's dispatch decision
  * through it.
+ *
+ * ALU_PORTS 2 (O4d): a second ALU port takes the oldest ready ALU entry that needs no multiplier, other than the
+ * one port 0 takes (port 0 keeps every branch and multiply: R6 of the O4 plan). Its writeback (i_wbp) wakes
+ * operands and is a same-cycle source, as port 0's is.
  */
 module qv_rs #(
     parameter int DEPTH      = 4,               // >= 1
     parameter bit BYPASS_EN  = 1'b1,
-    parameter bit LSU_BYPASS = 1'b0
+    parameter bit LSU_BYPASS = 1'b0,
+    parameter int ALU_PORTS  = 1                // O4d: 2 adds a second ALU port (no branch, no multiply)
 ) (
     input  logic                             clk,
     input  logic                             rst,
@@ -70,7 +75,10 @@ module qv_rs #(
     output qv_pkg::fu_req_t                  o_alu_req,
     output qv_pkg::fu_req_t                  o_bru_req,
     output qv_pkg::fu_req_t                  o_div_req,
-    output qv_pkg::fpu_req_t                 o_fpu_req
+    output qv_pkg::fpu_req_t                 o_fpu_req,
+    // O4d: the second ALU port
+    output logic                             o_sel_p1,         // ... is taken by an entry this cycle
+    output qv_pkg::fu_req_t                  o_alu1_req
 );
     import qv_pkg::*;
 
@@ -90,8 +98,11 @@ module qv_rs #(
     logic [63:0] vb      [0:DEPTH-1];
     logic [63:0] vc      [0:DEPTH-1];
     logic        issued  [0:DEPTH-1];
+    logic [4:0]  eop     [0:DEPTH-1];         // the op (for an ALU entry: is it a multiply)
     int          ab_i, div_i, fds_i, fpu_i;    // the chosen ALU/BRU entry, the oldest DIV and FDS, the chosen FPU one
     logic        ab_f, div_f, fds_f, fpu_f;    // ... exists
+    int          p1_i;                         // (O4d) the second ALU port's entry
+    logic        p1_f;
 
     always_comb begin
         /* verilator lint_off UNUSEDSIGNAL */
@@ -100,6 +111,7 @@ module qv_rs #(
         for (int i = 0; i < DEPTH; i++) begin
             x        = e_q[i];
             kind[i]  = x.kind;
+            eop[i]   = x.op;
             ready[i] = v_q[i] && (x.a.rdy || qv_opnd_byp(x.a, i_wb, i_wbp, i_wbl, i_wbf, BYPASS_EN, LSU_BYPASS))
                               && (x.b.rdy || qv_opnd_byp(x.b, i_wb, i_wbp, i_wbl, i_wbf, BYPASS_EN, LSU_BYPASS))
                               && (x.c.rdy || qv_opnd_byp(x.c, i_wb, i_wbp, i_wbl, i_wbf, BYPASS_EN, LSU_BYPASS));
@@ -118,11 +130,19 @@ module qv_rs #(
             if (ready[i] && (kind[i] == QV_RS_FPU || (kind[i] == QV_RS_FDS && i == fds_i && i_fpu_ds_free))) begin
                 fpu_f = 1'b1; fpu_i = i;
             end
+        p1_f = 1'b0; p1_i = 0;
+        if (ALU_PORTS > 1)
+            for (int i = DEPTH - 1; i >= 0; i--)
+                if (ready[i] && kind[i] == QV_RS_ALU && !qv_is_mul(eop[i]) && !(ab_f && i == ab_i)) begin
+                    p1_f = 1'b1; p1_i = i;
+                end
         o_sel_ab  = !i_flush && ab_f;
         o_sel_div = !i_flush && div_f && ready[div_i] && i_div_free;
         o_sel_fpu = !i_flush && fpu_f;
+        o_sel_p1  = !i_flush && p1_f;
         for (int i = 0; i < DEPTH; i++)
-            issued[i] = (o_sel_ab && i == ab_i) || (o_sel_div && i == div_i) || (o_sel_fpu && i == fpu_i);
+            issued[i] = (o_sel_ab && i == ab_i) || (o_sel_div && i == div_i) || (o_sel_fpu && i == fpu_i)
+                     || (o_sel_p1 && i == p1_i);
         o_has_div = div_f;
         o_has_fds = fds_f;
     end
@@ -153,8 +173,13 @@ module qv_rs #(
         o_bru_req = '0;
         o_div_req = '0;
         o_fpu_req = '0;
+        o_alu1_req = '0;
         for (int i = 0; i < DEPTH; i++) begin
             x = e_q[i];
+            if (i == p1_i) begin
+                o_alu1_req       = mk_req(x, va[i], vb[i]);
+                o_alu1_req.valid = o_sel_p1;
+            end
             if (i == ab_i) begin
                 o_alu_req       = mk_req(x, va[i], vb[i]);
                 o_alu_req.valid = o_sel_ab && x.kind == QV_RS_ALU;

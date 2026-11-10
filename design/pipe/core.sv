@@ -650,7 +650,11 @@ module core
     logic                    l1_complete, l2_complete;
     logic [63:0]             l1_value, l2_value;
     wb_t                     wb_bus;
+    wb_t                     wbp_bus;                 // (O4d) the second ALU port's writeback ('0 without it)
     fu_req_t                 alu_req, bru_req, lsu_req, div_req;
+    /* verilator lint_off UNUSEDSIGNAL */
+    fu_req_t                 alu1_req;                // (O4d) the second ALU port's request (unread with one port)
+    /* verilator lint_on UNUSEDSIGNAL */
     /* verilator lint_off UNUSEDSIGNAL */
     rs_opnd_t                lsu_opa, lsu_opb;     // the dispatching uop's operands, as issue resolved them (the queue reads a memory op's, O1c)
     /* verilator lint_on UNUSEDSIGNAL */
@@ -694,8 +698,10 @@ module core
     wb_t      c_bus;                       // commit's regfile write, with the committing tag: wakes the station's late operands
     qv_issue #(.SERIALIZE(SERIALIZE), .BYPASS_EN(BYPASS_EN), .CSR_LATE(CSR_NOSER),
                .LSU_BYPASS(LSQ_DEPTH > 0 && LSQ_BYPASS), .RS_DEPTH(RS_DEPTH),
-               .LSQ_WAIT(RS_DEPTH > 0 && LSQ_DEPTH > 0 && LSQ_WAIT), .DISPATCH_W(DISPATCH_W)) issue0 (
+               .LSQ_WAIT(RS_DEPTH > 0 && LSQ_DEPTH > 0 && LSQ_WAIT), .DISPATCH_W(DISPATCH_W),
+               .ALU_PORTS(ALU_PORTS)) issue0 (
         .clk(clk), .rst(rst), .i_flush(flush),
+        .o_alu1_req(alu1_req), .i_wbp(wbp_bus),
         .i_uop_valid(uop_valid), .i_uop(uop), .o_issue(issue_fire),
         .i_uop1_valid(uop1_valid), .i_uop1(uop1), .i_pb_active(pb_active), .o_issue2(issue_fire2),
         .o_rs1b_sel(rs1b_sel), .o_rs2b_sel(rs2b_sel), .i_rs1b_data(rs1b_data), .i_rs2b_data(rs2b_data),
@@ -755,7 +761,7 @@ module core
         .o_empty(rob_empty), .i_wb(wb_bus), .i_wb2(lsu_wb), .i_wb3(div_wb),
         .i_lookup1_tag(l1_tag), .o_lookup1_complete(l1_complete), .o_lookup1_value(l1_value),
         .i_lookup2_tag(l2_tag), .o_lookup2_complete(l2_complete), .o_lookup2_value(l2_value),
-        .i_wb4(fpu_wb),
+        .i_wb4(fpu_wb), .i_wb5(wbp_bus),
         .i_lookup3_tag(l3_tag), .o_lookup3_complete(l3_complete), .o_lookup3_value(l3_value),
         .o_head_valid(head_valid), .o_head_entry(head_entry), .o_head_tag(head_tag),
         .o_head_ctrl(head_ctrl), .i_commit_pop(commit_pop),
@@ -766,6 +772,15 @@ module core
     // ---------------- X: ALU, BRU -> writeback bus ----------------
     wb_t alu_wb, bru_wb;
     qv_exu_alu exu_alu0 (.clk(clk), .rst(rst), .i_flush(flush), .i_req(alu_req), .o_wb(alu_wb));
+    // (O4d) the second ALU port: no multiplier and no branches (issue sends it neither), its own writeback bus
+    generate
+        if (ALU_PORTS > 1) begin : g_alu1
+            qv_exu_alu #(.HAS_MUL(1'b0)) exu_alu1 (.clk(clk), .rst(rst), .i_flush(flush), .i_req(alu1_req),
+                                                   .o_wb(wbp_bus));
+        end else begin : g_noalu1
+            assign wbp_bus = '0;
+        end
+    endgenerate
     qv_exu_bru exu_bru0 (.clk(clk), .rst(rst), .i_flush(flush), .i_req(bru_req), .o_wb(bru_wb));
 
     // Both units take one cycle and issue sends at most one uop per
@@ -900,7 +915,7 @@ module core
                      .BYPASS_EN(BYPASS_EN), .LSU_BYPASS(LSQ_BYPASS)) lsq0 (
                 .clk(clk), .rst(rst), .i_flush(flush),
                 .i_req(lsu_req), .o_free(lsu_free), .i_opa(lsu_opa), .i_opb(lsu_opb),
-                .i_wb(wb_bus), .i_wbd(div_wb), .i_wbf(fpu_wb), .i_wbc(c_bus),
+                .i_wb(wb_bus), .i_wbp(wbp_bus), .i_wbd(div_wb), .i_wbf(fpu_wb), .i_wbc(c_bus),
                 .o_eng_req(eng_req), .i_eng_take(eng_take), .i_eng_wb(lsu_wb), .i_eng_res(eng_res),
                 .i_pop(commit_pop), .i_pop_tag(head_tag), .o_head_res(lsq_res0),
                 .i_pop2(commit_pop2), .i_pop2_tag(head1_tag), .o_head1_res(lsq_res1),
@@ -1198,6 +1213,7 @@ module core
     wire [SRCW-1:0] s_new1 = alloc_tag1[SRCW-1:0];
     wire [SRCW-1:0] s_alu = alu_req.tag[SRCW-1:0], s_bru = bru_req.tag[SRCW-1:0], s_div = div_req.tag[SRCW-1:0];
     wire [SRCW-1:0] s_fpu = fpu_req.tag[SRCW-1:0], s_eng = eng_req.tag[SRCW-1:0];
+    wire [SRCW-1:0] s_alu1 = alu1_req.tag[SRCW-1:0];
     always_ff @(posedge clk) begin
         if (RS_DEPTH > 0) begin
             if (alu_req.valid && src_wait_a_q[s_alu]) src_a_q[s_alu] <= alu_req.a;
@@ -1210,6 +1226,8 @@ module core
             if (fpu_req.valid && src_wait_b_q[s_fpu]) src_b_q[s_fpu] <= fpu_req.b;
             if (eng_req.valid && src_wait_a_q[s_eng]) src_a_q[s_eng] <= eng_req.a;
             if (eng_req.valid && src_wait_b_q[s_eng]) src_b_q[s_eng] <= eng_req.b;
+            if (alu1_req.valid && src_wait_a_q[s_alu1]) src_a_q[s_alu1] <= alu1_req.a;      // (O4d)
+            if (alu1_req.valid && src_wait_b_q[s_alu1]) src_b_q[s_alu1] <= alu1_req.b;
         end
         if (alloc_valid) begin
             src_a_q[s_new]      <= src0_a.value;
@@ -1343,8 +1361,8 @@ module core
 
 `ifndef SYNTHESIS
     // O4: the width knobs whose paths exist so far
-    initial if (COMMIT_W < 1 || COMMIT_W > 2 || DISPATCH_W < 1 || DISPATCH_W > 2 || ALU_PORTS != 1)
-        $fatal(1, "core: COMMIT_W and DISPATCH_W must be 1 or 2, ALU_PORTS 1 (O4c)");
+    initial if (COMMIT_W < 1 || COMMIT_W > 2 || DISPATCH_W < 1 || DISPATCH_W > 2 || ALU_PORTS < 1 || ALU_PORTS > 2)
+        $fatal(1, "core: COMMIT_W, DISPATCH_W and ALU_PORTS must be 1 or 2");
 `endif
 
     // ---------------- RVFI ----------------
@@ -1496,10 +1514,15 @@ module core
         if (lsu_req.valid) assert (rob_holds(lsu_req.tag, rob_h, rob_ta));
         if (fpu_req.valid) assert (rob_holds(fpu_req.tag, rob_h, rob_ta));
         if (eng_req.valid) assert (rob_holds(eng_req.tag, rob_h, rob_ta));
+        if (alu1_req.valid) assert (rob_holds(alu1_req.tag, rob_h, rob_ta) && !qv_is_mul(alu1_req.op));
+        if (alu1_req.valid && alu_req.valid) assert (alu1_req.tag != alu_req.tag);
+        if (alu1_req.valid && bru_req.valid) assert (alu1_req.tag != bru_req.tag);
         if (wb_bus.valid) assert (rob_holds(wb_bus.tag, rob_h, rob_t) && !rob0.complete_q[wb_bus.tag[RIW-1:0]]);
         if (lsu_wb.valid) assert (rob_holds(lsu_wb.tag, rob_h, rob_t) && !rob0.complete_q[lsu_wb.tag[RIW-1:0]]);
         if (div_wb.valid) assert (rob_holds(div_wb.tag, rob_h, rob_t) && !rob0.complete_q[div_wb.tag[RIW-1:0]]);
         if (fpu_wb.valid) assert (rob_holds(fpu_wb.tag, rob_h, rob_t) && !rob0.complete_q[fpu_wb.tag[RIW-1:0]]);
+        if (wbp_bus.valid) assert (rob_holds(wbp_bus.tag, rob_h, rob_t) && !rob0.complete_q[wbp_bus.tag[RIW-1:0]]
+                                   && !(wb_bus.valid && wb_bus.tag == wbp_bus.tag));
     end
 
     // The translators are safe only while a client keeps to one rule: a request it holds does not change (what it

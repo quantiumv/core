@@ -66,6 +66,10 @@ module qv_rob #(
     /* verilator lint_on UNUSEDSIGNAL */
     // F/D: the FPU's writeback (value and exception flags)
     input  qv_pkg::wb_fp_t                   i_wb4 = '0,
+    // O4d: the second ALU port's (value only: it takes no branch)
+    /* verilator lint_off UNUSEDSIGNAL */
+    input  qv_pkg::wb_t                      i_wb5 = '0,
+    /* verilator lint_on UNUSEDSIGNAL */
 
     // operand lookups (issue) -- indexing only needs the low bits; the
     // wrap bit matters for tag equality elsewhere, not here
@@ -200,6 +204,7 @@ module qv_rob #(
     wire [IDX_W-1:0] wb2_idx   = i_wb2.tag[IDX_W-1:0];
     wire [IDX_W-1:0] wb3_idx   = i_wb3.tag[IDX_W-1:0];
     wire [IDX_W-1:0] wb4_idx   = i_wb4.tag[IDX_W-1:0];
+    wire [IDX_W-1:0] wb5_idx   = i_wb5.tag[IDX_W-1:0];
 
     always_ff @(posedge clk) begin
         if (rst) begin
@@ -254,6 +259,10 @@ module qv_rob #(
                 value_q[wb4_idx]    <= i_wb4.value;
                 fflags_q[wb4_idx]   <= i_wb4.flags;
                 complete_q[wb4_idx] <= 1'b1;
+            end
+            if (i_wb5.valid && !i_flush) begin
+                value_q[wb5_idx]    <= i_wb5.value;
+                complete_q[wb5_idx] <= 1'b1;
             end
         end
     end

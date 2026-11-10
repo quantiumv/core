@@ -64,6 +64,11 @@
  * slot 0 is no CSR op), and slot 1 cannot go straight to its unit -- it goes into the station, or waits in the queue,
  * or the pair splits. The ports go to the station's picks first, then slot 0, then slot 1. Slot 1's claim comes after
  * slot 0's, so it wins a register both write.
+ *
+ * ALU_PORTS 2 (O4d): a second ALU port, for ALU uops that need no multiplier (branches and multiplies keep port 0:
+ * R6 of the O4 plan). Port 0 goes to the station's oldest ready ALU/BRU entry, else slot 0, else slot 1; port 1 to
+ * the station's next ready such entry, else a ready plain ALU uop that got no port 0 (slot 0 first). Port 1's
+ * writeback (i_wbp) is a bypass source and wakes operands, as port 0's does.
  */
 module qv_issue #(
     parameter bit SERIALIZE = 1'b0,
@@ -72,7 +77,8 @@ module qv_issue #(
     parameter bit LSU_BYPASS = 1'b0,            // path 3 also takes the LSU's writeback (O2d)
     parameter int RS_DEPTH  = 0,                // reservation-station entries (O1); 0: none
     parameter bit LSQ_WAIT  = 1'b0,             // a memory op's operands may wait in the load/store queue (O1c)
-    parameter int DISPATCH_W = 1                // O4c: 2 dispatches a second uop in the same cycle when it may
+    parameter int DISPATCH_W = 1,               // O4c: 2 dispatches a second uop in the same cycle when it may
+    parameter int ALU_PORTS  = 1                // O4d: 2 adds a second ALU port (no branch, no multiply)
 ) (
     input  logic                             clk,
     input  logic                             rst,
@@ -186,7 +192,11 @@ module qv_issue #(
     output qv_pkg::rs_opnd_t                 o_src0_a,
     output qv_pkg::rs_opnd_t                 o_src0_b,
     output qv_pkg::rs_opnd_t                 o_src1_a,
-    output qv_pkg::rs_opnd_t                 o_src1_b
+    output qv_pkg::rs_opnd_t                 o_src1_b,
+
+    // O4d: the second ALU port: its request, and its writeback
+    output qv_pkg::fu_req_t                  o_alu1_req,
+    input  qv_pkg::wb_t                      i_wbp = '0
 );
     import qv_pkg::*;
 
@@ -264,6 +274,7 @@ module qv_issue #(
             if (!p1_busy)                                          opa = r1_data;
             else if (p1_late)                                      a_ready = 1'b0;
             else if (BYPASS_EN && i_wb.valid && i_wb.tag == p1_tag) opa = i_wb.value;
+            else if (BYPASS_EN && i_wbp.valid && i_wbp.tag == p1_tag) opa = i_wbp.value;
             else if (BYPASS_EN && i_wbf.valid && i_wbf.tag == p1_tag) opa = i_wbf.value;
             else if (LSU_BYPASS && BYPASS_EN && i_wbl.valid && i_wbl.tag == p1_tag) opa = i_wbl.value;
             else if (i_lookup1_complete)                           opa = i_lookup1_value;
@@ -276,6 +287,7 @@ module qv_issue #(
             if (!p2_busy)                                          opb = r2_data;
             else if (p2_late)                                      b_ready = 1'b0;
             else if (BYPASS_EN && i_wb.valid && i_wb.tag == p2_tag) opb = i_wb.value;
+            else if (BYPASS_EN && i_wbp.valid && i_wbp.tag == p2_tag) opb = i_wbp.value;
             else if (BYPASS_EN && i_wbf.valid && i_wbf.tag == p2_tag) opb = i_wbf.value;
             else if (LSU_BYPASS && BYPASS_EN && i_wbl.valid && i_wbl.tag == p2_tag) opb = i_wbl.value;
             else if (i_lookup2_complete)                           opb = i_lookup2_value;
@@ -305,6 +317,7 @@ module qv_issue #(
             else if (!q1_busy)                                      opa1 = s1_r1;
             else if (q1_late)                                       a1_ready = 1'b0;
             else if (BYPASS_EN && i_wb.valid && i_wb.tag == q1_tag)   opa1 = i_wb.value;
+            else if (BYPASS_EN && i_wbp.valid && i_wbp.tag == q1_tag) opa1 = i_wbp.value;
             else if (BYPASS_EN && i_wbf.valid && i_wbf.tag == q1_tag) opa1 = i_wbf.value;
             else if (LSU_BYPASS && BYPASS_EN && i_wbl.valid && i_wbl.tag == q1_tag) opa1 = i_wbl.value;
             else if (i_lookup4_complete)                            opa1 = i_lookup4_value;
@@ -317,6 +330,7 @@ module qv_issue #(
             else if (!q2_busy)                                      opb1 = s1_r2;
             else if (q2_late)                                       b1_ready = 1'b0;
             else if (BYPASS_EN && i_wb.valid && i_wb.tag == q2_tag)   opb1 = i_wb.value;
+            else if (BYPASS_EN && i_wbp.valid && i_wbp.tag == q2_tag) opb1 = i_wbp.value;
             else if (BYPASS_EN && i_wbf.valid && i_wbf.tag == q2_tag) opb1 = i_wbf.value;
             else if (LSU_BYPASS && BYPASS_EN && i_wbl.valid && i_wbl.tag == q2_tag) opb1 = i_wbl.value;
             else if (i_lookup5_complete)                            opb1 = i_lookup5_value;
@@ -341,17 +355,20 @@ module qv_issue #(
     wire fpu_ds = (qv_fp_op_e'(i_uop.fp_op) == QV_FP_DIV) || (qv_fp_op_e'(i_uop.fp_op) == QV_FP_SQRT);
 
     // the station's view of the ports (all 0 without one)
-    logic     rs_room, rs_room2, rs_has_div, rs_has_fds, rs_sel_ab, rs_sel_div, rs_sel_fpu;
-    fu_req_t  rs_alu_req, rs_bru_req, rs_div_req;
+    logic     rs_room, rs_room2, rs_has_div, rs_has_fds, rs_sel_ab, rs_sel_div, rs_sel_fpu, rs_sel_p1;
+    fu_req_t  rs_alu_req, rs_bru_req, rs_div_req, rs_alu1_req;
     fpu_req_t rs_fpu_req;
 
     // straight to the unit: operands ready and the unit's port free (not taken by the station; a divide or an FP
     // divide/square root also waits for every one of its kind in the station, which keeps them in program order)
+    // (O4d) or, for a plain ALU uop (no branch, no multiply), port 1 when the station took port 0
+    wire plain0 = !to_bru && !to_lsu && !to_div && !to_fpu && !qv_is_mul(i_uop.alu_op);
+    wire p1_ok0 = (ALU_PORTS > 1) && plain0 && !rs_sel_p1;
     wire direct = a_ready && b_ready && c_ready
                && (to_lsu ? i_lsu_free
                    : to_div ? (i_div_free && !rs_has_div)
                    : to_fpu ? (!rs_sel_fpu && (!fpu_ds || (i_fpu_ds_free && !rs_has_fds)))
-                   :          !rs_sel_ab);
+                   :          (!rs_sel_ab || p1_ok0));
     wire to_rs  = (RS_DEPTH > 0) && !to_lsu && !direct;
     // (LSQ_WAIT) a memory op needs only room in the queue: its operands may wait there
     wire to_lsq = LSQ_WAIT && to_lsu && i_lsu_free;
@@ -372,12 +389,18 @@ module qv_issue #(
     wire to_lsu1 = (i_uop1.fu == QV_FU_LSU);
     wire to_fpu1 = (i_uop1.fu == QV_FU_FPU);
     // slot 0 takes the ALU/BRU port (or the FPU's) straight to its unit this cycle
-    wire s0_ab   = o_issue && direct && !to_lsu && !to_div && !to_fpu;
+    wire s0_ab   = o_issue && direct && !to_lsu && !to_div && !to_fpu;     // slot 0 takes an ALU port:
+    wire s0_p1   = s0_ab && rs_sel_ab;                                       // port 1 (the station has port 0)
+    wire s0_p0   = s0_ab && !rs_sel_ab;                                      // port 0
     wire s0_fpu  = o_issue && direct && to_fpu;
+    // (O4d) the ALU ports left for slot 1: port 0, or (a plain ALU uop) port 1
+    wire plain1  = !to_bru1 && !to_lsu1 && !to_fpu1 && !qv_is_mul(i_uop1.alu_op);
+    wire p0_ok1  = !rs_sel_ab && !s0_p0;
+    wire p1_ok1  = (ALU_PORTS > 1) && plain1 && !rs_sel_p1 && !s0_p1;
     wire direct1 = a1_ready && b1_ready && c1_ready
                 && (to_lsu1 ? i_lsu_free
                     : to_fpu1 ? (!rs_sel_fpu && !s0_fpu)
-                    :           (!rs_sel_ab && !s0_ab));
+                    :           (p0_ok1 || p1_ok1));
     wire to_rs1  = (RS_DEPTH > 0) && !to_lsu1 && !direct1;
     wire to_lsq1 = LSQ_WAIT && to_lsu1 && i_lsu_free;
     wire rs_ok1  = (o_issue && to_rs) ? rs_room2 : rs_room;     // the station's room behind slot 0's push
@@ -505,7 +528,9 @@ module qv_issue #(
         req.fp        = i_uop.rd_fp;
 
         o_alu_req       = req;
-        o_alu_req.valid = o_issue && direct && !to_bru && !to_lsu && !to_div && !to_fpu;
+        o_alu_req.valid = o_issue && direct && !to_bru && !to_lsu && !to_div && !to_fpu && !s0_p1;
+        o_alu1_req       = req;                                  // (O4d) slot 0 on port 1
+        o_alu1_req.valid = s0_p1;
         o_bru_req       = req;
         o_bru_req.valid = o_issue && direct && to_bru;
         o_lsu_req       = req;
@@ -539,8 +564,11 @@ module qv_issue #(
         req1.rvc       = i_uop1.rvc;
         req1.pred_next = pred_next1;
         req1.fp        = i_uop1.rd_fp;
-        if (o_issue2 && direct1 && !to_bru1 && !to_lsu1 && !to_fpu1) begin
+        if (o_issue2 && direct1 && !to_bru1 && !to_lsu1 && !to_fpu1 && p0_ok1) begin
             o_alu_req = req1; o_alu_req.valid = 1'b1;
+        end
+        if (o_issue2 && direct1 && !to_bru1 && !to_lsu1 && !to_fpu1 && !p0_ok1) begin      // (O4d) port 1
+            o_alu1_req = req1; o_alu1_req.valid = 1'b1;
         end
         if (o_issue2 && direct1 && to_bru1) begin
             o_bru_req = req1; o_bru_req.valid = 1'b1;
@@ -567,6 +595,7 @@ module qv_issue #(
             o_bru_req = rs_bru_req;
         end
         if (rs_sel_div) o_div_req = rs_div_req;
+        if (rs_sel_p1)  o_alu1_req = rs_alu1_req;
         if (rs_sel_fpu) o_fpu_req = rs_fpu_req;
     end
 
@@ -610,15 +639,16 @@ module qv_issue #(
                 pe1.b.rdy     = b1_ready;  pe1.b.late = q2_late;  pe1.b.tag = q2_tag;  pe1.b.value = opb1;
                 pe1.c.rdy     = c1_ready;  pe1.c.late = 1'b0;     pe1.c.tag = q3_tag;  pe1.c.value = opc1;
             end
-            qv_rs #(.DEPTH(RS_DEPTH), .BYPASS_EN(BYPASS_EN), .LSU_BYPASS(LSU_BYPASS)) rs0 (
+            qv_rs #(.DEPTH(RS_DEPTH), .BYPASS_EN(BYPASS_EN), .LSU_BYPASS(LSU_BYPASS), .ALU_PORTS(ALU_PORTS)) rs0 (
                 .clk(clk), .rst(rst), .i_flush(i_flush),
                 .i_push(o_issue && to_rs), .i_push_e(pe), .o_room(rs_room),
                 .i_push2(o_issue2 && to_rs1), .i_push2_e(pe1), .o_room2(rs_room2),
                 .o_has_div(rs_has_div), .o_has_fds(rs_has_fds),
-                .i_wb(i_wb), .i_wbl(i_wbl), .i_wbd(i_wbd), .i_wbf(i_wbf), .i_wbc(i_wbc),
+                .i_wb(i_wb), .i_wbp(i_wbp), .i_wbl(i_wbl), .i_wbd(i_wbd), .i_wbf(i_wbf), .i_wbc(i_wbc),
                 .i_div_free(i_div_free), .i_fpu_ds_free(i_fpu_ds_free),
                 .o_sel_ab(rs_sel_ab), .o_sel_div(rs_sel_div), .o_sel_fpu(rs_sel_fpu),
-                .o_alu_req(rs_alu_req), .o_bru_req(rs_bru_req), .o_div_req(rs_div_req), .o_fpu_req(rs_fpu_req)
+                .o_alu_req(rs_alu_req), .o_bru_req(rs_bru_req), .o_div_req(rs_div_req), .o_fpu_req(rs_fpu_req),
+                .o_sel_p1(rs_sel_p1), .o_alu1_req(rs_alu1_req)
             );
         end else begin : g_nors
             assign rs_room    = 1'b0;
@@ -632,6 +662,8 @@ module qv_issue #(
             assign rs_bru_req = '0;
             assign rs_div_req = '0;
             assign rs_fpu_req = '0;
+            assign rs_sel_p1  = 1'b0;
+            assign rs_alu1_req = '0;
         end
     endgenerate
 

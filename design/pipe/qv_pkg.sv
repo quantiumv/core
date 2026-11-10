@@ -441,6 +441,12 @@ package qv_pkg;
     endfunction
     /* verilator lint_on UNUSEDSIGNAL */
 
+    // O4d: an ALU op that needs the multiplier (defaults/alu_ops.sv: MUL, MULH, MULHSU, MULHU; MULW is MUL with
+    // is_word), which only ALU port 0 has
+    function automatic logic qv_is_mul(input logic [4:0] op);
+        return (op >= 5'b01110) && (op <= 5'b10001);
+    endfunction
+
     // What kind of control-flow instruction an encoding is (32-bit, or RVC with raw[31:16] = 0), for the branch
     // predictors: 0 none, 1 direct (conditional branch, JAL, C.J, C.BEQZ/C.BNEZ: the target is in the encoding),
     // 2 an indirect jump that is not a return (JALR, C.JR, C.JALR: the target is a register; a call or a jump),
