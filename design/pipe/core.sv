@@ -181,6 +181,19 @@
 `ifndef QV_PIPE_LSQ_WAIT
 `define QV_PIPE_LSQ_WAIT 1
 `endif
+
+// O4 (two-wide), one knob per step: QV_PIPE_COMMIT_W instructions retired a cycle (the RVFI ports carry that many
+// channels, oldest in channel 0), QV_PIPE_DISPATCH_W dispatched a cycle, QV_PIPE_ALU_PORTS ALU issue ports. 1 is the
+// core before O4. (O4a: only the RVFI channels exist; a second channel never retires.)
+`ifndef QV_PIPE_COMMIT_W
+`define QV_PIPE_COMMIT_W 1
+`endif
+`ifndef QV_PIPE_DISPATCH_W
+`define QV_PIPE_DISPATCH_W 1
+`endif
+`ifndef QV_PIPE_ALU_PORTS
+`define QV_PIPE_ALU_PORTS 1
+`endif
 `ifndef QV_PIPE_PMA_RAM_SIZE
 `define QV_PIPE_PMA_RAM_SIZE 64'h0
 `endif
@@ -250,6 +263,9 @@ module core
     parameter bit LSQ_BYPASS   = `QV_PIPE_LSQ_BYPASS,    // (with the queue) the LSU's writeback is a bypass source
     parameter int RS_DEPTH  = `QV_PIPE_RS_DEPTH,     // reservation-station entries, 0: none
     parameter bit LSQ_WAIT  = `QV_PIPE_LSQ_WAIT,     // (with the station and the queue) memory ops wait there for operands
+    parameter int COMMIT_W   = `QV_PIPE_COMMIT_W,    // instructions retired a cycle (1 or 2): the RVFI channels
+    parameter int DISPATCH_W = `QV_PIPE_DISPATCH_W,  // instructions dispatched a cycle (1 or 2)
+    parameter int ALU_PORTS  = `QV_PIPE_ALU_PORTS,   // ALU issue ports (1 or 2)
     parameter logic [63:0] PMA_RAM_BASE = `QV_PIPE_PMA_RAM_BASE,   // physical window of RAM: stores into it are posted
     parameter logic [63:0] PMA_RAM_SIZE = `QV_PIPE_PMA_RAM_SIZE
 ) (
@@ -306,55 +322,57 @@ module core
 
 `ifdef RISCV_FORMAL
     ,
-    output logic        rvfi_valid,
-    output logic [63:0] rvfi_order,
-    output logic [31:0] rvfi_insn,
-    output logic        rvfi_trap,
-    output logic        rvfi_halt,
-    output logic        rvfi_intr,
-    output logic [1:0]  rvfi_mode,
-    output logic [1:0]  rvfi_ixl,
-    output logic [4:0]  rvfi_rs1_addr,
-    output logic [4:0]  rvfi_rs2_addr,
-    output logic [63:0] rvfi_rs1_rdata,
-    output logic [63:0] rvfi_rs2_rdata,
-    output logic [4:0]  rvfi_rd_addr,
-    output logic [63:0] rvfi_rd_wdata,
-    output logic [63:0] rvfi_pc_rdata,
-    output logic [63:0] rvfi_pc_wdata,
-    output logic [63:0] rvfi_mem_addr,
-    output logic [7:0]  rvfi_mem_rmask,
-    output logic [7:0]  rvfi_mem_wmask,
-    output logic [63:0] rvfi_mem_rdata,
-    output logic [63:0] rvfi_mem_wdata,
-    output logic [63:0] rvfi_csr_mepc_rmask,
-    output logic [63:0] rvfi_csr_mepc_wmask,
-    output logic [63:0] rvfi_csr_mepc_rdata,
-    output logic [63:0] rvfi_csr_mepc_wdata,
-    output logic [63:0] rvfi_csr_mcause_rmask,
-    output logic [63:0] rvfi_csr_mcause_wmask,
-    output logic [63:0] rvfi_csr_mcause_rdata,
-    output logic [63:0] rvfi_csr_mcause_wdata,
-    output logic [63:0] rvfi_csr_sepc_rmask,
-    output logic [63:0] rvfi_csr_sepc_wmask,
-    output logic [63:0] rvfi_csr_sepc_rdata,
-    output logic [63:0] rvfi_csr_sepc_wdata,
-    output logic [63:0] rvfi_csr_scause_rmask,
-    output logic [63:0] rvfi_csr_scause_wmask,
-    output logic [63:0] rvfi_csr_scause_rdata,
-    output logic [63:0] rvfi_csr_scause_wdata,
-    output logic [63:0] rvfi_csr_pmpcfg0_rmask,
-    output logic [63:0] rvfi_csr_pmpcfg0_wmask,
-    output logic [63:0] rvfi_csr_pmpcfg0_rdata,
-    output logic [63:0] rvfi_csr_pmpcfg0_wdata,
-    output logic [63:0] rvfi_csr_pmpaddr0_rmask,
-    output logic [63:0] rvfi_csr_pmpaddr0_wmask,
-    output logic [63:0] rvfi_csr_pmpaddr0_rdata,
-    output logic [63:0] rvfi_csr_pmpaddr0_wdata,
-    output logic [63:0] rvfi_csr_medeleg_rmask,
-    output logic [63:0] rvfi_csr_medeleg_wmask,
-    output logic [63:0] rvfi_csr_medeleg_rdata,
-    output logic [63:0] rvfi_csr_medeleg_wdata,
+    // COMMIT_W channels, packed riscv-formal style (channel 0, the oldest, in the low bits); satp stays one channel,
+    // as the wrapper and the patched rvfi_testbench.sv have it
+    output logic [COMMIT_W-1:0]    rvfi_valid,
+    output logic [COMMIT_W*64-1:0] rvfi_order,
+    output logic [COMMIT_W*32-1:0] rvfi_insn,
+    output logic [COMMIT_W-1:0]    rvfi_trap,
+    output logic [COMMIT_W-1:0]    rvfi_halt,
+    output logic [COMMIT_W-1:0]    rvfi_intr,
+    output logic [COMMIT_W*2-1:0]  rvfi_mode,
+    output logic [COMMIT_W*2-1:0]  rvfi_ixl,
+    output logic [COMMIT_W*5-1:0]  rvfi_rs1_addr,
+    output logic [COMMIT_W*5-1:0]  rvfi_rs2_addr,
+    output logic [COMMIT_W*64-1:0] rvfi_rs1_rdata,
+    output logic [COMMIT_W*64-1:0] rvfi_rs2_rdata,
+    output logic [COMMIT_W*5-1:0]  rvfi_rd_addr,
+    output logic [COMMIT_W*64-1:0] rvfi_rd_wdata,
+    output logic [COMMIT_W*64-1:0] rvfi_pc_rdata,
+    output logic [COMMIT_W*64-1:0] rvfi_pc_wdata,
+    output logic [COMMIT_W*64-1:0] rvfi_mem_addr,
+    output logic [COMMIT_W*8-1:0]  rvfi_mem_rmask,
+    output logic [COMMIT_W*8-1:0]  rvfi_mem_wmask,
+    output logic [COMMIT_W*64-1:0] rvfi_mem_rdata,
+    output logic [COMMIT_W*64-1:0] rvfi_mem_wdata,
+    output logic [COMMIT_W*64-1:0] rvfi_csr_mepc_rmask,
+    output logic [COMMIT_W*64-1:0] rvfi_csr_mepc_wmask,
+    output logic [COMMIT_W*64-1:0] rvfi_csr_mepc_rdata,
+    output logic [COMMIT_W*64-1:0] rvfi_csr_mepc_wdata,
+    output logic [COMMIT_W*64-1:0] rvfi_csr_mcause_rmask,
+    output logic [COMMIT_W*64-1:0] rvfi_csr_mcause_wmask,
+    output logic [COMMIT_W*64-1:0] rvfi_csr_mcause_rdata,
+    output logic [COMMIT_W*64-1:0] rvfi_csr_mcause_wdata,
+    output logic [COMMIT_W*64-1:0] rvfi_csr_sepc_rmask,
+    output logic [COMMIT_W*64-1:0] rvfi_csr_sepc_wmask,
+    output logic [COMMIT_W*64-1:0] rvfi_csr_sepc_rdata,
+    output logic [COMMIT_W*64-1:0] rvfi_csr_sepc_wdata,
+    output logic [COMMIT_W*64-1:0] rvfi_csr_scause_rmask,
+    output logic [COMMIT_W*64-1:0] rvfi_csr_scause_wmask,
+    output logic [COMMIT_W*64-1:0] rvfi_csr_scause_rdata,
+    output logic [COMMIT_W*64-1:0] rvfi_csr_scause_wdata,
+    output logic [COMMIT_W*64-1:0] rvfi_csr_pmpcfg0_rmask,
+    output logic [COMMIT_W*64-1:0] rvfi_csr_pmpcfg0_wmask,
+    output logic [COMMIT_W*64-1:0] rvfi_csr_pmpcfg0_rdata,
+    output logic [COMMIT_W*64-1:0] rvfi_csr_pmpcfg0_wdata,
+    output logic [COMMIT_W*64-1:0] rvfi_csr_pmpaddr0_rmask,
+    output logic [COMMIT_W*64-1:0] rvfi_csr_pmpaddr0_wmask,
+    output logic [COMMIT_W*64-1:0] rvfi_csr_pmpaddr0_rdata,
+    output logic [COMMIT_W*64-1:0] rvfi_csr_pmpaddr0_wdata,
+    output logic [COMMIT_W*64-1:0] rvfi_csr_medeleg_rmask,
+    output logic [COMMIT_W*64-1:0] rvfi_csr_medeleg_wmask,
+    output logic [COMMIT_W*64-1:0] rvfi_csr_medeleg_rdata,
+    output logic [COMMIT_W*64-1:0] rvfi_csr_medeleg_wdata,
     output logic [63:0] rvfi_csr_satp_rmask,
     output logic [63:0] rvfi_csr_satp_wmask,
     output logic [63:0] rvfi_csr_satp_rdata,
@@ -362,9 +380,9 @@ module core
     output logic rvfi_any_trap_taken,
     output logic rvfi_any_debug_entry,
     // F/D, not standard RVFI: an FP register written by this retirement (the same ports as the reference's)
-    output logic        rvfi_frd_wvalid,
-    output logic [4:0]  rvfi_frd_addr,
-    output logic [63:0] rvfi_frd_wdata
+    output logic [COMMIT_W-1:0]    rvfi_frd_wvalid,
+    output logic [COMMIT_W*5-1:0]  rvfi_frd_addr,
+    output logic [COMMIT_W*64-1:0] rvfi_frd_wdata
 `endif
 );
     import qv_pkg::*;
@@ -1194,65 +1212,102 @@ module core
     assign o_progbuf_done  = pb_done;
     assign o_progbuf_abort = pb_abort;
 
+`ifndef SYNTHESIS
+    // O4a: the width knobs exist, the two-wide paths behind them do not yet
+    initial if (COMMIT_W < 1 || COMMIT_W > 2 || DISPATCH_W != 1 || ALU_PORTS != 1)
+        $fatal(1, "core: COMMIT_W must be 1 or 2, DISPATCH_W and ALU_PORTS 1 (O4a)");
+`endif
+
     // ---------------- RVFI ----------------
 `ifdef RISCV_FORMAL
-    assign rvfi_valid     = commit_now_w;
-    assign rvfi_order     = c_order;
-    assign rvfi_insn      = c_insn;
-    assign rvfi_trap      = c_rvfi_trap;
-    assign rvfi_halt      = 1'b0;
-    assign rvfi_intr      = c_intr;
-    assign rvfi_mode      = current_priv;
-    assign rvfi_ixl       = 2'd2;
-    assign rvfi_rs1_addr  = c_rs1_addr;
-    assign rvfi_rs2_addr  = c_rs2_addr;
-    assign rvfi_rs1_rdata = c_rs1_rdata;
-    assign rvfi_rs2_rdata = c_rs2_rdata;
-    assign rvfi_rd_addr   = c_rd_addr;
-    assign rvfi_rd_wdata  = c_rd_wdata;
-    assign rvfi_frd_wvalid = c_frd_wvalid;
-    assign rvfi_frd_addr   = c_frd_addr;
-    assign rvfi_frd_wdata  = c_frd_wdata;
-    assign rvfi_pc_rdata  = c_pc_rdata;
-    assign rvfi_pc_wdata  = c_pc_wdata;
-    assign rvfi_mem_addr  = c_mem_addr;
-    assign rvfi_mem_rmask = c_mem_rmask;
-    assign rvfi_mem_wmask = c_mem_wmask;
-    assign rvfi_mem_rdata = c_mem_rdata;
-    assign rvfi_mem_wdata = c_mem_wdata;
+    assign rvfi_valid[0]                    = commit_now_w;
+    assign rvfi_order[63:0]                 = c_order;
+    assign rvfi_insn[31:0]                  = c_insn;
+    assign rvfi_trap[0]                     = c_rvfi_trap;
+    assign rvfi_halt[0]                     = 1'b0;
+    assign rvfi_intr[0]                     = c_intr;
+    assign rvfi_mode[1:0]                   = current_priv;
+    assign rvfi_ixl[1:0]                    = 2'd2;
+    assign rvfi_rs1_addr[4:0]               = c_rs1_addr;
+    assign rvfi_rs2_addr[4:0]               = c_rs2_addr;
+    assign rvfi_rs1_rdata[63:0]             = c_rs1_rdata;
+    assign rvfi_rs2_rdata[63:0]             = c_rs2_rdata;
+    assign rvfi_rd_addr[4:0]                = c_rd_addr;
+    assign rvfi_rd_wdata[63:0]              = c_rd_wdata;
+    assign rvfi_frd_wvalid[0]               = c_frd_wvalid;
+    assign rvfi_frd_addr[4:0]               = c_frd_addr;
+    assign rvfi_frd_wdata[63:0]             = c_frd_wdata;
+    assign rvfi_pc_rdata[63:0]              = c_pc_rdata;
+    assign rvfi_pc_wdata[63:0]              = c_pc_wdata;
+    assign rvfi_mem_addr[63:0]              = c_mem_addr;
+    assign rvfi_mem_rmask[7:0]              = c_mem_rmask;
+    assign rvfi_mem_wmask[7:0]              = c_mem_wmask;
+    assign rvfi_mem_rdata[63:0]             = c_mem_rdata;
+    assign rvfi_mem_wdata[63:0]             = c_mem_wdata;
 
-    assign rvfi_csr_mepc_rmask     = 64'hffff_ffff_ffff_ffff;
-    assign rvfi_csr_mepc_wmask     = 64'hffff_ffff_ffff_ffff;
-    assign rvfi_csr_mepc_rdata     = mepc_w;
-    assign rvfi_csr_mepc_wdata     = mepc_next_w;
-    assign rvfi_csr_mcause_rmask   = 64'hffff_ffff_ffff_ffff;
-    assign rvfi_csr_mcause_wmask   = 64'hffff_ffff_ffff_ffff;
-    assign rvfi_csr_mcause_rdata   = mcause_w;
-    assign rvfi_csr_mcause_wdata   = mcause_next_w;
-    assign rvfi_csr_sepc_rmask     = 64'hffff_ffff_ffff_ffff;
-    assign rvfi_csr_sepc_wmask     = 64'hffff_ffff_ffff_ffff;
-    assign rvfi_csr_sepc_rdata     = sepc_w;
-    assign rvfi_csr_sepc_wdata     = sepc_next_w;
-    assign rvfi_csr_scause_rmask   = 64'hffff_ffff_ffff_ffff;
-    assign rvfi_csr_scause_wmask   = 64'hffff_ffff_ffff_ffff;
-    assign rvfi_csr_scause_rdata   = scause_w;
-    assign rvfi_csr_scause_wdata   = scause_next_w;
-    assign rvfi_csr_pmpcfg0_rmask  = 64'hffff_ffff_ffff_ffff;
-    assign rvfi_csr_pmpcfg0_wmask  = 64'hffff_ffff_ffff_ffff;
-    assign rvfi_csr_pmpcfg0_rdata  = pmpcfg0_w;
-    assign rvfi_csr_pmpcfg0_wdata  = pmpcfg0_w;
-    assign rvfi_csr_pmpaddr0_rmask = 64'hffff_ffff_ffff_ffff;
-    assign rvfi_csr_pmpaddr0_wmask = 64'hffff_ffff_ffff_ffff;
-    assign rvfi_csr_pmpaddr0_rdata = pmpaddr0_w;
-    assign rvfi_csr_pmpaddr0_wdata = pmpaddr0_w;
-    assign rvfi_csr_medeleg_rmask  = 64'hffff_ffff_ffff_ffff;
-    assign rvfi_csr_medeleg_wmask  = 64'hffff_ffff_ffff_ffff;
-    assign rvfi_csr_medeleg_rdata  = medeleg_w;
-    assign rvfi_csr_medeleg_wdata  = medeleg_w;
-    assign rvfi_csr_satp_rmask     = 64'hffff_ffff_ffff_ffff;
-    assign rvfi_csr_satp_wmask     = 64'hffff_ffff_ffff_ffff;
-    assign rvfi_csr_satp_rdata     = satp_w;
-    assign rvfi_csr_satp_wdata     = satp_w;
+    assign rvfi_csr_mepc_rmask[63:0]        = 64'hffff_ffff_ffff_ffff;
+    assign rvfi_csr_mepc_wmask[63:0]        = 64'hffff_ffff_ffff_ffff;
+    assign rvfi_csr_mepc_rdata[63:0]        = mepc_w;
+    assign rvfi_csr_mepc_wdata[63:0]        = mepc_next_w;
+    assign rvfi_csr_mcause_rmask[63:0]      = 64'hffff_ffff_ffff_ffff;
+    assign rvfi_csr_mcause_wmask[63:0]      = 64'hffff_ffff_ffff_ffff;
+    assign rvfi_csr_mcause_rdata[63:0]      = mcause_w;
+    assign rvfi_csr_mcause_wdata[63:0]      = mcause_next_w;
+    assign rvfi_csr_sepc_rmask[63:0]        = 64'hffff_ffff_ffff_ffff;
+    assign rvfi_csr_sepc_wmask[63:0]        = 64'hffff_ffff_ffff_ffff;
+    assign rvfi_csr_sepc_rdata[63:0]        = sepc_w;
+    assign rvfi_csr_sepc_wdata[63:0]        = sepc_next_w;
+    assign rvfi_csr_scause_rmask[63:0]      = 64'hffff_ffff_ffff_ffff;
+    assign rvfi_csr_scause_wmask[63:0]      = 64'hffff_ffff_ffff_ffff;
+    assign rvfi_csr_scause_rdata[63:0]      = scause_w;
+    assign rvfi_csr_scause_wdata[63:0]      = scause_next_w;
+    assign rvfi_csr_pmpcfg0_rmask[63:0]     = 64'hffff_ffff_ffff_ffff;
+    assign rvfi_csr_pmpcfg0_wmask[63:0]     = 64'hffff_ffff_ffff_ffff;
+    assign rvfi_csr_pmpcfg0_rdata[63:0]     = pmpcfg0_w;
+    assign rvfi_csr_pmpcfg0_wdata[63:0]     = pmpcfg0_w;
+    assign rvfi_csr_pmpaddr0_rmask[63:0]    = 64'hffff_ffff_ffff_ffff;
+    assign rvfi_csr_pmpaddr0_wmask[63:0]    = 64'hffff_ffff_ffff_ffff;
+    assign rvfi_csr_pmpaddr0_rdata[63:0]    = pmpaddr0_w;
+    assign rvfi_csr_pmpaddr0_wdata[63:0]    = pmpaddr0_w;
+    assign rvfi_csr_medeleg_rmask[63:0]     = 64'hffff_ffff_ffff_ffff;
+    assign rvfi_csr_medeleg_wmask[63:0]     = 64'hffff_ffff_ffff_ffff;
+    assign rvfi_csr_medeleg_rdata[63:0]     = medeleg_w;
+    assign rvfi_csr_medeleg_wdata[63:0]     = medeleg_w;
+    assign rvfi_csr_satp_rmask              = 64'hffff_ffff_ffff_ffff;
+    assign rvfi_csr_satp_wmask              = 64'hffff_ffff_ffff_ffff;
+    assign rvfi_csr_satp_rdata              = satp_w;
+    assign rvfi_csr_satp_wdata              = satp_w;
+
+    // Channels 1 .. COMMIT_W-1 (O4b retires a second instruction there): until then they never retire.
+    for (genvar ch = 1; ch < COMMIT_W; ch++) begin : g_rvfi_ch
+        assign rvfi_valid[ch] = 1'b0;          assign rvfi_trap[ch] = 1'b0;
+        assign rvfi_halt[ch]  = 1'b0;          assign rvfi_intr[ch] = 1'b0;
+        assign rvfi_frd_wvalid[ch] = 1'b0;
+        assign rvfi_order[64*ch +: 64] = 64'b0;          assign rvfi_insn[32*ch +: 32] = 32'b0;
+        assign rvfi_mode[2*ch +: 2] = 2'b0;              assign rvfi_ixl[2*ch +: 2] = 2'd2;
+        assign rvfi_rs1_addr[5*ch +: 5] = 5'b0;          assign rvfi_rs2_addr[5*ch +: 5] = 5'b0;
+        assign rvfi_rd_addr[5*ch +: 5] = 5'b0;           assign rvfi_frd_addr[5*ch +: 5] = 5'b0;
+        assign rvfi_rs1_rdata[64*ch +: 64] = 64'b0;      assign rvfi_rs2_rdata[64*ch +: 64] = 64'b0;
+        assign rvfi_rd_wdata[64*ch +: 64] = 64'b0;       assign rvfi_frd_wdata[64*ch +: 64] = 64'b0;
+        assign rvfi_pc_rdata[64*ch +: 64] = 64'b0;       assign rvfi_pc_wdata[64*ch +: 64] = 64'b0;
+        assign rvfi_mem_addr[64*ch +: 64] = 64'b0;       assign rvfi_mem_rmask[8*ch +: 8] = 8'b0;
+        assign rvfi_mem_wmask[8*ch +: 8] = 8'b0;         assign rvfi_mem_rdata[64*ch +: 64] = 64'b0;
+        assign rvfi_mem_wdata[64*ch +: 64] = 64'b0;
+        assign rvfi_csr_mepc_rmask[64*ch +: 64] = 64'b0;    assign rvfi_csr_mepc_wmask[64*ch +: 64] = 64'b0;
+        assign rvfi_csr_mepc_rdata[64*ch +: 64] = 64'b0;    assign rvfi_csr_mepc_wdata[64*ch +: 64] = 64'b0;
+        assign rvfi_csr_mcause_rmask[64*ch +: 64] = 64'b0;  assign rvfi_csr_mcause_wmask[64*ch +: 64] = 64'b0;
+        assign rvfi_csr_mcause_rdata[64*ch +: 64] = 64'b0;  assign rvfi_csr_mcause_wdata[64*ch +: 64] = 64'b0;
+        assign rvfi_csr_sepc_rmask[64*ch +: 64] = 64'b0;    assign rvfi_csr_sepc_wmask[64*ch +: 64] = 64'b0;
+        assign rvfi_csr_sepc_rdata[64*ch +: 64] = 64'b0;    assign rvfi_csr_sepc_wdata[64*ch +: 64] = 64'b0;
+        assign rvfi_csr_scause_rmask[64*ch +: 64] = 64'b0;  assign rvfi_csr_scause_wmask[64*ch +: 64] = 64'b0;
+        assign rvfi_csr_scause_rdata[64*ch +: 64] = 64'b0;  assign rvfi_csr_scause_wdata[64*ch +: 64] = 64'b0;
+        assign rvfi_csr_pmpcfg0_rmask[64*ch +: 64] = 64'b0; assign rvfi_csr_pmpcfg0_wmask[64*ch +: 64] = 64'b0;
+        assign rvfi_csr_pmpcfg0_rdata[64*ch +: 64] = 64'b0; assign rvfi_csr_pmpcfg0_wdata[64*ch +: 64] = 64'b0;
+        assign rvfi_csr_pmpaddr0_rmask[64*ch +: 64] = 64'b0; assign rvfi_csr_pmpaddr0_wmask[64*ch +: 64] = 64'b0;
+        assign rvfi_csr_pmpaddr0_rdata[64*ch +: 64] = 64'b0; assign rvfi_csr_pmpaddr0_wdata[64*ch +: 64] = 64'b0;
+        assign rvfi_csr_medeleg_rmask[64*ch +: 64] = 64'b0; assign rvfi_csr_medeleg_wmask[64*ch +: 64] = 64'b0;
+        assign rvfi_csr_medeleg_rdata[64*ch +: 64] = 64'b0; assign rvfi_csr_medeleg_wdata[64*ch +: 64] = 64'b0;
+    end
     assign rvfi_any_trap_taken     = trap_taken || interrupt_taken;
 
     // An interrupt or a halt is only ever taken with nothing started on the LSU's side of the data bus: the cycle
