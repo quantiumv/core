@@ -76,7 +76,7 @@ tb_soc_interrupt_tb|testbench/soc_interrupt_tb.sv||design|ref,pipe|pass|
 tb_soc_tb|testbench/soc_tb.sv||design|ref,pipe|pass|
 tb_soc_uart_rx_tb|testbench/soc_uart_rx_tb.sv||design|ref,pipe|pass|
 tb_soc_uart_plic_tb|testbench/soc_uart_plic_tb.sv||design|ref,pipe|pass|
-tb_soc_sba_running_tb|testbench/soc_sba_running_tb.sv||design|ref,pipe|pass|
+tb_soc_sba_running_tb|testbench/soc_sba_running_tb.sv||design|ref,pipe|pass|900
 tb_soc_sb_halt_sba_tb|testbench/soc_sb_halt_sba_tb.sv||design|pipe|pass|600
 
 # === testbench/*_tb.sv (core_wb4_sram_harness) ===
