@@ -44,6 +44,10 @@ module qv_rs #(
     input  logic                             i_push,           // only with o_room
     input  qv_pkg::rs_entry_t                i_push_e,
     output logic                             o_room,
+    // O4: a second push in the same cycle (the younger dispatching uop, behind i_push_e), only with o_room2: two free
+    input  logic                             i_push2 = 1'b0,
+    input  qv_pkg::rs_entry_t                i_push2_e = '0,
+    output logic                             o_room2,
     output logic                             o_has_div,        // an entry is a divide: a dispatching one may not pass it
     output logic                             o_has_fds,        // an entry is an FP divide/square root: likewise
 
@@ -153,6 +157,7 @@ module qv_rs #(
         o_has_fds = fds_f;
     end
     assign o_room = !v_q[DEPTH-1];
+    assign o_room2 = (DEPTH > 1) && !v_q[(DEPTH > 1) ? DEPTH - 2 : 0];
 
     // ---------------- requests ----------------
     /* verilator lint_off UNUSEDSIGNAL */
@@ -209,10 +214,12 @@ module qv_rs #(
     logic      n_v [0:DEPTH-1];
 
     always_comb begin
-        rs_entry_t x;
-        int        j;
+        rs_entry_t x, y;
+        int        j, k;
         x = '0;
+        y = '0;
         j = 0;
+        k = 0;
         for (int i = 0; i < DEPTH; i++) begin
             n_e[i] = e_q[i];
             n_v[i] = 1'b0;
@@ -236,6 +243,18 @@ module qv_rs #(
             n_e[j] = x;
             n_v[j] = 1'b1;
         end
+        // (O4) the second dispatching uop goes behind the first, with the same capture
+        if (i_push2) begin
+            k   = j + (i_push ? 1 : 0);
+            y   = i_push2_e;
+            y.a = wake(y.a, i_wb, i_wbl, i_wbd, i_wbf, i_wbc);
+            y.b = wake(y.b, i_wb, i_wbl, i_wbd, i_wbf, i_wbc);
+            y.c = wake(y.c, i_wb, i_wbl, i_wbd, i_wbf, i_wbc);
+            if (k < DEPTH) begin
+                n_e[k] = y;
+                n_v[k] = 1'b1;
+            end
+        end
     end
 
     always_ff @(posedge clk) begin
@@ -249,6 +268,10 @@ module qv_rs #(
     always @(posedge clk) begin
         if (!rst && !i_flush && i_push && !o_room)
             $error("qv_rs: push with no room");
+        if (!rst && !i_flush && i_push && i_push2 && !o_room2)
+            $error("qv_rs: two pushes with room for one");
+        if (!rst && !i_flush && i_push2 && !i_push && !o_room)
+            $error("qv_rs: a second push with no room");
         if (!rst && o_alu_req.valid && o_bru_req.valid)
             $error("qv_rs: ALU and BRU selected together");
     end

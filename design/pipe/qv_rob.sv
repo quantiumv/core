@@ -43,6 +43,17 @@ module qv_rob #(
     output logic [qv_pkg::QV_ROB_TAG_W-1:0]  o_alloc_tag,
     output logic                             o_alloc_ready,
     output logic                             o_empty,
+    // O4: a second allocation in the same cycle (the younger uop, behind the first), only with o_alloc_ready2: room
+    // for two; its tag is o_alloc_tag1
+    input  logic                             i_alloc2_valid = 1'b0,
+    input  logic [63:0]                      i_alloc2_pc = 64'b0,
+    input  logic [31:0]                      i_alloc2_raw = 32'b0,
+    input  logic [4:0]                       i_alloc2_rd = 5'b0,
+    input  logic                             i_alloc2_rd_wen = 1'b0,
+    input  logic [63:0]                      i_alloc2_next_pc = 64'b0,
+    input  qv_pkg::rob_ctrl_t                i_alloc2_ctrl = '0,
+    output logic [qv_pkg::QV_ROB_TAG_W-1:0]  o_alloc_tag1,
+    output logic                             o_alloc_ready2,
 
     // complete: the fast writeback bus (ALU/BRU) and the slow ones (LSU,
     // divider); a tag only ever has one producer, so they never hit the
@@ -71,6 +82,15 @@ module qv_rob #(
     /* verilator lint_on UNUSEDSIGNAL */
     output logic                             o_lookup3_complete,
     output logic [63:0]                      o_lookup3_value,
+    // O4: the second dispatching uop's two sources
+    /* verilator lint_off UNUSEDSIGNAL */
+    input  logic [qv_pkg::QV_ROB_TAG_W-1:0]  i_lookup4_tag = '0,
+    input  logic [qv_pkg::QV_ROB_TAG_W-1:0]  i_lookup5_tag = '0,
+    /* verilator lint_on UNUSEDSIGNAL */
+    output logic                             o_lookup4_complete,
+    output logic [63:0]                      o_lookup4_value,
+    output logic                             o_lookup5_complete,
+    output logic [63:0]                      o_lookup5_value,
 
     // head (commit)
     output logic                             o_head_valid,
@@ -111,6 +131,12 @@ module qv_rob #(
     assign o_alloc_tag   = QV_ROB_TAG_W'(tail_q);
 
     wire alloc = i_alloc_valid && o_alloc_ready && !i_flush;
+    // (O4) room for two, and the second's slot
+    wire [PTR_W-1:0] tail1_q   = tail_q + PTR_W'(1);
+    wire [IDX_W-1:0] tail1_idx = tail1_q[IDX_W-1:0];
+    assign o_alloc_tag1   = QV_ROB_TAG_W'(tail1_q);
+    assign o_alloc_ready2 = (tail_q - head_q) <= PTR_W'(ROB_DEPTH - 2);
+    wire alloc2 = alloc && i_alloc2_valid && o_alloc_ready2;
     wire pop   = i_commit_pop && !o_empty;
     wire [PTR_W-1:0] count = tail_q - head_q;
     assign o_head1_valid = count >= PTR_W'(2);
@@ -126,6 +152,12 @@ module qv_rob #(
     wire [IDX_W-1:0] l3_idx = i_lookup3_tag[IDX_W-1:0];
     assign o_lookup3_complete = complete_q[l3_idx];
     assign o_lookup3_value    = value_q[l3_idx];
+    wire [IDX_W-1:0] l4_idx = i_lookup4_tag[IDX_W-1:0];
+    wire [IDX_W-1:0] l5_idx = i_lookup5_tag[IDX_W-1:0];
+    assign o_lookup4_complete = complete_q[l4_idx];
+    assign o_lookup4_value    = value_q[l4_idx];
+    assign o_lookup5_complete = complete_q[l5_idx];
+    assign o_lookup5_value    = value_q[l5_idx];
 
     // head
     assign o_head_valid = !o_empty;
@@ -189,6 +221,18 @@ module qv_rob #(
                 complete_q[tail_idx]   <= 1'b0;
                 mispredict_q[tail_idx] <= 1'b0;
                 fflags_q[tail_idx]     <= 5'b0;
+                if (alloc2) begin
+                    tail_q                  <= tail_q + PTR_W'(2);
+                    pc_q[tail1_idx]         <= i_alloc2_pc;
+                    raw_q[tail1_idx]        <= i_alloc2_raw;
+                    rd_q[tail1_idx]         <= i_alloc2_rd;
+                    rd_wen_q[tail1_idx]     <= i_alloc2_rd_wen;
+                    next_pc_q[tail1_idx]    <= i_alloc2_next_pc;
+                    ctrl_q[tail1_idx]       <= i_alloc2_ctrl;
+                    complete_q[tail1_idx]   <= 1'b0;
+                    mispredict_q[tail1_idx] <= 1'b0;
+                    fflags_q[tail1_idx]     <= 5'b0;
+                end
             end
             if (i_wb.valid && !i_flush) begin
                 value_q[wb_idx]    <= i_wb.value;

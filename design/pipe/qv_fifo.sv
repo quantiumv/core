@@ -31,7 +31,11 @@ module qv_fifo #(
 
     output logic             o_head_valid,
     output logic [WIDTH-1:0] o_head_data,
-    input  logic             i_pop
+    input  logic             i_pop,
+    // O4: the entry behind the head (valid when there are two), and a second pop (with the first) that takes it too
+    output logic             o_head1_valid,
+    output logic [WIDTH-1:0] o_head1_data,
+    input  logic             i_pop2 = 1'b0
 );
     localparam int PTR_W = $clog2(DEPTH);
     localparam int CNT_W = $clog2(DEPTH + 1);
@@ -40,13 +44,17 @@ module qv_fifo #(
     logic [PTR_W-1:0] rd_q, wr_q;
     logic [CNT_W-1:0] count_q;
 
-    wire pop = i_pop && (count_q != '0);
+    wire pop  = i_pop && (count_q != '0);
+    wire pop2 = pop && i_pop2 && (count_q >= CNT_W'(2));
     wire [CNT_W-1:0] n_push = CNT_W'(i_push0_valid) + CNT_W'(i_push1_valid);
+    wire [CNT_W-1:0] n_pop  = CNT_W'(pop) + CNT_W'(pop2);
 
     assign o_push_ready = (count_q <= CNT_W'(DEPTH - 2));
     assign o_push_ready1 = (count_q <= CNT_W'(DEPTH - 1));
     assign o_head_valid = (count_q != '0);
     assign o_head_data  = mem[rd_q];
+    assign o_head1_valid = (count_q >= CNT_W'(2));
+    assign o_head1_data  = mem[rd_q + PTR_W'(1)];
 
     always_ff @(posedge clk) begin
         if (rst || i_flush) begin
@@ -57,8 +65,8 @@ module qv_fifo #(
             if (i_push0_valid) mem[wr_q] <= i_push0_data;
             if (i_push1_valid) mem[wr_q + PTR_W'(1)] <= i_push1_data;
             wr_q    <= wr_q + PTR_W'(n_push);
-            if (pop) rd_q <= rd_q + PTR_W'(1);
-            count_q <= count_q + n_push - CNT_W'(pop);
+            if (pop) rd_q <= rd_q + PTR_W'(n_pop);
+            count_q <= count_q + n_push - n_pop;
         end
     end
 endmodule

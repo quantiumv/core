@@ -550,6 +550,12 @@ module core
     logic [FE_W-1:0] iq_bits;
     fe_instr_t    iq_head;
     assign iq_head = iq_bits;
+    logic         iq1_valid, iq_pop2;          // O4c: the entry behind the IQ head, and a second pop
+    logic [FE_W-1:0] iq1_bits;
+    /* verilator lint_off UNUSEDSIGNAL */
+    fe_instr_t    iq_head1;                    // (read only with DISPATCH_W 2)
+    /* verilator lint_on UNUSEDSIGNAL */
+    assign iq_head1 = iq1_bits;
 
     qv_align #(.ONE_OK(FETCH_STREAM)) align0 (
         .clk(clk), .rst(rst), .i_flush(flush),
@@ -585,24 +591,52 @@ module core
         .i_push1_valid(p1_valid), .i_push1_data(p1_data),
         .o_push_ready(iq_push_ready), .o_push_ready1(iq_push_ready1),
         .o_head_valid(iq_valid), .o_head_data(iq_bits),
-        .i_pop(iq_pop)
+        .i_pop(iq_pop),
+        .o_head1_valid(iq1_valid), .o_head1_data(iq1_bits), .i_pop2(iq_pop2)
     );
 
     // ---------------- D: decode ----------------
     logic uop_valid, issue_fire;
     uop_t uop;
+    logic uop1_valid, issue_fire2;            // O4c: the second decoded uop, and its dispatch
+    uop_t uop1;
 
-    qv_decode #(.CSR_NOSER(CSR_NOSER), .FPU_EN(FPU_EN), .ZICNTR_EN(ZICNTR_EN)) decode0 (
-        .clk(clk), .rst(rst), .i_flush(flush),
-        .i_fs(mstatus_fs_w), .i_frm(frm_w),
-        .i_mcounteren(mcounteren_w), .i_scounteren(scounteren_w),
-        .i_priv(priv), .i_tsr(mstatus_tsr_w), .i_tvm(mstatus_tvm_w), .i_in_debug(dbg_in_debug), .i_pb_active(pb_active),
-        .i_tdata1_0(tdata1_0_w), .i_tdata2_0(tdata2_0_w), .i_tdata1_1(tdata1_1_w), .i_tdata2_1(tdata2_1_w),
-        .i_pmpcfg0(pmpcfg0_w), .i_pmpaddr0(pmpaddr0_w), .i_pmpaddr1(pmpaddr1_w),
-        .i_pmpaddr2(pmpaddr2_w), .i_pmpaddr3(pmpaddr3_w),
-        .i_iq_valid(iq_valid), .i_iq_data(iq_head), .o_iq_pop(iq_pop),
-        .o_valid(uop_valid), .o_uop(uop), .i_issue_ready(issue_fire)
-    );
+    generate
+        if (DISPATCH_W > 1) begin : g_dec2
+            qv_decode2 #(.CSR_NOSER(CSR_NOSER), .FPU_EN(FPU_EN), .ZICNTR_EN(ZICNTR_EN)) decode0 (
+                .clk(clk), .rst(rst), .i_flush(flush),
+                .i_fs(mstatus_fs_w), .i_frm(frm_w),
+                .i_mcounteren(mcounteren_w), .i_scounteren(scounteren_w),
+                .i_priv(priv), .i_tsr(mstatus_tsr_w), .i_tvm(mstatus_tvm_w), .i_in_debug(dbg_in_debug),
+                .i_pb_active(pb_active),
+                .i_tdata1_0(tdata1_0_w), .i_tdata2_0(tdata2_0_w), .i_tdata1_1(tdata1_1_w), .i_tdata2_1(tdata2_1_w),
+                .i_pmpcfg0(pmpcfg0_w), .i_pmpaddr0(pmpaddr0_w), .i_pmpaddr1(pmpaddr1_w),
+                .i_pmpaddr2(pmpaddr2_w), .i_pmpaddr3(pmpaddr3_w),
+                .i_iq_valid(iq_valid), .i_iq_data(iq_head), .i_iq1_valid(iq1_valid), .i_iq1_data(iq_head1),
+                .o_iq_pop(iq_pop), .o_iq_pop2(iq_pop2),
+                .o_valid(uop_valid), .o_uop(uop), .o_valid1(uop1_valid), .o_uop1(uop1),
+                .i_issue_n(issue_fire2 ? 2'd2 : issue_fire ? 2'd1 : 2'd0)
+            );
+        end else begin : g_dec1
+            qv_decode #(.CSR_NOSER(CSR_NOSER), .FPU_EN(FPU_EN), .ZICNTR_EN(ZICNTR_EN)) decode0 (
+                .clk(clk), .rst(rst), .i_flush(flush),
+                .i_fs(mstatus_fs_w), .i_frm(frm_w),
+                .i_mcounteren(mcounteren_w), .i_scounteren(scounteren_w),
+                .i_priv(priv), .i_tsr(mstatus_tsr_w), .i_tvm(mstatus_tvm_w), .i_in_debug(dbg_in_debug), .i_pb_active(pb_active),
+                .i_tdata1_0(tdata1_0_w), .i_tdata2_0(tdata2_0_w), .i_tdata1_1(tdata1_1_w), .i_tdata2_1(tdata2_1_w),
+                .i_pmpcfg0(pmpcfg0_w), .i_pmpaddr0(pmpaddr0_w), .i_pmpaddr1(pmpaddr1_w),
+                .i_pmpaddr2(pmpaddr2_w), .i_pmpaddr3(pmpaddr3_w),
+                .i_iq_valid(iq_valid), .i_iq_data(iq_head), .o_iq_pop(iq_pop),
+                .o_valid(uop_valid), .o_uop(uop), .i_issue_ready(issue_fire)
+            );
+            assign iq_pop2    = 1'b0;
+            assign uop1_valid = 1'b0;
+            assign uop1       = '0;
+            /* verilator lint_off UNUSEDSIGNAL */
+            wire   dec1_unused = iq1_valid || (|iq1_bits) || issue_fire2;
+            /* verilator lint_on UNUSEDSIGNAL */
+        end
+    endgenerate
 
     // ---------------- I: issue ----------------
     logic [4:0]              rs1_sel, rs2_sel;
@@ -621,6 +655,20 @@ module core
     rs_opnd_t                lsu_opa, lsu_opb;     // the dispatching uop's operands, as issue resolved them (the queue reads a memory op's, O1c)
     /* verilator lint_on UNUSEDSIGNAL */
     logic                    lsu_free, div_free;
+    // O4c: slot 1's register reads, ROB lookups and allocation; both slots' operands (RVFI)
+    logic [4:0]              rs1b_sel, rs2b_sel;
+    logic [63:0]             rs1b_data, rs2b_data;
+    logic [QV_ROB_TAG_W-1:0] l4_tag, l5_tag, alloc_tag1;
+    logic                    l4_complete, l5_complete, alloc_ready2;
+    logic [63:0]             l4_value, l5_value;
+    logic                    alloc2_valid, alloc2_rd_wen;
+    logic [63:0]             alloc2_pc, alloc2_next_pc;
+    logic [31:0]             alloc2_raw;
+    logic [4:0]              alloc2_rd;
+    rob_ctrl_t               alloc2_ctrl;
+    /* verilator lint_off UNUSEDSIGNAL */
+    rs_opnd_t                src0_a, src0_b, src1_a, src1_b;   // read only by the RISCV_FORMAL block
+    /* verilator lint_on UNUSEDSIGNAL */
     logic                    res_valid;      // the LR/SC reservation, kept by commit
     logic [63:0]             res_addr;
     logic                    c_valid, c_rd_wen, c_rd_fp;
@@ -646,9 +694,17 @@ module core
     wb_t      c_bus;                       // commit's regfile write, with the committing tag: wakes the station's late operands
     qv_issue #(.SERIALIZE(SERIALIZE), .BYPASS_EN(BYPASS_EN), .CSR_LATE(CSR_NOSER),
                .LSU_BYPASS(LSQ_DEPTH > 0 && LSQ_BYPASS), .RS_DEPTH(RS_DEPTH),
-               .LSQ_WAIT(RS_DEPTH > 0 && LSQ_DEPTH > 0 && LSQ_WAIT)) issue0 (
+               .LSQ_WAIT(RS_DEPTH > 0 && LSQ_DEPTH > 0 && LSQ_WAIT), .DISPATCH_W(DISPATCH_W)) issue0 (
         .clk(clk), .rst(rst), .i_flush(flush),
         .i_uop_valid(uop_valid), .i_uop(uop), .o_issue(issue_fire),
+        .i_uop1_valid(uop1_valid), .i_uop1(uop1), .i_pb_active(pb_active), .o_issue2(issue_fire2),
+        .o_rs1b_sel(rs1b_sel), .o_rs2b_sel(rs2b_sel), .i_rs1b_data(rs1b_data), .i_rs2b_data(rs2b_data),
+        .o_lookup4_tag(l4_tag), .i_lookup4_complete(l4_complete), .i_lookup4_value(l4_value),
+        .o_lookup5_tag(l5_tag), .i_lookup5_complete(l5_complete), .i_lookup5_value(l5_value),
+        .o_alloc2_valid(alloc2_valid), .o_alloc2_pc(alloc2_pc), .o_alloc2_raw(alloc2_raw), .o_alloc2_rd(alloc2_rd),
+        .o_alloc2_rd_wen(alloc2_rd_wen), .o_alloc2_next_pc(alloc2_next_pc), .o_alloc2_ctrl(alloc2_ctrl),
+        .i_alloc_tag1(alloc_tag1), .i_alloc_ready2(alloc_ready2),
+        .o_src0_a(src0_a), .o_src0_b(src0_b), .o_src1_a(src1_a), .o_src1_b(src1_b),
         .o_rs1_sel(rs1_sel), .o_rs2_sel(rs2_sel), .i_rs1_data(rs1_data), .i_rs2_data(rs2_data),
         .o_alloc_valid(alloc_valid), .o_alloc_pc(alloc_pc), .o_alloc_raw(alloc_raw),
         .o_alloc_rd(alloc_rd), .o_alloc_rd_wen(alloc_rd_wen), .o_alloc_next_pc(alloc_next_pc),
@@ -691,6 +747,11 @@ module core
         .i_alloc_rd(alloc_rd), .i_alloc_rd_wen(alloc_rd_wen), .i_alloc_next_pc(alloc_next_pc),
         .i_alloc_ctrl(alloc_ctrl),
         .o_alloc_tag(alloc_tag), .o_alloc_ready(alloc_ready),
+        .i_alloc2_valid(alloc2_valid), .i_alloc2_pc(alloc2_pc), .i_alloc2_raw(alloc2_raw), .i_alloc2_rd(alloc2_rd),
+        .i_alloc2_rd_wen(alloc2_rd_wen), .i_alloc2_next_pc(alloc2_next_pc), .i_alloc2_ctrl(alloc2_ctrl),
+        .o_alloc_tag1(alloc_tag1), .o_alloc_ready2(alloc_ready2),
+        .i_lookup4_tag(l4_tag), .o_lookup4_complete(l4_complete), .o_lookup4_value(l4_value),
+        .i_lookup5_tag(l5_tag), .o_lookup5_complete(l5_complete), .o_lookup5_value(l5_value),
         .o_empty(rob_empty), .i_wb(wb_bus), .i_wb2(lsu_wb), .i_wb3(div_wb),
         .i_lookup1_tag(l1_tag), .o_lookup1_complete(l1_complete), .o_lookup1_value(l1_value),
         .i_lookup2_tag(l2_tag), .o_lookup2_complete(l2_complete), .o_lookup2_value(l2_value),
@@ -1113,6 +1174,8 @@ module core
         .i_clk(clk),
         .i_read_gpr_A_sel(rs1_sel), .o_read_gpr_A_data(rs1_data),
         .i_read_gpr_B_sel(dm_access_active ? i_dm_gpr_sel : rs2_sel), .o_read_gpr_B_data(rs2_data),
+        .i_read_gpr_C_sel(rs1b_sel), .o_read_gpr_C_data(rs1b_data),       // (O4c) slot 1's sources
+        .i_read_gpr_D_sel(rs2b_sel), .o_read_gpr_D_data(rs2b_data),
         .i_load_gpr(dm_access_active ? i_dm_gpr_we : rf_we),
         .i_load_gpr_sel(dm_access_active ? i_dm_gpr_sel : rf_sel),
         .i_load_gpr_data(dm_access_active ? i_dm_gpr_wdata : rf_data),
@@ -1132,6 +1195,7 @@ module core
     logic [63:0]          src_b_q [0:ROB_DEPTH-1];
     logic [ROB_DEPTH-1:0] src_wait_a_q, src_wait_b_q;
     wire [SRCW-1:0] s_new = alloc_tag[SRCW-1:0];
+    wire [SRCW-1:0] s_new1 = alloc_tag1[SRCW-1:0];
     wire [SRCW-1:0] s_alu = alu_req.tag[SRCW-1:0], s_bru = bru_req.tag[SRCW-1:0], s_div = div_req.tag[SRCW-1:0];
     wire [SRCW-1:0] s_fpu = fpu_req.tag[SRCW-1:0], s_eng = eng_req.tag[SRCW-1:0];
     always_ff @(posedge clk) begin
@@ -1148,10 +1212,16 @@ module core
             if (eng_req.valid && src_wait_b_q[s_eng]) src_b_q[s_eng] <= eng_req.b;
         end
         if (alloc_valid) begin
-            src_a_q[s_new]      <= lsu_opa.value;
-            src_b_q[s_new]      <= lsu_opb.value;
-            src_wait_a_q[s_new] <= !lsu_opa.rdy;
-            src_wait_b_q[s_new] <= !lsu_opb.rdy;
+            src_a_q[s_new]      <= src0_a.value;
+            src_b_q[s_new]      <= src0_b.value;
+            src_wait_a_q[s_new] <= !src0_a.rdy;
+            src_wait_b_q[s_new] <= !src0_b.rdy;
+        end
+        if (alloc2_valid) begin                  // (O4c) the second dispatched uop's
+            src_a_q[s_new1]      <= src1_a.value;
+            src_b_q[s_new1]      <= src1_b.value;
+            src_wait_a_q[s_new1] <= !src1_a.rdy;
+            src_wait_b_q[s_new1] <= !src1_b.rdy;
         end
     end
     wire [63:0] c_rs1_rdata = (c_rs1_addr != 5'b0) ? src_a_q[head_tag[SRCW-1:0]] : 64'b0;
@@ -1273,8 +1343,8 @@ module core
 
 `ifndef SYNTHESIS
     // O4: the width knobs whose paths exist so far
-    initial if (COMMIT_W < 1 || COMMIT_W > 2 || DISPATCH_W != 1 || ALU_PORTS != 1)
-        $fatal(1, "core: COMMIT_W must be 1 or 2, DISPATCH_W and ALU_PORTS 1 (O4b)");
+    initial if (COMMIT_W < 1 || COMMIT_W > 2 || DISPATCH_W < 1 || DISPATCH_W > 2 || ALU_PORTS != 1)
+        $fatal(1, "core: COMMIT_W and DISPATCH_W must be 1 or 2, ALU_PORTS 1 (O4c)");
 `endif
 
     // ---------------- RVFI ----------------
@@ -1417,7 +1487,7 @@ module core
     endfunction
     wire [RIW:0] rob_h = rob0.head_q;
     wire [RIW:0] rob_t = rob0.tail_q;
-    wire [RIW:0] rob_ta = rob0.tail_q + (RIW + 1)'(alloc_valid);
+    wire [RIW:0] rob_ta = rob0.tail_q + (RIW + 1)'(alloc_valid) + (RIW + 1)'(alloc2_valid);
     always @* if (!rst) begin
         assert (!(alu_req.valid && bru_req.valid));
         if (alu_req.valid) assert (rob_holds(alu_req.tag, rob_h, rob_ta));

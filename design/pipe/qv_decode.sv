@@ -77,7 +77,10 @@
 module qv_decode #(
     parameter bit FPU_EN = 1'b0,          // F/D: the FP encodings are instructions (else illegal, as before)
     parameter bit CSR_NOSER = 1'b0,
-    parameter bit ZICNTR_EN = 1'b0        // Zicntr: cycle, time and instret exist (else they do not: errata E10)
+    parameter bit ZICNTR_EN = 1'b0,       // Zicntr: cycle, time and instret exist (else they do not: errata E10)
+    // O4 (qv_decode2): only the uop builder, combinational -- o_uop is i_iq_data decoded now, o_valid is i_iq_valid,
+    // o_iq_pop is 0 -- for a decode stage that holds two uops itself
+    parameter bit BUILD_ONLY = 1'b0
 ) (
     input  logic              clk,
     input  logic              rst,
@@ -584,9 +587,13 @@ module qv_decode #(
         end
     end
 
-    logic uop_valid_q;
+    /* verilator lint_off UNUSEDSIGNAL */
+    logic uop_valid_q;                    // (unused with BUILD_ONLY)
     uop_t uop_q;
+    /* verilator lint_on UNUSEDSIGNAL */
 
+generate
+    if (!BUILD_ONLY) begin : g_reg
     assign o_iq_pop = i_iq_valid && (!uop_valid_q || i_issue_ready) && !i_flush;
     assign o_valid  = uop_valid_q;
     assign o_uop    = uop_q;
@@ -601,4 +608,15 @@ module qv_decode #(
             uop_valid_q <= 1'b0;
         end
     end
+    end else begin : g_build
+    assign o_iq_pop = 1'b0;
+    assign o_valid  = i_iq_valid;
+    assign o_uop    = uop_d;
+    /* verilator lint_off UNUSEDSIGNAL */
+    wire   build_unused = clk ^ rst ^ i_flush ^ i_issue_ready;
+    /* verilator lint_on UNUSEDSIGNAL */
+    assign uop_valid_q = 1'b0;
+    assign uop_q       = '0;
+    end
+endgenerate
 endmodule

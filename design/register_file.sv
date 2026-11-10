@@ -48,6 +48,12 @@ module register_file #(
     input logic     [(l2_num_regs - 1):0]   i_read_gpr_B_sel,
     output logic    [(`WORD_SIZE - 1):0]    o_read_gpr_B_data,
 
+    // O4: two more read ports, for the second instruction dispatched in a cycle (unconnected: register 0)
+    input logic     [(l2_num_regs - 1):0]   i_read_gpr_C_sel = '0,
+    output logic    [(`WORD_SIZE - 1):0]    o_read_gpr_C_data,
+    input logic     [(l2_num_regs - 1):0]   i_read_gpr_D_sel = '0,
+    output logic    [(`WORD_SIZE - 1):0]    o_read_gpr_D_data,
+
     input logic                         i_load_gpr,
     input logic [(l2_num_regs - 1):0]   i_load_gpr_sel,
     input logic [(`WORD_SIZE - 1):0]    i_load_gpr_data,
@@ -82,6 +88,8 @@ module register_file #(
      */
     assign o_read_gpr_A_data = (i_read_gpr_A_sel == 0) ? '0 : gp_registers[i_read_gpr_A_sel];
     assign o_read_gpr_B_data = (i_read_gpr_B_sel == 0) ? '0 : gp_registers[i_read_gpr_B_sel];
+    assign o_read_gpr_C_data = (i_read_gpr_C_sel == 0) ? '0 : gp_registers[i_read_gpr_C_sel];
+    assign o_read_gpr_D_data = (i_read_gpr_D_sel == 0) ? '0 : gp_registers[i_read_gpr_D_sel];
 
 
     /* Write. */
