@@ -595,7 +595,8 @@ module lockstep_tb #(
             b_pub = longint'(b_last_order) + 1;
         end
     assign a_bnd    = mode_b ? bnd_ring[a_rvfi_order[7:0]] : 1'b1;
-    assign a_wait_b = mode_b && a_rvfi_valid && (longint'(a_rvfi_order) >= b_pub);
+    // (=== : before reset side A's outputs are X under Icarus, and an X here would hold clk_a for good)
+    assign a_wait_b = mode_b && !rst && (a_rvfi_valid === 1'b1) && (longint'(a_rvfi_order) >= b_pub);
 
     // Side B being the pipelined core, its last stores may still be in the store buffer when it has pushed stop_at
     // records (it writes the bus after a store retires). It is halted at that boundary (b_stop_req, through its
