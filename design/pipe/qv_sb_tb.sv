@@ -7,14 +7,15 @@
  * cycle of directed and random runs: the beats come out in the order the stores went in with the exact
  * address, byte select and data; a beat stays stable from its first cycle to its response, and cyc is low
  * in the response cycle; a beat never starts while the LSU's access is on the bus or the walker's beat is in
- * flight, nor (unless the buffer is full or the drain has yielded for YIELD_MAX cycles) while an LSU access is
- * ready to start or a load sits among the oldest ROB entries; o_start_now is followed by the beat in the next
+ * flight, nor (unless the buffer is full or the drain has yielded for YIELD_MAX cycles) while a load sits among
+ * the oldest ROB entries or, with YIELD_READY (P9d's rule), while any LSU access is ready to start, and it does
+ * start whenever none of that holds it (o_start_now is checked exactly); o_start_now is followed by the beat in the next
  * cycle; the gap between two back-to-back beats is one cycle; o_ready and o_empty follow the count; o_match
  * is exactly "an unwritten entry for that dword"; a response that is not the buffer's own (nobody's beat is
  * in flight) is ignored; an error response drops the entry and the drain goes on. Memory ends up equal to the
  * golden image.
  */
-module qv_sb_tb;
+module qv_sb_tb #(parameter bit YIELD_READY = 1'b0);   // 1: P9d's drain rule (QV_PIPE_SB_YIELD_READY)
     int   pass_count = 0;
     int   fail_count = 0;
     logic quiet_on_pass = 1'b1;
@@ -42,7 +43,7 @@ module qv_sb_tb;
     logic        ack = 1'b0, err = 1'b0;
     logic        foreign_ack = 1'b0;
 
-    qv_sb #(.DEPTH(DEPTH), .YIELD_MAX(YIELD_MAX)) dut (
+    qv_sb #(.DEPTH(DEPTH), .YIELD_MAX(YIELD_MAX), .YIELD_READY(YIELD_READY)) dut (
         .clk(clk), .rst(rst),
         .i_push(push), .i_push_addr(push_addr), .i_push_sel(push_sel), .i_push_data(push_data),
         .o_ready(ready), .o_empty(empty),
@@ -187,7 +188,16 @@ module qv_sb_tb;
                 check("start: something to write", {63'b0, cnt_model > ((ack || err) && beat ? 1 : 0)}, 64'd1);
                 if (cnt_model < DEPTH && !(dut.held_q >= YIELD_MAX))
                     check("start: not while a load goes first (not full, not yielded out)",
-                          {63'b0, lsu_busy || load_near}, 64'd0);
+                          {63'b0, (YIELD_READY && lsu_busy) || load_near}, 64'd0);
+            end
+            // and it does start whenever nothing holds it: the drain rule, exactly
+            begin
+                logic resp_m, exp_go;
+                resp_m = beat && ((ack || foreign_ack) || err);
+                exp_go = (!beat || resp_m) && (cnt_model > (resp_m ? 1 : 0)) && !lsu_inflight && !ptw_beat
+                         && ((cnt_model == DEPTH) || (dut.held_q >= YIELD_MAX)
+                             || (!(YIELD_READY && lsu_busy) && !load_near));
+                check("o_start_now is the drain rule", {63'b0, start_now}, {63'b0, exp_go});
             end
             check("o_start_now is followed by a beat", {63'b0, prev_start ? beat : 1'b1}, 64'd1);
             // what the LSU is told: the decision of an idle drain, never one taken in a response cycle
@@ -264,15 +274,21 @@ module qv_sb_tb;
         compare_memory("full");
         check("the refused push never reached memory", mem[8'h3F], gold[8'h3F]);
 
-        // ---- the LSU goes first: a ready access holds the drain off for up to YIELD_MAX cycles ----
+        // ---- an LSU access ready to start (not a load near the head): with YIELD_READY it holds the drain off for
+        // up to YIELD_MAX cycles, without it the drain goes at once ----
         lsu_busy = 1'b1;
         t0 = cycle_n;
         do_push(29'h40, 8'hFF, 64'h3000);
-        repeat (YIELD_MAX - 3) @(posedge clk);
-        #1;
-        check("LSU access ready: no beat yet", {63'b0, beat || start_now}, 64'd0);
-        while (!beat && !start_now && cycle_n - t0 < 40) begin @(posedge clk); #1; end
-        check("LSU access ready: it yields only so long", 64'(cycle_n - t0 <= YIELD_MAX + 4), 64'd1);
+        if (YIELD_READY) begin
+            repeat (YIELD_MAX - 3) @(posedge clk);
+            #1;
+            check("LSU access ready: no beat yet", {63'b0, beat || start_now}, 64'd0);
+            while (!beat && !start_now && cycle_n - t0 < 40) begin @(posedge clk); #1; end
+            check("LSU access ready: it yields only so long", 64'(cycle_n - t0 <= YIELD_MAX + 4), 64'd1);
+        end else begin
+            while (!beat && !start_now && cycle_n - t0 < 40) begin @(posedge clk); #1; end
+            check("LSU access ready, no load near the head: the drain goes at once", 64'(cycle_n - t0 <= 3), 64'd1);
+        end
         quiet_inputs();
         wait_empty(40);
         compare_memory("lsu first");
@@ -310,7 +326,7 @@ module qv_sb_tb;
 
         // ---- a response that is not ours is ignored ----
         do_push(29'h70, 8'hFF, 64'h6000);
-        lsu_busy = 1'b1;                            // hold the drain off, then fire foreign acks at it
+        lsu_inflight = 1'b1;                        // hold the drain off (the LSU is on the bus), then fire foreign acks at it
         repeat (2) @(posedge clk); #1;
         @(negedge clk); foreign_ack = 1'b1;
         @(posedge clk); #1; foreign_ack = 1'b0;
