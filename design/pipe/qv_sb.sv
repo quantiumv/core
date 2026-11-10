@@ -17,14 +17,15 @@
  * only taken as its own while beat_q is set.
  *
  * A beat starts only when nobody else is on the port: not the walker (i_ptw_beat), not an LSU access
- * in flight (i_lsu_inflight), and, unless the buffer is full, not an LSU access that is ready to start
- * in this very cycle (i_lsu_busy: a load goes before a store that has already retired). The drain also
- * yields to a load that sits in the LSU slot among the oldest ROB entries (i_load_near): with the
- * blocking write-through D$ a beat holds the D$ until memory has taken the store (the D$ passes it
- * straight through), and a load that follows the store would otherwise wait out the very beat the
- * store used to hold the ROB head for, which gains nothing. It
- * yields for at most YIELD_MAX cycles, and never when the buffer is full (o_start_now then also tells
- * the LSU not to start in the same cycle).
+ * in flight (i_lsu_inflight). The drain yields to a load that sits in the LSU slot among the oldest ROB
+ * entries (i_load_near): with the blocking write-through D$ a beat holds the D$ until memory has taken the
+ * store (the D$ passes it straight through), and a load that follows the store would otherwise wait out the
+ * very beat the store used to hold the ROB head for, which gains nothing. It yields for at most YIELD_MAX
+ * cycles, and never when the buffer is full (o_start_now then also tells the LSU not to start in the same
+ * cycle). With YIELD_READY (P9d's rule) it also yields to any LSU access that is ready to start
+ * (i_lsu_busy), however far from the head; without it (O4f, the core's default) a beat goes before such a load,
+ * whose start is not yet what the head waits for: yielding to a stream of them leaves the last stores in
+ * the buffer until a younger load that reads one of their dwords has to wait out the drain anyway.
  *
  * o_match says that an entry holds a store to the dword a load at the ROB head is about to read.
  * The load waits until it is gone (the drain is in order); the whole raw bus word is what RVFI reports
@@ -35,7 +36,8 @@
  */
 module qv_sb #(
     parameter int DEPTH     = 4,      // entries, >= 1
-    parameter int YIELD_MAX = 16      // cycles the drain may yield to a load before it goes anyway
+    parameter int YIELD_MAX = 16,     // cycles the drain may yield to a load before it goes anyway
+    parameter bit YIELD_READY = 1'b1  // also yield to any LSU access ready to start (P9d's rule; the core passes 0)
 ) (
     input  logic        clk,
     input  logic        rst,
@@ -53,7 +55,7 @@ module qv_sb #(
     output logic        o_match,
 
     // the memory port
-    input  logic        i_lsu_busy,    // an LSU access is on the bus or ready to start this cycle
+    input  logic        i_lsu_busy,    // an LSU access is on the bus or ready to start this cycle (YIELD_READY)
     input  logic        i_lsu_inflight,// ... is on the bus
     input  logic        i_ptw_beat,    // the walker's beat is in flight
     input  logic        i_load_near,   // a load that does not wait for this buffer is among the oldest ROB entries
@@ -101,7 +103,7 @@ module qv_sb #(
     // a beat can be decided in the response cycle of the previous one: it goes out one cycle later, so the gap
     // between two beats is a single cycle
     wire go       = (!beat_q || resp) && has_next && !i_lsu_inflight && !i_ptw_beat
-                    && (urgent || (!i_lsu_busy && !i_load_near));
+                    && (urgent || (!(YIELD_READY && i_lsu_busy) && !i_load_near));
 
     assign o_start_now = go;
     // With a beat in flight the LSU is held off by o_beat anyway, so it only needs the decision of an idle drain.
@@ -109,7 +111,7 @@ module qv_sb #(
     // ack (arbiter grant -> ack -> start -> lock -> grant), a loop in the netlist even though no ack can arrive
     // when the grant is open.
     assign o_start_idle = !beat_q && (cnt_q != '0) && !i_lsu_inflight && !i_ptw_beat
-                          && (urgent || (!i_lsu_busy && !i_load_near));
+                          && (urgent || (!(YIELD_READY && i_lsu_busy) && !i_load_near));
     assign o_beat      = beat_q;
     assign o_cyc       = beat_q && !(i_ack || i_err);
     assign o_addr      = {addr_q[rd_q], 3'b000};

@@ -185,7 +185,8 @@
 // O4 (two-wide), one knob per step: QV_PIPE_COMMIT_W instructions retired a cycle (the RVFI ports carry that many
 // channels, oldest in channel 0; qv_commit's pair rule), QV_PIPE_DISPATCH_W dispatched a cycle (qv_issue's pair rules),
 // QV_PIPE_ALU_PORTS ALU issue ports (the second without a multiplier or branches). 2 by default since O4e; all three at
-// 1 are the core before O4, cycle for cycle. The testbenches that size RVFI by QV_PIPE_COMMIT_W default to the same.
+// 1, with QV_PIPE_SB_YIELD_READY at 1, are the core before O4, cycle for cycle. The testbenches that size RVFI by
+// QV_PIPE_COMMIT_W default to the same.
 `ifndef QV_PIPE_COMMIT_W
 `define QV_PIPE_COMMIT_W 2
 `endif
@@ -194,6 +195,11 @@
 `endif
 `ifndef QV_PIPE_ALU_PORTS
 `define QV_PIPE_ALU_PORTS 2
+`endif
+// O4f: QV_PIPE_SB_YIELD_READY 1 is P9d's drain rule, the store buffer yields to any LSU access that is ready to start;
+// 0 (the default since O4f) yields only to a load near the ROB head (qv_sb.sv).
+`ifndef QV_PIPE_SB_YIELD_READY
+`define QV_PIPE_SB_YIELD_READY 0
 `endif
 `ifndef QV_PIPE_PMA_RAM_SIZE
 `define QV_PIPE_PMA_RAM_SIZE 64'h0
@@ -267,6 +273,7 @@ module core
     parameter int COMMIT_W   = `QV_PIPE_COMMIT_W,    // instructions retired a cycle (1 or 2): the RVFI channels
     parameter int DISPATCH_W = `QV_PIPE_DISPATCH_W,  // instructions dispatched a cycle (1 or 2)
     parameter int ALU_PORTS  = `QV_PIPE_ALU_PORTS,   // ALU issue ports (1 or 2)
+    parameter bit SB_YIELD_READY = `QV_PIPE_SB_YIELD_READY,   // the store buffer yields to any ready LSU access (P9d)
     parameter logic [63:0] PMA_RAM_BASE = `QV_PIPE_PMA_RAM_BASE,   // physical window of RAM: stores into it are posted
     parameter logic [63:0] PMA_RAM_SIZE = `QV_PIPE_PMA_RAM_SIZE
 ) (
@@ -961,7 +968,7 @@ module core
     assign sb_push_res = c_sb_push1 ? lsu_res1 : lsu_res;
     generate
         if (SB_DEPTH > 0) begin : g_sb
-            qv_sb #(.DEPTH(SB_DEPTH)) sb0 (
+            qv_sb #(.DEPTH(SB_DEPTH), .YIELD_READY(SB_YIELD_READY)) sb0 (
                 .clk(clk), .rst(rst),
                 .i_push(c_sb_push), .i_push_addr(sb_push_res.mem_addr[31:3]), .i_push_sel(sb_push_res.mem_wmask),
                 .i_push_data(sb_push_res.mem_wdata), .o_ready(sb_ready), .o_empty(sb_empty),
