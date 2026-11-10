@@ -1,12 +1,25 @@
 {
- "counts": [8, 24, 64],
+ "counts": [
+  8,
+  24,
+  64
+ ],
  "memcfg": "sram",
  "delay": 0,
  "jobs": 3,
  "inner_jobs": 2,
  "sim": "verilator",
  "profile": "--isa imafdc --priv msu --pmp --irq --smc --sv39",
- "extra": ["--defines", "QV_FPU_EN=1", "--irq-mode", "2", "--irq-density", "1", "--dbg-mode", "1"],
+ "extra": [
+  "--defines",
+  "QV_FPU_EN=1",
+  "--irq-mode",
+  "2",
+  "--irq-density",
+  "1",
+  "--dbg-mode",
+  "1"
+ ],
  "mutants": [
   {
    "name": "decode: an FP destination is taken for an integer one",
@@ -97,8 +110,8 @@
   {
    "name": "commit: an FPU op's flags are never accrued",
    "file": "qv_commit.sv",
-   "old": "? i_head_entry.fflags : 5'b0;",
-   "new": "? 5'b0 : 5'b0;"
+   "old": "? i_head_entry.fflags\n",
+   "new": "? 5'b0\n"
   },
   {
    "name": "core: an FP register write does not set FS Dirty",

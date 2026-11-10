@@ -34,8 +34,8 @@
   },
   {
    "name": "the target is the fall-through",
-   "old": "assign o_btb_upd_tgt   = i_head_entry.next_pc;",
-   "new": "assign o_btb_upd_tgt   = i_head_entry.pc + 64'd4;"
+   "old": "assign o_btb_upd_tgt   = t_entry.next_pc;",
+   "new": "assign o_btb_upd_tgt   = t_entry.pc + 64'd4;"
   },
   {
    "name": "a Program Buffer run trains",
@@ -59,38 +59,38 @@
   },
   {
    "name": "a 16-bit jump is crossing",
-   "old": "assign o_btb_upd_cross = !h_rvc && i_head_entry.pc[2:1] == 2'b11;",
-   "new": "assign o_btb_upd_cross = i_head_entry.pc[2:1] == 2'b11;"
+   "old": "assign o_btb_upd_cross = !h_rvc && t_entry.pc[2:1] == 2'b11;",
+   "new": "assign o_btb_upd_cross = t_entry.pc[2:1] == 2'b11;"
   },
   {
    "name": "the pc is the target",
-   "old": "assign o_btb_upd_pc    = i_head_entry.pc;",
-   "new": "assign o_btb_upd_pc    = i_head_entry.next_pc;"
+   "old": "assign o_btb_upd_pc    = t_entry.pc;",
+   "new": "assign o_btb_upd_pc    = t_entry.next_pc;"
   },
   {
    "name": "a jump trains the table",
-   "old": "assign o_bht_upd_valid = commit && !faulted && !i_pb_active && qv_is_cond(i_head_entry.raw);",
+   "old": "assign o_bht_upd_valid = commit && !faulted && !i_pb_active && qv_is_cond(t_entry.raw);",
    "new": "assign o_bht_upd_valid = commit && !faulted && !i_pb_active;"
   },
   {
    "name": "a faulted branch trains the table",
-   "old": "assign o_bht_upd_valid = commit && !faulted && !i_pb_active && qv_is_cond(i_head_entry.raw);",
-   "new": "assign o_bht_upd_valid = commit && !i_pb_active && qv_is_cond(i_head_entry.raw);"
+   "old": "assign o_bht_upd_valid = commit && !faulted && !i_pb_active && qv_is_cond(t_entry.raw);",
+   "new": "assign o_bht_upd_valid = commit && !i_pb_active && qv_is_cond(t_entry.raw);"
   },
   {
    "name": "a Program Buffer run trains the table",
-   "old": "assign o_bht_upd_valid = commit && !faulted && !i_pb_active && qv_is_cond(i_head_entry.raw);",
-   "new": "assign o_bht_upd_valid = commit && !faulted && qv_is_cond(i_head_entry.raw);"
+   "old": "assign o_bht_upd_valid = commit && !faulted && !i_pb_active && qv_is_cond(t_entry.raw);",
+   "new": "assign o_bht_upd_valid = commit && !faulted && qv_is_cond(t_entry.raw);"
   },
   {
    "name": "the table is trained with a 4-byte fall-through always",
-   "old": "assign o_bht_upd_taken = i_head_entry.next_pc != i_head_entry.pc + (h_rvc ? 64'd2 : 64'd4);",
-   "new": "assign o_bht_upd_taken = i_head_entry.next_pc != i_head_entry.pc + 64'd4;"
+   "old": "assign o_bht_upd_taken = t_entry.next_pc != t_entry.pc + (h_rvc ? 64'd2 : 64'd4);",
+   "new": "assign o_bht_upd_taken = t_entry.next_pc != t_entry.pc + 64'd4;"
   },
   {
    "name": "the table is trained with the inverse outcome",
-   "old": "assign o_bht_upd_taken = i_head_entry.next_pc != i_head_entry.pc + (h_rvc ? 64'd2 : 64'd4);",
-   "new": "assign o_bht_upd_taken = i_head_entry.next_pc == i_head_entry.pc + (h_rvc ? 64'd2 : 64'd4);"
+   "old": "assign o_bht_upd_taken = t_entry.next_pc != t_entry.pc + (h_rvc ? 64'd2 : 64'd4);",
+   "new": "assign o_bht_upd_taken = t_entry.next_pc == t_entry.pc + (h_rvc ? 64'd2 : 64'd4);"
   },
   {
    "name": "a faulted call pushes",
@@ -104,8 +104,8 @@
   },
   {
    "name": "the committed return address ignores a 16-bit call",
-   "old": "assign o_ras_addr = i_head_entry.pc + (h_rvc ? 64'd2 : 64'd4);",
-   "new": "assign o_ras_addr = i_head_entry.pc + 64'd4;"
+   "old": "assign o_ras_addr = t_entry.pc + (h_rvc ? 64'd2 : 64'd4);",
+   "new": "assign o_ras_addr = t_entry.pc + 64'd4;"
   },
   {
    "name": "a return does not pop the committed stack",
@@ -114,7 +114,7 @@
   },
   {
    "name": "a call does not push the committed stack",
-   "old": "assign o_ras_push = h_retires && qv_is_call(i_head_entry.raw);",
+   "old": "assign o_ras_push = h_retires && qv_is_call(t_entry.raw);",
    "new": "assign o_ras_push = 1'b0;"
   },
   {

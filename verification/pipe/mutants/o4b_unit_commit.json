@@ -1,0 +1,231 @@
+{
+ "dut": "design/pipe/qv_commit.sv",
+ "tb": "design/pipe/qv_commit_pair_tb.sv",
+ "files": [
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_commit.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench"
+ ],
+ "cwd": "design",
+ "timeout": 600,
+ "mutants": [
+  {
+   "name": "pairs with COMMIT_W 1",
+   "old": "    wire plain1 = (COMMIT_W > 1) && commit && !is_trap && (i_head_ctrl.cls != QV_FU_CSR)",
+   "new": "    wire plain1 = commit && !is_trap && (i_head_ctrl.cls != QV_FU_CSR)"
+  },
+  {
+   "name": "a trapping head pairs",
+   "old": "    wire plain1 = (COMMIT_W > 1) && commit && !is_trap && (i_head_ctrl.cls != QV_FU_CSR)",
+   "new": "    wire plain1 = (COMMIT_W > 1) && commit && (i_head_ctrl.cls != QV_FU_CSR)"
+  },
+  {
+   "name": "a CSR head pairs",
+   "old": "    wire plain1 = (COMMIT_W > 1) && commit && !is_trap && (i_head_ctrl.cls != QV_FU_CSR)",
+   "new": "    wire plain1 = (COMMIT_W > 1) && commit && !is_trap"
+  },
+  {
+   "name": "a system head pairs",
+   "old": "                  && (i_head_ctrl.cls != QV_FU_SYS) && !i_head_ctrl.serialize && !i_head_entry.mispredict",
+   "new": "                  && !i_head_ctrl.serialize && !i_head_entry.mispredict"
+  },
+  {
+   "name": "a serializing head pairs",
+   "old": "                  && (i_head_ctrl.cls != QV_FU_SYS) && !i_head_ctrl.serialize && !i_head_entry.mispredict",
+   "new": "                  && (i_head_ctrl.cls != QV_FU_SYS) && !i_head_entry.mispredict"
+  },
+  {
+   "name": "a mispredicted head pairs",
+   "old": "                  && (i_head_ctrl.cls != QV_FU_SYS) && !i_head_ctrl.serialize && !i_head_entry.mispredict",
+   "new": "                  && (i_head_ctrl.cls != QV_FU_SYS) && !i_head_ctrl.serialize"
+  },
+  {
+   "name": "a FENCE head pairs",
+   "old": "                  && !h_fence && !h_atomic && !i_pb_active && !i_dbg_stepping;",
+   "new": "                  && !h_atomic && !i_pb_active && !i_dbg_stepping;"
+  },
+  {
+   "name": "an atomic head pairs",
+   "old": "                  && !h_fence && !h_atomic && !i_pb_active && !i_dbg_stepping;",
+   "new": "                  && !h_fence && !i_pb_active && !i_dbg_stepping;"
+  },
+  {
+   "name": "pairs in a Program Buffer run",
+   "old": "                  && !h_fence && !h_atomic && !i_pb_active && !i_dbg_stepping;",
+   "new": "                  && !h_fence && !h_atomic && !i_dbg_stepping;"
+  },
+  {
+   "name": "pairs in a single step",
+   "old": "                  && !h_fence && !h_atomic && !i_pb_active && !i_dbg_stepping;",
+   "new": "                  && !h_fence && !h_atomic && !i_pb_active;"
+  },
+  {
+   "name": "pairs with no second",
+   "old": "    assign commit2 = plain1 && i_head1_valid && i_head1_entry.complete",
+   "new": "    assign commit2 = plain1 && i_head1_entry.complete"
+  },
+  {
+   "name": "pairs with a second not complete",
+   "old": "    assign commit2 = plain1 && i_head1_valid && i_head1_entry.complete",
+   "new": "    assign commit2 = plain1 && i_head1_valid"
+  },
+  {
+   "name": "a second with a fault marker pairs",
+   "old": "                  && !i_head1_ctrl.xcpt && !i_head1_ctrl.trig_exc && !i_head1_ctrl.trig_debug",
+   "new": "                  && !i_head1_ctrl.trig_exc && !i_head1_ctrl.trig_debug"
+  },
+  {
+   "name": "a second with an action-0 trigger pairs",
+   "old": "                  && !i_head1_ctrl.xcpt && !i_head1_ctrl.trig_exc && !i_head1_ctrl.trig_debug",
+   "new": "                  && !i_head1_ctrl.xcpt && !i_head1_ctrl.trig_debug"
+  },
+  {
+   "name": "a second with an action-1 trigger pairs",
+   "old": "                  && !i_head1_ctrl.xcpt && !i_head1_ctrl.trig_exc && !i_head1_ctrl.trig_debug",
+   "new": "                  && !i_head1_ctrl.xcpt && !i_head1_ctrl.trig_exc"
+  },
+  {
+   "name": "a CSR second pairs",
+   "old": "                  && (i_head1_ctrl.cls != QV_FU_CSR) && (i_head1_ctrl.cls != QV_FU_SYS) && !i_head1_ctrl.serialize",
+   "new": "                  && (i_head1_ctrl.cls != QV_FU_SYS) && !i_head1_ctrl.serialize"
+  },
+  {
+   "name": "a system second pairs",
+   "old": "                  && (i_head1_ctrl.cls != QV_FU_CSR) && (i_head1_ctrl.cls != QV_FU_SYS) && !i_head1_ctrl.serialize",
+   "new": "                  && (i_head1_ctrl.cls != QV_FU_CSR) && !i_head1_ctrl.serialize"
+  },
+  {
+   "name": "a serializing second pairs",
+   "old": "                  && (i_head1_ctrl.cls != QV_FU_CSR) && (i_head1_ctrl.cls != QV_FU_SYS) && !i_head1_ctrl.serialize",
+   "new": "                  && (i_head1_ctrl.cls != QV_FU_CSR) && (i_head1_ctrl.cls != QV_FU_SYS)"
+  },
+  {
+   "name": "a FENCE second pairs",
+   "old": "                  && !h1_fence && !h1_atomic",
+   "new": "                  && !h1_atomic"
+  },
+  {
+   "name": "an atomic second pairs",
+   "old": "                  && !h1_fence && !h1_atomic",
+   "new": "                  && !h1_fence"
+  },
+  {
+   "name": "a memory second pairs without its result",
+   "old": "                  && (!h1_is_lsu || (i_lsu_res1_ok && !i_lsu_res1.xcpt))",
+   "new": "                  && (!h1_is_lsu || (!i_lsu_res1.xcpt))"
+  },
+  {
+   "name": "a memory second pairs with a fault",
+   "old": "                  && (!h1_is_lsu || (i_lsu_res1_ok && !i_lsu_res1.xcpt))",
+   "new": "                  && (!h1_is_lsu || (i_lsu_res1_ok))"
+  },
+  {
+   "name": "two posted stores pair",
+   "old": "                  && !(sb_posted && h1_posted) && (!h1_posted || i_sb_ready)",
+   "new": "                  && (!h1_posted || i_sb_ready)"
+  },
+  {
+   "name": "a posted second pairs without room",
+   "old": "                  && !(sb_posted && h1_posted) && (!h1_posted || i_sb_ready)",
+   "new": "                  && !(sb_posted && h1_posted)"
+  },
+  {
+   "name": "two branches pair",
+   "old": "                  && !(hd_kind != 2'd0 && h1_kind != 2'd0)",
+   "new": "                  && 1'b1"
+  },
+  {
+   "name": "two FP-state writes pair",
+   "old": "                  && !(h_fpw && h1_fpw);",
+   "new": "                  ;"
+  },
+  {
+   "name": "port 2 writes the head's value",
+   "old": "    assign o_regfile2_data = i_head1_entry.value;",
+   "new": "    assign o_regfile2_data = i_head_entry.value;"
+  },
+  {
+   "name": "port 2 writes an FP destination",
+   "old": "    assign o_regfile2_we   = commit2 && writes_rd1 && !rd_fp1;",
+   "new": "    assign o_regfile2_we   = commit2 && writes_rd1;"
+  },
+  {
+   "name": "the second's claim clear has the head's tag",
+   "old": "    assign o_commit2_tag    = i_head1_tag;",
+   "new": "    assign o_commit2_tag    = i_head_tag;"
+  },
+  {
+   "name": "minstret counts one",
+   "old": "    assign o_instr_retired2 = commit2;",
+   "new": "    assign o_instr_retired2 = 1'b0;"
+  },
+  {
+   "name": "the order counter moves by one",
+   "old": "            order_q         <= order_q + 64'd2;",
+   "new": "            order_q         <= order_q + 64'd1;"
+  },
+  {
+   "name": "the architectural pc stops at the head's next",
+   "old": "        else if (commit2)       arch_pc_q <= i_head1_entry.next_pc;",
+   "new": "        else if (1'b0)          arch_pc_q <= i_head1_entry.next_pc;"
+  },
+  {
+   "name": "a mispredicted second does not redirect",
+   "old": "                              || (commit2 && i_head1_entry.mispredict);",
+   "new": "                              ;"
+  },
+  {
+   "name": "a mispredicted second redirects to the head's next",
+   "old": "                            : commit2 ? i_head1_entry.next_pc : actual_next_pc;",
+   "new": "                            : actual_next_pc;"
+  },
+  {
+   "name": "a store second leaves the reservation",
+   "old": "        end else if ((commit && i_head_ctrl.is_store_class) || (commit2 && i_head1_ctrl.is_store_class)) begin",
+   "new": "        end else if (commit && i_head_ctrl.is_store_class) begin"
+  },
+  {
+   "name": "a posted second is not pushed",
+   "old": "    assign o_sb_push1 = commit2 && h1_posted;",
+   "new": "    assign o_sb_push1 = 1'b0;"
+  },
+  {
+   "name": "the FP write goes to the head's rd",
+   "old": "    assign o_fprf_sel  = fp_w1 ? i_head1_entry.rd : i_head_entry.rd;",
+   "new": "    assign o_fprf_sel  = i_head_entry.rd;"
+  },
+  {
+   "name": "an FP second's flags are lost",
+   "old": "                       : (fp_w1 && i_head1_ctrl.cls == QV_FU_FPU) ? i_head1_entry.fflags : 5'b0;",
+   "new": "                       : 5'b0;"
+  },
+  {
+   "name": "the predictors train on the head only",
+   "old": "    assign t_entry = (commit2 && h1_kind != 2'd0) ? i_head1_entry : i_head_entry;",
+   "new": "    assign t_entry = i_head_entry;"
+  },
+  {
+   "name": "channel 1 has the head's order",
+   "old": "    assign o_rvfi1_order      = order_q + 64'd1;",
+   "new": "    assign o_rvfi1_order      = order_q;"
+  },
+  {
+   "name": "channel 1 shows the head's access",
+   "old": "    assign o_rvfi1_mem_addr   = h1_is_lsu ? i_lsu_res1.mem_addr  : 64'b0;",
+   "new": "    assign o_rvfi1_mem_addr   = h1_is_lsu ? i_lsu_res.mem_addr  : 64'b0;"
+  },
+  {
+   "name": "the next interrupt check compares with the head's next pc",
+   "old": "            prev_pc_wdata_q <= i_head1_entry.next_pc;",
+   "new": "            prev_pc_wdata_q <= actual_next_pc;"
+  }
+ ]
+}

@@ -19,13 +19,13 @@
  "mutants": [
   {
    "name": "pushes whatever retires",
-   "old": "assign o_sb_push = commit && sb_posted;",
-   "new": "assign o_sb_push = commit;"
+   "old": "assign o_sb_push  = (commit && sb_posted) || o_sb_push1;",
+   "new": "assign o_sb_push  = commit || o_sb_push1;"
   },
   {
    "name": "pushes before it retires",
-   "old": "assign o_sb_push = commit && sb_posted;",
-   "new": "assign o_sb_push = head_ready && sb_posted;"
+   "old": "assign o_sb_push  = (commit && sb_posted) || o_sb_push1;",
+   "new": "assign o_sb_push  = (head_ready && sb_posted) || o_sb_push1;"
   },
   {
    "name": "a posted store retires into a full buffer",

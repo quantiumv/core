@@ -84,8 +84,8 @@
   },
   {
    "name": "a resume ignores the (rewritten) dpc in the redirect",
-   "old": "(halt_take || head_dbg_entry) ? arch_pc_q : i_dbg_resume ? i_dpc : actual_next_pc;",
-   "new": "(halt_take || head_dbg_entry) ? arch_pc_q : i_dbg_resume ? arch_pc_q : actual_next_pc;"
+   "old": "(halt_take || head_dbg_entry) ? arch_pc_q : i_dbg_resume ? i_dpc\n",
+   "new": "(halt_take || head_dbg_entry) ? arch_pc_q : i_dbg_resume ? arch_pc_q\n"
   },
   {
    "name": "a resume does not load the architectural pc from dpc",
