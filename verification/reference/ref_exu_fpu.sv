@@ -9,9 +9,10 @@
  * pass a divide and complete first; the ROB takes results by tag.
  *
  * One writeback port (o_wb, to the ROB and the bypass): the pipeline's result has it whenever there is one; a finished
- * divide waits for a cycle the pipeline does not use and is acknowledged then. That wait is bounded: the divide is older
- * than everything competing for the port, the pipeline never stalls, and the ROB's depth limits how much can be issued
- * past it. i_flush kills both units; the writeback is masked in a flush cycle, so nothing written back belongs to a tag
+ * divide waits for a cycle the pipeline does not use and is acknowledged then. That wait is bounded: every op that can
+ * take the port from it holds a ROB entry, the divide's own entry cannot retire unwritten, so dispatch stops within the
+ * ROB's depth (and the reservation station's, which may send ops older than the divide, O1), and the pipeline never
+ * stalls. i_flush kills both units; the writeback is masked in a flush cycle, so nothing written back belongs to a tag
  * that a flush has freed (qv_exu_div.sv has the same rule).
  *
  * QV_FORMAL_FPU_ABSTRACT (the riscv-formal pipe-fpu model and fpu_props.sv) keeps every control path and replaces the

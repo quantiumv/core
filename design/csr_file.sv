@@ -161,6 +161,7 @@ module csr_file #(
     input  logic                          i_csr_we,
     input  logic [(`WORD_SIZE - 1):0]     i_csr_wdata,
     input  logic                          i_instr_retired,  // drives minstret; independent of i_csr_we/addr
+    input  logic                          i_instr_retired2 = 1'b0, // O4: a second retirement in the same cycle (with the first)
 
     input  logic [1:0]                    i_current_priv,
     input  logic                          i_mtip = 1'b0,
@@ -478,6 +479,8 @@ module csr_file #(
     always_ff @(posedge i_clk) begin
         if (i_rst)
             minstret_q <= '0;
+        else if (i_instr_retired && i_instr_retired2)
+            minstret_q <= minstret_q + 64'd2;
         else if (i_instr_retired)
             minstret_q <= minstret_q + 1'b1;
     end

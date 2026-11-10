@@ -306,6 +306,12 @@ verified on its own (for the FPU: TestFloat, Sail and ACT).
   says little here: its programs never read the counters, and `cycle` and
   `time` cannot match Sail's. ACT is the evidence. `QV_ZICNTR_EN=0` builds
   the reference as before (the three CSRs do not exist, errata E10).
+- **O4 (2026-11-10): `csr_file`'s `i_instr_retired2`.** The pipelined core
+  can retire two instructions a cycle, so `csr_file` takes a second
+  retirement pulse (minstret counts both). It defaults to 0 and the
+  reference never drives it: the regenerated `ref_csr_file.sv` behaves as
+  before. The same regeneration brought `ref_exu_fpu.sv` up to a comment
+  that O1 had changed in `qv_exu_fpu.sv`.
 
 ## Running the reference as `core`
 

@@ -50,7 +50,13 @@ module register_file #(
 
     input logic                         i_load_gpr,
     input logic [(l2_num_regs - 1):0]   i_load_gpr_sel,
-    input logic [(`WORD_SIZE - 1):0]    i_load_gpr_data
+    input logic [(`WORD_SIZE - 1):0]    i_load_gpr_data,
+
+    // O4: a second write port, for the second retirement of a pair. It is the younger instruction, so it wins a
+    // write to the same register in the same cycle. Unconnected, it never writes.
+    input logic                         i_load2_gpr = 1'b0,
+    input logic [(l2_num_regs - 1):0]   i_load2_gpr_sel = '0,
+    input logic [(`WORD_SIZE - 1):0]    i_load2_gpr_data = '0
 );
     /* num_regs general purpose registers, each WORD_SIZE bit wide. */
     logic [(`WORD_SIZE - 1):0]  gp_registers [0:(num_regs - 1)];
@@ -90,6 +96,9 @@ module register_file #(
         if (i_load_gpr && (i_load_gpr_sel != 0)) begin: load_gpr
             gp_registers[i_load_gpr_sel] <= i_load_gpr_data;
         end: load_gpr
+        if (i_load2_gpr && (i_load2_gpr_sel != 0)) begin: load2_gpr
+            gp_registers[i_load2_gpr_sel] <= i_load2_gpr_data;
+        end: load2_gpr
     end: write
 endmodule: register_file
 
