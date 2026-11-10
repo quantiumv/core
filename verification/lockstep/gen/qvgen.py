@@ -577,6 +577,109 @@ def emit_ooo(p: Program, recent: list[int]):
     del recent[:-8]
 
 
+def emit_pair(p: Program, recent: list[int]):
+    """--pair: what a core that dispatches, executes and retires two a cycle (O4) has to get right. Runs of independent
+    ALU ops (both slots, both ALU ports, commit pairs); a pair whose second reads the first's destination (it waits
+    for that tag); both writing one register, then a reader (the younger's value stays); a multiply beside an ALU op,
+    in either slot (only port 0 multiplies); a load or a store beside an ALU op; a branch in either slot; an FP op
+    beside an integer one; and LR, an ALU op, a store and SC, so the store that clears the reservation can be the
+    second of a commit pair."""
+    have_m = "m" in p.args.isa
+    have_f = "f" in p.args.isa
+    have_a = "a" in p.args.isa
+
+    def fresh(*excl):
+        r = p.reg()
+        while r in excl:
+            r = p.reg()
+        return r
+
+    def alu(rd=None, a=None, b=None):
+        rd = fresh() if rd is None else rd
+        a = p.reg_biased(recent) if a is None else a
+        b = p.reg_biased(recent) if b is None else b
+        if p.rng.random() < 0.3:
+            op = p.rng.choice(['addi', 'xori', 'ori', 'andi', 'slli', 'srai'])
+            imm = p.rng.randint(0, 63) if op in ('slli', 'srai') else p.rng.randint(-64, 63)
+            p.e(f"    {op:<7} x{rd}, x{a}, {imm}")
+        else:
+            p.e(f"    {p.rng.choice(['add', 'sub', 'xor', 'or', 'and', 'sll', 'srl', 'sra', 'slt', 'sltu', 'addw', 'subw']):<7} x{rd}, x{a}, x{b}")
+        recent.append(rd)
+        return rd
+
+    k = p.rng.random()
+    if k < 0.25:                                                   # a run of independent ALU ops
+        for _ in range(p.rng.randint(2, 6)):
+            alu()
+    elif k < 0.37:                                                 # the second reads the first's destination
+        x = alu()
+        if p.rng.random() < 0.5:
+            alu(a=x)
+        else:
+            alu(b=x)
+    elif k < 0.47:                                                 # both write one register, then a reader
+        x = fresh()
+        alu(rd=x)
+        alu(rd=x)
+        alu(a=x)
+    elif k < 0.57 and have_m:                                      # a multiply in either slot
+        mrd = fresh()
+        if p.rng.random() < 0.5:
+            p.e(f"    {p.rng.choice(['mul', 'mulh', 'mulhu', 'mulhsu', 'mulw']):<7} x{mrd}, x{p.reg_biased(recent)}, x{p.reg_biased(recent)}")
+            alu()
+        else:
+            alu()
+            p.e(f"    {p.rng.choice(['mul', 'mulh', 'mulhu', 'mulhsu', 'mulw']):<7} x{mrd}, x{p.reg_biased(recent)}, x{p.reg_biased(recent)}")
+        recent.append(mrd)
+    elif k < 0.70:                                                 # a load or a store beside an ALU op
+        addr = fresh()
+        _sandbox_addr(p, addr, width=8)
+        first_alu = p.rng.random() < 0.5
+        if first_alu:
+            alu()
+        if p.rng.random() < 0.5:
+            rd = fresh(addr)
+            p.e(f"    {p.rng.choice(['ld', 'lw', 'lwu', 'lh', 'lbu']):<7} x{rd}, 0(x{addr})")
+            recent.append(rd)
+        else:
+            p.e(f"    {p.rng.choice(['sd', 'sw', 'sh', 'sb']):<7} x{fresh(addr)}, 0(x{addr})")
+        if not first_alu:
+            alu()
+    elif k < 0.80 and not p.loop_nesting:                          # a branch in either slot
+        lbl = p.reserve_label("fwd")
+        br = f"    {p.rng.choice(['beq', 'bne', 'blt', 'bge', 'bltu', 'bgeu'])}     x{p.reg_biased(recent)}, x{p.reg_biased(recent)}, {lbl}"
+        if p.rng.random() < 0.5:
+            alu()
+            p.e(br)
+        else:
+            p.e(br)
+            alu()
+    elif k < 0.88 and have_f:                                      # an FP op beside an integer one
+        if p.rng.random() < 0.5:
+            alu()
+            emit_fp_op(p, recent)
+        else:
+            emit_fp_op(p, recent)
+            alu()
+    elif have_a and not p.args.sail_safe:                          # LR, ALU, store, SC: the store clears it
+        a_r = fresh()
+        _sandbox_addr(p, a_r, misaligned=False, width=8)
+        s_r = fresh(a_r)
+        _sandbox_addr(p, s_r, misaligned=False, width=8)
+        lr = fresh(a_r, s_r)
+        sfx = p.rng.choice(["w", "d"])
+        p.e(f"    lr.{sfx}    x{lr}, (x{a_r})")
+        alu(rd=fresh(a_r, s_r, lr))
+        p.e(f"    sd      x{fresh(s_r)}, 0(x{s_r})")
+        sc = fresh(a_r, s_r)
+        p.e(f"    sc.{sfx}    x{sc}, x{p.reg_biased(recent)}, (x{a_r})")
+        recent += [lr, sc]
+    else:
+        for _ in range(p.rng.randint(2, 4)):
+            alu()
+    del recent[:-8]
+
+
 def emit_amo(p: Program, recent: list[int]):
     addr_r = p.reg()
     _sandbox_addr(p, addr_r, misaligned=False, width=8)
@@ -2379,6 +2482,9 @@ def emit_main_body(p: Program):
         if getattr(a, "ooo", False) and p.rng.random() < 0.25:
             emit_ooo(p, recent)
             return
+        if getattr(a, "pair", False) and p.rng.random() < 0.30:
+            emit_pair(p, recent)
+            return
         if getattr(a, "mem_dense", False) and p.rng.random() < 0.30:
             emit_mem_pair(p, recent)
             return
@@ -2581,6 +2687,9 @@ def main():
     ap.add_argument("--ooo", action="store_true",
                     help="a quarter of the instructions are long-latency producers with independent work and their "
                          "consumers behind them (see emit_ooo): for out-of-order issue")
+    ap.add_argument("--pair", action="store_true",
+                    help="a third of the instructions are shaped to pair at dispatch and commit, with the hazards of "
+                         "a pair (see emit_pair): for the two-wide core (O4)")
     ap.add_argument("--no-div", action="store_true", dest="no_div",
                     help="keep M to the multiplies (for cores without a divider yet)")
     ap.add_argument("--len", type=int, default=200)
