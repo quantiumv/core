@@ -50,6 +50,8 @@ module perf_stack #(
 
     input logic             commit,
     input logic             instr_retired,      // minstret counts it
+    input logic             instr_retired2 = 1'b0, // (O4) a second retirement in the same cycle
+    input logic             mispredict2 = 1'b0,    // (O4) ... which is a mispredicted branch: its redirect
     input logic             head_valid,
     input logic             head_complete,
     input logic [2:0]       head_cls,           // qv_fu_e: 0 ALU, 1 BRU, 2 DIV, 3 LSU, 4 CSR, 5 SYS
@@ -291,7 +293,7 @@ module perf_stack #(
 
             // ---- the refill shadow: from a redirect to the first issue after it ----
             if (flush) begin
-                if (commit && head_mispredict)      shadow_q <= SRC_MISPRED;
+                if ((commit && head_mispredict) || mispredict2) shadow_q <= SRC_MISPRED;
                 else if (commit && head_serialize)  begin shadow_q <= SRC_SERIAL; shadow_kind_q <= ser_kind(head_cls, head_csr_wsup, head_csr_addr); end
                 else                                shadow_q <= SRC_OTHER;
             end else if (fe_redirect) begin
@@ -346,7 +348,7 @@ module perf_stack #(
                         default:     c_empty_front <= c_empty_front + 1;
                     endcase
                 end
-                if (instr_retired) c_instret <= c_instret + 1;
+                if (instr_retired) c_instret <= c_instret + 1 + (instr_retired2 ? 1 : 0);
 
                 if (!iq_valid)  c_iq_empty <= c_iq_empty + 1;
                 if (!fb_valid)  c_fb_empty <= c_fb_empty + 1;

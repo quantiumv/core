@@ -28,6 +28,7 @@
     perf_stack #(.WIN_CSR(WIN_CSR)) stack ( \
         .clk(clk), .rst(rst), \
         .commit(CORE.commit_now_w), .instr_retired(CORE.c_instr_retired), \
+        .instr_retired2(CORE.c_instr_retired2), .mispredict2(CORE.commit_pop2 && CORE.head1_entry.mispredict), \
         .head_valid(CORE.head_valid), .head_complete(CORE.head_entry.complete), \
         .head_cls(CORE.head_ctrl.cls), .head_raw(CORE.head_entry.raw), .head_pc(CORE.head_entry.pc), .head_next_pc(CORE.head_entry.next_pc), \
         .head_mispredict(CORE.head_entry.mispredict), \
