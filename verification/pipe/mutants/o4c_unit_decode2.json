@@ -1,0 +1,85 @@
+{
+ "dut": "design/pipe/qv_decode2.sv",
+ "tb": "design/pipe/qv_decode2_tb.sv",
+ "files": [
+  "design/decoder.sv",
+  "design/c_expand.sv",
+  "design/alu.sv",
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_pmp.sv",
+  "design/pipe/qv_fp_dec.sv",
+  "design/pipe/qv_csr_exists.sv",
+  "design/pipe/qv_decode.sv",
+  "design/pipe/qv_fifo.sv",
+  "design/pipe/qv_decode2.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench",
+  "-Pqv_decode2_tb.IQ_DEPTH=4"
+ ],
+ "cwd": "design",
+ "timeout": 900,
+ "mutants": [
+  {
+   "name": "slot 1 stays in slot 0 after both issue",
+   "old": "wire  r0_v  = take0 ? (v1_q && !take1) : v0_q;",
+   "new": "wire  r0_v  = take0 ? v1_q : v0_q;"
+  },
+  {
+   "name": "slot 0 keeps its uop after it issues",
+   "old": "assign r0_u = take0 ? u1_q : u0_q;",
+   "new": "assign r0_u = u0_q;"
+  },
+  {
+   "name": "slot 1 stays after slot 0 issues",
+   "old": "wire  r1_v  = !take0 && v1_q;",
+   "new": "wire  r1_v  = v1_q;"
+  },
+  {
+   "name": "the IQ pops into a held slot 1",
+   "old": "assign o_iq_pop  = i_iq_valid && !r1_v && !i_flush;",
+   "new": "assign o_iq_pop  = i_iq_valid && !i_flush;"
+  },
+  {
+   "name": "a second pop into a held slot 0",
+   "old": "assign o_iq_pop2 = o_iq_pop && !r0_v && i_iq1_valid;",
+   "new": "assign o_iq_pop2 = o_iq_pop && i_iq1_valid;"
+  },
+  {
+   "name": "a second pop of an entry that is not there",
+   "old": "assign o_iq_pop2 = o_iq_pop && !r0_v && i_iq1_valid;",
+   "new": "assign o_iq_pop2 = o_iq_pop && !r0_v;"
+  },
+  {
+   "name": "no second pop",
+   "old": "assign o_iq_pop2 = o_iq_pop && !r0_v && i_iq1_valid;",
+   "new": "assign o_iq_pop2 = 1'b0;"
+  },
+  {
+   "name": "slot 1 refilled with the entry behind the head",
+   "old": "if (!r1_v && o_iq_pop) u1_q <= b0;",
+   "new": "if (!r1_v && o_iq_pop) u1_q <= b1;"
+  },
+  {
+   "name": "slot 1 not refilled behind a held slot 0",
+   "old": "v1_q <= r1_v || o_iq_pop;",
+   "new": "v1_q <= r1_v;"
+  },
+  {
+   "name": "both slots refilled with the head",
+   "old": "if (o_iq_pop2) u1_q <= b1;",
+   "new": "if (o_iq_pop2) u1_q <= b0;"
+  },
+  {
+   "name": "slot 0 refilled with the entry behind",
+   "old": "if (o_iq_pop) u0_q <= b0;",
+   "new": "if (o_iq_pop) u0_q <= b1;"
+  }
+ ]
+}

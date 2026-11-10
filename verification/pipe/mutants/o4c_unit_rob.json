@@ -1,0 +1,78 @@
+{
+ "dut": "design/pipe/qv_rob.sv",
+ "tb": "design/pipe/qv_dispatch2_tb.sv",
+ "files": [
+  "design/alu.sv",
+  "design/register_file.sv",
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_exu_alu.sv",
+  "design/pipe/qv_rob.sv",
+  "design/pipe/qv_rs.sv",
+  "design/pipe/qv_issue.sv",
+  "design/pipe/qv_commit.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench",
+  "-Pqv_dispatch2_tb.BYPASS_EN=0",
+  "-Pqv_dispatch2_tb.ROB_DEPTH=4",
+  "-Pqv_dispatch2_tb.RS_DEPTH=2",
+  "-Pqv_dispatch2_tb.COMMIT_W=2",
+  "-Pqv_dispatch2_tb.CSR_LATE=1",
+  "-Pqv_dispatch2_tb.SEED=4"
+ ],
+ "cwd": "design",
+ "timeout": 900,
+ "mutants": [
+  {
+   "name": "room for two with one free",
+   "old": "assign o_alloc_ready2 = (tail_q - head_q) <= PTR_W'(ROB_DEPTH - 2);",
+   "new": "assign o_alloc_ready2 = (tail_q - head_q) <= PTR_W'(ROB_DEPTH - 1);"
+  },
+  {
+   "name": "the tail steps one on two allocations",
+   "old": "tail_q                  <= tail_q + PTR_W'(2);",
+   "new": "tail_q                  <= tail_q + PTR_W'(1);"
+  },
+  {
+   "name": "the second allocation's tag is the first's",
+   "old": "assign o_alloc_tag1   = QV_ROB_TAG_W'(tail1_q);",
+   "new": "assign o_alloc_tag1   = QV_ROB_TAG_W'(tail_q);"
+  },
+  {
+   "name": "the second entry takes the first's pc",
+   "old": "pc_q[tail1_idx]         <= i_alloc2_pc;",
+   "new": "pc_q[tail1_idx]         <= i_alloc_pc;"
+  },
+  {
+   "name": "the second entry takes the first's rd",
+   "old": "rd_q[tail1_idx]         <= i_alloc2_rd;",
+   "new": "rd_q[tail1_idx]         <= i_alloc_rd;"
+  },
+  {
+   "name": "the second entry takes the first's raw",
+   "old": "raw_q[tail1_idx]        <= i_alloc2_raw;",
+   "new": "raw_q[tail1_idx]        <= i_alloc_raw;"
+  },
+  {
+   "name": "the second entry starts complete",
+   "old": "complete_q[tail1_idx]   <= 1'b0;\n",
+   "new": ""
+  },
+  {
+   "name": "lookup 4 reads lookup 5's entry",
+   "old": "assign o_lookup4_value    = value_q[l4_idx];",
+   "new": "assign o_lookup4_value    = value_q[l5_idx];"
+  },
+  {
+   "name": "lookup 5 always complete",
+   "old": "assign o_lookup5_complete = complete_q[l5_idx];",
+   "new": "assign o_lookup5_complete = 1'b1;"
+  }
+ ]
+}

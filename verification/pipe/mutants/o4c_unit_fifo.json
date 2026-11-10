@@ -1,0 +1,55 @@
+{
+ "dut": "design/pipe/qv_fifo.sv",
+ "tb": "design/pipe/qv_decode2_tb.sv",
+ "files": [
+  "design/decoder.sv",
+  "design/c_expand.sv",
+  "design/alu.sv",
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_pmp.sv",
+  "design/pipe/qv_fp_dec.sv",
+  "design/pipe/qv_csr_exists.sv",
+  "design/pipe/qv_decode.sv",
+  "design/pipe/qv_fifo.sv",
+  "design/pipe/qv_decode2.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench",
+  "-Pqv_decode2_tb.IQ_DEPTH=4"
+ ],
+ "cwd": "design",
+ "timeout": 900,
+ "mutants": [
+  {
+   "name": "the entry behind the head with only one",
+   "old": "assign o_head1_valid = (count_q >= CNT_W'(2));",
+   "new": "assign o_head1_valid = (count_q >= CNT_W'(1));"
+  },
+  {
+   "name": "the entry behind the head is the head",
+   "old": "assign o_head1_data  = mem[rd_q + PTR_W'(1)];",
+   "new": "assign o_head1_data  = mem[rd_q];"
+  },
+  {
+   "name": "the second pop not counted",
+   "old": "wire [CNT_W-1:0] n_pop  = CNT_W'(pop) + CNT_W'(pop2);",
+   "new": "wire [CNT_W-1:0] n_pop  = CNT_W'(pop);"
+  },
+  {
+   "name": "the read pointer steps one on a second pop",
+   "old": "if (pop) rd_q <= rd_q + PTR_W'(n_pop);",
+   "new": "if (pop) rd_q <= rd_q + PTR_W'(1);"
+  },
+  {
+   "name": "no second pop",
+   "old": "wire pop2 = pop && i_pop2 && (count_q >= CNT_W'(2));",
+   "new": "wire pop2 = 1'b0;"
+  }
+ ]
+}
