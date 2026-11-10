@@ -71,6 +71,7 @@ module qv_lsq #(
     input  qv_pkg::rs_opnd_t                 i_opb = '0,
     /* verilator lint_off UNUSEDSIGNAL */
     input  qv_pkg::wb_t                      i_wb = '0,        // ALU/BRU
+    input  qv_pkg::wb_t                      i_wbp = '0,       // O4d: the second ALU port
     input  qv_pkg::wb_t                      i_wbd = '0,       // divider
     input  qv_pkg::wb_fp_t                   i_wbf = '0,       // FPU
     input  qv_pkg::wb_t                      i_wbc = '0,       // commit: an integer rd written to regfile0
@@ -143,45 +144,16 @@ module qv_lsq #(
     wire push = i_req.valid && !i_flush;
 
     // ---------------- (OPW) waiting operands ----------------
-    // wake, byp_hit and now_val are the reservation station's rules (qv_rs.sv), the LSU's writeback being i_eng_wb
+    // qv_pkg's qv_opnd_wake/_byp/_now are the rules, as in the reservation station; the LSU's writeback (i_eng_wb)
+    // is their wbl bus
     rs_opnd_t opa_q [DEPTH];
     rs_opnd_t opb_q [DEPTH];
-
-    /* verilator lint_off UNUSEDSIGNAL */
-    function automatic rs_opnd_t wake(input rs_opnd_t o, input wb_t wb, input wb_t wbl, input wb_t wbd,
-                                      input wb_fp_t wbf, input wb_t wbc);
-        rs_opnd_t n;
-        n = o;
-        if (!o.rdy) begin
-            if (wbc.valid && wbc.tag == o.tag) begin
-                n.rdy = 1'b1; n.value = wbc.value;
-            end else if (!o.late) begin
-                if (wb.valid && wb.tag == o.tag)        begin n.rdy = 1'b1; n.value = wb.value;  end
-                else if (wbl.valid && wbl.tag == o.tag) begin n.rdy = 1'b1; n.value = wbl.value; end
-                else if (wbd.valid && wbd.tag == o.tag) begin n.rdy = 1'b1; n.value = wbd.value; end
-                else if (wbf.valid && wbf.tag == o.tag) begin n.rdy = 1'b1; n.value = wbf.value; end
-            end
-        end
-        return n;
-    endfunction
-
-    function automatic logic byp_hit(input rs_opnd_t o, input wb_t wb, input wb_t wbl, input wb_fp_t wbf);
-        return !o.late && BYPASS_EN && ((wb.valid && wb.tag == o.tag) || (wbf.valid && wbf.tag == o.tag)
-                                        || (LSU_BYPASS && wbl.valid && wbl.tag == o.tag));
-    endfunction
-
-    function automatic logic [63:0] now_val(input rs_opnd_t o, input wb_t wb, input wb_t wbl, input wb_fp_t wbf);
-        if (o.rdy)                         return o.value;
-        if (wb.valid && wb.tag == o.tag)   return wb.value;
-        if (wbf.valid && wbf.tag == o.tag) return wbf.value;
-        return wbl.value;
-    endfunction
-    /* verilator lint_on UNUSEDSIGNAL */
 
     rs_opnd_t sa, sb;                                   // the oldest queued op's operands
     assign sa = opa_q[send_i];
     assign sb = opb_q[send_i];
-    wire s_ok  = !OPW || ((sa.rdy || byp_hit(sa, i_wb, i_eng_wb, i_wbf)) && (sb.rdy || byp_hit(sb, i_wb, i_eng_wb, i_wbf)));
+    wire s_ok  = !OPW || ((sa.rdy || qv_opnd_byp(sa, i_wb, i_wbp, i_eng_wb, i_wbf, BYPASS_EN, LSU_BYPASS))
+                       && (sb.rdy || qv_opnd_byp(sb, i_wb, i_wbp, i_eng_wb, i_wbf, BYPASS_EN, LSU_BYPASS)));
     wire in_ok = !OPW || (i_opa.rdy && i_opb.rdy);      // issue's request has its operands
 
     // the oldest queued op, or, with none, issue's own request
@@ -190,8 +162,8 @@ module qv_lsq #(
     always_comb begin
         o_eng_req       = has_q ? send_e : i_req;
         if (OPW && has_q) begin
-            o_eng_req.a = now_val(sa, i_wb, i_eng_wb, i_wbf);
-            o_eng_req.b = now_val(sb, i_wb, i_eng_wb, i_wbf);
+            o_eng_req.a = qv_opnd_now(sa, i_wb, i_wbp, i_eng_wb, i_wbf);
+            o_eng_req.b = qv_opnd_now(sb, i_wb, i_wbp, i_eng_wb, i_wbf);
         end
         o_eng_req.valid = has_q ? s_ok : (i_req.valid && in_ok);
     end
@@ -265,13 +237,13 @@ module qv_lsq #(
             end
             if (OPW)
                 for (int i = 0; i < DEPTH; i++) begin
-                    opa_q[i] <= wake(opa_q[i], i_wb, i_eng_wb, i_wbd, i_wbf, i_wbc);
-                    opb_q[i] <= wake(opb_q[i], i_wb, i_eng_wb, i_wbd, i_wbf, i_wbc);
+                    opa_q[i] <= qv_opnd_wake(opa_q[i], i_wb, i_wbp, i_eng_wb, i_wbd, i_wbf, i_wbc);
+                    opb_q[i] <= qv_opnd_wake(opb_q[i], i_wb, i_wbp, i_eng_wb, i_wbd, i_wbf, i_wbc);
                 end
             if (push) begin
                 if (OPW) begin                               // the dispatch-cycle capture: this cycle's buses too
-                    opa_q[tail_i] <= wake(i_opa, i_wb, i_eng_wb, i_wbd, i_wbf, i_wbc);
-                    opb_q[tail_i] <= wake(i_opb, i_wb, i_eng_wb, i_wbd, i_wbf, i_wbc);
+                    opa_q[tail_i] <= qv_opnd_wake(i_opa, i_wb, i_wbp, i_eng_wb, i_wbd, i_wbf, i_wbc);
+                    opb_q[tail_i] <= qv_opnd_wake(i_opb, i_wb, i_wbp, i_eng_wb, i_wbd, i_wbf, i_wbc);
                 end
                 xl_q[tail_i]      <= 1'b0;
                 req_q[tail_i]     <= i_req;

@@ -397,6 +397,50 @@ package qv_pkg;
         rs_opnd_t                c;
     } rs_entry_t;
 
+    // O1/O4: the rules for an operand that waits for its producer, shared by issue's station (qv_rs) and the
+    // load/store queue (qv_lsq). The buses: wb the ALU/BRU's (port 0), wbp the second ALU port's (O4d; '0 without
+    // it), wbl the LSU's, wbd the divider's, wbf the FPU's, wbc commit's (an integer rd written to regfile0).
+    // An operand's next state takes the first bus that carries its producer's tag, a late one only the commit bus
+    // (its unit's writeback is just the ALU's pass of the source operand).
+    /* verilator lint_off UNUSEDSIGNAL */
+    function automatic rs_opnd_t qv_opnd_wake(input rs_opnd_t o, input wb_t wb, input wb_t wbp, input wb_t wbl,
+                                              input wb_t wbd, input wb_fp_t wbf, input wb_t wbc);
+        rs_opnd_t n;
+        n = o;
+        if (!o.rdy) begin
+            if (wbc.valid && wbc.tag == o.tag) begin
+                n.rdy = 1'b1; n.value = wbc.value;
+            end else if (!o.late) begin
+                if (wb.valid && wb.tag == o.tag)        begin n.rdy = 1'b1; n.value = wb.value;  end
+                else if (wbp.valid && wbp.tag == o.tag) begin n.rdy = 1'b1; n.value = wbp.value; end
+                else if (wbl.valid && wbl.tag == o.tag) begin n.rdy = 1'b1; n.value = wbl.value; end
+                else if (wbd.valid && wbd.tag == o.tag) begin n.rdy = 1'b1; n.value = wbd.value; end
+                else if (wbf.valid && wbf.tag == o.tag) begin n.rdy = 1'b1; n.value = wbf.value; end
+            end
+        end
+        return n;
+    endfunction
+
+    // A waiting operand may still be taken in this cycle off a same-cycle bypass source (BYPASS_EN; the LSU's
+    // writeback only with LSU_BYPASS) ...
+    function automatic logic qv_opnd_byp(input rs_opnd_t o, input wb_t wb, input wb_t wbp, input wb_t wbl,
+                                         input wb_fp_t wbf, input logic bypass_en, input logic lsu_bypass);
+        return !o.late && bypass_en && ((wb.valid && wb.tag == o.tag) || (wbp.valid && wbp.tag == o.tag)
+                                        || (wbf.valid && wbf.tag == o.tag)
+                                        || (lsu_bypass && wbl.valid && wbl.tag == o.tag));
+    endfunction
+
+    // ... with this value (an operand that is ready, or one qv_opnd_byp takes now)
+    function automatic logic [63:0] qv_opnd_now(input rs_opnd_t o, input wb_t wb, input wb_t wbp, input wb_t wbl,
+                                                input wb_fp_t wbf);
+        if (o.rdy)                         return o.value;
+        if (wb.valid && wb.tag == o.tag)   return wb.value;
+        if (wbp.valid && wbp.tag == o.tag) return wbp.value;
+        if (wbf.valid && wbf.tag == o.tag) return wbf.value;
+        return wbl.value;
+    endfunction
+    /* verilator lint_on UNUSEDSIGNAL */
+
     // What kind of control-flow instruction an encoding is (32-bit, or RVC with raw[31:16] = 0), for the branch
     // predictors: 0 none, 1 direct (conditional branch, JAL, C.J, C.BEQZ/C.BNEZ: the target is in the encoding),
     // 2 an indirect jump that is not a return (JALR, C.JR, C.JALR: the target is a register; a call or a jump),

@@ -54,6 +54,7 @@ module qv_rs #(
     // wakeup (only valid, tag and value are read)
     /* verilator lint_off UNUSEDSIGNAL */
     input  qv_pkg::wb_t                      i_wb,             // ALU/BRU
+    input  qv_pkg::wb_t                      i_wbp = '0,       // O4d: the second ALU port
     input  qv_pkg::wb_t                      i_wbl,            // LSU
     input  qv_pkg::wb_t                      i_wbd,            // divider
     input  qv_pkg::wb_fp_t                   i_wbf,            // FPU
@@ -79,39 +80,8 @@ module qv_rs #(
     // (Elements of e_q are copied into a temporary before their fields are read or written: Icarus crashes
     // elaborating `array[i].field` on an array of structs.)
 
-    // An operand's next state: a waiting one takes the first bus that carries its producer's tag (a late one only
-    // the commit bus).
-    /* verilator lint_off UNUSEDSIGNAL */
-    function automatic rs_opnd_t wake(input rs_opnd_t o, input wb_t wb, input wb_t wbl, input wb_t wbd,
-                                      input wb_fp_t wbf, input wb_t wbc);
-        rs_opnd_t n;
-        n = o;
-        if (!o.rdy) begin
-            if (wbc.valid && wbc.tag == o.tag) begin
-                n.rdy = 1'b1; n.value = wbc.value;
-            end else if (!o.late) begin
-                if (wb.valid && wb.tag == o.tag)        begin n.rdy = 1'b1; n.value = wb.value;  end
-                else if (wbl.valid && wbl.tag == o.tag) begin n.rdy = 1'b1; n.value = wbl.value; end
-                else if (wbd.valid && wbd.tag == o.tag) begin n.rdy = 1'b1; n.value = wbd.value; end
-                else if (wbf.valid && wbf.tag == o.tag) begin n.rdy = 1'b1; n.value = wbf.value; end
-            end
-        end
-        return n;
-    endfunction
-
-    // An operand that is not ready may still be taken in this cycle off a same-cycle bypass source.
-    function automatic logic byp_hit(input rs_opnd_t o, input wb_t wb, input wb_t wbl, input wb_fp_t wbf);
-        return !o.late && BYPASS_EN && ((wb.valid && wb.tag == o.tag) || (wbf.valid && wbf.tag == o.tag)
-                                        || (LSU_BYPASS && wbl.valid && wbl.tag == o.tag));
-    endfunction
-
-    function automatic logic [63:0] now_val(input rs_opnd_t o, input wb_t wb, input wb_t wbl, input wb_fp_t wbf);
-        if (o.rdy)                         return o.value;
-        if (wb.valid && wb.tag == o.tag)   return wb.value;
-        if (wbf.valid && wbf.tag == o.tag) return wbf.value;
-        return wbl.value;
-    endfunction
-    /* verilator lint_on UNUSEDSIGNAL */
+    // An operand's next state, and whether and with which value it can be taken this cycle: qv_pkg's qv_opnd_wake,
+    // qv_opnd_byp and qv_opnd_now (one copy for the station and the load/store queue).
 
     // ---------------- select ----------------
     qv_rs_kind_e kind    [0:DEPTH-1];
@@ -130,12 +100,12 @@ module qv_rs #(
         for (int i = 0; i < DEPTH; i++) begin
             x        = e_q[i];
             kind[i]  = x.kind;
-            ready[i] = v_q[i] && (x.a.rdy || byp_hit(x.a, i_wb, i_wbl, i_wbf))
-                              && (x.b.rdy || byp_hit(x.b, i_wb, i_wbl, i_wbf))
-                              && (x.c.rdy || byp_hit(x.c, i_wb, i_wbl, i_wbf));
-            va[i]    = now_val(x.a, i_wb, i_wbl, i_wbf);
-            vb[i]    = now_val(x.b, i_wb, i_wbl, i_wbf);
-            vc[i]    = now_val(x.c, i_wb, i_wbl, i_wbf);
+            ready[i] = v_q[i] && (x.a.rdy || qv_opnd_byp(x.a, i_wb, i_wbp, i_wbl, i_wbf, BYPASS_EN, LSU_BYPASS))
+                              && (x.b.rdy || qv_opnd_byp(x.b, i_wb, i_wbp, i_wbl, i_wbf, BYPASS_EN, LSU_BYPASS))
+                              && (x.c.rdy || qv_opnd_byp(x.c, i_wb, i_wbp, i_wbl, i_wbf, BYPASS_EN, LSU_BYPASS));
+            va[i]    = qv_opnd_now(x.a, i_wb, i_wbp, i_wbl, i_wbf);
+            vb[i]    = qv_opnd_now(x.b, i_wb, i_wbp, i_wbl, i_wbf);
+            vc[i]    = qv_opnd_now(x.c, i_wb, i_wbp, i_wbl, i_wbf);
         end
         ab_f = 1'b0; ab_i = 0; div_f = 1'b0; div_i = 0; fds_f = 1'b0; fds_i = 0;
         for (int i = DEPTH - 1; i >= 0; i--) begin             // the last hit is the oldest
@@ -227,9 +197,9 @@ module qv_rs #(
         for (int i = 0; i < DEPTH; i++) begin
             if (v_q[i] && !issued[i]) begin
                 x      = e_q[i];
-                x.a    = wake(x.a, i_wb, i_wbl, i_wbd, i_wbf, i_wbc);
-                x.b    = wake(x.b, i_wb, i_wbl, i_wbd, i_wbf, i_wbc);
-                x.c    = wake(x.c, i_wb, i_wbl, i_wbd, i_wbf, i_wbc);
+                x.a    = qv_opnd_wake(x.a, i_wb, i_wbp, i_wbl, i_wbd, i_wbf, i_wbc);
+                x.b    = qv_opnd_wake(x.b, i_wb, i_wbp, i_wbl, i_wbd, i_wbf, i_wbc);
+                x.c    = qv_opnd_wake(x.c, i_wb, i_wbp, i_wbl, i_wbd, i_wbf, i_wbc);
                 n_e[j] = x;
                 n_v[j] = 1'b1;
                 j++;
@@ -237,9 +207,9 @@ module qv_rs #(
         end
         if (i_push && j < DEPTH) begin                          // the dispatch-cycle capture: this cycle's buses too
             x      = i_push_e;
-            x.a    = wake(x.a, i_wb, i_wbl, i_wbd, i_wbf, i_wbc);
-            x.b    = wake(x.b, i_wb, i_wbl, i_wbd, i_wbf, i_wbc);
-            x.c    = wake(x.c, i_wb, i_wbl, i_wbd, i_wbf, i_wbc);
+            x.a    = qv_opnd_wake(x.a, i_wb, i_wbp, i_wbl, i_wbd, i_wbf, i_wbc);
+            x.b    = qv_opnd_wake(x.b, i_wb, i_wbp, i_wbl, i_wbd, i_wbf, i_wbc);
+            x.c    = qv_opnd_wake(x.c, i_wb, i_wbp, i_wbl, i_wbd, i_wbf, i_wbc);
             n_e[j] = x;
             n_v[j] = 1'b1;
         end
@@ -247,9 +217,9 @@ module qv_rs #(
         if (i_push2) begin
             k   = j + (i_push ? 1 : 0);
             y   = i_push2_e;
-            y.a = wake(y.a, i_wb, i_wbl, i_wbd, i_wbf, i_wbc);
-            y.b = wake(y.b, i_wb, i_wbl, i_wbd, i_wbf, i_wbc);
-            y.c = wake(y.c, i_wb, i_wbl, i_wbd, i_wbf, i_wbc);
+            y.a = qv_opnd_wake(y.a, i_wb, i_wbp, i_wbl, i_wbd, i_wbf, i_wbc);
+            y.b = qv_opnd_wake(y.b, i_wb, i_wbp, i_wbl, i_wbd, i_wbf, i_wbc);
+            y.c = qv_opnd_wake(y.c, i_wb, i_wbp, i_wbl, i_wbd, i_wbf, i_wbc);
             if (k < DEPTH) begin
                 n_e[k] = y;
                 n_v[k] = 1'b1;
