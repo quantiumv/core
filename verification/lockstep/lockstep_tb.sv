@@ -113,7 +113,9 @@ module lockstep_tb #(
     // only after each group, where side A, one at a time, samples after every retirement. So side B publishes, per
     // retirement, whether it ended a group (bnd_ring, by retirement order), side A may not pass a retirement before
     // side B has made it, and side A sees the interrupt levels and the script's halt only at those boundaries
-    // (lockstep_irq.sv, lockstep_side.sv, lockstep_dbg.sv). The stop is side B's alone, at the end of a group. On by
+    // (lockstep_irq.sv, lockstep_side.sv, lockstep_dbg.sv): after a retirement inside one of side B's groups its
+    // interrupt pins read 0 and its script halt waits, so it takes either only where side B can (and mip's pin bits
+    // are not compared, as with the late modes). The stop is side B's alone, at the end of a group. On by
     // itself when side B retires two a cycle; +MODE_B forces it on (with one a cycle every retirement is a boundary,
     // and the verdicts must be mode A's).
 `ifndef QV_PIPE_COMMIT_W
@@ -486,7 +488,7 @@ module lockstep_tb #(
     logic [63:0] fail_order, match_count, ev_match_count;
 
     lockstep_cmp cmp0 (
-        .clk(clk_mon), .rst(rst), .irq_late_i(irq_late != 0),
+        .clk(clk_mon), .rst(rst), .irq_late_i(irq_late != 0 || mode_b),
         .a_rec_avail(a_rec_avail), .a_rec_total(a_rec_total), .a_rec_pop(a_rec_pop),
         .a_order(a_rp_order), .a_pc_rdata(a_rp_pc_rdata), .a_pc_wdata(a_rp_pc_wdata), .a_insn(a_rp_insn),
         .a_trap(a_rp_trap), .a_intr(a_rp_intr), .a_mode(a_rp_mode),

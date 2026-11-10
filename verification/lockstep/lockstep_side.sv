@@ -180,6 +180,13 @@ module lockstep_side #(
     logic        last_bnd_q;
     always_ff @(posedge clk) if (rst) last_bnd_q <= 1'b1; else if (rvfi_valid) last_bnd_q <= bnd_i;
     assign core_halt_req = dm_halt_req | (script_halt_req && (!bnd_mode_i || last_bnd_q)) | stop_i;
+    // ... and so are the interrupt pins: a level this side already sees could otherwise be taken after a retirement
+    // inside one of the other side's groups (one that became enabled, or was held off by a halt, at the boundary
+    // before), where the other side cannot sample
+    logic        irq_mtip, irq_meip, irq_seip;
+    assign i_mtip = irq_mtip && (!bnd_mode_i || last_bnd_q);
+    assign i_meip = irq_meip && (!bnd_mode_i || last_bnd_q);
+    assign i_seip = irq_seip && (!bnd_mode_i || last_bnd_q);
     logic        rvfi_frd_wvalid;
     logic [4:0]  rvfi_frd_addr;
     logic [63:0] rvfi_frd_wdata;
@@ -448,7 +455,7 @@ module lockstep_side #(
         .rvfi_valid(rvfi_valid),
         .magic_clr_we(ret_clr_we), .magic_clr_wdata(ret_clr_wdata),
         .rvfi_valid2(rvfi1_valid), .magic_clr_we2(ret_clr_we1), .magic_clr_wdata2(ret_clr_wdata1),
-        .o_mtip(i_mtip), .o_meip(i_meip), .o_seip(i_seip)
+        .o_mtip(irq_mtip), .o_meip(irq_meip), .o_seip(irq_seip)
     );
 
     // The Debug Module itself (its System Bus Access port is unused here) and the scripted debugger in

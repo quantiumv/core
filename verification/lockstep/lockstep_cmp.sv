@@ -23,7 +23,8 @@ module lockstep_cmp #(
     input logic rst,
 
     // injected levels become visible a cycle late: mip's MTIP/SEIP/MEIP bits are then a live pin
-    // view that two sides retiring back to back or far apart legitimately read a cycle apart
+    // view that two sides retiring back to back or far apart legitimately read a cycle apart (also set in
+    // mode B, where side A's pins read 0 after a retirement inside one of side B's groups)
     input logic irq_late_i,
 
     // side A retirement pop interface
