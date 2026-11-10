@@ -60,8 +60,8 @@
   },
   {
    "name": "no dispatch-cycle capture (operand c)",
-   "old": "x.c    = wake(x.c, i_wb, i_wbl, i_wbd, i_wbf, i_wbc);\n            n_e[j] = x;\n            n_v[j] = 1'b1;\n        end\n    end",
-   "new": "n_e[j] = x;\n            n_v[j] = 1'b1;\n        end\n    end"
+   "old": "x.c    = wake(x.c, i_wb, i_wbl, i_wbd, i_wbf, i_wbc);\n            n_e[j] = x;\n            n_v[j] = 1'b1;\n        end\n        // (O4)",
+   "new": "n_e[j] = x;\n            n_v[j] = 1'b1;\n        end\n        // (O4)"
   },
   {
    "name": "a waiting entry's operand b never wakes",

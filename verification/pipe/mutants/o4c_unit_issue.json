@@ -1,0 +1,295 @@
+{
+ "dut": "design/pipe/qv_issue.sv",
+ "tb": "design/pipe/qv_dispatch2_tb.sv",
+ "files": [
+  "design/alu.sv",
+  "design/register_file.sv",
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_exu_alu.sv",
+  "design/pipe/qv_rob.sv",
+  "design/pipe/qv_rs.sv",
+  "design/pipe/qv_issue.sv",
+  "design/pipe/qv_commit.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench",
+  "-Pqv_dispatch2_tb.CSR_LATE=1",
+  "-Pqv_dispatch2_tb.RS_DEPTH=2",
+  "-Pqv_dispatch2_tb.COMMIT_W=2"
+ ],
+ "cwd": "design",
+ "timeout": 900,
+ "mutants": [
+  {
+   "name": "touches_fp misses an FP destination",
+   "old": " || u.rs3_used || (u.rd_wen && u.rd_fp)\n",
+   "new": " || u.rs3_used\n"
+  },
+  {
+   "name": "the FP ports go to slot 1 also when slot 0 touches FP",
+   "old": "touches_fp(i_uop1) && !fp_s0;",
+   "new": "touches_fp(i_uop1);"
+  },
+  {
+   "name": "an FP source is a hit on slot 0's integer write",
+   "old": "wire s0_wr_f = i_uop.rd_wen && i_uop.rd_fp;",
+   "new": "wire s0_wr_f = i_uop.rd_wen;"
+  },
+  {
+   "name": "rs1's hit ignores which table",
+   "old": "wire q1_hit  = i_uop1.rs1_used && (i_uop1.rs1_fp ? s0_wr_f : s0_wr_x)",
+   "new": "wire q1_hit  = i_uop1.rs1_used && (s0_wr_f || s0_wr_x)"
+  },
+  {
+   "name": "rs1's hit compares rs2",
+   "old": "(i_uop1.rs1 == i_uop.rd);",
+   "new": "(i_uop1.rs2 == i_uop.rd);"
+  },
+  {
+   "name": "no rs2 hit",
+   "old": "wire q2_hit  = i_uop1.rs2_used &&",
+   "new": "wire q2_hit  = 1'b0 &&"
+  },
+  {
+   "name": "the intra-pair operand takes the table's tag",
+   "old": "q1_tag  = q1_hit ? i_alloc_tag\n",
+   "new": "q1_tag  = 1'b0 ? i_alloc_tag\n"
+  },
+  {
+   "name": "rs1 late on a stale bit",
+   "old": "q1_late = !q1_hit && !i_uop1.rs1_fp",
+   "new": "q1_late = !i_uop1.rs1_fp"
+  },
+  {
+   "name": "rs2 late on a stale bit",
+   "old": "q2_late = !q2_hit && !i_uop1.rs2_fp",
+   "new": "q2_late = !i_uop1.rs2_fp"
+  },
+  {
+   "name": "slot 1 reads slot 0's register port",
+   "old": "s1_r1   = i_uop1.rs1_fp ? i_frs1_data : i_rs1b_data;",
+   "new": "s1_r1   = i_uop1.rs1_fp ? i_frs1_data : i_rs1_data;"
+  },
+  {
+   "name": "slot 1's port reads slot 0's register",
+   "old": "assign o_rs1b_sel    = i_uop1.rs1;",
+   "new": "assign o_rs1b_sel    = i_uop.rs1;"
+  },
+  {
+   "name": "lookup 4 is slot 0's",
+   "old": "assign o_lookup4_tag = q1_tag;",
+   "new": "assign o_lookup4_tag = p1_tag;"
+  },
+  {
+   "name": "the FP ports never serve slot 1",
+   "old": "assign o_frs1_sel    = fp_s1 ? i_uop1.rs1 : i_uop.rs1;",
+   "new": "assign o_frs1_sel    = i_uop.rs1;"
+  },
+  {
+   "name": "an intra-pair source looks ready",
+   "old": "            if (q1_hit)                                             a1_ready = 1'b0;\n",
+   "new": "            if (1'b0)                                               a1_ready = 1'b0;\n"
+  },
+  {
+   "name": "slot 1 takes the port the station picked",
+   "old": ":           (!rs_sel_ab && !s0_ab));",
+   "new": ":           (!s0_ab));"
+  },
+  {
+   "name": "slot 1 takes slot 0's port",
+   "old": ":           (!rs_sel_ab && !s0_ab));",
+   "new": ":           (!rs_sel_ab));"
+  },
+  {
+   "name": "a slot-1 memory op ignores the LSU's room",
+   "old": "&& (to_lsu1 ? i_lsu_free\n",
+   "new": "&& (to_lsu1 ? 1'b1\n"
+  },
+  {
+   "name": "a slot-1 memory op goes into the station",
+   "old": "wire to_rs1  = (RS_DEPTH > 0) && !to_lsu1 && !direct1;",
+   "new": "wire to_rs1  = (RS_DEPTH > 0) && !direct1;"
+  },
+  {
+   "name": "the queue takes slot 1 when full",
+   "old": "wire to_lsq1 = LSQ_WAIT && to_lsu1 && i_lsu_free;",
+   "new": "wire to_lsq1 = LSQ_WAIT && to_lsu1;"
+  },
+  {
+   "name": "slot 1's station room ignores slot 0's push",
+   "old": "wire rs_ok1  = (o_issue && to_rs) ? rs_room2 : rs_room;",
+   "new": "wire rs_ok1  = rs_room;"
+  },
+  {
+   "name": "a pair without slot 1",
+   "old": "&& i_uop1_valid && o_issue &&",
+   "new": "&& o_issue &&"
+  },
+  {
+   "name": "slot 1 without slot 0",
+   "old": "&& i_uop1_valid && o_issue &&",
+   "new": "&& i_uop1_valid &&"
+  },
+  {
+   "name": "a pair without ROB room for two",
+   "old": "&& o_issue && i_alloc_ready2 &&",
+   "new": "&& o_issue &&"
+  },
+  {
+   "name": "a pair in a SERIALIZE build",
+   "old": "&& !SERIALIZE && !i_pb_active\n",
+   "new": "&& !i_pb_active\n"
+  },
+  {
+   "name": "a pair in a Program Buffer run",
+   "old": "&& !SERIALIZE && !i_pb_active\n",
+   "new": "&& !SERIALIZE\n"
+  },
+  {
+   "name": "slot 0 alone not checked",
+   "old": "&& !alone(i_uop) && !alone(i_uop1) &&",
+   "new": "&& !alone(i_uop1) &&"
+  },
+  {
+   "name": "slot 1 alone not checked",
+   "old": "&& !alone(i_uop) && !alone(i_uop1) &&",
+   "new": "&& !alone(i_uop) &&"
+  },
+  {
+   "name": "two memory ops pair",
+   "old": " && !(to_lsu && to_lsu1) &&",
+   "new": " &&"
+  },
+  {
+   "name": "two FP-touching uops pair",
+   "old": " && !(fp_s0 && touches_fp(i_uop1));",
+   "new": ";"
+  },
+  {
+   "name": "a CSR op pairs",
+   "old": "(u.fu == QV_FU_CSR) || ",
+   "new": ""
+  },
+  {
+   "name": "a system op pairs",
+   "old": "(u.fu == QV_FU_SYS) || ",
+   "new": ""
+  },
+  {
+   "name": "a divide pairs",
+   "old": "(u.fu == QV_FU_DIV) || ",
+   "new": ""
+  },
+  {
+   "name": "an atomic pairs",
+   "old": " || u.is_atomic",
+   "new": ""
+  },
+  {
+   "name": "a serializing op pairs",
+   "old": " || u.serialize\n",
+   "new": "\n"
+  },
+  {
+   "name": "a faulting uop pairs",
+   "old": "|| u.xcpt ",
+   "new": ""
+  },
+  {
+   "name": "a trig_debug uop pairs",
+   "old": "|| u.trig_debug ",
+   "new": ""
+  },
+  {
+   "name": "a trig_exc uop pairs",
+   "old": "|| u.trig_exc ",
+   "new": ""
+  },
+  {
+   "name": "a FENCE pairs",
+   "old": " || (u.raw[6:0] == 7'b0001111)",
+   "new": ""
+  },
+  {
+   "name": "an FP divide/square root pairs",
+   "old": "            || ((u.fu == QV_FU_FPU) && ((qv_fp_op_e'(u.fp_op) == QV_FP_DIV) || (qv_fp_op_e'(u.fp_op) == QV_FP_SQRT)));",
+   "new": "            ;"
+  },
+  {
+   "name": "slot 1's claim takes slot 0's tag",
+   "old": "                prod_tag_q[i_uop1.rd]  <= i_alloc_tag1;\n                prod_late_q",
+   "new": "                prod_tag_q[i_uop1.rd]  <= i_alloc_tag;\n                prod_late_q"
+  },
+  {
+   "name": "slot 1 never claims",
+   "old": "if (o_issue2 && i_uop1.rd_wen && i_uop1.rd != 5'd0 && !i_uop1.rd_fp) begin",
+   "new": "if (1'b0) begin"
+  },
+  {
+   "name": "slot 1's claim keeps a stale late bit",
+   "old": "                prod_late_q[i_uop1.rd] <= 1'b0;                 // slot 1 is never a CSR op\n",
+   "new": ""
+  },
+  {
+   "name": "slot 1's request carries slot 0's tag",
+   "old": "req1.tag     = i_alloc_tag1;",
+   "new": "req1.tag     = i_alloc_tag;"
+  },
+  {
+   "name": "slot 1's ALU request not sent",
+   "old": "o_alu_req = req1; o_alu_req.valid = 1'b1;",
+   "new": "o_alu_req.valid = o_alu_req.valid;"
+  },
+  {
+   "name": "slot 1's memory op not sent",
+   "old": "o_lsu_req = req1; o_lsu_req.valid = 1'b1;",
+   "new": "o_lsu_req.valid = o_lsu_req.valid;"
+  },
+  {
+   "name": "slot 1's queue operand a is slot 0's",
+   "old": "            o_lsu_opa.rdy = a1_ready;  o_lsu_opa.late = q1_late;  o_lsu_opa.tag = q1_tag;  o_lsu_opa.value = opa1;\n",
+   "new": ""
+  },
+  {
+   "name": "slot 1's station operand a readiness is slot 0's",
+   "old": "pe1.a.rdy     = a1_ready;",
+   "new": "pe1.a.rdy     = a_ready;"
+  },
+  {
+   "name": "slot 1 never into the station",
+   "old": ".i_push2(o_issue2 && to_rs1),",
+   "new": ".i_push2(1'b0),"
+  },
+  {
+   "name": "slot 1's ROB entry has slot 0's pc",
+   "old": "assign o_alloc2_pc      = i_uop1.pc;",
+   "new": "assign o_alloc2_pc      = i_uop.pc;"
+  },
+  {
+   "name": "slot 1's ROB entry has slot 0's raw",
+   "old": "assign o_alloc2_raw     = i_uop1.raw;",
+   "new": "assign o_alloc2_raw     = i_uop.raw;"
+  },
+  {
+   "name": "slot 1's ROB entry has slot 0's rd",
+   "old": "assign o_alloc2_rd      = i_uop1.rd;",
+   "new": "assign o_alloc2_rd      = i_uop.rd;"
+  },
+  {
+   "name": "slot 1's next pc from slot 0's",
+   "old": "i_uop1.pc + (i_uop1.rvc ? 64'd2 : 64'd4);",
+   "new": "i_uop.pc + (i_uop1.rvc ? 64'd2 : 64'd4);"
+  },
+  {
+   "name": "slot 1's RVFI rs1 is slot 0's",
+   "old": "o_alloc2_ctrl.rvfi_rs1   = i_uop1.rs1_fp ? 5'b0 : i_uop1.rs1;",
+   "new": "o_alloc2_ctrl.rvfi_rs1   = i_uop1.rs1_fp ? 5'b0 : i_uop.rs1;"
+  }
+ ]
+}
