@@ -642,3 +642,42 @@ frontend in the last column):
 
 Then the D$ write path was the biggest lever at one-wide (a store's drain held the D$ for 5 cycles, a load for 2:
 memcpy's loop was exactly those 7 cycles), and store-heavy code gained from two-wide only with it.
+
+### Two-wide with its pair rules (O4.0)
+
+`ilp.py --set o4` runs the two-wide configurations with the pair rules of O4 as knobs (all off by default, so the O1.0
+tables above are unchanged): at most one memory op in a dispatch pair (`mem1`), at most one uop touching FP state
+(`fp1`), CSR, SYS, FENCE, divide, FP divide/square root, atomic and trapping uops dispatched alone (`alone`), branches and
+multiplies on port 0 only (`p0`), no trap, CSR, SYS or FENCE in the second commit slot (`slot2`), at most one FP-state
+write per commit pair (`fpw1`), and two commits with one dispatch (`dispatch1`). The fit is on traces with
+`QV_PIPE_RS_DEPTH=0`, because it needs the units' own latencies; its "OOO, RS 4" reproduces what the station measured.
+
+Change in cycles against the core before the station, SoC configuration (S mode in brackets):
+
+| kernel | two commits, one dispatch | 2-wide in order, ROB 16 | 2-wide OOO, no rules, ROB 16, RS 8 | every rule, ROB 16, RS 8 | every rule, ROB 8, RS 4 | the same, ideal frontend |
+|---|---|---|---|---|---|---|
+| memcpy | -0.6 % (-1.0 %) | -1.0 % (-1.2 %) | -1.0 % (-1.2 %) | -1.2 % (-1.2 %) | -1.2 % (-1.2 %) | -1.2 % (-1.5 %) |
+| crc32 | -1.3 % (-1.3 %) | -30.2 % (-20.6 %) | -30.2 % (-20.8 %) | -30.2 % (-20.8 %) | -30.2 % (-20.7 %) | -31.5 % (-30.7 %) |
+| qsort | -3.7 % (-6.5 %) | -14.8 % (-13.3 %) | -14.8 % (-14.0 %) | -14.5 % (-13.4 %) | -14.5 % (-13.3 %) | -16.0 % (-14.2 %) |
+| matmul | -3.4 % (-11.1 %) | -15.0 % (-13.2 %) | -18.6 % (-26.3 %) | -18.6 % (-26.3 %) | -18.5 % (-26.3 %) | -30.7 % (-29.1 %) |
+| sieve | -0.2 % (-0.5 %) | -1.0 % (-44.7 %) | -1.1 % (-44.7 %) | -1.1 % (-44.7 %) | -1.1 % (-44.7 %) | -46.5 % (-46.1 %) |
+| listchase | -0.9 % (0.0 %) | -17.2 % (-0.1 %) | -17.2 % (-0.1 %) | -17.2 % (-0.1 %) | -17.2 % (-0.1 %) | -17.2 % (-0.1 %) |
+| mixedint | -1.3 % (-2.4 %) | -2.5 % (-3.9 %) | -2.5 % (-3.9 %) | -2.5 % (-3.8 %) | -2.5 % (-3.7 %) | -6.4 % (-7.3 %) |
+| trap | -2.0 % (-1.9 %) | -7.8 % (-5.6 %) | -5.8 % (-3.8 %) | -1.9 % (0.0 %) | -1.9 % (0.0 %) | -2.0 % (-1.9 %) |
+| fmatmul | -2.3 % (-10.5 %) | -8.4 % (-11.6 %) | -9.3 % (-18.8 %) | -9.3 % (-18.8 %) | -8.7 % (-16.5 %) | -14.3 % (-18.1 %) |
+| fpmix | -5.2 % (-5.7 %) | -0.8 % (-0.8 %) | -10.8 % (-11.4 %) | -10.7 % (-11.4 %) | -5.6 % (-6.0 %) | -5.8 % (-6.1 %) |
+| geomean | -2.1 % (-4.2 %) | -10.4 % (-12.6 %) | -11.6 % (-15.7 %) | -11.2 % (-15.3 %) | -10.6 % (-14.5 %) | -18.5 % (-16.9 %) |
+
+("two commits, one dispatch": ROB 8, RS 4, with the commit rules `slot2` and `fpw1`.)
+
+What it says:
+- Each rule alone costs nothing on the geometric mean except `slot2` (0.4 points in both modes): the trap
+  kernel's `ecall` and `mret` would otherwise retire beside the instruction before them. The other five together cost
+  under 0.1.
+- ROB 16 and RS 8 buy 0.6 points (0.8 in S mode), nearly all on fpmix, whose divides overlap more work with more room.
+- Two commits with one dispatch buy 2.1 % (4.2 %), 1.2 (1.6) points more than the station alone ("OOO, RS 4"),
+  mostly on qsort, matmul and fmatmul.
+- The measured frontend is the largest gap: with an ideal one the same core gains 18.5 % (16.9 %) instead of 10.6 %
+  (14.5 %), almost all on sieve's M build (its loop straddles two dwords), matmul and crc32. The model keeps the
+  measured frontend gaps, which at one-wide include the IQ's back-pressure, so it cannot say how much of that the real
+  frontend already has at two-wide: that is measured on the two-wide core (O4f).

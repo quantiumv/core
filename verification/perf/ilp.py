@@ -21,6 +21,12 @@ The model replays the retired stream through a dataflow machine with the core's 
 Operands are ready in the producer's writeback cycle for the units with a bypass (ALU/BRU, FPU, LSU), a cycle later for
 the divider, and a cycle after the commit for a CSR op (its value is made at commit).
 
+The pair rules of O4 are knobs (all off by default, so the O1.0 configurations are unchanged): mem1, at most one memory
+op in a dispatch pair; fp1, at most one uop touching FP state; alone, a CSR, SYS, FENCE, divide, FP divide/square root,
+atomic or trapping uop dispatches alone; p0, branches and multiplies use port 0 only; slot2, the second commit is never
+a trap, CSR, SYS or FENCE; fpw1, a commit pair writes FP state at most once; dispatch1, two commits with one dispatch.
+--set o4 runs the two-wide configurations with them.
+
 Everything the structure does not explain is kept as a per-instruction residual, measured on the core as it is: the
 traced run is replayed in its own configuration ("fit"), each event's residual is its traced cycle minus the latest of
 its modelled constraints, and other configurations add the same residual to their own constraints. That keeps cache
@@ -134,7 +140,7 @@ def decode(raw):
 
 class Ins:
     __slots__ = ('pc', 'raw', 'push', 'pop', 'disp', 'acc', 'go', 'cmpl', 'commit', 'early', 'ared', 'trap', 'redir',
-                 'addr', 'cls', 'dst', 'srcs', 'mem', 'posted', 'prod', 'dword', 'rvc')
+                 'addr', 'cls', 'dst', 'srcs', 'mem', 'posted', 'prod', 'dword', 'rvc', 'fpw', 'fp', 'alone', 'mul')
 
 
 def read_trace(path):
@@ -156,6 +162,10 @@ def read_trace(path):
             i.srcs = [s for s in i.srcs if s != ('x', 0)]
             i.posted = i.mem == 'st' and i.go and i.cmpl == i.go and not i.trap
             i.dword = i.pc >> 3
+            i.fpw = (i.dst is not None and i.dst[0] == 'f') or i.cls in ('fpu', 'fds')    # writes FP state (fflags too)
+            i.fp = i.fpw or any(s[0] == 'f' for s in i.srcs)
+            i.alone = i.cls in ('csr', 'sys', 'fence', 'div', 'fds') or i.mem == 'amo' or bool(i.trap)
+            i.mul = not i.rvc and (i.raw & 0x7F) in (0x33, 0x3B) and (i.raw >> 25) == 1 and i.cls == 'alu'
             out.append(i)
     last = {}
     for k, i in enumerate(out):
@@ -169,7 +179,8 @@ def read_trace(path):
 # the machine
 
 BASE = dict(w=1, rs=0, rob=8, iq=8, lsq=4, sb=4, handoff=True, early=True, lsu_bypass=True, bypass=True,
-            alu_ports=1, fe='res', fe_rate=1, db=2)
+            alu_ports=1, fe='res', fe_rate=1, db=2,
+            mem1=False, fp1=False, alone=False, p0=False, slot2=False, fpw1=False, dispatch1=False)
 
 
 class DPort:
@@ -271,7 +282,7 @@ def sim(tr, p, res=None, fit=False, t0=None):
         for k in ('push', 'pop', 'disp', 'acc', 'go', 'com', 'lat', 'bus'):
             res[k] = [0] * n
     ports = {}                      # (port, cycle) -> uses
-    cap = {'alu': p['alu_ports'], 'bru': 1, 'fpu': 1}
+    cap = {'alu': p['alu_ports'], 'bru': 1, 'fpu': 1, 'p0': 1}     # p0: port 0's own (branches, multiplies)
     rs_occ = []                     # (disp, issue) of uops that waited in the RS
     last_div = None; last_fds = None
     mem_idx = []                    # indices of memory ops, in order
@@ -295,6 +306,7 @@ def sim(tr, p, res=None, fit=False, t0=None):
         return cmpl[k]
 
     def port_of(q):
+        if p['p0'] and (q.cls == 'bru' or q.mul): return 'p0'
         if q.cls in ('bru',): return 'bru'
         if q.cls in ('fpu',): return 'fpu'
         if q.cls in ('div', 'fds', 'lsu'): return None
@@ -304,7 +316,7 @@ def sim(tr, p, res=None, fit=False, t0=None):
         """the first cycle from t at which port pt has room"""
         if pt is None:
             return t
-        while ports.get((pt, t), 0) >= cap[pt] or (pt in ('alu', 'bru') and ports.get(('int', t), 0) >= p['alu_ports']):
+        while ports.get((pt, t), 0) >= cap[pt] or (pt in ('alu', 'bru', 'p0') and ports.get(('int', t), 0) >= p['alu_ports']):
             t += 1
         return t
 
@@ -313,7 +325,7 @@ def sim(tr, p, res=None, fit=False, t0=None):
             return t
         t = free_port(pt, t)
         ports[(pt, t)] = ports.get((pt, t), 0) + 1
-        if pt in ('alu', 'bru'):
+        if pt in ('alu', 'bru', 'p0'):
             ports[('int', t)] = ports.get(('int', t), 0) + 1
         return t
 
@@ -361,6 +373,12 @@ def sim(tr, p, res=None, fit=False, t0=None):
         c = pop[k] + 1
         if k >= 1: c = max(c, disp[k - 1] + (1 if W == 1 else 0))
         if k >= 2 and W == 2: c = max(c, disp[k - 2] + 1)
+        if p['dispatch1'] and k >= 1: c = max(c, disp[k - 1] + 1)
+        if W == 2 and k >= 1 and disp[k - 1] >= c and not fit:
+            pq = tr[k - 1]                                    # would pair with the uop before it: the pair rules
+            if ((p['mem1'] and q.cls == 'lsu' and pq.cls == 'lsu') or (p['fp1'] and q.fp and pq.fp)
+                    or (p['alone'] and (q.alone or pq.alone))):
+                c = max(c, disp[k - 1] + 1)
         if k >= p['rob']: c = max(c, com[k - p['rob']] + 1)
         if q.cls == 'lsu':
             mi = len(mem_idx)
@@ -445,6 +463,8 @@ def sim(tr, p, res=None, fit=False, t0=None):
                 pq = tr[k - 1]
                 plain = not (pq.trap or pq.redir or pq.cls in ('csr', 'sys', 'fence'))
                 pair = plain and not (pq.posted and q.posted) and not (pq.cls == 'bru' and q.cls == 'bru')
+                if p['slot2'] and (q.trap or q.cls in ('csr', 'sys', 'fence')): pair = False
+                if p['fpw1'] and q.fpw and pq.fpw: pair = False
                 if pair and (k < 2 or com[k - 2] < com[k - 1]):
                     c = max(cmpl[k] + 1, com[k - 1])
         if q.posted and p['sb'] > 0:
@@ -494,6 +514,28 @@ CONFIGS = [  # name, knobs
     ('w2 ooo db1 fe-ideal', dict(w=2, alu_ports=2, rob=16, rs=8, db=1, fe='ideal')),
 ]
 
+RULES = dict(mem1=True, fp1=True, alone=True, p0=True, slot2=True, fpw1=True)
+W2 = dict(w=2, alu_ports=2)
+
+CONFIGS_O4 = [  # name, knobs: two-wide with the pair rules (O4.0)
+    ('ooo rs4', dict(rs=4)),
+    ('commit2 rob8 rs4', dict(w=2, rs=4, dispatch1=True, slot2=True, fpw1=True)),
+    ('w2 io rob16', dict(W2, rob=16)),
+    ('w2 ooo free rob16 rs8', dict(W2, rob=16, rs=8)),
+    ('mem1', dict(W2, rob=16, rs=8, mem1=True)),
+    ('fp1', dict(W2, rob=16, rs=8, fp1=True)),
+    ('alone', dict(W2, rob=16, rs=8, alone=True)),
+    ('p0', dict(W2, rob=16, rs=8, p0=True)),
+    ('slot2', dict(W2, rob=16, rs=8, slot2=True)),
+    ('fpw1', dict(W2, rob=16, rs=8, fpw1=True)),
+    ('rules rob16 rs8', dict(W2, **RULES, rob=16, rs=8)),
+    ('rules rob16 rs4', dict(W2, **RULES, rob=16, rs=4)),
+    ('rules rob8 rs4', dict(W2, **RULES, rob=8, rs=4)),
+    ('rules rob8 rs4 ideal', dict(W2, **RULES, rob=8, rs=4, fe='ideal')),
+    ('rules rob16 rs8 ideal', dict(W2, **RULES, rob=16, rs=8, fe='ideal')),
+    ('rules rob16 rs8 ideal db1', dict(W2, **RULES, rob=16, rs=8, fe='ideal', db=1)),
+]
+
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -504,7 +546,9 @@ def main():
     ap.add_argument('--mode', default='m')
     ap.add_argument('--kernels', default=' '.join(KERNELS))
     ap.add_argument('--db', type=int, default=2, help='cycles from a drain beat to its response (2: the D$ passes a store through)')
+    ap.add_argument('--set', default='o1', choices=('o1', 'o4'), help='o1: the O1.0 configurations; o4: two-wide with the pair rules')
     a = ap.parse_args()
+    configs = CONFIGS if a.set == 'o1' else CONFIGS_O4
     sfx = '_s' if a.mode == 's' else ''
     base = load_csv(a.base)
     BASE['db'] = a.db
@@ -516,7 +560,7 @@ def main():
                 vals[lab] = load_csv(f)
     hdr = ['kernel', 'cycles', 'fit', 'neg']
     hdr += ['%s (meas)' % lab for lab, _ in VALID if lab in vals]
-    hdr += [c for c, _ in CONFIGS]
+    hdr += [c for c, _ in configs]
     print('| ' + ' | '.join(hdr) + ' |')
     print('|' + '---|' * len(hdr))
     logs = {}
@@ -539,7 +583,7 @@ def main():
             pc, _ = sim(tr, p, res, t0=t0)
             m = int(vals[lab][(kern, a.config)]['cycles']) if (kern, a.config) in vals[lab] else 0
             row.append('%+.1f%% (%+.1f%%)' % (100.0 * (pc - fitc) / fitc, 100.0 * (m - meas) / meas if meas else 0))
-        for ci, (_, kn) in enumerate(CONFIGS):
+        for ci, (_, kn) in enumerate(configs):
             p = dict(BASE); p.update(kn)
             pc, _ = sim(tr, p, res, t0=t0)
             row.append('%+.1f%%' % (100.0 * (pc - fitc) / fitc))
