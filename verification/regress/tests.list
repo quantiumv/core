@@ -147,9 +147,9 @@ pipe_decode_tb|design/pipe/qv_decode_tb.sv||design|pipe|pass|
 pipe_decode_noser_tb|design/pipe/qv_decode_tb.sv||design|pipe|pass||-Pqv_decode_tb.CSR_NOSER=1
 pipe_decode_fp_tb|design/pipe/qv_decode_tb.sv||design|pipe|pass||-Pqv_decode_tb.FPU_EN=1
 pipe_decode_zicntr_tb|design/pipe/qv_decode_tb.sv||design|pipe|pass||-Pqv_decode_tb.ZICNTR_EN=1
-pipe_decode2_tb_iq4|design/pipe/qv_decode2_tb.sv||design|pipe|pass||
-pipe_decode2_tb_iq8|design/pipe/qv_decode2_tb.sv||design|pipe|pass||-Pqv_decode2_tb.IQ_DEPTH=8 -Pqv_decode2_tb.SEED=2
-pipe_decode2_tb_iq2|design/pipe/qv_decode2_tb.sv||design|pipe|pass||-Pqv_decode2_tb.IQ_DEPTH=2 -Pqv_decode2_tb.SEED=3
+pipe_decode2_tb_iq4|design/pipe/qv_decode2_tb.sv||design|pipe|pass|900|
+pipe_decode2_tb_iq8|design/pipe/qv_decode2_tb.sv||design|pipe|pass|900|-Pqv_decode2_tb.IQ_DEPTH=8 -Pqv_decode2_tb.SEED=2
+pipe_decode2_tb_iq2|design/pipe/qv_decode2_tb.sv||design|pipe|pass|900|-Pqv_decode2_tb.IQ_DEPTH=2 -Pqv_decode2_tb.SEED=3
 pipe_pmp_tb|design/pipe/qv_pmp_tb.sv||design|pipe|pass||
 pipe_pte_tb|design/pipe/qv_pte_tb.sv||design|pipe|pass|
 pipe_tlb_tb|design/pipe/qv_tlb_tb.sv||design|pipe|pass|
