@@ -59,6 +59,11 @@ module lockstep_side #(
     // core writes the bus after a store retires; ref_core before). The halt belongs to the harness, not to the
     // compared behavior: the debug script is silenced, so it logs no event and writes nothing from here on.
     input  logic        stop_i,
+    // Mode B (lockstep_tb.sv): this side, the reference, sees interrupt levels and the debug script's halt only where
+    // the other side ended a group of retirements (bnd_i: the retirement in this cycle ends one), as the other side
+    // samples them only there.
+    input  logic        bnd_mode_i,
+    input  logic        bnd_i,
 
     // RVFI passthrough (core/ref_core always built with -DRISCV_FORMAL
     // by this harness -- see run_lockstep.sh)
@@ -154,7 +159,10 @@ module lockstep_side #(
     logic [6:0]  dmi_addr;
     logic [31:0] dmi_wdata, dmi_rdata;
     logic        dmi_we;
-    assign core_halt_req = dm_halt_req | script_halt_req | stop_i;
+    // (mode B) whether this side's last retirement ended a group: a sample point the other side has too
+    logic        last_bnd_q;
+    always_ff @(posedge clk) if (rst) last_bnd_q <= 1'b1; else if (rvfi_valid) last_bnd_q <= bnd_i;
+    assign core_halt_req = dm_halt_req | (script_halt_req && (!bnd_mode_i || last_bnd_q)) | stop_i;
     logic        rvfi_frd_wvalid;
     logic [4:0]  rvfi_frd_addr;
     logic [63:0] rvfi_frd_wdata;
@@ -273,6 +281,7 @@ module lockstep_side #(
     lockstep_irq irq0 (
         .clk(clk), .rst(rst),
         .irq_mode_i(irq_mode_i), .seed_i(irq_seed_i), .density_i(irq_density_i), .late_i(irq_late_i),
+        .bnd_mode_i(bnd_mode_i), .bnd_i(bnd_i),
         .rvfi_valid(rvfi_valid),
         .magic_clr_we(ret_clr_we), .magic_clr_wdata(ret_clr_wdata),
         .o_mtip(i_mtip), .o_meip(i_meip), .o_seip(i_seip)
@@ -309,7 +318,7 @@ module lockstep_side #(
         .clk(clk), .rst(rst),
         .mode_i(dbg_mode_i), .seed_i(dbg_seed_i), .density_i(dbg_density_i), .feat_i(dbg_feat_i),
         .late_i(dbg_late_i), .max_retire_i(dbg_max_retire_i),
-        .rvfi_valid(rvfi_valid), .debug_mode_i(dbg_halted),
+        .rvfi_valid(rvfi_valid), .debug_mode_i(dbg_halted), .bnd_mode_i(bnd_mode_i), .last_bnd_i(last_bnd_q),
         .o_reg_addr(dmi_addr), .o_reg_wdata(dmi_wdata), .o_reg_we(dmi_we), .i_reg_rdata(dmi_rdata),
         .o_halt_req(script_halt_req),
         .o_ev_valid(ev_valid_raw), .o_ev_kind(o_ev_kind), .o_ev_order(o_ev_order),

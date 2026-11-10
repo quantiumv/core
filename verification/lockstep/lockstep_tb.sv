@@ -20,7 +20,7 @@
  * Everything else is genuine runtime data and comes in as a plusarg:
  * +HEXFILE=<path> +TOHOST_ADDR=<hex> +MAX_RETIRE=<n> +TIMEOUT=<cycles>
  * +IRQ_MODE=<0|1|2> +IRQ_SEED=<n> +IRQ_LATE=<0|1> +DLY_SEED_A=<n> +DLY_SEED_B=<n>
- * +DBG_MODE=<0|1> +DBG_SEED=<n> +DBG_DENSITY=<n> +DBG_FEAT=<mask> +DBG_LATE=<0|1>
+ * +DBG_MODE=<0|1> +DBG_SEED=<n> +DBG_DENSITY=<n> +DBG_FEAT=<mask> +DBG_LATE=<0|1> +MODE_B (see "mode B")
  * (scripted debugger, see lockstep_dbg.sv; DBG_MODE 0 = off)
  * +CORRUPT_AT=<order> +CORRUPT_FIELD=<code> +DUMP_FROM=<cycles> (0 = no
  * VCD).
@@ -108,6 +108,27 @@ module lockstep_tb #(
     logic a_stopped, b_stopped;         // see "exact stop" below
     logic b_stop_req;                   // side B has pushed its stop_at records: halt it (see below)
 
+    // ---------------- mode B ----------------
+    // Side B may retire more than one instruction a cycle (QV_PIPE_COMMIT_W 2) and then samples interrupts and halts
+    // only after each group, where side A, one at a time, samples after every retirement. So side B publishes, per
+    // retirement, whether it ended a group (bnd_ring, by retirement order), side A may not pass a retirement before
+    // side B has made it, and side A sees the interrupt levels and the script's halt only at those boundaries
+    // (lockstep_irq.sv, lockstep_side.sv, lockstep_dbg.sv). The stop is side B's alone, at the end of a group. On by
+    // itself when side B retires two a cycle; +MODE_B forces it on (with one a cycle every retirement is a boundary,
+    // and the verdicts must be mode A's).
+`ifndef QV_PIPE_COMMIT_W
+`define QV_PIPE_COMMIT_W 1
+`endif
+    logic   mode_b;
+    initial mode_b = (B_PIPE && `QV_PIPE_COMMIT_W > 1) || $test$plusargs("MODE_B");
+    logic   bnd_ring [0:255];
+    longint b_pub;                      // side B's retirements so far, each with its bit in bnd_ring
+    initial begin
+        b_pub = 0;
+        for (int i = 0; i < 256; i++) bnd_ring[i] = 1'b1;
+    end
+    logic   a_bnd, a_wait_b;
+
     always #5 if (!pace_a_hold) clk_a = ~clk_a;
     always #5 if (!pace_b_hold) clk_b = ~clk_b;
     always #5 clk_mon = ~clk_mon;
@@ -149,7 +170,7 @@ module lockstep_tb #(
         .irq_mode_i(irq_mode[31:0]), .irq_seed_i(irq_seed[31:0]), .irq_density_i(irq_density[31:0]), .irq_late_i(irq_late != 0),
         .dbg_mode_i(dbg_mode[31:0]), .dbg_seed_i(dbg_seed[31:0]), .dbg_density_i(dbg_density[31:0]),
         .dbg_feat_i(dbg_feat[31:0]), .dbg_late_i(dbg_late != 0), .dbg_max_retire_i(max_retire[63:0]),
-        .stop_i(1'b0),
+        .stop_i(1'b0), .bnd_mode_i(mode_b), .bnd_i(a_bnd),
         .rvfi_valid(a_rvfi_valid), .rvfi_order(a_rvfi_order), .rvfi_insn(a_rvfi_insn),
         .rvfi_trap(a_rvfi_trap), .rvfi_halt(a_rvfi_halt), .rvfi_intr(a_rvfi_intr),
         .rvfi_mode(a_rvfi_mode), .rvfi_ixl(a_rvfi_ixl),
@@ -225,7 +246,7 @@ module lockstep_tb #(
         .irq_mode_i(irq_mode[31:0]), .irq_seed_i(irq_seed[31:0]), .irq_density_i(irq_density[31:0]), .irq_late_i(irq_late != 0),
         .dbg_mode_i(dbg_mode[31:0]), .dbg_seed_i(dbg_seed[31:0]), .dbg_density_i(dbg_density[31:0]),
         .dbg_feat_i(dbg_feat[31:0]), .dbg_late_i(dbg_late != 0), .dbg_max_retire_i(max_retire[63:0]),
-        .stop_i(b_stop_req),
+        .stop_i(b_stop_req), .bnd_mode_i(1'b0), .bnd_i(1'b1),
         .rvfi_valid(b_rvfi_valid), .rvfi_order(b_rvfi_order), .rvfi_insn(b_rvfi_insn),
         .rvfi_trap(b_rvfi_trap), .rvfi_halt(b_rvfi_halt), .rvfi_intr(b_rvfi_intr),
         .rvfi_mode(b_rvfi_mode), .rvfi_ixl(b_rvfi_ixl),
@@ -522,13 +543,26 @@ module lockstep_tb #(
     endfunction
 
     always @(posedge clk_a)
-        if (!rst && tohost_store(a_rvfi_valid, a_rvfi_trap, a_rvfi_mem_wmask, a_rvfi_mem_addr, a_rvfi_mem_wdata)
+        if (!rst && !mode_b && tohost_store(a_rvfi_valid, a_rvfi_trap, a_rvfi_mem_wmask, a_rvfi_mem_addr, a_rvfi_mem_wdata)
                  && (stop_at == 0 || longint'(a_rvfi_order) + 1 < stop_at))
             stop_at = longint'(a_rvfi_order) + 1;
     always @(posedge clk_b)
         if (!rst && tohost_store(b_rvfi_valid, b_rvfi_trap, b_rvfi_mem_wmask, b_rvfi_mem_addr, b_rvfi_mem_wdata)
                  && (stop_at == 0 || longint'(b_rvfi_order) + 1 < stop_at))
             stop_at = longint'(b_rvfi_order) + 1;
+
+    // mode B: side B's boundaries (one channel: every retirement ends a group), and side A's wait for them
+    always @(posedge clk_b)
+        if (!rst && b_rvfi_valid) begin
+            if (mode_b && longint'(b_rvfi_order) - longint'(a_rec_total) >= 255) begin
+                $display("LOCKSTEP_RESULT: FAIL (mode B: side B is too far ahead of side A for its boundary ring)");
+                $finish;
+            end
+            bnd_ring[b_rvfi_order[7:0]] = 1'b1;
+            b_pub = longint'(b_rvfi_order) + 1;
+        end
+    assign a_bnd    = mode_b ? bnd_ring[a_rvfi_order[7:0]] : 1'b1;
+    assign a_wait_b = mode_b && a_rvfi_valid && (longint'(a_rvfi_order) >= b_pub);
 
     // Side B being the pipelined core, its last stores may still be in the store buffer when it has pushed stop_at
     // records (it writes the bus after a store retires). It is halted at that boundary (b_stop_req, through its
@@ -574,7 +608,7 @@ module lockstep_tb #(
             trap_cause_cnt[a_cause[3:0]] = trap_cause_cnt[a_cause[3:0]] + 1;
 
     // ---------------- pacing: hold a side's clock once it's too far ahead or done ----------------
-    assign pace_a_hold = (a_rec_count >= `QV_LOCKSTEP_AHEAD_MAX) || (a_ev_count >= `QV_LOCKSTEP_EV_AHEAD_MAX) || a_stopped;
+    assign pace_a_hold = (a_rec_count >= `QV_LOCKSTEP_AHEAD_MAX) || (a_ev_count >= `QV_LOCKSTEP_EV_AHEAD_MAX) || a_stopped || a_wait_b;
     assign pace_b_hold = (b_rec_count >= `QV_LOCKSTEP_AHEAD_MAX) || (b_ev_count >= `QV_LOCKSTEP_EV_AHEAD_MAX) || b_stopped;
 
     // ---------------- image load, run control, final report ----------------

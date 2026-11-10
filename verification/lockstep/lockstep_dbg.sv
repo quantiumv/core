@@ -79,6 +79,11 @@ module lockstep_dbg (
 
     input  logic        rvfi_valid,
     input  logic        debug_mode_i,  // core.o_debug_mode
+    // mode B (lockstep_side.sv): this side halts only where the other side ended a group of retirements, so the
+    // halt is raised only after a retirement that ended one (last_bnd_i); with late_i that is a sample point the
+    // other side misses as well, and both halt after the next group
+    input  logic        bnd_mode_i,
+    input  logic        last_bnd_i,
 
     // the DM's plain register interface
     output logic [6:0]  o_reg_addr,
@@ -655,7 +660,7 @@ module lockstep_dbg (
                 while (1) begin
                     tick;
                     if (debug_mode_i) break;
-                    if (!raised && feat_i[0] && retired_q >= target
+                    if (!raised && feat_i[0] && retired_q >= target && (!bnd_mode_i || last_bnd_i)
                             && (max_retire_i == 64'b0 || retired_q + 64'(PHASE_MARGIN) <= max_retire_i)) begin
                         if (late_i) tick;
                         o_halt_req = 1'b1;

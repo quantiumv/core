@@ -76,6 +76,7 @@ IRQ_MODE=0
 IRQ_SEED=1
 IRQ_DENSITY=4
 IRQ_LATE=0
+MODE_B=0
 # 0 (off) matches every run before the scripted debugger existed. DBG_FEAT is the lockstep_dbg.sv feature mask:
 # 1 halt, 2 step, 4 access (Access Register), 8 ebreak, 16 trigger, 32 progbuf, 64 (set per program: it is
 # qvgen --dbg output), 128 hold the halt request across a resume.
@@ -126,6 +127,8 @@ Usage: run_lockstep.sh --mode selfproof|mutant|corrupt [options]
   --irq-late            make each injected level visible one cycle later
                         (separates a core that samples a cycle late, e.g.
                         QV_MUTANT 5, from one that samples on time)
+  --mode-b              force mode B (lockstep_tb.sv: side A sees interrupts and halts only where side B
+                        ended a group of retirements); on by itself when side B retires two a cycle
   --dbg-mode N          0=off (default), 1=scripted debugger on both sides (lockstep_dbg.sv)
   --dbg-features MASK   which parts of the script run (default 191 = everything but the per-program bit 64):
                         1 halt, 2 step, 4 Access Register, 8 ebreak, 16 trigger, 32 Program Buffer,
@@ -165,6 +168,7 @@ while [ $# -gt 0 ]; do
         --irq-seed) IRQ_SEED="$2"; shift 2 ;;
         --irq-density) IRQ_DENSITY="$2"; shift 2 ;;
         --irq-late) IRQ_LATE=1; shift ;;
+        --mode-b) MODE_B=1; shift ;;
         --dbg-mode) DBG_MODE="$2"; shift 2 ;;
         --dbg-features) DBG_FEAT="$2"; shift 2 ;;
         --dbg-density) DBG_DENSITY="$2"; shift 2 ;;
@@ -235,7 +239,7 @@ RUN_DELAY_MAX=$DELAY_MAX
 SRC_HASH=$( (cat $PIPE_FILES $REF_FILES $SUPPORT_FILES $LOCKSTEP_FILES \
                design/defaults/*.sv verification/reference/*.svh verification/lockstep/*.svh \
                2>/dev/null; echo "defines: $DEFINES") | sha1sum | cut -c1-8)
-RUN_KEY="${MODE}_${DUT}_m${QV_MUTANT_B}_${MEMCFG_B}_d${RUN_DELAY_MAX}_i${IRQ_MODE}_l${IRQ_LATE}_q${IRQ_SEED}_y${IRQ_DENSITY}_g${DBG_MODE}-${DBG_FEAT}-${DBG_DENSITY}-${DBG_LATE}_s${RUN_SEED}_${SRC_HASH}"
+RUN_KEY="${MODE}_${DUT}_m${QV_MUTANT_B}_${MEMCFG_B}_d${RUN_DELAY_MAX}_i${IRQ_MODE}_l${IRQ_LATE}_q${IRQ_SEED}_y${IRQ_DENSITY}_g${DBG_MODE}-${DBG_FEAT}-${DBG_DENSITY}-${DBG_LATE}_b${MODE_B}_s${RUN_SEED}_${SRC_HASH}"
 [ "$SIM" == "iverilog" ] || RUN_KEY="${RUN_KEY}_${SIM}"
 VVP_BIN="$OUTDIR/lockstep_${MODE}_${DUT}_m${QV_MUTANT_B}_${MEMCFG_B}_d${RUN_DELAY_MAX}_${SRC_HASH}.vvp"
 BUILD_LOG="$OUTDIR/build_${MODE}_${DUT}_m${QV_MUTANT_B}.log"
@@ -492,6 +496,7 @@ run_one() {
     local args=(+HEXFILE="$hex" +TIMEOUT=$MAX_CYCLES +DLY_SEED_A=$seed_a +DLY_SEED_B=$seed_b +IRQ_MODE=$IRQ_MODE +IRQ_SEED=$IRQ_SEED +IRQ_DENSITY=$IRQ_DENSITY +IRQ_LATE=$IRQ_LATE)
     [ -n "$tohost" ] && args+=(+TOHOST_ADDR=$tohost)
     [ -n "$max_retire" ] && args+=(+MAX_RETIRE=$max_retire)
+    [ "$MODE_B" == 1 ] && args+=(+MODE_B)
     # shellcheck disable=SC2207
     args+=($(dbg_args "$tag") ${QV_LOCKSTEP_EXTRA:-})   # QV_LOCKSTEP_EXTRA: more plusargs for debugging, e.g. +DBG_TRACE
     local out

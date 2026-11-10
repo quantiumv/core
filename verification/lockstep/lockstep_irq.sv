@@ -21,6 +21,11 @@
  * there and takes it after the NEXT retirement; one that samples a cycle
  * late (QV_MUTANT==5) takes it a retirement earlier, so the retirement
  * streams differ. Without late_i both kinds take it at the same boundary.
+ *
+ * Mode B (bnd_mode_i, lockstep_tb.sv): the other side retires in groups and samples only after a group, so this side
+ * (the reference) may see a level change only where a group ended (bnd_i: this retirement ends one). The levels
+ * still step per retirement; what this side sees is latched at each boundary, and with late_i at the boundary after
+ * that (the group after the one that raised it: what a core that samples after each group sees one cycle late).
  */
 module lockstep_irq (
     input  logic clk,
@@ -31,6 +36,8 @@ module lockstep_irq (
     input  logic [31:0]  irq_mode_i,       // runtime: 0=disabled, 1=MTIP only, 2=MTIP+MEIP+SEIP
     input  logic [31:0]  seed_i,           // runtime: re-seeds the LFSR at reset
     input  logic         late_i,           // runtime: level changes visible one cycle later
+    input  logic         bnd_mode_i,       // runtime: mode B, the levels this side sees change only at boundaries
+    input  logic         bnd_i,            // (mode B) this cycle's retirement ends a group of the other side's
 
     input  logic         rvfi_valid,       // this side's own retirement pulse
     input  logic         magic_clr_we,     // this side's own retired store to MAGIC_CLR
@@ -46,6 +53,23 @@ module lockstep_irq (
     logic pending_mtip_q, pending_meip_q, pending_seip_q;
     wire  do_clear = magic_clr_we && (magic_clr_wdata != 32'b0);
 
+    // the levels after this cycle's retirement (a clear wins over a new assert)
+    logic n_mtip, n_meip, n_seip;
+    always_comb begin
+        n_mtip = pending_mtip_q;
+        n_meip = pending_meip_q;
+        n_seip = pending_seip_q;
+        if (do_clear) begin
+            n_mtip = 1'b0;
+            n_meip = 1'b0;
+            n_seip = 1'b0;
+        end else if (irq_mode_i != 32'b0 && rvfi_valid) begin
+            if (lfsr_next[7:0] < density_i[7:0])                           n_mtip = 1'b1;
+            if (irq_mode_i >= 32'd2 && lfsr_next[15:8] < density_i[7:0])  n_meip = 1'b1;
+            if (irq_mode_i >= 32'd2 && lfsr_next[23:16] < density_i[7:0]) n_seip = 1'b1;
+        end
+    end
+
     always_ff @(posedge clk) begin
         if (rst) begin
             lfsr_q         <= (seed_i == 32'b0) ? 32'hC0FF_EE11 : seed_i;
@@ -53,25 +77,10 @@ module lockstep_irq (
             pending_meip_q <= 1'b0;
             pending_seip_q <= 1'b0;
         end else begin
-            if (do_clear) begin
-                pending_mtip_q <= 1'b0;
-                pending_meip_q <= 1'b0;
-                pending_seip_q <= 1'b0;
-            end
-            if (irq_mode_i != 32'b0 && rvfi_valid) begin
-                lfsr_q <= lfsr_next;
-                if (!do_clear) begin
-                    if (lfsr_next[7:0] < density_i[7:0]) begin
-                        pending_mtip_q <= 1'b1;
-                    end
-                    if (irq_mode_i >= 32'd2 && lfsr_next[15:8] < density_i[7:0]) begin
-                        pending_meip_q <= 1'b1;
-                    end
-                    if (irq_mode_i >= 32'd2 && lfsr_next[23:16] < density_i[7:0]) begin
-                        pending_seip_q <= 1'b1;
-                    end
-                end
-            end
+            if (irq_mode_i != 32'b0 && rvfi_valid) lfsr_q <= lfsr_next;
+            pending_mtip_q <= n_mtip;
+            pending_meip_q <= n_meip;
+            pending_seip_q <= n_seip;
         end
     end
 
@@ -88,7 +97,20 @@ module lockstep_irq (
         end
     end
 
-    assign o_mtip = late_i ? late_mtip_q : pending_mtip_q;
-    assign o_meip = late_i ? late_meip_q : pending_meip_q;
-    assign o_seip = late_i ? late_seip_q : pending_seip_q;
+    // mode B: vis_* is what this side sees, prv_* the levels at the last boundary (for late_i)
+    logic vis_mtip_q, vis_meip_q, vis_seip_q, prv_mtip_q, prv_meip_q, prv_seip_q;
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            {vis_mtip_q, vis_meip_q, vis_seip_q} <= 3'b0;
+            {prv_mtip_q, prv_meip_q, prv_seip_q} <= 3'b0;
+        end else if (rvfi_valid && bnd_i) begin
+            {prv_mtip_q, prv_meip_q, prv_seip_q} <= {n_mtip, n_meip, n_seip};
+            {vis_mtip_q, vis_meip_q, vis_seip_q} <= late_i ? {prv_mtip_q, prv_meip_q, prv_seip_q}
+                                                           : {n_mtip, n_meip, n_seip};
+        end
+    end
+
+    assign o_mtip = bnd_mode_i ? vis_mtip_q : late_i ? late_mtip_q : pending_mtip_q;
+    assign o_meip = bnd_mode_i ? vis_meip_q : late_i ? late_meip_q : pending_meip_q;
+    assign o_seip = bnd_mode_i ? vis_seip_q : late_i ? late_seip_q : pending_seip_q;
 endmodule
