@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 
 /*
- * qv_commit -- retires the ROB head, one instruction per cycle, and owns
+ * qv_commit -- retires the ROB head (and, with COMMIT_W 2, the entry behind it in the same cycle when the pair rule
+ * below allows: O4), and owns
  * every architectural side effect: the regfile0 write, csr_file0's side
  * channels (CSR read/write, trap, mret, retirement count), the
  * producer-table release back to issue, the architectural PC, redirects,
@@ -85,7 +86,8 @@
  * below), since only a retirement may change either.
  */
 module qv_commit #(
-    parameter logic [63:0] RESET_PC = 64'h0
+    parameter logic [63:0] RESET_PC = 64'h0,
+    parameter int          COMMIT_W = 1          // O4: 2 retires the entry behind the head in the same cycle when it may
 ) (
     input  logic                             clk,
     input  logic                             rst,
@@ -99,6 +101,17 @@ module qv_commit #(
     input  qv_pkg::rob_ctrl_t                i_head_ctrl,
     input  qv_pkg::lsu_res_t                 i_lsu_res,     // the head's, when it's a memory op
     output logic                             o_commit_pop,
+    // O4 (COMMIT_W 2): the entry behind the head, and its LSU result (i_lsu_res1_ok: when it is a memory op, this
+    // is its result); o_commit_pop2 retires it with the head. The defaults are a core that retires one.
+    input  logic                             i_head1_valid = 1'b0,
+    /* verilator lint_off UNUSEDSIGNAL */
+    input  qv_pkg::rob_entry_t               i_head1_entry = '0,
+    input  logic [qv_pkg::QV_ROB_TAG_W-1:0]  i_head1_tag = '0,
+    input  qv_pkg::rob_ctrl_t                i_head1_ctrl = '0,
+    input  qv_pkg::lsu_res_t                 i_lsu_res1 = '0,
+    input  logic                             i_lsu_res1_ok = 1'b0,
+    /* verilator lint_on UNUSEDSIGNAL */
+    output logic                             o_commit_pop2,
 
     // LR/SC reservation, read by the LSU when an SC becomes the head
     output logic                             o_res_valid,
@@ -107,6 +120,9 @@ module qv_commit #(
     output logic                             o_regfile_we,
     output logic [4:0]                       o_regfile_sel,
     output logic [63:0]                      o_regfile_data,
+    output logic                             o_regfile2_we,     // O4: the second retirement's write (regfile0 port 2)
+    output logic [4:0]                       o_regfile2_sel,
+    output logic [63:0]                      o_regfile2_data,
 
     output logic                             o_commit_valid,
     output logic [4:0]                       o_commit_rd,
@@ -119,6 +135,12 @@ module qv_commit #(
     output logic [63:0]                      o_fprf_data,
     output logic [4:0]                       o_fp_accrue,
     output logic [qv_pkg::QV_ROB_TAG_W-1:0]  o_commit_tag,
+    // O4: the second retirement, for issue's producer tables (its rd, as o_commit_* are the first's)
+    output logic                             o_commit2_valid,
+    output logic [4:0]                       o_commit2_rd,
+    output logic                             o_commit2_rd_wen,
+    output logic                             o_commit2_rd_fp,
+    output logic [qv_pkg::QV_ROB_TAG_W-1:0]  o_commit2_tag,
 
     // csr_file0
     output logic [11:0]                      o_csr_addr,
@@ -126,6 +148,7 @@ module qv_commit #(
     output logic                             o_csr_we,
     output logic [63:0]                      o_csr_wdata,
     output logic                             o_instr_retired,
+    output logic                             o_instr_retired2,  // O4: a second retirement this cycle (minstret)
     output logic                             o_trap_taken,
     output logic [63:0]                      o_trap_cause,
     output logic [63:0]                      o_trap_val,
@@ -191,6 +214,7 @@ module qv_commit #(
     input  logic                             i_sb_ready = 1'b1,
     input  logic                             i_sb_empty = 1'b1,
     output logic                             o_sb_push,
+    output logic                             o_sb_push1,        // O4: ... and the store pushed is the second retirement's
     // Branch target buffer training, from architectural outcomes only: a retiring branch or jump with its target in
     // the encoding or in a register (not a return), outside a Program Buffer run. taken says whether it went to the
     // target; a conditional branch that fell through removes its own entry; cross: a 32-bit instruction that starts in
@@ -237,7 +261,25 @@ module qv_commit #(
     // F/D, not standard RVFI: the FP register this retirement wrote
     output logic                             o_rvfi_frd_wvalid,
     output logic [4:0]                       o_rvfi_frd_addr,
-    output logic [63:0]                      o_rvfi_frd_wdata
+    output logic [63:0]                      o_rvfi_frd_wdata,
+    // O4: RVFI channel 1, the second retirement (valid: o_commit_pop2). Never a trap, an interrupt or an FP
+    // register write beside another FP state change.
+    output logic [63:0]                      o_rvfi1_order,
+    output logic [31:0]                      o_rvfi1_insn,
+    output logic [4:0]                       o_rvfi1_rs1_addr,
+    output logic [4:0]                       o_rvfi1_rs2_addr,
+    output logic [4:0]                       o_rvfi1_rd_addr,
+    output logic [63:0]                      o_rvfi1_rd_wdata,
+    output logic [63:0]                      o_rvfi1_pc_rdata,
+    output logic [63:0]                      o_rvfi1_pc_wdata,
+    output logic [63:0]                      o_rvfi1_mem_addr,
+    output logic [7:0]                       o_rvfi1_mem_rmask,
+    output logic [7:0]                       o_rvfi1_mem_wmask,
+    output logic [63:0]                      o_rvfi1_mem_rdata,
+    output logic [63:0]                      o_rvfi1_mem_wdata,
+    output logic                             o_rvfi1_frd_wvalid,
+    output logic [4:0]                       o_rvfi1_frd_addr,
+    output logic [63:0]                      o_rvfi1_frd_wdata
 );
     import qv_pkg::*;
 
@@ -315,7 +357,10 @@ module qv_commit #(
     wire sb_drain_first = is_fence_i || (is_sys && i_head_ctrl.sys_op == QV_SYS_EBREAK) || is_fence_wr;
     wire sb_ok          = (!sb_posted || i_sb_ready) && (!sb_drain_first || i_sb_empty);
     wire commit = head_ready && (!is_fence_i || i_fetch_idle) && sb_ok && !irq && !halt_take && !head_dbg_entry;
-    assign o_sb_push = commit && sb_posted;
+    logic commit2;                                       // O4: the entry behind the head retires too (see below)
+    logic h1_posted;
+    assign o_sb_push1 = commit2 && h1_posted;
+    assign o_sb_push  = (commit && sb_posted) || o_sb_push1;
     always_ff @(posedge clk) begin
         if (rst) commit_q <= 1'b0;
         else     commit_q <= commit;
@@ -402,24 +447,75 @@ module qv_commit #(
     assign o_commit_pop = commit;
     assign o_commit_now = commit;
 
+    // The predictors train on the head, or (O4) on the second retirement when that is the branch or jump: a pair
+    // never holds two (below), and a pair's head always retires cleanly, outside a Program Buffer run.
+    wire [1:0]  hd_kind = qv_ctl_kind(i_head_entry.raw);
+    wire [1:0]  h1_kind = qv_ctl_kind(i_head1_entry.raw);
+    /* verilator lint_off UNUSEDSIGNAL */
+    rob_entry_t t_entry;                         // its pc, raw and next pc
+    /* verilator lint_on UNUSEDSIGNAL */
+    assign t_entry = (commit2 && h1_kind != 2'd0) ? i_head1_entry : i_head_entry;
+
     // ---------------- branch target buffer training ----------------
-    wire [1:0]  h_kind = qv_ctl_kind(i_head_entry.raw);
-    wire        h_rvc  = i_head_entry.raw[1:0] != 2'b11;
+    wire [1:0]  h_kind = qv_ctl_kind(t_entry.raw);
+    wire        h_rvc  = t_entry.raw[1:0] != 2'b11;
     assign o_btb_upd_valid = commit && !faulted && !i_pb_active && (h_kind == 2'd1 || h_kind == 2'd2);
-    assign o_btb_upd_cross = !h_rvc && i_head_entry.pc[2:1] == 2'b11;
+    assign o_btb_upd_cross = !h_rvc && t_entry.pc[2:1] == 2'b11;
 
     // ---------------- branch history table training ----------------
-    assign o_bht_upd_valid = commit && !faulted && !i_pb_active && qv_is_cond(i_head_entry.raw);
-    assign o_bht_upd_taken = i_head_entry.next_pc != i_head_entry.pc + (h_rvc ? 64'd2 : 64'd4);
+    assign o_bht_upd_valid = commit && !faulted && !i_pb_active && qv_is_cond(t_entry.raw);
+    assign o_bht_upd_taken = t_entry.next_pc != t_entry.pc + (h_rvc ? 64'd2 : 64'd4);
 
     // ---------------- return-address stack ----------------
     wire h_retires = commit && !faulted && !i_pb_active;
-    assign o_ras_push = h_retires && qv_is_call(i_head_entry.raw);
-    assign o_ras_addr = i_head_entry.pc + (h_rvc ? 64'd2 : 64'd4);
+    assign o_ras_push = h_retires && qv_is_call(t_entry.raw);
+    assign o_ras_addr = t_entry.pc + (h_rvc ? 64'd2 : 64'd4);
     assign o_ras_pop  = h_retires && h_kind == 2'd3;
-    assign o_btb_upd_pc    = i_head_entry.pc;
-    assign o_btb_upd_tgt   = i_head_entry.next_pc;
-    assign o_btb_upd_taken = (h_kind == 2'd2) || (i_head_entry.next_pc != i_head_entry.pc + (h_rvc ? 64'd2 : 64'd4));
+    assign o_btb_upd_pc    = t_entry.pc;
+    assign o_btb_upd_tgt   = t_entry.next_pc;
+    assign o_btb_upd_taken = (h_kind == 2'd2) || (t_entry.next_pc != t_entry.pc + (h_rvc ? 64'd2 : 64'd4));
+
+    // ---------------- the second retirement (O4) ----------------
+    // With COMMIT_W 2 the entry behind the head retires in the same cycle when neither has anything the one-wide
+    // rules order around a retirement. The head (plain1): it commits, takes no trap and no Debug Mode entry (commit
+    // excludes those), is no CSR, system, serializing, FENCE, atomic or mispredicted op, and runs outside a Program
+    // Buffer run and a single step (both retire one at a time). The second: complete, no fault marker, trigger mark
+    // or memory fault, none of those classes either, its memory result at hand (i_lsu_res1_ok), and against the
+    // head: at most one posted store (and room for it), one branch or jump (the predictors train once), one write
+    // of FP state (one FP register write port, one fflags and FS update). The sample point follows the pair, so
+    // nothing an interrupt or a halt could take sits between the two.
+    wire h_fence   = i_head_entry.raw[6:0] == 7'b0001111;
+    wire h_atomic  = i_head_entry.raw[6:0] == 7'b0101111;
+    wire h_fpw     = (i_head_ctrl.rd_fp && i_head_entry.rd_wen) || (i_head_ctrl.cls == QV_FU_FPU);
+    wire h1_fence  = i_head1_entry.raw[6:0] == 7'b0001111;
+    wire h1_atomic = i_head1_entry.raw[6:0] == 7'b0101111;
+    wire h1_fpw    = (i_head1_ctrl.rd_fp && i_head1_entry.rd_wen) || (i_head1_ctrl.cls == QV_FU_FPU);
+    wire h1_is_lsu = (i_head1_ctrl.cls == QV_FU_LSU) && !i_head1_ctrl.xcpt;
+    assign h1_posted = h1_is_lsu && i_lsu_res1.posted;
+    wire plain1 = (COMMIT_W > 1) && commit && !is_trap && (i_head_ctrl.cls != QV_FU_CSR)
+                  && (i_head_ctrl.cls != QV_FU_SYS) && !i_head_ctrl.serialize && !i_head_entry.mispredict
+                  && !h_fence && !h_atomic && !i_pb_active && !i_dbg_stepping;
+    assign commit2 = plain1 && i_head1_valid && i_head1_entry.complete
+                  && !i_head1_ctrl.xcpt && !i_head1_ctrl.trig_exc && !i_head1_ctrl.trig_debug
+                  && (i_head1_ctrl.cls != QV_FU_CSR) && (i_head1_ctrl.cls != QV_FU_SYS) && !i_head1_ctrl.serialize
+                  && !h1_fence && !h1_atomic
+                  && (!h1_is_lsu || (i_lsu_res1_ok && !i_lsu_res1.xcpt))
+                  && !(sb_posted && h1_posted) && (!h1_posted || i_sb_ready)
+                  && !(hd_kind != 2'd0 && h1_kind != 2'd0)
+                  && !(h_fpw && h1_fpw);
+    assign o_commit_pop2    = commit2;
+    assign o_instr_retired2 = commit2;          // a pair retires outside Debug Mode, so stopcount never applies
+
+    wire writes_rd1 = i_head1_entry.rd_wen;     // never a trap
+    wire rd_fp1     = i_head1_ctrl.rd_fp;
+    assign o_regfile2_we   = commit2 && writes_rd1 && !rd_fp1;
+    assign o_regfile2_sel  = i_head1_entry.rd;
+    assign o_regfile2_data = i_head1_entry.value;
+    assign o_commit2_valid  = commit2;
+    assign o_commit2_rd     = i_head1_entry.rd;
+    assign o_commit2_rd_wen = i_head1_entry.rd_wen;
+    assign o_commit2_rd_fp  = rd_fp1;
+    assign o_commit2_tag    = i_head1_tag;
 
     // ---------------- LR/SC reservation ----------------
     // Set by a clean LR, to the address it loaded. Cleared by retiring any
@@ -435,8 +531,8 @@ module qv_commit #(
         end else if (commit && i_head_ctrl.is_lr && !is_trap) begin
             res_valid_q <= 1'b1;
             res_addr_q  <= i_lsu_res.vaddr;
-        end else if (commit && i_head_ctrl.is_store_class) begin
-            res_valid_q <= 1'b0;
+        end else if ((commit && i_head_ctrl.is_store_class) || (commit2 && i_head1_ctrl.is_store_class)) begin
+            res_valid_q <= 1'b0;                     // (an LR never retires in a pair, a store may be the second)
         end
     end
     assign o_res_valid = res_valid_q;
@@ -454,10 +550,13 @@ module qv_commit #(
     assign o_commit_rd_wen = i_head_entry.rd_wen;
     assign o_commit_rd_fp  = rd_fp;
 
-    assign o_fprf_we   = commit && writes_rd && rd_fp;
-    assign o_fprf_sel  = i_head_entry.rd;
-    assign o_fprf_data = i_head_entry.value;
-    assign o_fp_accrue = (commit && !faulted && i_head_ctrl.cls == QV_FU_FPU) ? i_head_entry.fflags : 5'b0;
+    // one FP register write and one fflags accrual a cycle: a pair writes FP state at most once (above)
+    wire fp_w1 = commit2 && h1_fpw;
+    assign o_fprf_we   = (commit && writes_rd && rd_fp) || (fp_w1 && writes_rd1 && rd_fp1);
+    assign o_fprf_sel  = fp_w1 ? i_head1_entry.rd : i_head_entry.rd;
+    assign o_fprf_data = fp_w1 ? i_head1_entry.value : i_head_entry.value;
+    assign o_fp_accrue = (commit && !faulted && i_head_ctrl.cls == QV_FU_FPU) ? i_head_entry.fflags
+                       : (fp_w1 && i_head1_ctrl.cls == QV_FU_FPU) ? i_head1_entry.fflags : 5'b0;
     assign o_commit_tag    = i_head_tag;
 
     // ---------------- next pc / redirect ----------------
@@ -489,10 +588,13 @@ module qv_commit #(
     wire [63:0] irq_vector = {irq_tvec[63:2], 2'b00} + ((irq_tvec[1:0] == 2'b01) ? {58'b0, int_cause, 2'b00} : 64'b0);
     // A debug entry redirects to the architectural pc (fetch is held, so it only records it and everything
     // in flight is flushed); a resume restarts at the live dpc.
+    // (O4) a pair redirects only for its second, a mispredicted branch: its head can do none of these
     assign o_redirect_valid = irq || halt_take || head_dbg_entry || i_dbg_resume
                               || (commit && (trap_fx || mret_fx || sret_fx || i_head_entry.mispredict
-                                             || i_head_ctrl.serialize));
-    assign o_redirect_pc    = irq ? irq_vector : (halt_take || head_dbg_entry) ? arch_pc_q : i_dbg_resume ? i_dpc : actual_next_pc;
+                                             || i_head_ctrl.serialize))
+                              || (commit2 && i_head1_entry.mispredict);
+    assign o_redirect_pc    = irq ? irq_vector : (halt_take || head_dbg_entry) ? arch_pc_q : i_dbg_resume ? i_dpc
+                            : commit2 ? i_head1_entry.next_pc : actual_next_pc;
     assign o_redirect_ctx   = irq || (commit && (trap_fx || mret_fx || sret_fx || i_head_ctrl.serialize));
 
     // architectural PC: the next instruction to retire
@@ -500,6 +602,7 @@ module qv_commit #(
         if (rst)                arch_pc_q <= RESET_PC;
         else if (irq)           arch_pc_q <= irq_vector;
         else if (i_dbg_resume)  arch_pc_q <= i_dpc;
+        else if (commit2)       arch_pc_q <= i_head1_entry.next_pc;
         else if (commit)        arch_pc_q <= actual_next_pc;
     end
     assign o_pc      = arch_pc_q;
@@ -511,6 +614,9 @@ module qv_commit #(
         if (rst) begin
             order_q         <= 64'b0;
             prev_pc_wdata_q <= RESET_PC;
+        end else if (commit2) begin
+            order_q         <= order_q + 64'd2;
+            prev_pc_wdata_q <= i_head1_entry.next_pc;
         end else if (commit) begin
             order_q         <= order_q + 64'd1;
             prev_pc_wdata_q <= actual_next_pc;
@@ -536,4 +642,28 @@ module qv_commit #(
     assign o_rvfi_mem_wmask = is_lsu ? i_lsu_res.mem_wmask : 8'b0;
     assign o_rvfi_mem_rdata = is_lsu ? i_lsu_res.mem_rdata : 64'b0;
     assign o_rvfi_mem_wdata = is_lsu ? i_lsu_res.mem_wdata : 64'b0;
+
+    // channel 1: the second retirement (its pc is the head's next pc, so it is never an interrupt's first)
+    assign o_rvfi1_order      = order_q + 64'd1;
+    assign o_rvfi1_insn       = i_head1_entry.raw;
+    assign o_rvfi1_rs1_addr   = i_head1_ctrl.rvfi_rs1;
+    assign o_rvfi1_rs2_addr   = i_head1_ctrl.rvfi_rs2;
+    assign o_rvfi1_rd_addr    = (writes_rd1 && !rd_fp1) ? i_head1_entry.rd : 5'b0;
+    assign o_rvfi1_rd_wdata   = (writes_rd1 && !rd_fp1 && i_head1_entry.rd != 5'b0) ? i_head1_entry.value : 64'b0;
+    assign o_rvfi1_frd_wvalid = commit2 && writes_rd1 && rd_fp1;
+    assign o_rvfi1_frd_addr   = (writes_rd1 && rd_fp1) ? i_head1_entry.rd : 5'b0;
+    assign o_rvfi1_frd_wdata  = (writes_rd1 && rd_fp1) ? i_head1_entry.value : 64'b0;
+    assign o_rvfi1_pc_rdata   = i_head1_entry.pc;
+    assign o_rvfi1_pc_wdata   = i_head1_entry.next_pc;
+    assign o_rvfi1_mem_addr   = h1_is_lsu ? i_lsu_res1.mem_addr  : 64'b0;
+    assign o_rvfi1_mem_rmask  = h1_is_lsu ? i_lsu_res1.mem_rmask : 8'b0;
+    assign o_rvfi1_mem_wmask  = h1_is_lsu ? i_lsu_res1.mem_wmask : 8'b0;
+    assign o_rvfi1_mem_rdata  = h1_is_lsu ? i_lsu_res1.mem_rdata : 64'b0;
+    assign o_rvfi1_mem_wdata  = h1_is_lsu ? i_lsu_res1.mem_wdata : 64'b0;
+
+`ifndef SYNTHESIS
+    // a pair is two consecutive instructions of the program
+    always @(posedge clk) if (!rst && commit2 && i_head1_entry.pc != i_head_entry.next_pc)
+        $error("qv_commit: a pair whose second does not follow its head");
+`endif
 endmodule

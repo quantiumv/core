@@ -77,7 +77,13 @@ module qv_rob #(
     output qv_pkg::rob_entry_t               o_head_entry,
     output logic [qv_pkg::QV_ROB_TAG_W-1:0]  o_head_tag,
     output qv_pkg::rob_ctrl_t                o_head_ctrl,
-    input  logic                             i_commit_pop
+    input  logic                             i_commit_pop,
+    // O4: the entry behind the head (valid when there are two), and a second pop (with the first) that retires it too
+    output logic                             o_head1_valid,
+    output qv_pkg::rob_entry_t               o_head1_entry,
+    output logic [qv_pkg::QV_ROB_TAG_W-1:0]  o_head1_tag,
+    output qv_pkg::rob_ctrl_t                o_head1_ctrl,
+    input  logic                             i_commit_pop2 = 1'b0
 );
     import qv_pkg::*;
 
@@ -106,6 +112,9 @@ module qv_rob #(
 
     wire alloc = i_alloc_valid && o_alloc_ready && !i_flush;
     wire pop   = i_commit_pop && !o_empty;
+    wire [PTR_W-1:0] count = tail_q - head_q;
+    assign o_head1_valid = count >= PTR_W'(2);
+    wire pop2  = pop && i_commit_pop2 && o_head1_valid;
 
     // operand lookups
     wire [IDX_W-1:0] l1_idx = i_lookup1_tag[IDX_W-1:0];
@@ -136,7 +145,25 @@ module qv_rob #(
     end
     assign o_head_ctrl   = ctrl_q[head_idx];
 
-    wire [PTR_W-1:0] head_next = pop ? head_q + PTR_W'(1) : head_q;
+    wire [PTR_W-1:0] head1_q   = head_q + PTR_W'(1);
+    wire [IDX_W-1:0] head1_idx = head1_q[IDX_W-1:0];
+    assign o_head1_tag = QV_ROB_TAG_W'(head1_q);
+    always_comb begin
+        o_head1_entry            = '0;
+        o_head1_entry.valid      = o_head1_valid;
+        o_head1_entry.complete   = complete_q[head1_idx];
+        o_head1_entry.pc         = pc_q[head1_idx];
+        o_head1_entry.raw        = raw_q[head1_idx];
+        o_head1_entry.rd         = rd_q[head1_idx];
+        o_head1_entry.rd_wen     = rd_wen_q[head1_idx];
+        o_head1_entry.value      = value_q[head1_idx];
+        o_head1_entry.next_pc    = next_pc_q[head1_idx];
+        o_head1_entry.mispredict = mispredict_q[head1_idx];
+        o_head1_entry.fflags     = fflags_q[head1_idx];
+    end
+    assign o_head1_ctrl  = ctrl_q[head1_idx];
+
+    wire [PTR_W-1:0] head_next = head_q + PTR_W'(pop) + PTR_W'(pop2);
     wire [IDX_W-1:0] wb_idx    = i_wb.tag[IDX_W-1:0];
     wire [IDX_W-1:0] wb2_idx   = i_wb2.tag[IDX_W-1:0];
     wire [IDX_W-1:0] wb3_idx   = i_wb3.tag[IDX_W-1:0];

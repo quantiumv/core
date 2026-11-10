@@ -136,7 +136,13 @@ module qv_issue #(
     input  logic [4:0]                       i_commit_rd,
     input  logic                             i_commit_rd_wen,
     input  logic                             i_commit_rd_fp = 1'b0,
-    input  logic [qv_pkg::QV_ROB_TAG_W-1:0]  i_commit_tag
+    input  logic [qv_pkg::QV_ROB_TAG_W-1:0]  i_commit_tag,
+    // O4: a second retirement in the same cycle (the younger of the two): its claim is cleared the same way
+    input  logic                             i_commit2_valid = 1'b0,
+    input  logic [4:0]                       i_commit2_rd = 5'b0,
+    input  logic                             i_commit2_rd_wen = 1'b0,
+    input  logic                             i_commit2_rd_fp = 1'b0,
+    input  logic [qv_pkg::QV_ROB_TAG_W-1:0]  i_commit2_tag = '0
 );
     import qv_pkg::*;
 
@@ -404,6 +410,14 @@ module qv_issue #(
             if (i_commit_valid && i_commit_rd_wen && i_commit_rd_fp
                     && fprod_busy_q[i_commit_rd] && fprod_tag_q[i_commit_rd] == i_commit_tag)
                 fprod_busy_q[i_commit_rd] <= 1'b0;
+            // (O4) the second retirement's: two writes of one register leave the younger's claim, which the older's
+            // tag does not match; a claim made this cycle comes later and wins, as for the first
+            if (i_commit2_valid && i_commit2_rd_wen && i_commit2_rd != 5'd0 && !i_commit2_rd_fp
+                    && prod_busy_q[i_commit2_rd] && prod_tag_q[i_commit2_rd] == i_commit2_tag)
+                prod_busy_q[i_commit2_rd] <= 1'b0;
+            if (i_commit2_valid && i_commit2_rd_wen && i_commit2_rd_fp
+                    && fprod_busy_q[i_commit2_rd] && fprod_tag_q[i_commit2_rd] == i_commit2_tag)
+                fprod_busy_q[i_commit2_rd] <= 1'b0;
             if (o_issue && i_uop.rd_wen && i_uop.rd_fp) begin
                 fprod_busy_q[i_uop.rd] <= 1'b1;
                 fprod_tag_q[i_uop.rd]  <= i_alloc_tag;

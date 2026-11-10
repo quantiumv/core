@@ -88,6 +88,10 @@ module qv_lsq #(
     input  logic                             i_pop,            // the ROB head retires ...
     input  logic [qv_pkg::QV_ROB_TAG_W-1:0]  i_pop_tag,        // ... with this tag
     output qv_pkg::lsu_res_t                 o_head_res,       // the oldest entry's result
+    // O4: the entry behind the ROB head retires too (with i_pop), with this tag; and the second-oldest entry's result
+    input  logic                             i_pop2 = 1'b0,
+    input  logic [qv_pkg::QV_ROB_TAG_W-1:0]  i_pop2_tag = '0,
+    output qv_pkg::lsu_res_t                 o_head1_res,
 
     // early accesses
     input  logic                             i_bar_alloc = 1'b0,   // issue allocates a barrier uop ...
@@ -196,8 +200,15 @@ module qv_lsq #(
     wire cmpl = i_eng_wb.valid && !i_flush;
 
     wire pop  = i_pop && !empty && (i_pop_tag == tag_q[head_i]) && !i_flush;
+    // (O4) the second retirement leaves too when it is the next memory op: the oldest entry, or the one behind it
+    // when the head was one
+    wire [IW:0]   head1_q = head_q + 1'b1;
+    wire [IW-1:0] head1_i = head1_q[IW-1:0];
+    wire [IW-1:0] h2_i    = pop ? head1_i : head_i;
+    wire pop2 = i_pop2 && !i_flush && (count > (pop ? (IW + 1)'(1) : (IW + 1)'(0))) && (i_pop2_tag == tag_q[h2_i]);
 
     assign o_head_res = (copy_q && copy_idx_q == head_i) ? i_eng_res : res_q[head_i];
+    assign o_head1_res = (copy_q && copy_idx_q == head1_i) ? i_eng_res : res_q[head1_i];
 
     // ---------------- barriers ----------------
     wire bar_retire = i_pop && !i_flush;             // the ROB head retires: is it a barrier someone waits for?
@@ -279,7 +290,7 @@ module qv_lsq #(
             end
             if (send) send_q <= send_q + 1'b1;
             if (cmpl) cmpl_q <= cmpl_q + 1'b1;
-            if (pop)  head_q <= head_q + 1'b1;
+            if (pop || pop2) head_q <= head_q + (IW + 1)'(pop) + (IW + 1)'(pop2);
             if (copy_q) res_q[copy_idx_q] <= i_eng_res;
             copy_q     <= cmpl;
             copy_idx_q <= cmpl_i;
@@ -296,6 +307,8 @@ module qv_lsq #(
             $error("qv_lsq: the engine completed an op it does not hold");
         if (pop && head_q == cmpl_q)
             $error("qv_lsq: an op retires before it is done");
+        if (pop2 && (pop ? head1_q : head_q) == cmpl_q)
+            $error("qv_lsq: a second op retires before it is done");
     end
 `endif
 endmodule: qv_lsq

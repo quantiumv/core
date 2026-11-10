@@ -184,7 +184,8 @@
 
 // O4 (two-wide), one knob per step: QV_PIPE_COMMIT_W instructions retired a cycle (the RVFI ports carry that many
 // channels, oldest in channel 0), QV_PIPE_DISPATCH_W dispatched a cycle, QV_PIPE_ALU_PORTS ALU issue ports. 1 is the
-// core before O4. (O4a: only the RVFI channels exist; a second channel never retires.)
+// core before O4. (So far: COMMIT_W 2 retires a second instruction when qv_commit's pair rule allows; dispatch and the
+// ALU stay one.)
 `ifndef QV_PIPE_COMMIT_W
 `define QV_PIPE_COMMIT_W 1
 `endif
@@ -625,6 +626,9 @@ module core
     logic                    c_valid, c_rd_wen, c_rd_fp;
     logic [4:0]              c_rd;
     logic [QV_ROB_TAG_W-1:0] c_tag;
+    logic                    c2_valid, c2_rd_wen, c2_rd_fp;   // O4: the second retirement of a pair
+    logic [4:0]              c2_rd;
+    logic [QV_ROB_TAG_W-1:0] c2_tag;
     // F/D: the FP register file's read ports (issue), the third ROB lookup, the FPU's request and writeback
     logic [4:0]              frs1_sel, frs2_sel, frs3_sel;
     logic [63:0]             frs1_data, frs2_data, frs3_data;
@@ -661,17 +665,25 @@ module core
         .i_frs1_data(frs1_data), .i_frs2_data(frs2_data), .i_frs3_data(frs3_data),
         .i_wbf(fpu_wb), .o_fpu_req(fpu_req), .i_fpu_ds_free(fpu_ds_free), .i_wbl(lsu_wb),
         .i_commit_valid(c_valid), .i_commit_rd(c_rd), .i_commit_rd_wen(c_rd_wen), .i_commit_rd_fp(c_rd_fp),
-        .i_commit_tag(c_tag), .i_wbd(div_wb), .i_wbc(c_bus)
+        .i_commit_tag(c_tag), .i_wbd(div_wb), .i_wbc(c_bus),
+        .i_commit2_valid(c2_valid), .i_commit2_rd(c2_rd), .i_commit2_rd_wen(c2_rd_wen), .i_commit2_rd_fp(c2_rd_fp),
+        .i_commit2_tag(c2_tag)
     );
 
     lsu_res_t lsu_res;                     // the result of the memory op at the ROB head (commit, RVFI, the store buffer)
+    lsu_res_t lsq_res0, lsq_res1;          // (with the queue) its oldest entry's result, and the one behind it
+    lsu_res_t lsu_res1;                    // (O4) the second retirement's, when it is a memory op
     logic     c_sfence;                    // commit: an SFENCE.VMA retires, empty the TLBs
 
     // ---------------- ROB ----------------
-    logic                    head_valid, commit_pop;
+    logic                    head_valid, commit_pop, commit_pop2;
     rob_entry_t              head_entry;
     logic [QV_ROB_TAG_W-1:0] head_tag;
     rob_ctrl_t               head_ctrl;
+    logic                    head1_valid;   // O4: the entry behind the head
+    rob_entry_t              head1_entry;
+    logic [QV_ROB_TAG_W-1:0] head1_tag;
+    rob_ctrl_t               head1_ctrl;
 
     qv_rob #(.ROB_DEPTH(ROB_DEPTH)) rob0 (
         .clk(clk), .rst(rst), .i_flush(flush),
@@ -685,7 +697,9 @@ module core
         .i_wb4(fpu_wb),
         .i_lookup3_tag(l3_tag), .o_lookup3_complete(l3_complete), .o_lookup3_value(l3_value),
         .o_head_valid(head_valid), .o_head_entry(head_entry), .o_head_tag(head_tag),
-        .o_head_ctrl(head_ctrl), .i_commit_pop(commit_pop)
+        .o_head_ctrl(head_ctrl), .i_commit_pop(commit_pop),
+        .o_head1_valid(head1_valid), .o_head1_entry(head1_entry), .o_head1_tag(head1_tag),
+        .o_head1_ctrl(head1_ctrl), .i_commit_pop2(commit_pop2)
     );
 
     // ---------------- X: ALU, BRU -> writeback bus ----------------
@@ -827,13 +841,18 @@ module core
                 .i_req(lsu_req), .o_free(lsu_free), .i_opa(lsu_opa), .i_opb(lsu_opb),
                 .i_wb(wb_bus), .i_wbd(div_wb), .i_wbf(fpu_wb), .i_wbc(c_bus),
                 .o_eng_req(eng_req), .i_eng_take(eng_take), .i_eng_wb(lsu_wb), .i_eng_res(eng_res),
-                .i_pop(commit_pop), .i_pop_tag(head_tag), .o_head_res(lsu_res),
+                .i_pop(commit_pop), .i_pop_tag(head_tag), .o_head_res(lsq_res0),
+                .i_pop2(commit_pop2), .i_pop2_tag(head1_tag), .o_head1_res(lsq_res1),
                 .i_bar_alloc(alloc_bar), .i_bar_tag(alloc_tag), .o_early(lsq_early),
                 .i_match_addr(sb_match_addr), .o_match(lsq_match),
                 .o_xl_req(qx_req), .o_xl_va(qx_va), .o_xl_wr(qx_wr), .i_xl_free(!lx_req), .i_xl_active(x_active),
                 .i_xl_done(x_done), .i_xl_pf(x_pf), .i_xl_af(x_af), .i_xl_ppn(x_ppn),
                 .o_eng_xl(eng_xl), .o_eng_ppn(eng_ppn)
             );
+            // the head's result, and (O4) the second retirement's: the queue's oldest entry when the head is no
+            // memory op, the one behind it when it is one
+            assign lsu_res  = lsq_res0;
+            assign lsu_res1 = (head_ctrl.cls == QV_FU_LSU) ? lsq_res1 : lsq_res0;
             /* verilator lint_off UNUSEDSIGNAL */
             wire   free_unused = eng_free;           // the queue follows the LSU's o_take
             /* verilator lint_on UNUSEDSIGNAL */
@@ -841,6 +860,9 @@ module core
             assign eng_req   = lsu_req;
             assign lsu_free  = eng_free;
             assign lsu_res   = eng_res;
+            assign lsu_res1  = eng_res;              // never used: without the queue no memory op retires second
+            assign lsq_res0  = '0;
+            assign lsq_res1  = '0;
             assign lsq_early = 1'b0;
             assign lsq_match = 1'b0;
             assign qx_req    = 1'b0;
@@ -855,12 +877,18 @@ module core
     endgenerate
 
     // ---------------- the store buffer ----------------
+    // the store pushed is the head's, or (O4) the second retirement's: a pair posts at most one
+    logic     c_sb_push1;
+    /* verilator lint_off UNUSEDSIGNAL */
+    lsu_res_t sb_push_res;                   // only the address, mask and data are pushed
+    /* verilator lint_on UNUSEDSIGNAL */
+    assign sb_push_res = c_sb_push1 ? lsu_res1 : lsu_res;
     generate
         if (SB_DEPTH > 0) begin : g_sb
             qv_sb #(.DEPTH(SB_DEPTH)) sb0 (
                 .clk(clk), .rst(rst),
-                .i_push(c_sb_push), .i_push_addr(lsu_res.mem_addr[31:3]), .i_push_sel(lsu_res.mem_wmask),
-                .i_push_data(lsu_res.mem_wdata), .o_ready(sb_ready), .o_empty(sb_empty),
+                .i_push(c_sb_push), .i_push_addr(sb_push_res.mem_addr[31:3]), .i_push_sel(sb_push_res.mem_wmask),
+                .i_push_data(sb_push_res.mem_wdata), .o_ready(sb_ready), .o_empty(sb_empty),
                 .i_match_addr(sb_match_addr), .o_match(sb_match),
                 .i_lsu_busy(lsu_bus_busy), .i_lsu_inflight(lsu_in_bus), .i_ptw_beat(ptw_beat),
                 .i_load_near(lsu_load_near),
@@ -985,7 +1013,18 @@ module core
     logic [4:0]  c_rd_addr;
     logic [63:0] c_mem_addr, c_mem_rdata, c_mem_wdata;
     logic [7:0]  c_mem_rmask, c_mem_wmask;
+    // O4: RVFI channel 1, the second retirement
+    logic [63:0] c1_order, c1_rd_wdata, c1_pc_rdata, c1_pc_wdata, c1_mem_addr, c1_mem_rdata, c1_mem_wdata;
+    logic [63:0] c1_frd_wdata;
+    logic [31:0] c1_insn;
+    logic [4:0]  c1_rs1_addr, c1_rs2_addr, c1_rd_addr, c1_frd_addr;
+    logic [7:0]  c1_mem_rmask, c1_mem_wmask;
+    logic        c1_frd_wvalid;
     /* verilator lint_on UNUSEDSIGNAL */
+    logic        rf2_we;                     // O4: the second retirement's register write (regfile0 port 2)
+    logic [4:0]  rf2_sel;
+    logic [63:0] rf2_data;
+    logic        c_instr_retired2;
 
     // declared ahead of csr_file0, which drives them
     logic [63:0] csr_rdata, mtvec_w, mepc_w;
@@ -1001,10 +1040,23 @@ module core
     // satp through the Access Register path, which raises no redirect at all)
     assign fetch_xl_flush = c_sfence || dbg_in_debug || dbg_entry;
 
-    qv_commit #(.RESET_PC(RESET_PC)) commit0 (
+    qv_commit #(.RESET_PC(RESET_PC), .COMMIT_W(COMMIT_W)) commit0 (
         .clk(clk), .rst(rst),
         .i_head_valid(head_valid), .i_head_entry(head_entry), .i_head_tag(head_tag),
         .i_head_ctrl(head_ctrl), .i_lsu_res(lsu_res), .o_commit_pop(commit_pop),
+        .i_head1_valid(head1_valid), .i_head1_entry(head1_entry), .i_head1_tag(head1_tag),
+        .i_head1_ctrl(head1_ctrl), .i_lsu_res1(lsu_res1), .i_lsu_res1_ok(LSQ_DEPTH > 0),
+        .o_commit_pop2(commit_pop2),
+        .o_regfile2_we(rf2_we), .o_regfile2_sel(rf2_sel), .o_regfile2_data(rf2_data),
+        .o_commit2_valid(c2_valid), .o_commit2_rd(c2_rd), .o_commit2_rd_wen(c2_rd_wen),
+        .o_commit2_rd_fp(c2_rd_fp), .o_commit2_tag(c2_tag),
+        .o_instr_retired2(c_instr_retired2), .o_sb_push1(c_sb_push1),
+        .o_rvfi1_order(c1_order), .o_rvfi1_insn(c1_insn), .o_rvfi1_rs1_addr(c1_rs1_addr),
+        .o_rvfi1_rs2_addr(c1_rs2_addr), .o_rvfi1_rd_addr(c1_rd_addr), .o_rvfi1_rd_wdata(c1_rd_wdata),
+        .o_rvfi1_pc_rdata(c1_pc_rdata), .o_rvfi1_pc_wdata(c1_pc_wdata), .o_rvfi1_mem_addr(c1_mem_addr),
+        .o_rvfi1_mem_rmask(c1_mem_rmask), .o_rvfi1_mem_wmask(c1_mem_wmask), .o_rvfi1_mem_rdata(c1_mem_rdata),
+        .o_rvfi1_mem_wdata(c1_mem_wdata), .o_rvfi1_frd_wvalid(c1_frd_wvalid), .o_rvfi1_frd_addr(c1_frd_addr),
+        .o_rvfi1_frd_wdata(c1_frd_wdata),
         .o_res_valid(res_valid), .o_res_addr(res_addr),
         .o_regfile_we(rf_we), .o_regfile_sel(rf_sel), .o_regfile_data(rf_data),
         .o_commit_valid(c_valid), .o_commit_rd(c_rd), .o_commit_rd_wen(c_rd_wen), .o_commit_tag(c_tag),
@@ -1063,7 +1115,9 @@ module core
         .i_read_gpr_B_sel(dm_access_active ? i_dm_gpr_sel : rs2_sel), .o_read_gpr_B_data(rs2_data),
         .i_load_gpr(dm_access_active ? i_dm_gpr_we : rf_we),
         .i_load_gpr_sel(dm_access_active ? i_dm_gpr_sel : rf_sel),
-        .i_load_gpr_data(dm_access_active ? i_dm_gpr_wdata : rf_data)
+        .i_load_gpr_data(dm_access_active ? i_dm_gpr_wdata : rf_data),
+        // (O4) the second retirement's write; nothing retires while the Debug Module has the port
+        .i_load2_gpr(rf2_we), .i_load2_gpr_sel(rf2_sel), .i_load2_gpr_data(rf2_data)
     );
 
 `ifdef RISCV_FORMAL
@@ -1102,6 +1156,11 @@ module core
     end
     wire [63:0] c_rs1_rdata = (c_rs1_addr != 5'b0) ? src_a_q[head_tag[SRCW-1:0]] : 64'b0;
     wire [63:0] c_rs2_rdata = (c_rs2_addr != 5'b0) ? src_b_q[head_tag[SRCW-1:0]] : 64'b0;
+    // (O4) the second retirement's, from its own slot (read only with COMMIT_W 2)
+    /* verilator lint_off UNUSEDSIGNAL */
+    wire [63:0] c1_rs1_rdata = (c1_rs1_addr != 5'b0) ? src_a_q[head1_tag[SRCW-1:0]] : 64'b0;
+    wire [63:0] c1_rs2_rdata = (c1_rs2_addr != 5'b0) ? src_b_q[head1_tag[SRCW-1:0]] : 64'b0;
+    /* verilator lint_on UNUSEDSIGNAL */
 `endif
 
     // F/D: the FP register file (its array fp_registers is a name the lockstep harness reads in both cores), read by
@@ -1137,7 +1196,7 @@ module core
         .i_csr_addr(dm_access_active ? i_dm_csr_addr : c_csr_addr), .o_csr_rdata(csr_rdata),
         .i_csr_we(dm_access_active ? i_dm_csr_we : c_csr_we),
         .i_csr_wdata(dm_access_active ? i_dm_csr_wdata : c_csr_wdata),
-        .i_instr_retired(c_instr_retired),
+        .i_instr_retired(c_instr_retired), .i_instr_retired2(c_instr_retired2),
         .i_current_priv(priv),
         .i_mtip(i_mtip), .i_meip(i_meip), .i_seip(i_seip), .i_time(i_time),
         .i_trap_taken(c_trap_taken), .i_trap_cause(c_trap_cause), .i_trap_val(c_trap_val),
@@ -1213,9 +1272,9 @@ module core
     assign o_progbuf_abort = pb_abort;
 
 `ifndef SYNTHESIS
-    // O4a: the width knobs exist, the two-wide paths behind them do not yet
+    // O4: the width knobs whose paths exist so far
     initial if (COMMIT_W < 1 || COMMIT_W > 2 || DISPATCH_W != 1 || ALU_PORTS != 1)
-        $fatal(1, "core: COMMIT_W must be 1 or 2, DISPATCH_W and ALU_PORTS 1 (O4a)");
+        $fatal(1, "core: COMMIT_W must be 1 or 2, DISPATCH_W and ALU_PORTS 1 (O4b)");
 `endif
 
     // ---------------- RVFI ----------------
@@ -1278,35 +1337,51 @@ module core
     assign rvfi_csr_satp_rdata              = satp_w;
     assign rvfi_csr_satp_wdata              = satp_w;
 
-    // Channels 1 .. COMMIT_W-1 (O4b retires a second instruction there): until then they never retire.
-    for (genvar ch = 1; ch < COMMIT_W; ch++) begin : g_rvfi_ch
-        assign rvfi_valid[ch] = 1'b0;          assign rvfi_trap[ch] = 1'b0;
-        assign rvfi_halt[ch]  = 1'b0;          assign rvfi_intr[ch] = 1'b0;
-        assign rvfi_frd_wvalid[ch] = 1'b0;
-        assign rvfi_order[64*ch +: 64] = 64'b0;          assign rvfi_insn[32*ch +: 32] = 32'b0;
-        assign rvfi_mode[2*ch +: 2] = 2'b0;              assign rvfi_ixl[2*ch +: 2] = 2'd2;
-        assign rvfi_rs1_addr[5*ch +: 5] = 5'b0;          assign rvfi_rs2_addr[5*ch +: 5] = 5'b0;
-        assign rvfi_rd_addr[5*ch +: 5] = 5'b0;           assign rvfi_frd_addr[5*ch +: 5] = 5'b0;
-        assign rvfi_rs1_rdata[64*ch +: 64] = 64'b0;      assign rvfi_rs2_rdata[64*ch +: 64] = 64'b0;
-        assign rvfi_rd_wdata[64*ch +: 64] = 64'b0;       assign rvfi_frd_wdata[64*ch +: 64] = 64'b0;
-        assign rvfi_pc_rdata[64*ch +: 64] = 64'b0;       assign rvfi_pc_wdata[64*ch +: 64] = 64'b0;
-        assign rvfi_mem_addr[64*ch +: 64] = 64'b0;       assign rvfi_mem_rmask[8*ch +: 8] = 8'b0;
-        assign rvfi_mem_wmask[8*ch +: 8] = 8'b0;         assign rvfi_mem_rdata[64*ch +: 64] = 64'b0;
-        assign rvfi_mem_wdata[64*ch +: 64] = 64'b0;
-        assign rvfi_csr_mepc_rmask[64*ch +: 64] = 64'b0;    assign rvfi_csr_mepc_wmask[64*ch +: 64] = 64'b0;
-        assign rvfi_csr_mepc_rdata[64*ch +: 64] = 64'b0;    assign rvfi_csr_mepc_wdata[64*ch +: 64] = 64'b0;
-        assign rvfi_csr_mcause_rmask[64*ch +: 64] = 64'b0;  assign rvfi_csr_mcause_wmask[64*ch +: 64] = 64'b0;
-        assign rvfi_csr_mcause_rdata[64*ch +: 64] = 64'b0;  assign rvfi_csr_mcause_wdata[64*ch +: 64] = 64'b0;
-        assign rvfi_csr_sepc_rmask[64*ch +: 64] = 64'b0;    assign rvfi_csr_sepc_wmask[64*ch +: 64] = 64'b0;
-        assign rvfi_csr_sepc_rdata[64*ch +: 64] = 64'b0;    assign rvfi_csr_sepc_wdata[64*ch +: 64] = 64'b0;
-        assign rvfi_csr_scause_rmask[64*ch +: 64] = 64'b0;  assign rvfi_csr_scause_wmask[64*ch +: 64] = 64'b0;
-        assign rvfi_csr_scause_rdata[64*ch +: 64] = 64'b0;  assign rvfi_csr_scause_wdata[64*ch +: 64] = 64'b0;
-        assign rvfi_csr_pmpcfg0_rmask[64*ch +: 64] = 64'b0; assign rvfi_csr_pmpcfg0_wmask[64*ch +: 64] = 64'b0;
-        assign rvfi_csr_pmpcfg0_rdata[64*ch +: 64] = 64'b0; assign rvfi_csr_pmpcfg0_wdata[64*ch +: 64] = 64'b0;
-        assign rvfi_csr_pmpaddr0_rmask[64*ch +: 64] = 64'b0; assign rvfi_csr_pmpaddr0_wmask[64*ch +: 64] = 64'b0;
-        assign rvfi_csr_pmpaddr0_rdata[64*ch +: 64] = 64'b0; assign rvfi_csr_pmpaddr0_wdata[64*ch +: 64] = 64'b0;
-        assign rvfi_csr_medeleg_rmask[64*ch +: 64] = 64'b0; assign rvfi_csr_medeleg_wmask[64*ch +: 64] = 64'b0;
-        assign rvfi_csr_medeleg_rdata[64*ch +: 64] = 64'b0; assign rvfi_csr_medeleg_wdata[64*ch +: 64] = 64'b0;
+    // Channel 1 (COMMIT_W 2): the second retirement of a pair. It is never a trap, an interrupt's first instruction,
+    // a halt or a CSR op, and it runs at the head's privilege; the CSR ports show what they show for channel 0 (no
+    // instruction in a pair writes those CSRs).
+    if (COMMIT_W > 1) begin : g_rvfi_ch1
+        assign rvfi_valid[1] = commit_pop2;            assign rvfi_trap[1] = 1'b0;
+        assign rvfi_halt[1]  = 1'b0;                   assign rvfi_intr[1] = 1'b0;
+        assign rvfi_frd_wvalid[1] = c1_frd_wvalid;
+        assign rvfi_order[127:64] = c1_order;          assign rvfi_insn[63:32] = c1_insn;
+        assign rvfi_mode[3:2] = current_priv;          assign rvfi_ixl[3:2] = 2'd2;
+        assign rvfi_rs1_addr[9:5] = c1_rs1_addr;       assign rvfi_rs2_addr[9:5] = c1_rs2_addr;
+        assign rvfi_rd_addr[9:5] = c1_rd_addr;         assign rvfi_frd_addr[9:5] = c1_frd_addr;
+        assign rvfi_rs1_rdata[127:64] = c1_rs1_rdata;  assign rvfi_rs2_rdata[127:64] = c1_rs2_rdata;
+        assign rvfi_rd_wdata[127:64] = c1_rd_wdata;    assign rvfi_frd_wdata[127:64] = c1_frd_wdata;
+        assign rvfi_pc_rdata[127:64] = c1_pc_rdata;    assign rvfi_pc_wdata[127:64] = c1_pc_wdata;
+        assign rvfi_mem_addr[127:64] = c1_mem_addr;    assign rvfi_mem_rmask[15:8] = c1_mem_rmask;
+        assign rvfi_mem_wmask[15:8] = c1_mem_wmask;    assign rvfi_mem_rdata[127:64] = c1_mem_rdata;
+        assign rvfi_mem_wdata[127:64] = c1_mem_wdata;
+        assign rvfi_csr_mepc_rmask[127:64]     = rvfi_csr_mepc_rmask[63:0];
+        assign rvfi_csr_mepc_wmask[127:64]     = rvfi_csr_mepc_wmask[63:0];
+        assign rvfi_csr_mepc_rdata[127:64]     = mepc_w;
+        assign rvfi_csr_mepc_wdata[127:64]     = mepc_w;
+        assign rvfi_csr_mcause_rmask[127:64]   = rvfi_csr_mcause_rmask[63:0];
+        assign rvfi_csr_mcause_wmask[127:64]   = rvfi_csr_mcause_wmask[63:0];
+        assign rvfi_csr_mcause_rdata[127:64]   = mcause_w;
+        assign rvfi_csr_mcause_wdata[127:64]   = mcause_w;
+        assign rvfi_csr_sepc_rmask[127:64]     = rvfi_csr_sepc_rmask[63:0];
+        assign rvfi_csr_sepc_wmask[127:64]     = rvfi_csr_sepc_wmask[63:0];
+        assign rvfi_csr_sepc_rdata[127:64]     = sepc_w;
+        assign rvfi_csr_sepc_wdata[127:64]     = sepc_w;
+        assign rvfi_csr_scause_rmask[127:64]   = rvfi_csr_scause_rmask[63:0];
+        assign rvfi_csr_scause_wmask[127:64]   = rvfi_csr_scause_wmask[63:0];
+        assign rvfi_csr_scause_rdata[127:64]   = scause_w;
+        assign rvfi_csr_scause_wdata[127:64]   = scause_w;
+        assign rvfi_csr_pmpcfg0_rmask[127:64]  = rvfi_csr_pmpcfg0_rmask[63:0];
+        assign rvfi_csr_pmpcfg0_wmask[127:64]  = rvfi_csr_pmpcfg0_wmask[63:0];
+        assign rvfi_csr_pmpcfg0_rdata[127:64]  = pmpcfg0_w;
+        assign rvfi_csr_pmpcfg0_wdata[127:64]  = pmpcfg0_w;
+        assign rvfi_csr_pmpaddr0_rmask[127:64] = rvfi_csr_pmpaddr0_rmask[63:0];
+        assign rvfi_csr_pmpaddr0_wmask[127:64] = rvfi_csr_pmpaddr0_wmask[63:0];
+        assign rvfi_csr_pmpaddr0_rdata[127:64] = pmpaddr0_w;
+        assign rvfi_csr_pmpaddr0_wdata[127:64] = pmpaddr0_w;
+        assign rvfi_csr_medeleg_rmask[127:64]  = rvfi_csr_medeleg_rmask[63:0];
+        assign rvfi_csr_medeleg_wmask[127:64]  = rvfi_csr_medeleg_wmask[63:0];
+        assign rvfi_csr_medeleg_rdata[127:64]  = medeleg_w;
+        assign rvfi_csr_medeleg_wdata[127:64]  = medeleg_w;
     end
     assign rvfi_any_trap_taken     = trap_taken || interrupt_taken;
 
