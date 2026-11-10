@@ -18,13 +18,18 @@
  * wrong wakeup, an operand taken from the wrong bus or too early, an entry issued twice or skipped, an age mistake, a
  * divide passing an older one or a select in a flush cycle all fail. Tags are reused as in the ROB: a producer's tag
  * is free again once it has delivered, so a missed wakeup would be woken later by another producer's value.
+ *
+ * PUSH2 (O4c): a second entry may be pushed in the same cycle behind the first (an ALU, BRU or pipelined FPU op: a
+ * two-wide core's slot 1 is never a divide or an FP divide/square root), with the same dispatch-cycle capture; it
+ * joins behind the first, and o_room2 says whether two fit.
  */
 module qv_rs_tb #(
     parameter int DEPTH      = 4,
     parameter bit BYPASS_EN  = 1'b1,
     parameter bit LSU_BYPASS = 1'b1,
     parameter int CYCLES     = 40000,
-    parameter int SEED       = 1
+    parameter int SEED       = 1,
+    parameter bit PUSH2      = 1'b0
 );
     import qv_pkg::*;
 
@@ -43,9 +48,9 @@ module qv_rs_tb #(
     logic rst = 1'b1;
 
     // ---------------- DUT ----------------
-    logic      flush = 1'b0, push = 1'b0;
-    rs_entry_t push_e = '0;
-    logic      room, has_div, has_fds;
+    logic      flush = 1'b0, push = 1'b0, push2 = 1'b0;
+    rs_entry_t push_e = '0, push2_e = '0;
+    logic      room, room2, has_div, has_fds;
     wb_t       wb = '0, wbl = '0, wbd = '0, wbc = '0;
     wb_fp_t    wbf = '0;
     logic      div_free = 1'b1, ds_free = 1'b1;
@@ -56,6 +61,7 @@ module qv_rs_tb #(
     qv_rs #(.DEPTH(DEPTH), .BYPASS_EN(BYPASS_EN), .LSU_BYPASS(LSU_BYPASS)) dut (
         .clk(clk), .rst(rst), .i_flush(flush),
         .i_push(push), .i_push_e(push_e), .o_room(room), .o_has_div(has_div), .o_has_fds(has_fds),
+        .i_push2(push2), .i_push2_e(push2_e), .o_room2(room2),
         .i_wb(wb), .i_wbl(wbl), .i_wbd(wbd), .i_wbf(wbf), .i_wbc(wbc),
         .i_div_free(div_free), .i_fpu_ds_free(ds_free),
         .o_sel_ab(sel_ab), .o_sel_div(sel_div), .o_sel_fpu(sel_fpu),
@@ -189,12 +195,12 @@ module qv_rs_tb #(
     endtask
 
     // ---------------- coverage ----------------
-    int n_push, n_ab, n_alu, n_bru, n_div, n_fpu, n_fds, n_flush, n_capture, n_same, n_late, n_ooo, n_div_hold,
+    int n_push, n_push2, n_ab, n_alu, n_bru, n_div, n_fpu, n_fds, n_flush, n_capture, n_same, n_late, n_ooo, n_div_hold,
         n_fds_hold, n_full;
 
     // ---------------- the run ----------------
     int  t, e_ab, e_div, e_fds, e_fpu, div_busy_until, ds_busy_until, old_gn;
-    logic f_ab, f_div, f_fds, f_fpu, x_div, x_fpu, pushed_now;
+    logic f_ab, f_div, f_fds, f_fpu, x_div, x_fpu, pushed_now, pushed2_now;
     rs_entry_t gf;
     int        seed_v;
 
@@ -219,7 +225,7 @@ module qv_rs_tb #(
         for (int i = 0; i < NP; i++) p_live[i] = 1'b0;
         for (int bb = 0; bb < 5; bb++) for (int k = 0; k < RING; k++) begin s_p[bb][k] = -1; s_garb[bb][k] = 1'b0; end
         gn = 0;
-        n_push = 0; n_ab = 0; n_alu = 0; n_bru = 0; n_div = 0; n_fpu = 0; n_fds = 0; n_flush = 0; n_capture = 0;
+        n_push = 0; n_push2 = 0; n_ab = 0; n_alu = 0; n_bru = 0; n_div = 0; n_fpu = 0; n_fds = 0; n_flush = 0; n_capture = 0;
         n_same = 0; n_late = 0; n_ooo = 0; n_div_hold = 0; n_fds_hold = 0; n_full = 0;
         div_busy_until = -1; ds_busy_until = -1;
         repeat (3) @(posedge clk);
@@ -250,11 +256,16 @@ module qv_rs_tb #(
 
             // ---- push ----
             push = 1'b0;
-            if (!flush && gn < DEPTH && ($urandom % 100) < 55 && free_tags() > 0) begin
+            push2 = 1'b0;
+            for (int sl = 0; sl < (PUSH2 ? 2 : 1); sl++) begin
+              int gi;
+              gi = gn + sl;
+              if (!flush && gi < DEPTH && (sl == 0 || push) && ($urandom % 100) < 55 && free_tags() > 0) begin
                 int kind, tg;
                 rs_entry_t e;
                 kind = $urandom % 100;
-                kind = kind < 35 ? 0 : kind < 50 ? 1 : kind < 65 ? 2 : kind < 85 ? 3 : 4;
+                if (sl == 0) kind = kind < 35 ? 0 : kind < 50 ? 1 : kind < 65 ? 2 : kind < 85 ? 3 : 4;
+                else         kind = kind < 45 ? 0 : kind < 70 ? 1 : 3;       // slot 1: never DIV or FDS
                 tg   = alloc_tag();
                 e           = '0;
                 e.kind      = qv_rs_kind_e'(kind);
@@ -268,12 +279,12 @@ module qv_rs_tb #(
                 e.fmt       = 1'($urandom);
                 e.ityp      = 2'($urandom);
                 e.rm        = 3'($urandom);
-                g_kind[gn] = kind;
-                g_tag[gn]  = tg;
+                g_kind[gi] = kind;
+                g_tag[gi]  = tg;
                 for (int k = 0; k < 3; k++) begin
                     rs_opnd_t o;
                     int s, x;
-                    x = 3 * gn + k;
+                    x = 3 * gi + k;
                     s = -1;
                     if (k < 2 || kind == 3) begin              // c is used by the pipelined FPU ops only
                         if (($urandom % 100) < 55) begin
@@ -312,10 +323,10 @@ module qv_rs_tb #(
                     end
                     if (k == 0) e.a = o; else if (k == 1) e.b = o; else e.c = o;
                 end
-                g_e[gn] = e;
-                push_e  = e;
-                push    = 1'b1;
-                n_push++;
+                g_e[gi] = e;
+                if (sl == 0) begin push_e  = e; push  = 1'b1; n_push++;  end
+                else         begin push2_e = e; push2 = 1'b1; n_push2++; end
+              end
             end
             #1;
 
@@ -335,6 +346,7 @@ module qv_rs_tb #(
             x_fpu = f_fpu;
 
             check($sformatf("t=%0d room", t), b(room), b(gn < DEPTH));
+            check($sformatf("t=%0d room for two", t), b(room2), b(gn + 2 <= DEPTH));
             check($sformatf("t=%0d has_div", t), b(has_div), b(f_div));
             check($sformatf("t=%0d has_fds", t), b(has_fds), b(f_fds));
             check($sformatf("t=%0d ALU/BRU port taken", t), b(sel_ab), b(f_ab));
@@ -383,10 +395,12 @@ module qv_rs_tb #(
 
             // ---- the edge: the model follows ----
             pushed_now = push;
+            pushed2_now = push2;
             old_gn     = gn;
             @(posedge clk);
             #1;
             push = 1'b0;
+            push2 = 1'b0;
             if (f_ab)  begin tag_used[g_tag[e_ab]] = 1'b0; end
             if (x_div) begin tag_used[g_tag[e_div]] = 1'b0; div_busy_until = t + 1 + int'($urandom % 10); end
             if (x_fpu) begin
@@ -400,6 +414,10 @@ module qv_rs_tb #(
                 if (i < gn && ((f_ab && i == e_ab) || (x_div && i == e_div) || (x_fpu && i == e_fpu))) g_remove(i);
             if (pushed_now) begin
                 g_move(old_gn, gn);
+                gn++;
+            end
+            if (pushed2_now) begin                        // behind the first
+                g_move(old_gn + 1, gn);
                 gn++;
             end
             // producers that delivered in cycle t leave (their tags are free for reuse)
@@ -419,10 +437,11 @@ module qv_rs_tb #(
             @(negedge clk);
         end
 
-        $display("qv_rs_tb (DEPTH %0d, BYPASS_EN %0d, LSU_BYPASS %0d): %0d pushes; ALU/BRU %0d (ALU %0d, BRU %0d, %0d past an older waiting one), DIV %0d, FPU %0d, FDS %0d; %0d dispatch-cycle captures, %0d same-cycle bypass operands, %0d late operands, %0d divide holds, %0d FDS holds, %0d full cycles, %0d flushes",
-                 DEPTH, BYPASS_EN, LSU_BYPASS, n_push, n_ab, n_alu, n_bru, n_ooo, n_div, n_fpu, n_fds, n_capture,
+        $display("qv_rs_tb (DEPTH %0d, BYPASS_EN %0d, LSU_BYPASS %0d, PUSH2 %0d): %0d pushes (%0d second); ALU/BRU %0d (ALU %0d, BRU %0d, %0d past an older waiting one), DIV %0d, FPU %0d, FDS %0d; %0d dispatch-cycle captures, %0d same-cycle bypass operands, %0d late operands, %0d divide holds, %0d FDS holds, %0d full cycles, %0d flushes",
+                 DEPTH, BYPASS_EN, LSU_BYPASS, PUSH2, n_push, n_push2, n_ab, n_alu, n_bru, n_ooo, n_div, n_fpu, n_fds, n_capture,
                  n_same, n_late, n_div_hold, n_fds_hold, n_full, n_flush);
         check("coverage: ALU issued", b(n_alu > 100), 1);
+        if (PUSH2 && DEPTH > 1) check("coverage: second pushes", b(n_push2 > 500), 1);
         check("coverage: BRU issued", b(n_bru > 50), 1);
         if (DEPTH > 1) begin                                  // (one entry: none of these can happen)
             check("coverage: issued past an older waiting entry", b(n_ooo > 50), 1);
