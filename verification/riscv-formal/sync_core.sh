@@ -48,7 +48,7 @@ case "${1:-}" in
         REF=1
         # the reference's own files (ref_design_files.list) and its macros header, flat in design/ (the cfg lists them)
         FILES="$(grep -E '^verification/reference/' verification/regress/ref_design_files.list) verification/reference/ref_macros.svh" ;;
-    pipe|pipe-rs0|pipe-full|pipe-amo|pipe-sv39|pipe-sb|pipe-fpu)
+    pipe|pipe-rs0|pipe-full|pipe-amo|pipe-sv39|pipe-sb|pipe-fpu|pipe-w2)
         NAME=quantiumv_pipe
         [ "$1" == "pipe-rs0" ] && SUFFIX=_rs0
         [ "$1" == "pipe-full" ] && SUFFIX=_full
@@ -56,9 +56,10 @@ case "${1:-}" in
         [ "$1" == "pipe-sv39" ] && SUFFIX=_sv39
         [ "$1" == "pipe-fpu" ] && SUFFIX=_fpu
         [ "$1" == "pipe-amo" ] && NAME=quantiumv_pipe_amo
+        [ "$1" == "pipe-w2" ] && NAME=quantiumv_pipe_w2        # two retirement channels (O4), its own checks.cfg
         FILES=$(grep -E '^design/(pipe/|decoder\.sv|alu\.sv|c_expand\.sv|csr_file\.sv|register_file\.sv|divider\.sv)' \
                     verification/regress/design_files.list) ;;
-    *) echo "usage: sync_core.sh ref|pipe|pipe-rs0|pipe-full|pipe-amo|pipe-sv39|pipe-sb|pipe-fpu" >&2; exit 2 ;;
+    *) echo "usage: sync_core.sh ref|pipe|pipe-rs0|pipe-full|pipe-amo|pipe-sv39|pipe-sb|pipe-fpu|pipe-w2" >&2; exit 2 ;;
 esac
 
 DST="$RVFORMAL/cores/$NAME$SUFFIX"

@@ -1,5 +1,5 @@
 #!/bin/bash
-# run_sweep.sh ref|pipe|pipe-rs0|pipe-full|pipe-amo|pipe-sv39|pipe-sb|pipe-fpu [-j N] [--only REGEX] [--timeout SECONDS] [--rerun]
+# run_sweep.sh ref|pipe|pipe-rs0|pipe-full|pipe-amo|pipe-sv39|pipe-sb|pipe-fpu|pipe-w2 [-j N] [--only REGEX] [--timeout SECONDS] [--rerun]
 #
 # Runs a core's generated riscv-formal checks (see sync_core.sh), N at a
 # time with a 4 s stagger between launches (simultaneous launches killed
@@ -18,7 +18,8 @@ case "${1:-}" in
     pipe-sv39) NAME=quantiumv_pipe_sv39 ;;
     pipe-sb) NAME=quantiumv_pipe_sb ;;
     pipe-fpu) NAME=quantiumv_pipe_fpu ;;
-    *) echo "usage: run_sweep.sh ref|pipe|pipe-rs0|pipe-full|pipe-amo|pipe-sv39|pipe-sb|pipe-fpu [-j N] [--only REGEX] [--timeout S] [--rerun]" >&2; exit 2 ;;
+    pipe-w2) NAME=quantiumv_pipe_w2 ;;
+    *) echo "usage: run_sweep.sh ref|pipe|pipe-rs0|pipe-full|pipe-amo|pipe-sv39|pipe-sb|pipe-fpu|pipe-w2 [-j N] [--only REGEX] [--timeout S] [--rerun]" >&2; exit 2 ;;
 esac
 shift
 while [ $# -gt 0 ]; do
