@@ -119,7 +119,7 @@ module lockstep_tb #(
     // itself when side B retires two a cycle; +MODE_B forces it on (with one a cycle every retirement is a boundary,
     // and the verdicts must be mode A's).
 `ifndef QV_PIPE_COMMIT_W
-`define QV_PIPE_COMMIT_W 1
+`define QV_PIPE_COMMIT_W 2                // the core's default (design/pipe/core.sv)
 `endif
     logic   mode_b;
     initial mode_b = (B_PIPE && `QV_PIPE_COMMIT_W > 1) || $test$plusargs("MODE_B");

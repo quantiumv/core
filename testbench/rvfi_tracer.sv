@@ -33,7 +33,7 @@ module rvfi_tracer;
     // NRET channels, packed riscv-formal style (channel 0, the oldest, in the low bits): the pipelined core retires
     // QV_PIPE_COMMIT_W a cycle, the reference one. satp is one channel on both.
 `ifndef QV_PIPE_COMMIT_W
-`define QV_PIPE_COMMIT_W 1
+`define QV_PIPE_COMMIT_W 2                // the core's default (design/pipe/core.sv)
 `endif
 `ifdef QV_REF_AS_CORE
     localparam int NRET = 1;

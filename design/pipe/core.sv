@@ -183,17 +183,17 @@
 `endif
 
 // O4 (two-wide), one knob per step: QV_PIPE_COMMIT_W instructions retired a cycle (the RVFI ports carry that many
-// channels, oldest in channel 0), QV_PIPE_DISPATCH_W dispatched a cycle, QV_PIPE_ALU_PORTS ALU issue ports. 1 is the
-// core before O4. (So far: COMMIT_W 2 retires a second instruction when qv_commit's pair rule allows; dispatch and the
-// ALU stay one.)
+// channels, oldest in channel 0; qv_commit's pair rule), QV_PIPE_DISPATCH_W dispatched a cycle (qv_issue's pair rules),
+// QV_PIPE_ALU_PORTS ALU issue ports (the second without a multiplier or branches). 2 by default since O4e; all three at
+// 1 are the core before O4, cycle for cycle. The testbenches that size RVFI by QV_PIPE_COMMIT_W default to the same.
 `ifndef QV_PIPE_COMMIT_W
-`define QV_PIPE_COMMIT_W 1
+`define QV_PIPE_COMMIT_W 2
 `endif
 `ifndef QV_PIPE_DISPATCH_W
-`define QV_PIPE_DISPATCH_W 1
+`define QV_PIPE_DISPATCH_W 2
 `endif
 `ifndef QV_PIPE_ALU_PORTS
-`define QV_PIPE_ALU_PORTS 1
+`define QV_PIPE_ALU_PORTS 2
 `endif
 `ifndef QV_PIPE_PMA_RAM_SIZE
 `define QV_PIPE_PMA_RAM_SIZE 64'h0

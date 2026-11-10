@@ -84,7 +84,7 @@ module run_soc_tb;
 `ifdef RISCV_FORMAL
     // one line per retirement, channel 0 (the oldest) first; NRET as testbench/rvfi_tracer.sv has it
 `ifndef QV_PIPE_COMMIT_W
-`define QV_PIPE_COMMIT_W 1
+`define QV_PIPE_COMMIT_W 2                // the core's default (design/pipe/core.sv)
 `endif
 `ifdef QV_REF_AS_CORE
     localparam int NRET = 1;

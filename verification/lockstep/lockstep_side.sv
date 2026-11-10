@@ -194,7 +194,7 @@ module lockstep_side #(
     // The core's RVFI channels (the pipelined core retires QV_PIPE_COMMIT_W a cycle, ref_core one), packed as the
     // core has them: channel 0, the oldest, in the low bits
 `ifndef QV_PIPE_COMMIT_W
-`define QV_PIPE_COMMIT_W 1
+`define QV_PIPE_COMMIT_W 2                // the core's default (design/pipe/core.sv)
 `endif
     localparam int NRET = CORE_PIPE ? `QV_PIPE_COMMIT_W : 1;
     logic [NRET-1:0]    p_valid, p_trap, p_halt, p_intr, p_frd_wvalid;
