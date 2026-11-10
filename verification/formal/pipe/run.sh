@@ -21,7 +21,8 @@
 #   to D; for the store buffer a drain out of order, a lost byte select, a beat that starts while
 #   the LSU is on the bus or the walker's beat is in flight, one that ignores the full-buffer rule, a cyc held into
 #   the response cycle, an answer taken that is not the buffer's own, an o_match that sees a dead entry, a beat
-#   with nothing to write, a push into a full buffer, an idle start that follows the response; for fetch a stream through a redirect, a yield or
+#   with nothing to write, a push into a full buffer, an idle start that follows the response, a drain that yields to
+#   a ready LSU access far from the head (P9d's rule, off since O4f); for fetch a stream through a redirect, a yield or
 #   a full buffer, a request presented with the old address; for the reservation station a late operand woken by a
 #   unit's writeback, no dispatch-cycle capture, the youngest entry first, a divide past an older one or to a busy
 #   divider, a select in a flush cycle, an entry that stays after it goes, a lost divider wakeup, an FMA that ignores
@@ -143,6 +144,7 @@ EOF
     mutant sb_beat_with_nothing sb 's/wire has_next = (cnt_q > (resp ? CNT_W'"'"'(1) : CNT_W'"'"'(0)));/wire has_next = 1'"'"'b1;/'
     mutant sb_push_when_full   sb 's/wire push = i_push \&\& o_ready;/wire push = i_push;/'
     mutant sb_idle_in_response sb 's/assign o_start_idle = !beat_q \&\& (cnt_q != .0)/assign o_start_idle = (!beat_q || resp) \&\& (cnt_q != 0)/'
+    mutant sb_yields_to_ready  sb 's/!(YIELD_READY \&\& i_lsu_busy)/!i_lsu_busy/g'
     # fpu_mutant NAME FILE SED-EXPR: the FP unit is five files (the datapath abstracted); one of them is mutated
     fpu_mutant() {
         local name=$1 file=$2 expr=$3

@@ -1,0 +1,37 @@
+{
+ "dut": "design/pipe/qv_sb.sv",
+ "tb": "design/pipe/qv_sb_tb.sv",
+ "files": [
+  "design/pipe/qv_sb.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench"
+ ],
+ "cwd": "design",
+ "timeout": 600,
+ "mutants": [
+  {
+   "name": "yields to a ready LSU access far from the head (P9d's rule)",
+   "old": "(urgent || (!(YIELD_READY && i_lsu_busy) && !i_load_near))",
+   "new": "(urgent || (!i_lsu_busy && !i_load_near))",
+   "count": 2
+  },
+  {
+   "name": "ignores a load near the head",
+   "old": "(urgent || (!(YIELD_READY && i_lsu_busy) && !i_load_near))",
+   "new": "(urgent || !(YIELD_READY && i_lsu_busy))",
+   "count": 2
+  },
+  {
+   "name": "yields to a ready access in the idle decision only",
+   "old": "assign o_start_idle = !beat_q && (cnt_q != '0) && !i_lsu_inflight && !i_ptw_beat\n                          && (urgent || (!(YIELD_READY && i_lsu_busy) && !i_load_near));",
+   "new": "assign o_start_idle = !beat_q && (cnt_q != '0) && !i_lsu_inflight && !i_ptw_beat\n                          && (urgent || (!i_lsu_busy && !i_load_near));"
+  }
+ ]
+}

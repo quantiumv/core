@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 
 /*
- * sb_props -- SymbiYosys properties for design/pipe/qv_sb.sv, the store buffer (DEPTH 2, YIELD_MAX 3 here).
+ * sb_props -- SymbiYosys properties for design/pipe/qv_sb.sv, the store buffer (DEPTH 2, YIELD_MAX 3 and
+ * YIELD_READY 0, the core's default, here).
  * Pushes, the match address, the LSU's and the walker's state and the answers are free; the slave is a
  * registered one (it answers a request that was on the bus, unanswered, the cycle before -- see fetch_props.sv),
  * and the LSU and the walker are never on the bus while one of the buffer's beats is in flight (the core makes
@@ -15,8 +16,8 @@
  *   - a beat stays on the bus, unchanged, until answered, and cyc is low in its response cycle;
  *   - nothing starts that has nothing to write: the beat count never passes the push count;
  *   - a beat starts only while the LSU is not on the bus and the walker's beat is not in flight; and, unless
- *     the buffer is full or has yielded for YIELD_MAX cycles, not while an LSU access is ready to start or a load
- *     is near the head;
+ *     the buffer is full or has yielded for YIELD_MAX cycles, not while a load is near the head (with YIELD_READY,
+ *     not while any LSU access is ready to start either); and it does start whenever none of that holds it;
  *   - o_start_now is followed by a beat in the next cycle, and no beat starts without it;
  *   - an answer that is not a beat's own (none in flight) changes nothing;
  *   - o_empty / o_ready follow the count, which never passes DEPTH; a push into a full buffer is refused;
@@ -37,13 +38,14 @@ module sb_props (
 );
     localparam int DEPTH = 2;
     localparam int YIELD_MAX = 3;
+    localparam bit YIELD_READY = 1'b0;
 
     logic        ready, empty, match, start_now, start_idle, beat, cyc;
     logic [31:0] addr;
     logic [63:0] dat;
     logic [7:0]  sel;
 
-    qv_sb #(.DEPTH(DEPTH), .YIELD_MAX(YIELD_MAX)) dut (
+    qv_sb #(.DEPTH(DEPTH), .YIELD_MAX(YIELD_MAX), .YIELD_READY(YIELD_READY)) dut (
         .clk(clk), .rst(rst),
         .i_push(push), .i_push_addr(push_addr), .i_push_sel(push_sel), .i_push_data(push_data),
         .o_ready(ready), .o_empty(empty),
@@ -147,8 +149,12 @@ module sb_props (
                 assert (!lsu_inflight);
                 assert (!ptw_beat);
                 assert (cnt_model > (resp ? 4'd1 : 4'd0));
-                if (!(cnt_model == DEPTH) && !(dut.held_q >= YIELD_MAX)) assert (!lsu_busy && !load_near);
+                if (!(cnt_model == DEPTH) && !(dut.held_q >= YIELD_MAX)) assert (!(YIELD_READY && lsu_busy) && !load_near);
             end
+            // ... and whenever nothing holds it, it starts
+            if ((!beat || resp) && cnt_model > (resp ? 4'd1 : 4'd0) && !lsu_inflight && !ptw_beat
+                    && !(YIELD_READY && lsu_busy) && !load_near)
+                assert (start_now);
             if (p_start) assert (beat);
             // the decision the LSU takes: an idle drain's, which does not look at the response
             assert (start_idle == (start_now && !beat));
@@ -174,6 +180,7 @@ module sb_props (
             cover (resp && cnt_model == 4'd2);
             cover (start_now && resp);                  // a beat decided in the previous beat's response cycle
             cover (cnt_model == DEPTH && start_now && lsu_busy);   // full overrides a ready LSU access
+            cover (!(cnt_model == DEPTH) && dut.held_q == 0 && start_now && lsu_busy && !lsu_inflight);   // a ready access far from the head does not hold it
             cover (!(cnt_model == DEPTH) && dut.held_q >= YIELD_MAX && start_now && load_near);   // yielded out
             cover (push && !ready);
             cover ((ack || err) && !beat);              // a foreign answer
