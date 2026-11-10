@@ -30,34 +30,44 @@ module rvfi_tracer;
     logic        wbm_we, wbm_cyc, wbm_stb, wbm_ack, wbm_err, wbm_lock;
 
     // -- RVFI taps (see core.sv's own `ifdef RISCV_FORMAL port block) --
-    logic        rvfi_valid;
-    logic [63:0] rvfi_order;
-    logic [31:0] rvfi_insn;
-    logic        rvfi_trap;
-    logic        rvfi_halt;
-    logic        rvfi_intr;
-    logic [1:0]  rvfi_mode;
-    logic [1:0]  rvfi_ixl;
-    logic [4:0]  rvfi_rs1_addr, rvfi_rs2_addr;
-    logic [63:0] rvfi_rs1_rdata, rvfi_rs2_rdata;
-    logic [4:0]  rvfi_rd_addr;
-    logic [63:0] rvfi_rd_wdata;
-    logic [63:0] rvfi_pc_rdata, rvfi_pc_wdata;
-    logic [63:0] rvfi_mem_addr;
-    logic [7:0]  rvfi_mem_rmask, rvfi_mem_wmask;
-    logic [63:0] rvfi_mem_rdata, rvfi_mem_wdata;
-    logic [63:0] rvfi_csr_mepc_rmask, rvfi_csr_mepc_wmask, rvfi_csr_mepc_rdata, rvfi_csr_mepc_wdata;
-    logic [63:0] rvfi_csr_mcause_rmask, rvfi_csr_mcause_wmask, rvfi_csr_mcause_rdata, rvfi_csr_mcause_wdata;
-    logic [63:0] rvfi_csr_sepc_rmask, rvfi_csr_sepc_wmask, rvfi_csr_sepc_rdata, rvfi_csr_sepc_wdata;
-    logic [63:0] rvfi_csr_scause_rmask, rvfi_csr_scause_wmask, rvfi_csr_scause_rdata, rvfi_csr_scause_wdata;
-    logic [63:0] rvfi_csr_pmpcfg0_rmask, rvfi_csr_pmpcfg0_wmask, rvfi_csr_pmpcfg0_rdata, rvfi_csr_pmpcfg0_wdata;
-    logic [63:0] rvfi_csr_pmpaddr0_rmask, rvfi_csr_pmpaddr0_wmask, rvfi_csr_pmpaddr0_rdata, rvfi_csr_pmpaddr0_wdata;
-    logic [63:0] rvfi_csr_medeleg_rmask, rvfi_csr_medeleg_wmask, rvfi_csr_medeleg_rdata, rvfi_csr_medeleg_wdata;
-    logic [63:0] rvfi_csr_satp_rmask, rvfi_csr_satp_wmask, rvfi_csr_satp_rdata, rvfi_csr_satp_wdata;
-    logic        rvfi_any_trap_taken, rvfi_any_debug_entry;
-    logic        rvfi_frd_wvalid;               // F/D: the FP register a retirement wrote
-    logic [4:0]  rvfi_frd_addr;
-    logic [63:0] rvfi_frd_wdata;
+    // NRET channels, packed riscv-formal style (channel 0, the oldest, in the low bits): the pipelined core retires
+    // QV_PIPE_COMMIT_W a cycle, the reference one. satp is one channel on both.
+`ifndef QV_PIPE_COMMIT_W
+`define QV_PIPE_COMMIT_W 1
+`endif
+`ifdef QV_REF_AS_CORE
+    localparam int NRET = 1;
+`else
+    localparam int NRET = `QV_PIPE_COMMIT_W;
+`endif
+    logic [NRET-1:0]    rvfi_valid;
+    logic [NRET*64-1:0] rvfi_order;
+    logic [NRET*32-1:0] rvfi_insn;
+    logic [NRET-1:0]    rvfi_trap;
+    logic [NRET-1:0]    rvfi_halt;
+    logic [NRET-1:0]    rvfi_intr;
+    logic [NRET*2-1:0]  rvfi_mode;
+    logic [NRET*2-1:0]  rvfi_ixl;
+    logic [NRET*5-1:0]  rvfi_rs1_addr, rvfi_rs2_addr;
+    logic [NRET*64-1:0] rvfi_rs1_rdata, rvfi_rs2_rdata;
+    logic [NRET*5-1:0]  rvfi_rd_addr;
+    logic [NRET*64-1:0] rvfi_rd_wdata;
+    logic [NRET*64-1:0] rvfi_pc_rdata, rvfi_pc_wdata;
+    logic [NRET*64-1:0] rvfi_mem_addr;
+    logic [NRET*8-1:0]  rvfi_mem_rmask, rvfi_mem_wmask;
+    logic [NRET*64-1:0] rvfi_mem_rdata, rvfi_mem_wdata;
+    logic [NRET*64-1:0] rvfi_csr_mepc_rmask, rvfi_csr_mepc_wmask, rvfi_csr_mepc_rdata, rvfi_csr_mepc_wdata;
+    logic [NRET*64-1:0] rvfi_csr_mcause_rmask, rvfi_csr_mcause_wmask, rvfi_csr_mcause_rdata, rvfi_csr_mcause_wdata;
+    logic [NRET*64-1:0] rvfi_csr_sepc_rmask, rvfi_csr_sepc_wmask, rvfi_csr_sepc_rdata, rvfi_csr_sepc_wdata;
+    logic [NRET*64-1:0] rvfi_csr_scause_rmask, rvfi_csr_scause_wmask, rvfi_csr_scause_rdata, rvfi_csr_scause_wdata;
+    logic [NRET*64-1:0] rvfi_csr_pmpcfg0_rmask, rvfi_csr_pmpcfg0_wmask, rvfi_csr_pmpcfg0_rdata, rvfi_csr_pmpcfg0_wdata;
+    logic [NRET*64-1:0] rvfi_csr_pmpaddr0_rmask, rvfi_csr_pmpaddr0_wmask, rvfi_csr_pmpaddr0_rdata, rvfi_csr_pmpaddr0_wdata;
+    logic [NRET*64-1:0] rvfi_csr_medeleg_rmask, rvfi_csr_medeleg_wmask, rvfi_csr_medeleg_rdata, rvfi_csr_medeleg_wdata;
+    logic [63:0]        rvfi_csr_satp_rmask, rvfi_csr_satp_wmask, rvfi_csr_satp_rdata, rvfi_csr_satp_wdata;
+    logic               rvfi_any_trap_taken, rvfi_any_debug_entry;
+    logic [NRET-1:0]    rvfi_frd_wvalid;        // F/D: the FP register a retirement wrote
+    logic [NRET*5-1:0]  rvfi_frd_addr;
+    logic [NRET*64-1:0] rvfi_frd_wdata;
 
     // Named connections only for wb_fetch/wb_mem + every RVFI port;
     // everything else (icache_flush_o, debug/DM/progbuf/interrupt
@@ -146,7 +156,8 @@ module rvfi_tracer;
         n = 0;
         while (n < max_cycles) begin
             @(posedge clk); #1;
-            if (rvfi_valid) begin
+            // one line per retirement, channel 0 (the oldest) first
+            for (int ch = 0; ch < NRET; ch++) if (rvfi_valid[ch]) begin
                 // trap_val: core.sv's own LIVE combinational wire (not
                 // mtval_q/stval_q, which are registered and lag this
                 // cycle by one -- see this project's own established
@@ -159,6 +170,7 @@ module rvfi_tracer;
                 // combining trap_to_s/interrupt_to_s the same way
                 // csr_file0's own i_trap_to_s input does) selects
                 // mcause_wdata vs scause_wdata DETERMINISTICALLY.
+                // (Both are per cycle, not per channel: a trap never retires beside another instruction.)
                 //
                 // A REAL bug this fixes, found by direct comparison
                 // against Sail: the previous version picked whichever
@@ -171,15 +183,15 @@ module rvfi_tracer;
                 // real trap, with a real (unchanged-but-rewritten)
                 // cause, genuinely occurred.
                 $write("rvfi order=%0d pc_rdata=%h pc_wdata=%h insn=%h mode=%0d trap=%b intr=%b cause=%h tval=%h rd_addr=%0d rd_wdata=%h rs1_addr=%0d rs1_rdata=%h rs2_addr=%0d rs2_rdata=%h mem_addr=%h mem_rmask=%h mem_wmask=%h mem_rdata=%h mem_wdata=%h",
-                    rvfi_order, rvfi_pc_rdata, rvfi_pc_wdata, rvfi_insn, rvfi_mode,
-                    rvfi_trap, rvfi_intr,
-                    rvfi_trap ? (dut.route_to_s ? rvfi_csr_scause_wdata : rvfi_csr_mcause_wdata) : 64'b0,
-                    (rvfi_trap ? dut.trap_val : 64'b0),
-                    rvfi_rd_addr, rvfi_rd_wdata, rvfi_rs1_addr, rvfi_rs1_rdata,
-                    rvfi_rs2_addr, rvfi_rs2_rdata, rvfi_mem_addr, rvfi_mem_rmask,
-                    rvfi_mem_wmask, rvfi_mem_rdata, rvfi_mem_wdata);
+                    rvfi_order[64*ch +: 64], rvfi_pc_rdata[64*ch +: 64], rvfi_pc_wdata[64*ch +: 64],
+                    rvfi_insn[32*ch +: 32], rvfi_mode[2*ch +: 2], rvfi_trap[ch], rvfi_intr[ch],
+                    rvfi_trap[ch] ? (dut.route_to_s ? rvfi_csr_scause_wdata[64*ch +: 64] : rvfi_csr_mcause_wdata[64*ch +: 64]) : 64'b0,
+                    (rvfi_trap[ch] ? dut.trap_val : 64'b0),
+                    rvfi_rd_addr[5*ch +: 5], rvfi_rd_wdata[64*ch +: 64], rvfi_rs1_addr[5*ch +: 5], rvfi_rs1_rdata[64*ch +: 64],
+                    rvfi_rs2_addr[5*ch +: 5], rvfi_rs2_rdata[64*ch +: 64], rvfi_mem_addr[64*ch +: 64], rvfi_mem_rmask[8*ch +: 8],
+                    rvfi_mem_wmask[8*ch +: 8], rvfi_mem_rdata[64*ch +: 64], rvfi_mem_wdata[64*ch +: 64]);
                 // F/D: only on an FP register write (sail_diff.py and cmp_rvfi.py read it as optional)
-                if (rvfi_frd_wvalid) $write(" frd_addr=%0d frd_wdata=%h", rvfi_frd_addr, rvfi_frd_wdata);
+                if (rvfi_frd_wvalid[ch]) $write(" frd_addr=%0d frd_wdata=%h", rvfi_frd_addr[5*ch +: 5], rvfi_frd_wdata[64*ch +: 64]);
                 $display("");
             end
             tohost_val = sram0.memory[tohost_addr[31:3]];

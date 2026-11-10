@@ -82,19 +82,29 @@ module run_soc_tb;
     end
 
 `ifdef RISCV_FORMAL
+    // one line per retirement, channel 0 (the oldest) first; NRET as testbench/rvfi_tracer.sv has it
+`ifndef QV_PIPE_COMMIT_W
+`define QV_PIPE_COMMIT_W 1
+`endif
+`ifdef QV_REF_AS_CORE
+    localparam int NRET = 1;
+`else
+    localparam int NRET = `QV_PIPE_COMMIT_W;
+`endif
     always @(posedge clk) begin
-        if (trace_fd != 0 && dut.core0.rvfi_valid)
-            $fdisplay(trace_fd, "rvfi order=%0d pc_rdata=%h pc_wdata=%h insn=%h mode=%0d trap=%b intr=%b cause=%h tval=%h rd_addr=%0d rd_wdata=%h rs1_addr=%0d rs1_rdata=%h rs2_addr=%0d rs2_rdata=%h mem_addr=%h mem_rmask=%h mem_wmask=%h mem_rdata=%h mem_wdata=%h",
-                dut.core0.rvfi_order, dut.core0.rvfi_pc_rdata, dut.core0.rvfi_pc_wdata,
-                dut.core0.rvfi_insn, dut.core0.rvfi_mode, dut.core0.rvfi_trap, dut.core0.rvfi_intr,
-                dut.core0.rvfi_trap ? (dut.core0.route_to_s ? dut.core0.rvfi_csr_scause_wdata
-                                                            : dut.core0.rvfi_csr_mcause_wdata) : 64'b0,
-                dut.core0.rvfi_trap ? dut.core0.trap_val : 64'b0,
-                dut.core0.rvfi_rd_addr, dut.core0.rvfi_rd_wdata,
-                dut.core0.rvfi_rs1_addr, dut.core0.rvfi_rs1_rdata,
-                dut.core0.rvfi_rs2_addr, dut.core0.rvfi_rs2_rdata,
-                dut.core0.rvfi_mem_addr, dut.core0.rvfi_mem_rmask, dut.core0.rvfi_mem_wmask,
-                dut.core0.rvfi_mem_rdata, dut.core0.rvfi_mem_wdata);
+        if (trace_fd != 0)
+            for (int ch = 0; ch < NRET; ch++) if (dut.core0.rvfi_valid[ch])
+                $fdisplay(trace_fd, "rvfi order=%0d pc_rdata=%h pc_wdata=%h insn=%h mode=%0d trap=%b intr=%b cause=%h tval=%h rd_addr=%0d rd_wdata=%h rs1_addr=%0d rs1_rdata=%h rs2_addr=%0d rs2_rdata=%h mem_addr=%h mem_rmask=%h mem_wmask=%h mem_rdata=%h mem_wdata=%h",
+                    dut.core0.rvfi_order[64*ch +: 64], dut.core0.rvfi_pc_rdata[64*ch +: 64], dut.core0.rvfi_pc_wdata[64*ch +: 64],
+                    dut.core0.rvfi_insn[32*ch +: 32], dut.core0.rvfi_mode[2*ch +: 2], dut.core0.rvfi_trap[ch], dut.core0.rvfi_intr[ch],
+                    dut.core0.rvfi_trap[ch] ? (dut.core0.route_to_s ? dut.core0.rvfi_csr_scause_wdata[64*ch +: 64]
+                                                                    : dut.core0.rvfi_csr_mcause_wdata[64*ch +: 64]) : 64'b0,
+                    dut.core0.rvfi_trap[ch] ? dut.core0.trap_val : 64'b0,
+                    dut.core0.rvfi_rd_addr[5*ch +: 5], dut.core0.rvfi_rd_wdata[64*ch +: 64],
+                    dut.core0.rvfi_rs1_addr[5*ch +: 5], dut.core0.rvfi_rs1_rdata[64*ch +: 64],
+                    dut.core0.rvfi_rs2_addr[5*ch +: 5], dut.core0.rvfi_rs2_rdata[64*ch +: 64],
+                    dut.core0.rvfi_mem_addr[64*ch +: 64], dut.core0.rvfi_mem_rmask[8*ch +: 8], dut.core0.rvfi_mem_wmask[8*ch +: 8],
+                    dut.core0.rvfi_mem_rdata[64*ch +: 64], dut.core0.rvfi_mem_wdata[64*ch +: 64]);
     end
 `endif
 endmodule
