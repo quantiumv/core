@@ -43,6 +43,9 @@ module qv_lsq_tb #(
     logic                    pop = 1'b0;
     logic [QV_ROB_TAG_W-1:0] pop_tag = '0;
     lsu_res_t                head_res;
+    logic                    pop2 = 1'b0;              // O4: a second retirement in the same cycle
+    logic [QV_ROB_TAG_W-1:0] pop2_tag = '0;
+    lsu_res_t                head1_res;
     logic                    bar_alloc = 1'b0;
     logic [QV_ROB_TAG_W-1:0] bar_tag = '0;
     logic                    early, match;
@@ -60,6 +63,7 @@ module qv_lsq_tb #(
         .i_req(req), .o_free(free),
         .o_eng_req(eng_req), .i_eng_take(e_take), .i_eng_wb(eng_wb), .i_eng_res(eng_res),
         .i_pop(pop), .i_pop_tag(pop_tag), .o_head_res(head_res),
+        .i_pop2(pop2), .i_pop2_tag(pop2_tag), .o_head1_res(head1_res),
         .i_bar_alloc(bar_alloc), .i_bar_tag(bar_tag), .o_early(early), .i_match_addr(match_addr), .o_match(match),
         .o_xl_req(xl_req), .o_xl_va(xl_va), .o_xl_wr(xl_wr), .i_xl_free(xl_free), .i_xl_active(1'b1),
         .i_xl_done(xl_req && !xl_miss), .i_xl_pf(xl_fault || (xl_wr && xl_va[32])), .i_xl_af(1'b0),
@@ -470,20 +474,31 @@ module qv_lsq_tb #(
         // ---- random ----
         seen_tags.delete();
         begin
-            int n_pops, n_flush;
-            n_pops = 0; n_flush = 0;
+            int n_pops, n_flush, n_pairs;
+            n_pops = 0; n_flush = 0; n_pairs = 0;
             for (int k = 0; k < 4000; k++) begin
                 // drive this cycle's inputs
-                idle(); pop = 1'b0; flush = 1'b0;
+                idle(); pop = 1'b0; pop2 = 1'b0; flush = 1'b0;
                 e_lat = $urandom_range(0, 3);
                 if (free && $urandom_range(0, 2) != 0) begin
                     present(t0, a0);
                     q_tag.push_back(t0); q_a.push_back(a0); q_done.push_back(-1);
                 end
+                // (O4) a second retirement in the cycle: the op behind a retiring one, or the oldest one behind a
+                // retirement that is no memory op
                 if (q_tag.size() > 0 && q_done[0] >= 0 && cyc > q_done[0] && $urandom_range(0, 2) != 0) begin
                     pop = 1'b1; pop_tag = q_tag[0];
+                    if (q_tag.size() > 1 && q_done[1] >= 0 && cyc > q_done[1] && $urandom_range(0, 1) != 0) begin
+                        pop2 = 1'b1; pop2_tag = q_tag[1];
+                    end
                 end else if ($urandom_range(0, 9) == 0) begin
                     pop = 1'b1; pop_tag = next_tag + 4'd8;        // a ROB entry that is not a memory op
+                    if (q_tag.size() > 0 && q_done[0] >= 0 && cyc > q_done[0] && $urandom_range(0, 1) != 0) begin
+                        pop2 = 1'b1; pop2_tag = q_tag[0];
+                    end
+                end else if ($urandom_range(0, 19) == 0) begin
+                    pop = 1'b1; pop_tag = next_tag + 4'd8;        // two retirements, neither a memory op
+                    pop2 = 1'b1; pop2_tag = next_tag + 4'd9;
                 end
                 if ($urandom_range(0, 199) == 0) flush = 1'b1;
                 #1;
@@ -494,6 +509,15 @@ module qv_lsq_tb #(
                     check("random: a retirement reads its own op's result", head_res.tval, exp_tval(q_tag[0], q_a[0]));
                     check("random: ... all of it", head_res.mem_addr, exp_maddr(q_tag[0], q_a[0]));
                     n_pops++;
+                    if (pop2) begin
+                        check("random: a second retirement reads its own op's result (behind the head)",
+                              head1_res.tval, exp_tval(q_tag[1], q_a[1]));
+                        n_pairs++;
+                    end
+                end else if (pop2 && q_tag.size() > 0 && pop2_tag == q_tag[0] && !flush) begin
+                    check("random: a second retirement reads its own op's result (the head)",
+                          head_res.tval, exp_tval(q_tag[0], q_a[0]));
+                    n_pairs++;
                 end
                 @(posedge clk);
                 // what that edge did, to the model
@@ -507,14 +531,18 @@ module qv_lsq_tb #(
                     if (pop && q_tag.size() > 0 && pop_tag == q_tag[0]) begin
                         void'(q_tag.pop_front()); void'(q_a.pop_front()); void'(q_done.pop_front());
                     end
+                    if (pop2 && q_tag.size() > 0 && pop2_tag == q_tag[0]) begin
+                        void'(q_tag.pop_front()); void'(q_a.pop_front()); void'(q_done.pop_front());
+                    end
                 end
                 #1;
             end
-            idle(); pop = 1'b0; flush = 1'b0;
-            $display("qv_lsq_tb: random: %0d retirements checked, %0d flushes, %0d ops taken by the engine",
-                     n_pops, n_flush, seen_tags.size());
+            idle(); pop = 1'b0; pop2 = 1'b0; flush = 1'b0;
+            $display("qv_lsq_tb: random: %0d retirements checked, %0d flushes, %0d ops taken by the engine, %0d pairs",
+                     n_pops, n_flush, seen_tags.size(), n_pairs);
             check("random: retirements happened", b(n_pops > 500), 64'd1);
             check("random: flushes happened", b(n_flush > 5), 64'd1);
+            check("random: pairs happened", b(n_pairs > 20), 64'd1);
         end
 
         $display("");

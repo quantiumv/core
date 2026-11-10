@@ -41,7 +41,11 @@ module qv_rob_tb #(
     logic [63:0]             l1_value, l2_value;
     logic                    head_valid;
     rob_entry_t              head;
-    logic                    pop = 1'b0;
+    logic                    pop = 1'b0, pop2 = 1'b0;
+    logic                    head1_valid;            // O4: the entry behind the head
+    rob_entry_t              head1;
+    logic [QV_ROB_TAG_W-1:0] head1_tag;
+    rob_ctrl_t               head1_ctrl;
 
     qv_rob #(.ROB_DEPTH(ROB_DEPTH)) dut (
         .clk(clk), .rst(rst), .i_flush(flush),
@@ -53,7 +57,9 @@ module qv_rob_tb #(
         .i_lookup1_tag(l1_tag), .o_lookup1_complete(l1_complete), .o_lookup1_value(l1_value),
         .i_lookup2_tag(l2_tag), .o_lookup2_complete(l2_complete), .o_lookup2_value(l2_value),
         .o_head_valid(head_valid), .o_head_entry(head), .o_head_tag(head_tag),
-        .o_head_ctrl(head_ctrl), .i_commit_pop(pop)
+        .o_head_ctrl(head_ctrl), .i_commit_pop(pop),
+        .o_head1_valid(head1_valid), .o_head1_entry(head1), .o_head1_tag(head1_tag), .o_head1_ctrl(head1_ctrl),
+        .i_commit_pop2(pop2)
     );
 
     // Entry n's fields are a pure function of n, so any slot can be
@@ -328,6 +334,43 @@ module qv_rob_tb #(
         check("post-flush: head valid", {63'b0, head_valid}, 64'd1);
         check("post-flush: head not complete", {63'b0, head.complete}, 64'd0);
         check("post-flush: head is the new entry", head.pc, 64'h1000 + 64'(4 * (seq - 1)));
+
+        // ---- O4: the entry behind the head, and two pops in one cycle ----
+        check("one entry: nothing behind the head", {63'b0, head1_valid}, 64'd0);
+        do_complete(seq - 1);
+        @(negedge clk); pop = 1'b1; pop2 = 1'b1; @(posedge clk); #1; pop = 1'b0; pop2 = 1'b0;   // a second pop alone
+        check("a second pop with one entry pops one", {63'b0, empty}, 64'd1);
+        base = seq;
+        do_alloc(); do_alloc();
+        #1;
+        check("two entries: one behind the head", {63'b0, head1_valid}, 64'd1);
+        check("behind the head: its tag", {60'b0, head1_tag}, {60'b0, tag_of[base + 1]});
+        check("behind the head: its pc", head1.pc, 64'h1000 + 64'(4 * (base + 1)));
+        check("behind the head: its raw", {32'b0, head1.raw}, 64'h5000_0000 + 64'(base + 1));
+        check("behind the head: its rd", {59'b0, head1.rd}, 64'((base + 1) % 31 + 1));
+        check("behind the head: its ctrl", {59'b0, head1_ctrl.rvfi_rs1}, 64'((base + 1) % 7));
+        check("behind the head: not complete yet", {63'b0, head1.complete}, 64'd0);
+        do_complete(base + 1);
+        #1;
+        check("behind the head: complete", {63'b0, head1.complete}, 64'd1);
+        check("behind the head: its value", head1.value, val_of(base + 1));
+        do_complete(base);
+        @(negedge clk); pop = 1'b1; pop2 = 1'b1; @(posedge clk); #1; pop = 1'b0; pop2 = 1'b0;
+        check("two pops: empty", {63'b0, empty}, 64'd1);
+        check("two pops: the next tag is two past the old head", {60'b0, alloc_tag},
+              64'((int'(tag_of[base]) + 2) % (2 * ROB_DEPTH)));
+        // a second pop without the first pops nothing
+        base = seq;
+        do_alloc(); do_alloc();
+        do_complete(base); do_complete(base + 1);
+        @(negedge clk); pop2 = 1'b1; @(posedge clk); #1; pop2 = 1'b0;
+        check("a second pop alone: the head stays", {60'b0, head_tag}, {60'b0, tag_of[base]});
+        // two pops and a flush in the same cycle: the tail follows the head past both
+        @(negedge clk); pop = 1'b1; pop2 = 1'b1; flush = 1'b1; @(posedge clk); #1;
+        pop = 1'b0; pop2 = 1'b0; flush = 1'b0;
+        check("two pops and a flush: empty", {63'b0, empty}, 64'd1);
+        check("two pops and a flush: the tail is past both", {60'b0, alloc_tag},
+              64'((int'(tag_of[base]) + 2) % (2 * ROB_DEPTH)));
 
         $display("");
         $display("qv_rob_tb (ROB_DEPTH=%0d): %0d passed, %0d failed", ROB_DEPTH, pass_count, fail_count);
