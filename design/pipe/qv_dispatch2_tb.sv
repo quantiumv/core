@@ -758,6 +758,18 @@ module qv_dispatch2_tb #(
                 check("T4: its slot 1 is not late (no wait for slot 0's commit)",
                       exec_cyc[3] - exec_cyc[2], BYPASS_EN ? 64'd1 : 64'd2);
             end
+            // the same through rs2
+            begin_script();
+            push(mk_csrr(5), 0);
+            push(mk(`ADD, 6, 5, 1, 0, 0, 0, 64'd1), 0);
+            push(mk(`ADD, 5, 0, 0, 64'd11, 0, 0, 64'd0), 12);
+            push(mk(`SUB, 7, 0, 0, 64'd20, 5, 1, 0), 0);          // x7 = 20 - x5 = 9: through rs2
+            run_script("T4b", 300);
+            if (RS_DEPTH > 0) begin
+                check("T4b: the second pair dispatches in one cycle", issue_cyc[3] - issue_cyc[2], 64'd0);
+                check("T4b: its slot 1 is not late through rs2 either",
+                      exec_cyc[3] - exec_cyc[2], BYPASS_EN ? 64'd1 : 64'd2);
+            end
         end
 
         // ---- R1: random dense-hazard stream with bubbles (and CSR reads with CSR_LATE) ----
