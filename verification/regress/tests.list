@@ -195,6 +195,9 @@ pipe_rs_tb_d1|design/pipe/qv_rs_tb.sv||design|pipe|pass|900|-Pqv_rs_tb.DEPTH=1 -
 pipe_rs_tb_d4_p2|design/pipe/qv_rs_tb.sv||design|pipe|pass|900|-Pqv_rs_tb.PUSH2=1 -Pqv_rs_tb.SEED=5
 pipe_rs_tb_d2_b0_p2|design/pipe/qv_rs_tb.sv||design|pipe|pass|900|-Pqv_rs_tb.DEPTH=2 -Pqv_rs_tb.BYPASS_EN=0 -Pqv_rs_tb.LSU_BYPASS=0 -Pqv_rs_tb.PUSH2=1 -Pqv_rs_tb.SEED=6
 pipe_rs_tb_d8_l0_p2|design/pipe/qv_rs_tb.sv||design|pipe|pass|900|-Pqv_rs_tb.DEPTH=8 -Pqv_rs_tb.LSU_BYPASS=0 -Pqv_rs_tb.PUSH2=1 -Pqv_rs_tb.SEED=7
+pipe_rs_tb_d4_a2|design/pipe/qv_rs_tb.sv||design|pipe|pass|900|-Pqv_rs_tb.PUSH2=1 -Pqv_rs_tb.ALU_PORTS=2 -Pqv_rs_tb.SEED=8
+pipe_rs_tb_d8_a2_b0|design/pipe/qv_rs_tb.sv||design|pipe|pass|900|-Pqv_rs_tb.DEPTH=8 -Pqv_rs_tb.BYPASS_EN=0 -Pqv_rs_tb.LSU_BYPASS=0 -Pqv_rs_tb.PUSH2=1 -Pqv_rs_tb.ALU_PORTS=2 -Pqv_rs_tb.SEED=9
+pipe_rs_tb_d2_a2|design/pipe/qv_rs_tb.sv||design|pipe|pass|900|-Pqv_rs_tb.DEPTH=2 -Pqv_rs_tb.ALU_PORTS=2 -Pqv_rs_tb.SEED=10
 pipe_backend_tb_b1s0r8|design/pipe/qv_backend_tb.sv||design|pipe|pass||-Pqv_backend_tb.BYPASS_EN=1 -Pqv_backend_tb.SERIALIZE=0 -Pqv_backend_tb.ROB_DEPTH=8
 pipe_backend_tb_b0s0r8|design/pipe/qv_backend_tb.sv||design|pipe|pass||-Pqv_backend_tb.BYPASS_EN=0 -Pqv_backend_tb.SERIALIZE=0 -Pqv_backend_tb.ROB_DEPTH=8
 pipe_backend_tb_b1s0r8_csr|design/pipe/qv_backend_tb.sv||design|pipe|pass||-Pqv_backend_tb.BYPASS_EN=1 -Pqv_backend_tb.SERIALIZE=0 -Pqv_backend_tb.ROB_DEPTH=8 -Pqv_backend_tb.CSR_LATE=1
@@ -214,3 +217,6 @@ pipe_dispatch2_tb_b0r4rs2_c2_csr|design/pipe/qv_dispatch2_tb.sv||design|pipe|pas
 pipe_dispatch2_tb_r2rs1|design/pipe/qv_dispatch2_tb.sv||design|pipe|pass||-Pqv_dispatch2_tb.ROB_DEPTH=2 -Pqv_dispatch2_tb.RS_DEPTH=1 -Pqv_dispatch2_tb.SEED=5
 pipe_dispatch2_tb_rs0_c2|design/pipe/qv_dispatch2_tb.sv||design|pipe|pass||-Pqv_dispatch2_tb.RS_DEPTH=0 -Pqv_dispatch2_tb.COMMIT_W=2 -Pqv_dispatch2_tb.SEED=6
 pipe_dispatch2_tb_rs8_c2_csr|design/pipe/qv_dispatch2_tb.sv||design|pipe|pass||-Pqv_dispatch2_tb.RS_DEPTH=8 -Pqv_dispatch2_tb.COMMIT_W=2 -Pqv_dispatch2_tb.CSR_LATE=1 -Pqv_dispatch2_tb.SEED=7
+pipe_dispatch2_tb_a2_c2_csr|design/pipe/qv_dispatch2_tb.sv||design|pipe|pass||-Pqv_dispatch2_tb.ALU_PORTS=2 -Pqv_dispatch2_tb.COMMIT_W=2 -Pqv_dispatch2_tb.CSR_LATE=1 -Pqv_dispatch2_tb.SEED=8
+pipe_dispatch2_tb_a2_rs0_c2|design/pipe/qv_dispatch2_tb.sv||design|pipe|pass||-Pqv_dispatch2_tb.ALU_PORTS=2 -Pqv_dispatch2_tb.RS_DEPTH=0 -Pqv_dispatch2_tb.COMMIT_W=2 -Pqv_dispatch2_tb.SEED=9
+pipe_dispatch2_tb_a2_b0r4rs2|design/pipe/qv_dispatch2_tb.sv||design|pipe|pass||-Pqv_dispatch2_tb.ALU_PORTS=2 -Pqv_dispatch2_tb.BYPASS_EN=0 -Pqv_dispatch2_tb.ROB_DEPTH=4 -Pqv_dispatch2_tb.RS_DEPTH=2 -Pqv_dispatch2_tb.SEED=10

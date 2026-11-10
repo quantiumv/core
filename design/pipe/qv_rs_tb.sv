@@ -22,6 +22,9 @@
  * PUSH2 (O4c): a second entry may be pushed in the same cycle behind the first (an ALU, BRU or pipelined FPU op: a
  * two-wide core's slot 1 is never a divide or an FP divide/square root), with the same dispatch-cycle capture; it
  * joins behind the first, and o_room2 says whether two fit.
+ *
+ * ALU_PORTS 2 (O4d): the second ALU port takes the oldest ready ALU entry whose op is no multiply, other than the one
+ * port 0 takes; its writeback is a sixth producer bus (bus 5), a same-cycle source under BYPASS_EN like port 0's.
  */
 module qv_rs_tb #(
     parameter int DEPTH      = 4,
@@ -29,7 +32,8 @@ module qv_rs_tb #(
     parameter bit LSU_BYPASS = 1'b1,
     parameter int CYCLES     = 40000,
     parameter int SEED       = 1,
-    parameter bit PUSH2      = 1'b0
+    parameter bit PUSH2      = 1'b0,
+    parameter int ALU_PORTS  = 1
 );
     import qv_pkg::*;
 
@@ -51,21 +55,22 @@ module qv_rs_tb #(
     logic      flush = 1'b0, push = 1'b0, push2 = 1'b0;
     rs_entry_t push_e = '0, push2_e = '0;
     logic      room, room2, has_div, has_fds;
-    wb_t       wb = '0, wbl = '0, wbd = '0, wbc = '0;
+    wb_t       wb = '0, wbl = '0, wbd = '0, wbc = '0, wbp = '0;
     wb_fp_t    wbf = '0;
     logic      div_free = 1'b1, ds_free = 1'b1;
-    logic      sel_ab, sel_div, sel_fpu;
-    fu_req_t   alu_req, bru_req, div_req;
+    logic      sel_ab, sel_div, sel_fpu, sel_p1;
+    fu_req_t   alu_req, bru_req, div_req, alu1_req;
     fpu_req_t  fpu_req;
 
-    qv_rs #(.DEPTH(DEPTH), .BYPASS_EN(BYPASS_EN), .LSU_BYPASS(LSU_BYPASS)) dut (
+    qv_rs #(.DEPTH(DEPTH), .BYPASS_EN(BYPASS_EN), .LSU_BYPASS(LSU_BYPASS), .ALU_PORTS(ALU_PORTS)) dut (
         .clk(clk), .rst(rst), .i_flush(flush),
         .i_push(push), .i_push_e(push_e), .o_room(room), .o_has_div(has_div), .o_has_fds(has_fds),
         .i_push2(push2), .i_push2_e(push2_e), .o_room2(room2),
-        .i_wb(wb), .i_wbl(wbl), .i_wbd(wbd), .i_wbf(wbf), .i_wbc(wbc),
+        .i_wb(wb), .i_wbp(wbp), .i_wbl(wbl), .i_wbd(wbd), .i_wbf(wbf), .i_wbc(wbc),
         .i_div_free(div_free), .i_fpu_ds_free(ds_free),
         .o_sel_ab(sel_ab), .o_sel_div(sel_div), .o_sel_fpu(sel_fpu),
-        .o_alu_req(alu_req), .o_bru_req(bru_req), .o_div_req(div_req), .o_fpu_req(fpu_req)
+        .o_alu_req(alu_req), .o_bru_req(bru_req), .o_div_req(div_req), .o_fpu_req(fpu_req),
+        .o_sel_p1(sel_p1), .o_alu1_req(alu1_req)
     );
 
     function automatic logic [63:0] b(input logic x); return {63'b0, x}; endfunction
@@ -91,15 +96,15 @@ module qv_rs_tb #(
     endfunction
 
     // ---------------- producers and the bus schedule ----------------
-    // bus 0 ALU/BRU, 1 LSU, 2 divider, 3 FPU, 4 commit
+    // bus 0 ALU/BRU, 1 LSU, 2 divider, 3 FPU, 4 commit, 5 the second ALU port (ALU_PORTS 2 only)
     logic        p_live [0:NP-1];
     int          p_tag  [0:NP-1];
     logic [63:0] p_val  [0:NP-1];
     logic        p_late [0:NP-1];
     int          p_bus  [0:NP-1];
     int          p_w    [0:NP-1];           // the cycle the value is delivered (a late one: its commit)
-    int          s_p    [0:4][0:RING-1];    // the producer whose event is on that bus in that cycle, or -1
-    logic        s_garb [0:4][0:RING-1];    // ... and the event is a late producer's wrong-value writeback
+    int          s_p    [0:5][0:RING-1];    // the producer whose event is on that bus in that cycle, or -1
+    logic        s_garb [0:5][0:RING-1];    // ... and the event is a late producer's wrong-value writeback
 
     function automatic int n_live();
         int n;
@@ -115,7 +120,7 @@ module qv_rs_tb #(
     endfunction
 
     function automatic logic same_ok(input int bus, input logic late);   // the station may use it in its cycle
-        return !late && BYPASS_EN && (bus == 0 || bus == 3 || (bus == 1 && LSU_BYPASS));
+        return !late && BYPASS_EN && (bus == 0 || bus == 3 || bus == 5 || (bus == 1 && LSU_BYPASS));
     endfunction
 
     // A new producer, made after cycle t's buses are driven, so delivering from cycle t + 1 on: its index, or -1 (no tag or
@@ -128,7 +133,8 @@ module qv_rs_tb #(
         for (int i = 0; i < NP; i++) if (!p_live[i] && s < 0) s = i;
         if (s < 0) return -1;
         late = ($urandom % 5) == 0;
-        bus  = late ? 4 : int'($urandom % 4);
+        bus  = late ? 4 : int'($urandom % ((ALU_PORTS > 1) ? 5 : 4));
+        if (bus == 4 && !late) bus = 5;                     // (the second ALU port's bus)
         w    = free_slot(bus, t + 1 + int'($urandom % 16));
         if (w < 0) return -1;
         p_live[s] = 1'b1;
@@ -195,12 +201,13 @@ module qv_rs_tb #(
     endtask
 
     // ---------------- coverage ----------------
+    int n_p1, n_p1_mul_skip;
     int n_push, n_push2, n_ab, n_alu, n_bru, n_div, n_fpu, n_fds, n_flush, n_capture, n_same, n_late, n_ooo, n_div_hold,
         n_fds_hold, n_full;
 
     // ---------------- the run ----------------
-    int  t, e_ab, e_div, e_fds, e_fpu, div_busy_until, ds_busy_until, old_gn;
-    logic f_ab, f_div, f_fds, f_fpu, x_div, x_fpu, pushed_now, pushed2_now;
+    int  t, e_ab, e_div, e_fds, e_fpu, e_p1, div_busy_until, ds_busy_until, old_gn;
+    logic f_ab, f_div, f_fds, f_fpu, f_p1, x_div, x_fpu, pushed_now, pushed2_now;
     rs_entry_t gf;
     int        seed_v;
 
@@ -223,8 +230,9 @@ module qv_rs_tb #(
         void'($urandom(seed_v));
         for (int i = 0; i < NTAG; i++) tag_used[i] = 1'b0;
         for (int i = 0; i < NP; i++) p_live[i] = 1'b0;
-        for (int bb = 0; bb < 5; bb++) for (int k = 0; k < RING; k++) begin s_p[bb][k] = -1; s_garb[bb][k] = 1'b0; end
+        for (int bb = 0; bb < 6; bb++) for (int k = 0; k < RING; k++) begin s_p[bb][k] = -1; s_garb[bb][k] = 1'b0; end
         gn = 0;
+        n_p1 = 0; n_p1_mul_skip = 0;
         n_push = 0; n_push2 = 0; n_ab = 0; n_alu = 0; n_bru = 0; n_div = 0; n_fpu = 0; n_fds = 0; n_flush = 0; n_capture = 0;
         n_same = 0; n_late = 0; n_ooo = 0; n_div_hold = 0; n_fds_hold = 0; n_full = 0;
         div_busy_until = -1; ds_busy_until = -1;
@@ -235,8 +243,8 @@ module qv_rs_tb #(
         for (t = 0; t < CYCLES; t++) begin
             // ---- inputs for cycle t ----
             flush = ($urandom % 400) == 0;
-            wb = '0; wbl = '0; wbd = '0; wbf = '0; wbc = '0;
-            for (int bb = 0; bb < 5; bb++) begin
+            wb = '0; wbl = '0; wbd = '0; wbf = '0; wbc = '0; wbp = '0;
+            for (int bb = 0; bb < 6; bb++) begin
                 int s;
                 s = s_p[bb][t % RING];
                 if (s >= 0) begin
@@ -247,6 +255,7 @@ module qv_rs_tb #(
                         1: begin wbl.valid = 1'b1; wbl.tag = TW'(p_tag[s]); wbl.value = v; end
                         2: begin wbd.valid = 1'b1; wbd.tag = TW'(p_tag[s]); wbd.value = v; end
                         3: begin wbf.valid = 1'b1; wbf.tag = TW'(p_tag[s]); wbf.value = v; end
+                        5: begin wbp.valid = 1'b1; wbp.tag = TW'(p_tag[s]); wbp.value = v; end
                         default: begin wbc.valid = 1'b1; wbc.tag = TW'(p_tag[s]); wbc.value = v; end
                     endcase
                 end
@@ -342,7 +351,17 @@ module qv_rs_tb #(
                     f_fpu = 1'b1; e_fpu = i;
                 end
             x_div = f_div && g_ready(e_div, t) && div_free;
-            if (flush) begin f_ab = 1'b0; x_div = 1'b0; f_fpu = 1'b0; end
+            // (ALU_PORTS 2) the second ALU port: the oldest ready ALU entry that is no multiply, other than port 0's
+            f_p1 = 1'b0; e_p1 = 0;
+            if (ALU_PORTS > 1)
+                for (int i = gn - 1; i >= 0; i--) begin
+                    gf = g_e[i];
+                    if (g_ready(i, t) && g_kind[i] == 0 && !(f_ab && i == e_ab)) begin
+                        if (!qv_is_mul(gf.op)) begin f_p1 = 1'b1; e_p1 = i; end
+                        else n_p1_mul_skip++;
+                    end
+                end
+            if (flush) begin f_ab = 1'b0; x_div = 1'b0; f_fpu = 1'b0; f_p1 = 1'b0; end
             x_fpu = f_fpu;
 
             check($sformatf("t=%0d room", t), b(room), b(gn < DEPTH));
@@ -351,6 +370,9 @@ module qv_rs_tb #(
             check($sformatf("t=%0d has_fds", t), b(has_fds), b(f_fds));
             check($sformatf("t=%0d ALU/BRU port taken", t), b(sel_ab), b(f_ab));
             check($sformatf("t=%0d ALU request", t), b(alu_req.valid), b(f_ab && g_kind[e_ab] == 0));
+            check($sformatf("t=%0d second ALU port taken", t), b(sel_p1), b(f_p1));
+            check($sformatf("t=%0d second ALU request", t), b(alu1_req.valid), b(f_p1));
+            if (f_p1) chk_req($sformatf("t=%0d ALU port 1", t), alu1_req, e_p1);
             check($sformatf("t=%0d BRU request", t), b(bru_req.valid), b(f_ab && g_kind[e_ab] == 1));
             check($sformatf("t=%0d divider request", t), b(div_req.valid), b(x_div));
             check($sformatf("t=%0d divider port taken", t), b(sel_div), b(x_div));
@@ -402,6 +424,7 @@ module qv_rs_tb #(
             push = 1'b0;
             push2 = 1'b0;
             if (f_ab)  begin tag_used[g_tag[e_ab]] = 1'b0; end
+            if (f_p1)  begin tag_used[g_tag[e_p1]] = 1'b0; n_p1++; end
             if (x_div) begin tag_used[g_tag[e_div]] = 1'b0; div_busy_until = t + 1 + int'($urandom % 10); end
             if (x_fpu) begin
                 gf = g_e[e_fpu];
@@ -411,7 +434,8 @@ module qv_rs_tb #(
             // remove the issued ones, youngest index first so the others do not move (the pushed entry, at index
             // old_gn, is not touched), then append the pushed one
             for (int i = DEPTH - 1; i >= 0; i--)
-                if (i < gn && ((f_ab && i == e_ab) || (x_div && i == e_div) || (x_fpu && i == e_fpu))) g_remove(i);
+                if (i < gn && ((f_ab && i == e_ab) || (x_div && i == e_div) || (x_fpu && i == e_fpu)
+                               || (f_p1 && i == e_p1))) g_remove(i);
             if (pushed_now) begin
                 g_move(old_gn, gn);
                 gn++;
@@ -421,7 +445,7 @@ module qv_rs_tb #(
                 gn++;
             end
             // producers that delivered in cycle t leave (their tags are free for reuse)
-            for (int bb = 0; bb < 5; bb++) begin
+            for (int bb = 0; bb < 6; bb++) begin
                 s_p[bb][t % RING] = -1;
                 s_garb[bb][t % RING] = 1'b0;
             end
@@ -432,7 +456,7 @@ module qv_rs_tb #(
                 for (int i = 0; i < gn; i++) tag_used[g_tag[i]] = 1'b0;
                 gn = 0;
                 for (int q = 0; q < NP; q++) if (p_live[q]) begin p_live[q] = 1'b0; tag_used[p_tag[q]] = 1'b0; end
-                for (int bb = 0; bb < 5; bb++) for (int k = 0; k < RING; k++) begin s_p[bb][k] = -1; s_garb[bb][k] = 1'b0; end
+                for (int bb = 0; bb < 6; bb++) for (int k = 0; k < RING; k++) begin s_p[bb][k] = -1; s_garb[bb][k] = 1'b0; end
             end
             @(negedge clk);
         end
@@ -443,6 +467,11 @@ module qv_rs_tb #(
         check("coverage: ALU issued", b(n_alu > 100), 1);
         if (PUSH2 && DEPTH > 1) check("coverage: second pushes", b(n_push2 > 500), 1);
         check("coverage: BRU issued", b(n_bru > 50), 1);
+        if (ALU_PORTS > 1) begin
+            $display("qv_rs_tb: second ALU port %0d, a multiply passed over %0d times", n_p1, n_p1_mul_skip);
+            check("coverage: the second ALU port issued", b(n_p1 > 200), 1);
+            check("coverage: a multiply was passed over for it", b(n_p1_mul_skip > 20), 1);
+        end
         if (DEPTH > 1) begin                                  // (one entry: none of these can happen)
             check("coverage: issued past an older waiting entry", b(n_ooo > 50), 1);
             check("coverage: dispatch-cycle captures", b(n_capture > 50), 1);

@@ -23,7 +23,13 @@
  * One ALU port: two ALU uops pair only through the station (RS_DEPTH > 0); with RS_DEPTH 0 the clocked part runs
  * one-wide and must say so (no pair), while the probes still check the rules.
  *
- * Run once per configuration via -P overrides (BYPASS_EN, ROB_DEPTH, RS_DEPTH, CSR_LATE, COMMIT_W, SEED).
+ * ALU_PORTS 2 (O4d): a second ALU (no multiplier) beside the first, its writeback into the ROB and issue; two
+ * independent ALU uops then dispatch and execute in the same cycle, with or without the station. Multiplies are in
+ * the stream (the golden model has MUL), and a multiply that reached port 1 would compute 0 there. A fourth probe
+ * instance (ALU_PORTS 2) checks the port rules: branches and multiplies only on port 0, port 1 for a ready plain
+ * ALU uop that got no port 0, a dependent slot 1 still into the station.
+ *
+ * Run once per configuration via -P overrides (BYPASS_EN, ROB_DEPTH, RS_DEPTH, CSR_LATE, COMMIT_W, ALU_PORTS, SEED).
  */
 module qv_dispatch2_tb #(
     parameter bit BYPASS_EN = 1'b1,
@@ -31,7 +37,8 @@ module qv_dispatch2_tb #(
     parameter int RS_DEPTH  = 4,
     parameter bit CSR_LATE  = 1'b0,
     parameter int COMMIT_W  = 1,
-    parameter int SEED      = 1
+    parameter int SEED      = 1,
+    parameter int ALU_PORTS = 1
 );
     import qv_pkg::*;
 
@@ -62,8 +69,8 @@ module qv_dispatch2_tb #(
     logic [QV_ROB_TAG_W-1:0] alloc_tag, alloc_tag1, l1_tag, l2_tag, l4_tag, l5_tag, head_tag, head1_tag, c_tag, c2_tag;
     logic                    l1_complete, l2_complete, l4_complete, l5_complete;
     logic [63:0]             l1_value, l2_value, l4_value, l5_value;
-    wb_t                     wb;
-    fu_req_t                 fu_req;
+    wb_t                     wb, wbp;
+    fu_req_t                 fu_req, fu1_req;
     logic                    head_valid, head1_valid, commit_pop, commit_pop2;
     rob_entry_t              head_entry, head1_entry;
     logic                    rf_we, rf2_we, c_valid, c_rd_wen, c2_valid, c2_rd_wen, c2_rd_fp, commit_now;
@@ -85,7 +92,8 @@ module qv_dispatch2_tb #(
         c_bus.value = rf_data;
     end
 
-    qv_issue #(.BYPASS_EN(BYPASS_EN), .CSR_LATE(CSR_LATE), .RS_DEPTH(RS_DEPTH), .DISPATCH_W(2)) issue0 (
+    qv_issue #(.BYPASS_EN(BYPASS_EN), .CSR_LATE(CSR_LATE), .RS_DEPTH(RS_DEPTH), .DISPATCH_W(2),
+               .ALU_PORTS(ALU_PORTS)) issue0 (
         .clk(clk), .rst(rst), .i_flush(1'b0),
         .i_uop_valid(uop_valid), .i_uop(uop), .o_issue(issue),
         .o_rs1_sel(rs1_sel), .o_rs2_sel(rs2_sel), .i_rs1_data(rs1_data), .i_rs2_data(rs2_data),
@@ -110,7 +118,8 @@ module qv_dispatch2_tb #(
         .o_alloc2_valid(alloc2_valid), .o_alloc2_pc(alloc2_pc), .o_alloc2_raw(alloc2_raw), .o_alloc2_rd(alloc2_rd),
         .o_alloc2_rd_wen(alloc2_rd_wen), .o_alloc2_next_pc(alloc2_next_pc), .o_alloc2_ctrl(alloc2_ctrl),
         .i_alloc_tag1(alloc_tag1), .i_alloc_ready2(alloc_ready2),
-        .o_src0_a(), .o_src0_b(), .o_src1_a(), .o_src1_b()
+        .o_src0_a(), .o_src0_b(), .o_src1_a(), .o_src1_b(),
+        .o_alu1_req(fu1_req), .i_wbp(wbp)
     );
 
     qv_rob #(.ROB_DEPTH(ROB_DEPTH)) rob0 (
@@ -123,7 +132,7 @@ module qv_dispatch2_tb #(
         .i_alloc2_valid(alloc2_valid), .i_alloc2_pc(alloc2_pc), .i_alloc2_raw(alloc2_raw), .i_alloc2_rd(alloc2_rd),
         .i_alloc2_rd_wen(alloc2_rd_wen), .i_alloc2_next_pc(alloc2_next_pc), .i_alloc2_ctrl(alloc2_ctrl),
         .o_alloc_tag1(alloc_tag1), .o_alloc_ready2(alloc_ready2),
-        .i_wb(wb), .i_wb2('0), .i_wb3('0),
+        .i_wb(wb), .i_wb2('0), .i_wb3('0), .i_wb5(wbp),
         .i_lookup1_tag(l1_tag), .o_lookup1_complete(l1_complete), .o_lookup1_value(l1_value),
         .i_lookup2_tag(l2_tag), .o_lookup2_complete(l2_complete), .o_lookup2_value(l2_value),
         .i_lookup4_tag(l4_tag), .o_lookup4_complete(l4_complete), .o_lookup4_value(l4_value),
@@ -135,6 +144,13 @@ module qv_dispatch2_tb #(
     );
 
     qv_exu_alu exu0 (.clk(clk), .rst(rst), .i_flush(1'b0), .i_req(fu_req), .o_wb(wb));
+    generate
+        if (ALU_PORTS > 1) begin : g_alu1
+            qv_exu_alu #(.HAS_MUL(1'b0)) exu1 (.clk(clk), .rst(rst), .i_flush(1'b0), .i_req(fu1_req), .o_wb(wbp));
+        end else begin : g_noalu1
+            assign wbp = '0;
+        end
+    endgenerate
 
     qv_commit #(.COMMIT_W(COMMIT_W)) commit0 (
         .clk(clk), .rst(rst),
@@ -183,6 +199,7 @@ module qv_dispatch2_tb #(
             `SLL:  return a << b[5:0];
             `SRL:  return a >> b[5:0];
             `SRA:  return 64'($signed(a) >>> b[5:0]);
+            `MUL:  return a * b;
             default: return 64'hBAD;
         endcase
     endfunction
@@ -308,6 +325,11 @@ module qv_dispatch2_tb #(
                 rule_errs++;
                 $display("RULE: a pair dispatched without ROB room for two (cyc %0d)", cyc);
             end
+            if (fu1_req.valid && (ALU_PORTS < 2 || qv_is_mul(fu1_req.op) || (fu_req.valid && fu_req.tag == fu1_req.tag)))
+            begin
+                rule_errs++;
+                $display("RULE: port 1 got a request it may not take (cyc %0d)", cyc);
+            end
         end
     end
 
@@ -321,6 +343,10 @@ module qv_dispatch2_tb #(
                 exec_cyc[(uop_valid && issue && fu_req.tag == alloc_tag) ? k
                          : (uop_valid && issue && issue2 && fu_req.tag == alloc_tag1) ? k + 1
                          : idx_of_tag[fu_req.tag]] <= cyc;
+            if (fu1_req.valid)                                  // (O4d) port 1
+                exec_cyc[(uop_valid && issue && fu1_req.tag == alloc_tag) ? k
+                         : (uop_valid && issue && issue2 && fu1_req.tag == alloc_tag1) ? k + 1
+                         : idx_of_tag[fu1_req.tag]] <= cyc;
         end
     end
 
@@ -425,6 +451,8 @@ module qv_dispatch2_tb #(
     logic    p_v1, p_ready, p_ready2, p_pb, p_lsu_free;
     logic    pr_issue, pr_issue2, pr0_issue, pr0_issue2, prs_issue, prs_issue2;
     fu_req_t pr_alu, pr_bru, pr_lsu, pr_div, pr0_alu, pr0_bru, pr0_lsu;
+    logic    pr2_issue, pr2_issue2;
+    fu_req_t pr2_alu, pr2_alu1, pr2_bru;
     fpu_req_t pr_fpu, pr0_fpu;
     rs_opnd_t pr_lsu_opa, pr_lsu_opb;
     logic [4:0] pr_frs1;
@@ -465,6 +493,24 @@ module qv_dispatch2_tb #(
         .o_alloc2_ctrl(), .i_alloc_tag1(QV_ROB_TAG_W'(2)), .i_alloc_ready2(p_ready2),
         .o_src0_a(), .o_src0_b(), .o_src1_a(), .o_src1_b()
     );
+    qv_issue #(.BYPASS_EN(1'b1), .RS_DEPTH(4), .LSQ_WAIT(1'b1), .DISPATCH_W(2), .ALU_PORTS(2)) pr2 (
+        .clk(clk), .rst(1'b1), .i_flush(1'b0),
+        .i_uop_valid(1'b1), .i_uop(p_u0), .o_issue(pr2_issue),
+        .o_rs1_sel(), .o_rs2_sel(), .i_rs1_data(64'd0), .i_rs2_data(64'd0),
+        .o_alloc_valid(), .o_alloc_pc(), .o_alloc_raw(), .o_alloc_rd(), .o_alloc_rd_wen(), .o_alloc_next_pc(),
+        .o_alloc_ctrl(), .i_alloc_tag(QV_ROB_TAG_W'(1)), .i_alloc_ready(p_ready), .i_rob_empty(1'b1),
+        .o_lookup1_tag(), .i_lookup1_complete(1'b0), .i_lookup1_value(64'd0),
+        .o_lookup2_tag(), .i_lookup2_complete(1'b0), .i_lookup2_value(64'd0),
+        .o_lookup3_tag(), .o_frs1_sel(), .o_frs2_sel(), .o_frs3_sel(), .o_fpu_req(),
+        .i_wb('0), .o_alu_req(pr2_alu), .o_bru_req(pr2_bru), .o_lsu_req(), .o_lsu_opa(), .o_lsu_opb(),
+        .i_lsu_free(p_lsu_free), .o_div_req(), .i_div_free(1'b1),
+        .i_commit_valid(1'b0), .i_commit_rd(5'd0), .i_commit_rd_wen(1'b0), .i_commit_tag('0),
+        .i_uop1_valid(p_v1), .i_uop1(p_u1), .i_pb_active(p_pb), .o_issue2(pr2_issue2),
+        .o_rs1b_sel(), .o_rs2b_sel(), .o_lookup4_tag(), .o_lookup5_tag(),
+        .o_alloc2_valid(), .o_alloc2_pc(), .o_alloc2_raw(), .o_alloc2_rd(), .o_alloc2_rd_wen(), .o_alloc2_next_pc(),
+        .o_alloc2_ctrl(), .i_alloc_tag1(QV_ROB_TAG_W'(2)), .i_alloc_ready2(p_ready2),
+        .o_src0_a(), .o_src0_b(), .o_src1_a(), .o_src1_b(), .o_alu1_req(pr2_alu1)
+    );
     qv_issue #(.SERIALIZE(1'b1), .BYPASS_EN(1'b1), .RS_DEPTH(4), .DISPATCH_W(2)) prs (
         .clk(clk), .rst(1'b1), .i_flush(1'b0),
         .i_uop_valid(1'b1), .i_uop(p_u0), .o_issue(prs_issue),
@@ -487,6 +533,9 @@ module qv_dispatch2_tb #(
     // probe uops (registers x/f 1..9; the tables are empty, so every source is ready)
     function automatic uop_t p_alu(input logic [4:0] rd, input logic [4:0] rs1, input logic [4:0] rs2);
         return mk(`ADD, rd, rs1, 1'b1, 64'd0, rs2, 1'b1, 64'd0);
+    endfunction
+    function automatic uop_t p_mul(input logic [4:0] rd, input logic [4:0] rs1, input logic [4:0] rs2);
+        return mk(`MUL, rd, rs1, 1'b1, 64'd0, rs2, 1'b1, 64'd0);
     endfunction
     function automatic uop_t p_bru(input logic [4:0] rs1, input logic [4:0] rs2);
         uop_t u;
@@ -690,15 +739,49 @@ module qv_dispatch2_tb #(
         p_ready = 1'b1; #1;
         check("P9: back to a pair", {63'b0, pr_issue2 && pr0_issue2}, 64'd1);
         check("P9: a SERIALIZE build: one at a time", {63'b0, prs_issue && !prs_issue2}, 64'd1);
+        // (O4d) two ALU ports: pr2
+        probe_set(p_alu(5'd3, 5'd1, 5'd2), p_alu(5'd4, 5'd1, 5'd2));
+        check("Q1: two ports: ALU+ALU both straight to an ALU",
+              {63'b0, pr2_issue2 && pr2_alu.valid && pr2_alu.tag == QV_ROB_TAG_W'(1) && pr2_alu1.valid
+                      && pr2_alu1.tag == QV_ROB_TAG_W'(2) && !pr2.g_rs.rs0.i_push2}, 64'd1);
+        probe_set(p_mul(5'd3, 5'd1, 5'd2), p_alu(5'd4, 5'd1, 5'd2));
+        check("Q2: MUL+ALU: the multiply on port 0, the ALU op on port 1",
+              {63'b0, pr2_issue2 && pr2_alu.valid && pr2_alu.tag == QV_ROB_TAG_W'(1) && pr2_alu1.valid
+                      && pr2_alu1.tag == QV_ROB_TAG_W'(2)}, 64'd1);
+        probe_set(p_alu(5'd3, 5'd1, 5'd2), p_mul(5'd4, 5'd1, 5'd2));
+        check("Q3: ALU+MUL: a multiply never on port 1 (it waits in the station)",
+              {63'b0, pr2_issue2 && pr2_alu.valid && pr2_alu.tag == QV_ROB_TAG_W'(1) && !pr2_alu1.valid
+                      && pr2.g_rs.rs0.i_push2}, 64'd1);
+        probe_set(p_mul(5'd3, 5'd1, 5'd2), p_mul(5'd4, 5'd1, 5'd2));
+        check("Q3b: MUL+MUL: the second waits in the station",
+              {63'b0, pr2_issue2 && !pr2_alu1.valid && pr2.g_rs.rs0.i_push2}, 64'd1);
+        probe_set(p_bru(5'd1, 5'd2), p_alu(5'd4, 5'd1, 5'd2));
+        check("Q4: BRU+ALU: the branch on port 0, the ALU op on port 1",
+              {63'b0, pr2_issue2 && pr2_bru.valid && pr2_bru.tag == QV_ROB_TAG_W'(1) && pr2_alu1.valid
+                      && pr2_alu1.tag == QV_ROB_TAG_W'(2) && !pr2_alu.valid}, 64'd1);
+        probe_set(p_alu(5'd3, 5'd1, 5'd2), p_bru(5'd1, 5'd2));
+        check("Q5: ALU+BRU: a branch never on port 1 (it waits in the station)",
+              {63'b0, pr2_issue2 && pr2_alu.valid && pr2_alu.tag == QV_ROB_TAG_W'(1) && !pr2_alu1.valid
+                      && !pr2_bru.valid && pr2.g_rs.rs0.i_push2}, 64'd1);
+        probe_set(p_alu(5'd5, 5'd1, 5'd2), p_alu(5'd6, 5'd5, 5'd2));
+        check("Q6: a dependent slot 1 still waits in the station",
+              {63'b0, pr2_issue2 && pr2_alu.valid && !pr2_alu1.valid && pr2.g_rs.rs0.i_push2}, 64'd1);
+        probe_set(p_alone(0), p_alu(5'd4, 5'd1, 5'd2));
+        check("Q7: two ports: a CSR op still dispatches alone", {63'b0, pr2_issue && !pr2_issue2 && !pr2_alu1.valid},
+              64'd1);
+        probe_set(p_alu(5'd3, 5'd1, 5'd2), p_ld(5'd4, 5'd1, 1'b0));
+        check("Q8: two ports: ALU+LD: the load to the LSU, port 1 idle",
+              {63'b0, pr2_issue2 && pr2_alu.valid && !pr2_alu1.valid}, 64'd1);
     endtask
 
     int i, gap, j0;
     int seed_v = SEED;
-    logic [4:0] ops [0:9];
+    logic [4:0] ops [0:10];
 
     initial begin
         ops[0] = `ADD; ops[1] = `SUB; ops[2] = `SLT; ops[3] = `SLTU; ops[4] = `XOR;
         ops[5] = `OR;  ops[6] = `AND; ops[7] = `SLL; ops[8] = `SRL;  ops[9] = `SRA;
+        ops[10] = `MUL;
         void'($urandom(seed_v));
 
         repeat (2) @(posedge clk);                          // the probes (held in reset) take their reset first
@@ -709,11 +792,13 @@ module qv_dispatch2_tb #(
         begin_script();
         for (i = 0; i < 8; i++) push(mk(`ADD, 5'(8 + i), 0, 0, 64'(i), 0, 0, 64'(100)), 0);
         run_script("T1", 200);
-        if (RS_DEPTH > 0) begin
+        if (RS_DEPTH > 0 || ALU_PORTS > 1) begin
             check("T1: the first two dispatch in one cycle", issue_cyc[1] - issue_cyc[0], 64'd0);
             check("T1: pairs happened", 64'(n_pairs > 0), 64'd1);
         end else
             check("T1: no station: one dispatch a cycle", 64'(n_pairs), 64'd0);
+        if (ALU_PORTS > 1)
+            check("T1: two ports: the first two execute in one cycle", exec_cyc[1] - exec_cyc[0], 64'd0);
 
         // ---- T2: an intra-pair dependence, through rs1 and through rs2 ----
         for (j0 = 0; j0 < 2; j0++) begin
@@ -741,7 +826,7 @@ module qv_dispatch2_tb #(
             push(mk(`ADD, 5, 0, 0, 64'd2, 0, 0, 64'd0), 0);   // younger writer: x5 = 2
             push(mk(`ADD, 7, 5, 1, 0, 0, 0, 64'd0), gap);     // reader: x7 = x5 (must be 2)
             run_script($sformatf("T3 gap=%0d", gap), 200);
-            if (RS_DEPTH > 0)
+            if (RS_DEPTH > 0 || ALU_PORTS > 1)
                 check($sformatf("T3 gap=%0d: the two writers paired", gap), issue_cyc[2] - issue_cyc[1], 64'd0);
         end
 
@@ -772,6 +857,31 @@ module qv_dispatch2_tb #(
             end
         end
 
+        // ---- T5 (ALU_PORTS 2): port 1's result, bypassed to both slots through rs1 and through rs2 ----
+        if (ALU_PORTS > 1) begin
+            for (j0 = 0; j0 < 2; j0++) begin
+                begin_script();
+                push(mk(`ADD, 5, 0, 0, 64'd7, 0, 0, 64'd0), 3);       // x5 = 7   (port 0)  } a pair, after a bubble
+                push(mk(`ADD, 9, 0, 0, 64'd1, 0, 0, 64'd0), 0);       // x9 = 1   (port 1)  }
+                if (j0 == 0) begin
+                    push(mk(`ADD, 6, 9, 1, 0, 0, 0, 64'd1), 0);       // x6 = x9 + 1   slot 0, rs1  } the next pair
+                    push(mk(`SUB, 7, 0, 0, 64'd3, 9, 1, 0), 0);       // x7 = 3 - x9   slot 1, rs2  }
+                end else begin
+                    push(mk(`SUB, 6, 0, 0, 64'd3, 9, 1, 0), 0);       // x6 = 3 - x9   slot 0, rs2
+                    push(mk(`ADD, 7, 9, 1, 0, 0, 0, 64'd1), 0);       // x7 = x9 + 1   slot 1, rs1
+                end
+                run_script($sformatf("T5.%0d", j0), 200);
+                check($sformatf("T5.%0d: the first pair executes on both ports in one cycle", j0),
+                      exec_cyc[1] - exec_cyc[0], 64'd0);
+                check($sformatf("T5.%0d: the second pair dispatches in one cycle", j0), issue_cyc[3] - issue_cyc[2],
+                      64'd0);
+                check($sformatf("T5.%0d: slot 0 takes port 1's result %s", j0, BYPASS_EN ? "the next cycle" : "a cycle later"),
+                      exec_cyc[2] - exec_cyc[1], BYPASS_EN ? 64'd1 : 64'd2);
+                check($sformatf("T5.%0d: slot 1 takes port 1's result %s", j0, BYPASS_EN ? "the next cycle" : "a cycle later"),
+                      exec_cyc[3] - exec_cyc[1], BYPASS_EN ? 64'd1 : 64'd2);
+            end
+        end
+
         // ---- R1: random dense-hazard stream with bubbles (and CSR reads with CSR_LATE) ----
         begin_script();
         for (i = 0; i < 1500; i++) begin
@@ -782,7 +892,7 @@ module qv_dispatch2_tb #(
             if (CSR_LATE && $urandom % 7 == 0) begin
                 push(mk_csrr(5'($urandom % 8)), ($urandom % 6 == 0) ? int'($urandom % 3) : 0);
             end else begin
-                op   = ops[$urandom % 10];
+                op   = ops[$urandom % 11];
                 rd   = 5'($urandom % 8);                     // x0..x7 only: lots of RAW/WAW, inside pairs too
                 rs1  = 5'($urandom % 8);
                 rs2  = 5'($urandom % 8);
@@ -798,14 +908,14 @@ module qv_dispatch2_tb #(
         run_script("R1", 30000);
         $display("qv_dispatch2_tb R1: %0d uops, %0d dispatched in pairs, %0d retired in pairs", n_uops, 2 * n_pairs,
                  2 * n_cpairs);
-        if (RS_DEPTH > 0) check("R1: pairs dispatched", 64'(n_pairs > 10), 64'd1);
-        else              check("R1: no station: no pair", 64'(n_pairs), 64'd0);
+        if (RS_DEPTH > 0 || ALU_PORTS > 1) check("R1: pairs dispatched", 64'(n_pairs > 10), 64'd1);
+        else                               check("R1: no station: no pair", 64'(n_pairs), 64'd0);
         // (with no station nothing backs up: every entry completes the cycle after the one ahead of it retires)
         if (COMMIT_W > 1 && RS_DEPTH > 0) check("R1: pairs retired", 64'(n_cpairs > 10), 64'd1);
 
         $display("");
-        $display("qv_dispatch2_tb (BYPASS_EN=%0d ROB_DEPTH=%0d RS_DEPTH=%0d CSR_LATE=%0d COMMIT_W=%0d): %0d passed, %0d failed",
-                 BYPASS_EN, ROB_DEPTH, RS_DEPTH, CSR_LATE, COMMIT_W, pass_count, fail_count);
+        $display("qv_dispatch2_tb (BYPASS_EN=%0d ROB_DEPTH=%0d RS_DEPTH=%0d CSR_LATE=%0d COMMIT_W=%0d ALU_PORTS=%0d): %0d passed, %0d failed",
+                 BYPASS_EN, ROB_DEPTH, RS_DEPTH, CSR_LATE, COMMIT_W, ALU_PORTS, pass_count, fail_count);
         if (fail_count > 0) $display("qv_dispatch2_tb: FAILURES PRESENT");
         $finish;
     end
