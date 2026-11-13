@@ -196,6 +196,10 @@ pipe_lsu_early_nosb_tb|design/pipe/qv_lsu_early_tb.sv||design|pipe|pass||-Pqv_ls
 pipe_rob_tb_d8|design/pipe/qv_rob_tb.sv||design|pipe|pass||-Pqv_rob_tb.ROB_DEPTH=8
 pipe_rob_tb_d4|design/pipe/qv_rob_tb.sv||design|pipe|pass||-Pqv_rob_tb.ROB_DEPTH=4
 pipe_rob_tb_d2|design/pipe/qv_rob_tb.sv||design|pipe|pass||-Pqv_rob_tb.ROB_DEPTH=2
+pipe_rebuild_tb|design/pipe/qv_rebuild_tb.sv||design|pipe|pass||-Pqv_rebuild_tb.ROB_DEPTH=8
+pipe_rebuild_tb_d4|design/pipe/qv_rebuild_tb.sv||design|pipe|pass||-Pqv_rebuild_tb.ROB_DEPTH=4 -Pqv_rebuild_tb.SEED=2
+pipe_rebuild_tb_d2|design/pipe/qv_rebuild_tb.sv||design|pipe|pass||-Pqv_rebuild_tb.ROB_DEPTH=2 -Pqv_rebuild_tb.SEED=3
+pipe_rebuild_tb_nolate|design/pipe/qv_rebuild_tb.sv||design|pipe|pass||-Pqv_rebuild_tb.CSR_LATE=0 -Pqv_rebuild_tb.SEED=4
 pipe_rs_tb_d4|design/pipe/qv_rs_tb.sv||design|pipe|pass|900|
 pipe_rs_tb_d2_b0|design/pipe/qv_rs_tb.sv||design|pipe|pass|900|-Pqv_rs_tb.DEPTH=2 -Pqv_rs_tb.BYPASS_EN=0 -Pqv_rs_tb.LSU_BYPASS=0 -Pqv_rs_tb.SEED=2
 pipe_rs_tb_d8_l0|design/pipe/qv_rs_tb.sv||design|pipe|pass|900|-Pqv_rs_tb.DEPTH=8 -Pqv_rs_tb.LSU_BYPASS=0 -Pqv_rs_tb.SEED=3
