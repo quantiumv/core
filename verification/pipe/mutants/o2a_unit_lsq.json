@@ -83,13 +83,13 @@
   },
   {
    "name": "o_early ignores the barrier",
-   "old": "assign o_early  = (cmpl_q != send_q) && !bar_q[cmpl_i];",
-   "new": "assign o_early  = (cmpl_q != send_q);"
+   "old": "assign o_early  = (cmpl_q != send_q) && !bar_q[cmpl_i] && !i_kill_vec[tag_q[cmpl_i]];",
+   "new": "assign o_early  = (cmpl_q != send_q) && !i_kill_vec[tag_q[cmpl_i]];"
   },
   {
    "name": "o_early reads the next entry's barrier",
-   "old": "assign o_early  = (cmpl_q != send_q) && !bar_q[cmpl_i];",
-   "new": "assign o_early  = (cmpl_q != send_q) && !bar_q[send_i];"
+   "old": "assign o_early  = (cmpl_q != send_q) && !bar_q[cmpl_i] && !i_kill_vec[tag_q[cmpl_i]];",
+   "new": "assign o_early  = (cmpl_q != send_q) && !bar_q[send_i] && !i_kill_vec[tag_q[cmpl_i]];"
   },
   {
    "name": "a new entry ignores the barrier",

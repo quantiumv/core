@@ -6,7 +6,7 @@
   {
    "name": "divider never killed",
    "file": "qv_exu_div.sv",
-   "old": ".i_kill(i_flush),",
+   "old": ".i_kill(i_flush || kill),",
    "new": ".i_kill(1'b0),"
   },
   {

@@ -20,8 +20,8 @@
  "mutants": [
   {
    "name": "no kill to the divider",
-   "old": ".i_kill(i_flush),",
-   "new": ".i_kill(1'b0),"
+   "old": ".i_kill(i_flush || kill),",
+   "new": ".i_kill(kill),"
   },
   {
    "name": "busy not cleared by flush",
@@ -30,8 +30,8 @@
   },
   {
    "name": "pulse not masked in the flush cycle",
-   "old": "o_wb.valid = div_done && !i_flush;",
-   "new": "o_wb.valid = div_done;"
+   "old": "o_wb.valid = div_done && !i_flush && !kill;",
+   "new": "o_wb.valid = div_done && !kill;"
   },
   {
    "name": "accept ignores busy",

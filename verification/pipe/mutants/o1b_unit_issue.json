@@ -77,8 +77,8 @@
   },
   {
    "name": "the station is not flushed",
-   "old": "                .clk(clk), .rst(rst), .i_flush(i_flush),\n                .i_push(",
-   "new": "                .clk(clk), .rst(rst), .i_flush(1'b0),\n                .i_push(",
+   "old": "                .clk(clk), .rst(rst), .i_flush(i_flush), .i_kill_vec(i_kill_vec),\n                .i_push(",
+   "new": "                .clk(clk), .rst(rst), .i_flush(1'b0), .i_kill_vec(i_kill_vec),\n                .i_push(",
    "equivalent": true,
    "why": "qv_backend_tb never flushes (i_flush is tied to 0); the flush is covered by qv_rs_tb, rs_props and the lockstep"
   }
