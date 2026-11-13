@@ -201,6 +201,13 @@ module qv_commit_pair_tb;
         check("head mispredicted: the second does not retire", b(pop2), 64'd0);
         check("head mispredicted: it redirects", b(redirect), 64'd1);
         step();
+        // (O3) recovered at execute: no redirect, and still no second (in its kill cycle the entry behind it is a
+        // killed one, which may be complete)
+        pair(64'h2000, 1, 2); e.mispredict = 1'b1; e.recovered = 1'b1; e.next_pc = 64'h2000;
+        #1;
+        check("head recovered: the second does not retire", b(pop2), 64'd0);
+        check("head recovered: no redirect", b(redirect), 64'd0);
+        step();
         pair(64'h2000, 1, 2); pb_act = 1'b1;                           expect_no_pair("a Program Buffer run");
         pb_act = 1'b0;
         pair(64'h2000, 1, 2); dbg_step = 1'b1;                         expect_no_pair("a single step");
@@ -260,6 +267,14 @@ module qv_commit_pair_tb;
         check("mispredicted second: to its target", redirect_pc, 64'h6100);
         check("mispredicted second: it trains the predictors", {63'b0, btb_valid}, 64'd1);
         check("mispredicted second: ... at its pc", btb_pc, 64'h6004);
+        @(posedge clk); #1;
+        hv = 1'b0; hv1 = 1'b0;
+        // (O3) a second recovered at execute retires in the pair without a redirect
+        pair(64'h6100, 1, 2); e1.raw = BEQ; c1.cls = QV_FU_BRU; e1.mispredict = 1'b1; e1.recovered = 1'b1;
+        e1.next_pc = 64'h6100; e1.rd_wen = 1'b0;
+        #1;
+        check("recovered second: it retires in the pair", b(pop2), 64'd1);
+        check("recovered second: no redirect", b(redirect), 64'd0);
         @(posedge clk); #1;
         hv = 1'b0; hv1 = 1'b0;
         check("mispredicted second: the architectural pc is its target", arch_pc, 64'h6100);

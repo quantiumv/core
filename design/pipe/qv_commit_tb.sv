@@ -421,6 +421,14 @@ module qv_commit_tb;
         check("mispredict: not a context change (fetch need not wait)", b(redirect_ctx), 64'd0);
         retire();
         check("mispredict: arch pc = target", arch_pc, 64'h2000);
+        // (O3) one recovered at execute retires the same way, without a redirect: fetch is at its target already
+        set_entry(64'h2000, 32'h0000_006F, 1, 1'b1, 64'h2004);
+        e.next_pc = 64'h2000; e.mispredict = 1'b1; e.recovered = 1'b1;
+        expect_plain("recovered mispredict", 1'b0);
+        check("recovered mispredict: link written", rf_data, 64'h2004);
+        check("recovered mispredict: rvfi pc_wdata = the target", r_pc_wdata, 64'h2000);
+        retire();
+        check("recovered mispredict: arch pc = target", arch_pc, 64'h2000);
         set_entry(64'h2000, 32'h13, 0, 1'b0, 64'd0);
         c.serialize = 1'b1;
         expect_plain("serialize", 1'b1);
@@ -433,7 +441,7 @@ module qv_commit_tb;
         expect_trap("illegal (zero word)", 64'd2, 64'd0);
         retire();
         check("illegal: arch pc = vector", arch_pc, 64'h8000);
-        check("illegal: order counts every commit, trapped or not", r_order, 64'd4);
+        check("illegal: order counts every commit, trapped or not", r_order, 64'd5);   // (the recovered mispredict too)
 
         set_entry(64'h8000, 32'hF147_9873, 16, 1'b0, 64'd0);   // csrrw x16, mhartid, x15
         c.xcpt = 1'b1; c.cause = 4'd2; c.cls = QV_FU_ALU;

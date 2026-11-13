@@ -441,6 +441,12 @@ module qv_rob_tb #(
         check("recovered: marked", {63'b0, head.recovered}, 64'd1);
         check("recovered: the resolved next pc", head.next_pc, 64'h7777_0000);
         @(negedge clk); pop = 1'b1; @(posedge clk); #1; pop = 1'b0;
+        // every slot allocated again (that one too) starts unmarked, before any writeback
+        for (int k = 0; k < ROB_DEPTH; k++) do_alloc();
+        for (int k = 0; k < ROB_DEPTH; k++) begin
+            #1 check("a reused slot: not marked", {63'b0, head.recovered}, 64'd0);
+            @(negedge clk); pop = 1'b1; @(posedge clk); #1; pop = 1'b0;
+        end
         base = seq;
         do_alloc();
         @(negedge clk);
