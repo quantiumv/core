@@ -1,0 +1,28 @@
+{
+ "dut": "design/pipe/qv_pkg.sv",
+ "tb": "design/pipe/qv_lsu_sb_tb.sv",
+ "files": [
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_pmp.sv",
+  "design/pipe/qv_lsu.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench",
+  "-Pqv_lsu_sb_tb.ROB=4"
+ ],
+ "cwd": "design",
+ "timeout": 900,
+ "mutants": [
+  {
+   "name": "the distance modulo the tag width",
+   "old": "return (t - p) & QV_ROB_TAG_W'((1 << ptr_w) - 1);",
+   "new": "return t - p;"
+  }
+ ]
+}

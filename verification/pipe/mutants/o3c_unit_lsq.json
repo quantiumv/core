@@ -1,0 +1,41 @@
+{
+ "dut": "design/pipe/qv_lsq.sv",
+ "tb": "design/pipe/qv_lsq_tb.sv",
+ "files": [
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_lsq.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench"
+ ],
+ "cwd": "design",
+ "timeout": 600,
+ "mutants": [
+  {
+   "name": "the tail does not go back on a kill",
+   "old": "                tail_q <= keep_tail;\n",
+   "new": ""
+  },
+  {
+   "name": "a killed op is offered to the engine",
+   "old": "        if (i_kill_vec[o_eng_req.tag]) o_eng_req.valid = 1'b0;     // (O3) a killed op goes no further\n",
+   "new": ""
+  },
+  {
+   "name": "the send pointer is not pulled back",
+   "old": "if (send_q + (IW + 1)'(send) - head_q > keep) send_q <= keep_tail;",
+   "new": ""
+  },
+  {
+   "name": "the completion pointer is not pulled back",
+   "old": "if (cmpl_q + (IW + 1)'(cmpl) - head_q > keep) cmpl_q <= keep_tail;",
+   "new": ""
+  }
+ ]
+}

@@ -1,0 +1,52 @@
+{
+ "dut": "design/pipe/qv_lsu.sv",
+ "tb": "design/pipe/qv_lsu_early_tb.sv",
+ "files": [
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_pmp.sv",
+  "design/pipe/qv_lsu.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench"
+ ],
+ "cwd": "design",
+ "timeout": 600,
+ "mutants": [
+  {
+   "name": "a killed op may start in its kill cycle",
+   "old": "wire go        = at_head || (early && !killed);",
+   "new": "wire go        = at_head || early;"
+  },
+  {
+   "name": "a killed op writes back",
+   "old": "        if (killed) o_wb.valid = 1'b0;\n",
+   "new": ""
+  },
+  {
+   "name": "a killed op that waits is kept",
+   "old": "if (state_q == S_WAIT_HEAD)  state_q <= S_IDLE;",
+   "new": "if (state_q == S_WAIT_HEAD)  state_q <= state_q;"
+  },
+  {
+   "name": "a killed access on the bus is abandoned",
+   "old": "else if (!resp)              state_q <= S_DRAIN;",
+   "new": "else if (!resp)              state_q <= S_IDLE;"
+  },
+  {
+   "name": "any kill kills the held op",
+   "old": "&& i_kill_vec[tag_q];",
+   "new": "&& |i_kill_vec;"
+  },
+  {
+   "name": "a killed access drains past its response",
+   "old": "else if (!resp)              state_q <= S_DRAIN;",
+   "new": "else                         state_q <= S_DRAIN;"
+  }
+ ]
+}

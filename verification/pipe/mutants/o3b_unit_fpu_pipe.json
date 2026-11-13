@@ -1,0 +1,45 @@
+{
+ "dut": "design/pipe/qv_fpu_pipe.sv",
+ "tb": "design/pipe/qv_exu_fpu_tb.sv",
+ "files": [
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_fp_dec.sv",
+  "design/pipe/qv_fpu_round.sv",
+  "design/pipe/qv_fpu_pipe.sv",
+  "design/pipe/qv_fpu_divsqrt.sv",
+  "design/pipe/qv_exu_fpu.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench"
+ ],
+ "cwd": "design",
+ "timeout": 900,
+ "mutants": [
+  {
+   "name": "a killed op leaves stage 1",
+   "old": "        if (i_kill_vec[r0.tag]) r1_valid <= 1'b0;                  // (O3) killed: it goes no further\n",
+   "new": ""
+  },
+  {
+   "name": "a killed op leaves stage 2",
+   "old": "        if (i_kill_vec[r1_tag]) r2_valid <= 1'b0;\n",
+   "new": ""
+  },
+  {
+   "name": "a killed op leaves stage 3",
+   "old": "        if (i_kill_vec[r2_tag]) r3_valid <= 1'b0;\n",
+   "new": ""
+  },
+  {
+   "name": "a killed op writes back from stage 3",
+   "old": "o_wb.valid = r3_valid && !i_flush && !i_kill_vec[r3_tag];",
+   "new": "o_wb.valid = r3_valid && !i_flush;"
+  }
+ ]
+}

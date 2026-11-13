@@ -1,0 +1,31 @@
+{
+ "dut": "design/pipe/qv_exu_bru.sv",
+ "tb": "design/pipe/qv_exu_bru_tb.sv",
+ "files": [
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_exu_bru.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench"
+ ],
+ "cwd": "design",
+ "timeout": 900,
+ "mutants": [
+  {
+   "name": "a killed branch writes back",
+   "old": "o_wb.valid      = req_q.valid && !i_kill_vec[req_q.tag];",
+   "new": "o_wb.valid      = req_q.valid;"
+  },
+  {
+   "name": "a killed branch reports its mispredict",
+   "old": "o_wb.mispredict = req_q.valid && !i_kill_vec[req_q.tag] &&",
+   "new": "o_wb.mispredict = req_q.valid &&"
+  }
+ ]
+}

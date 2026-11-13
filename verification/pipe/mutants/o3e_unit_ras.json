@@ -1,0 +1,42 @@
+{
+ "dut": "design/pipe/qv_ras.sv",
+ "tb": "design/pipe/qv_ras_tb.sv",
+ "files": [
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_ras.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench",
+  "-Pqv_ras_tb.REPAIR=2"
+ ],
+ "cwd": "design",
+ "timeout": 900,
+ "mutants": [
+  {
+   "name": "a restore leaves the index",
+   "old": "                    p_q <= rs_ptr;",
+   "new": "                    p_q <= p_q;"
+  },
+  {
+   "name": "a restore leaves the top entry",
+   "old": "if (REPAIR > 1) a_q[rs_ptr] <= i_restore_snap.top;",
+   "new": "if (REPAIR > 9) a_q[rs_ptr] <= i_restore_snap.top;"
+  },
+  {
+   "name": "a pop's snapshot top is the old top",
+   "old": "top0 = (i_sp_op0 == 2'b01) ? i_sp_addr0 : a_q[p0];",
+   "new": "top0 = (i_sp_op0 == 2'b01) ? i_sp_addr0 : a_q[p_q];"
+  },
+  {
+   "name": "the second snapshot forgets the first op's push",
+   "old": "((i_sp_op0 == 2'b01) && (p1 == p0)) ? i_sp_addr0 : a_q[p1];",
+   "new": "a_q[p1];"
+  }
+ ]
+}

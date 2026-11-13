@@ -1,0 +1,27 @@
+{
+ "dut": "design/pipe/qv_rob.sv",
+ "tb": "design/pipe/qv_rob_tb.sv",
+ "files": [
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_rob.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench",
+  "-Pqv_rob_tb.ROB_DEPTH=4"
+ ],
+ "cwd": "design",
+ "timeout": 900,
+ "mutants": [
+  {
+   "name": "the kill vector marks tags that are no pointer of this ROB",
+   "old": "o_kill_vec[k] = i_kill && ((k >> PTR_W) == 0)",
+   "new": "o_kill_vec[k] = i_kill"
+  }
+ ]
+}

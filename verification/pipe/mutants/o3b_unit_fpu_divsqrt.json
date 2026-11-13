@@ -1,0 +1,30 @@
+{
+ "dut": "design/pipe/qv_fpu_divsqrt.sv",
+ "tb": "design/pipe/qv_exu_fpu_tb.sv",
+ "files": [
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_fp_dec.sv",
+  "design/pipe/qv_fpu_round.sv",
+  "design/pipe/qv_fpu_pipe.sv",
+  "design/pipe/qv_fpu_divsqrt.sv",
+  "design/pipe/qv_exu_fpu.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench"
+ ],
+ "cwd": "design",
+ "timeout": 900,
+ "mutants": [
+  {
+   "name": "a killed divide/sqrt runs on",
+   "old": "            if (st_q != S_IDLE && i_kill_vec[tag_q]) st_q <= S_IDLE;\n",
+   "new": ""
+  }
+ ]
+}

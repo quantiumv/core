@@ -1,0 +1,54 @@
+{
+ "dut": "design/pipe/qv_rob.sv",
+ "tb": "design/pipe/qv_rebuild_tb.sv",
+ "files": [
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_rs.sv",
+  "design/pipe/qv_issue.sv",
+  "design/pipe/qv_rob.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench",
+  "-Pqv_rebuild_tb.CYCLES=6000"
+ ],
+ "cwd": "design",
+ "timeout": 900,
+ "mutants": [
+  {
+   "name": "the killed entries survive too",
+   "old": "QV_ROB_TAG_W'(kill_from), QV_ROB_TAG_W'(head_next), PTR_W);\n    always_comb",
+   "new": "QV_ROB_TAG_W'(tail_q), QV_ROB_TAG_W'(head_next), PTR_W);\n    always_comb"
+  },
+  {
+   "name": "this cycle's retirements survive",
+   "old": "            p = head_next + PTR_W'(j);",
+   "new": "            p = head_q + PTR_W'(j);"
+  },
+  {
+   "name": "the branch does not survive",
+   "old": "(QV_ROB_TAG_W'(j) < n_surv)",
+   "new": "(QV_ROB_TAG_W'(j) + 1 < n_surv)"
+  },
+  {
+   "name": "x0 is claimed",
+   "old": "o_surv_int[j]  = rd_wen_q[x] && !c.rd_fp && (rd_q[x] != 5'd0);",
+   "new": "o_surv_int[j]  = rd_wen_q[x] && !c.rd_fp;"
+  },
+  {
+   "name": "a survivor tag without its wrap bit",
+   "old": "o_surv_tag[j]  = QV_ROB_TAG_W'(p);",
+   "new": "o_surv_tag[j]  = QV_ROB_TAG_W'(x);"
+  },
+  {
+   "name": "every survivor is a CSR op",
+   "old": "o_surv_csr[j]  = (c.cls == QV_FU_CSR);",
+   "new": "o_surv_csr[j]  = 1'b1;"
+  }
+ ]
+}

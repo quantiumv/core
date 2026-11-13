@@ -1,0 +1,32 @@
+{
+ "dut": "design/pipe/qv_rs.sv",
+ "tb": "design/pipe/qv_rs_tb.sv",
+ "files": [
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_rs.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench",
+  "-Pqv_rs_tb.CYCLES=20000"
+ ],
+ "cwd": "design",
+ "timeout": 900,
+ "mutants": [
+  {
+   "name": "a killed entry is selected",
+   "old": "ready[i] = v_q[i] && !killed[i] &&",
+   "new": "ready[i] = v_q[i] &&"
+  },
+  {
+   "name": "a killed entry is kept",
+   "old": "if (v_q[i] && !issued[i] && !killed[i]) begin",
+   "new": "if (v_q[i] && !issued[i]) begin"
+  }
+ ]
+}

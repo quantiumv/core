@@ -1,0 +1,49 @@
+{
+ "dut": "design/pipe/qv_issue.sv",
+ "tb": "design/pipe/qv_rebuild_tb.sv",
+ "files": [
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_rs.sv",
+  "design/pipe/qv_issue.sv",
+  "design/pipe/qv_rob.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench",
+  "-Pqv_rebuild_tb.CYCLES=6000"
+ ],
+ "cwd": "design",
+ "timeout": 900,
+ "mutants": [
+  {
+   "name": "the oldest writer wins",
+   "old": "            for (int j = 0; j < QV_ROB_DEPTH; j++) begin\n                if (i_surv_live[j] && i_surv_int[j]) begin",
+   "new": "            for (int j = QV_ROB_DEPTH - 1; j >= 0; j--) begin\n                if (i_surv_live[j] && i_surv_int[j]) begin"
+  },
+  {
+   "name": "no rebuild: a kill updates the tables as a cycle without one",
+   "old": "        end else if (i_kill) begin",
+   "new": "        end else if (1'b0) begin"
+  },
+  {
+   "name": "the tables are not cleared before the rebuild",
+   "old": "are not among the survivors\n            for (int r = 0; r < 32; r++) begin\n                prod_busy_q[r] <= 1'b0; prod_late_q[r] <= 1'b0; fprod_busy_q[r] <= 1'b0;\n            end",
+   "new": "are not among the survivors"
+  },
+  {
+   "name": "late is not rebuilt",
+   "old": "prod_late_q[i_surv_rd[j]] <= CSR_LATE && i_surv_csr[j];",
+   "new": "prod_late_q[i_surv_rd[j]] <= 1'b0;"
+  },
+  {
+   "name": "the FP table is not rebuilt",
+   "old": "if (i_surv_live[j] && i_surv_fp[j]) begin",
+   "new": "if (i_surv_live[j] && i_surv_fp[j] && 1'b0) begin"
+  }
+ ]
+}

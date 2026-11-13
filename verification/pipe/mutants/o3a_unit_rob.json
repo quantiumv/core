@@ -1,0 +1,51 @@
+{
+ "dut": "design/pipe/qv_rob.sv",
+ "tb": "design/pipe/qv_rob_tb.sv",
+ "files": [
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_rob.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench"
+ ],
+ "cwd": "design",
+ "timeout": 900,
+ "mutants": [
+  {
+   "name": "the tail does not go back on a kill",
+   "old": "                tail_q <= kill_from;",
+   "new": "                tail_q <= tail_q;"
+  },
+  {
+   "name": "the kill starts at the branch itself",
+   "old": "wire [PTR_W-1:0] kill_from = i_kill_tag[PTR_W-1:0] + PTR_W'(1);",
+   "new": "wire [PTR_W-1:0] kill_from = i_kill_tag[PTR_W-1:0];"
+  },
+  {
+   "name": "a kill wins a flush",
+   "old": "            if (i_flush) begin\n                tail_q <= head_next;",
+   "new": "            if (i_flush && !i_kill) begin\n                tail_q <= head_next;"
+  },
+  {
+   "name": "a writeback is always marked recovered",
+   "old": "recovered_q[wb_idx]  <= i_wb_recover;",
+   "new": "recovered_q[wb_idx]  <= 1'b1;"
+  },
+  {
+   "name": "a recovered mark survives a new allocation",
+   "old": "                recovered_q[tail_idx]  <= 1'b0;\n",
+   "new": ""
+  },
+  {
+   "name": "the kill vector takes the tail too",
+   "old": "                                < qv_rob_dist(QV_ROB_TAG_W'(tail_q), QV_ROB_TAG_W'(kill_from), PTR_W));",
+   "new": "                                <= qv_rob_dist(QV_ROB_TAG_W'(tail_q), QV_ROB_TAG_W'(kill_from), PTR_W));"
+  }
+ ]
+}

@@ -1,0 +1,59 @@
+{
+ "dut": "design/pipe/qv_ras.sv",
+ "tb": "design/pipe/qv_ras_tb.sv",
+ "files": [
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_ras.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench",
+  "-Pqv_ras_tb.REPAIR=1"
+ ],
+ "cwd": "design",
+ "timeout": 900,
+ "mutants": [
+  {
+   "name": "a restore leaves the count",
+   "old": "                    n_q <= CNT_W'(i_restore_snap.cnt);",
+   "new": "                    n_q <= n_q;"
+  },
+  {
+   "name": "the flush copies the committed stack in the wrong order",
+   "old": "a_q[j] <= c_next[64*((DEPTH - j) % DEPTH) +: 64];",
+   "new": "a_q[j] <= c_next[64*j +: 64];"
+  },
+  {
+   "name": "a pop on an empty stack moves the index",
+   "old": "if (op == 2'b10 && n != '0) return {p - PTR_W'(1), n - CNT_W'(1)};",
+   "new": "if (op == 2'b10) return {p - PTR_W'(1), (n == '0) ? n : n - CNT_W'(1)};",
+   "equivalent": true,
+   "why": "with a count of 0 nothing is visible, and the next push puts its entry one above the index wherever it is"
+  },
+  {
+   "name": "a pop on an empty stack wraps the count",
+   "old": "if (op == 2'b10 && n != '0) return {p - PTR_W'(1), n - CNT_W'(1)};",
+   "new": "if (op == 2'b10) return {p - PTR_W'(1), n - CNT_W'(1)};"
+  },
+  {
+   "name": "a restore wins a flush",
+   "old": "                end else if (i_flush) begin\n                    // the committed stack after",
+   "new": "                end else if (i_flush && !i_restore) begin\n                    // the committed stack after"
+  },
+  {
+   "name": "the second snapshot's count is the first's",
+   "old": "o_snap1.cnt = 4'(n1);",
+   "new": "o_snap1.cnt = 4'(n0);"
+  },
+  {
+   "name": "the second op's push is lost",
+   "old": "if (i_sp_op1 == 2'b01) a_q[p1] <= i_sp_addr1;",
+   "new": ""
+  }
+ ]
+}

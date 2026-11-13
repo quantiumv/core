@@ -1,0 +1,32 @@
+{
+ "dut": "design/pipe/qv_exu_div.sv",
+ "tb": "design/pipe/qv_exu_div_tb.sv",
+ "files": [
+  "design/pipe/qv_pkg.sv",
+  "design/divider.sv",
+  "design/pipe/qv_exu_div.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench"
+ ],
+ "cwd": "design",
+ "timeout": 900,
+ "mutants": [
+  {
+   "name": "a killed divide runs on",
+   "old": "wire kill   = busy_q && i_kill_vec[tag_q];",
+   "new": "wire kill   = 1'b0;"
+  },
+  {
+   "name": "a killed divide writes back",
+   "old": "o_wb.valid = div_done && !i_flush && !kill;",
+   "new": "o_wb.valid = div_done && !i_flush;"
+  }
+ ]
+}
