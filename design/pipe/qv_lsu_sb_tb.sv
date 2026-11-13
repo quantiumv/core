@@ -16,7 +16,9 @@
  * off, and the LSU's request cannot be swallowed by a response that is not its own. o_load_near is high for a
  * plain RAM load that does not wait for the buffer, among the three oldest ROB entries, once translated.
  */
-module qv_lsu_sb_tb;
+module qv_lsu_sb_tb #(
+    parameter int ROB = qv_pkg::QV_ROB_DEPTH          // the ROB the LSU's tags come from
+);
     import qv_pkg::*;
 
     int   pass_count = 0;
@@ -49,7 +51,7 @@ module qv_lsu_sb_tb;
     logic                    foreign_ack = 1'b0;      // a response that is not the LSU's
     logic                    foreign_err = 1'b0;      // ... an error response (the walker's PTE read, say)
 
-    qv_lsu #(.SB_EN(1'b1), .PMA_RAM_BASE(64'h0), .PMA_RAM_SIZE(64'h400)) dut (
+    qv_lsu #(.SB_EN(1'b1), .PMA_RAM_BASE(64'h0), .PMA_RAM_SIZE(64'h400), .ROB_DEPTH(ROB)) dut (
         .clk(clk), .rst(rst), .i_flush(flush),
         .i_req(req), .o_free(free),
         .i_head_valid(head_valid), .i_head_tag(head_tag),
@@ -386,6 +388,18 @@ module qv_lsu_sb_tb;
         check("load_near: not for an atomic", {63'b0, load_near}, 64'd0);
         @(negedge clk); flush = 1'b1; head_valid = 1'b0;
         @(posedge clk); #1; flush = 1'b0;
+        // (O3) the distance is the ROB's: with a smaller ROB its pointers wrap before the tag field does, so the
+        // entry after the last pointer is tag 0, one behind it
+        if (ROB < QV_ROB_DEPTH) begin
+            next_tag = '0;
+            dispatch(1'b0, QV_AMO_LR, 1'b0, 2'd3, 64'h0A8, 64'd0);
+            @(negedge clk); head_valid = 1'b1; head_tag = QV_ROB_TAG_W'(2 * ROB - 1); #1;
+            check("load_near: one behind the head across the ROB's wrap", {63'b0, load_near}, 64'd1);
+            head_tag = QV_ROB_TAG_W'(2 * ROB - 3); #1;
+            check("load_near: three behind across the wrap: not near", {63'b0, load_near}, 64'd0);
+            @(negedge clk); flush = 1'b1; head_valid = 1'b0;
+            @(posedge clk); #1; flush = 1'b0;
+        end
 
         // ---- a flush drops a posted store that has not reached the head ----
         dispatch(1'b0, QV_AMO_LR, 1'b1, 2'd3, 64'h0A0, 64'd7);
