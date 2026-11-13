@@ -29,6 +29,7 @@ DEFINES=""
 LABEL=""
 MODE=m
 ILPDIR=""
+MEMLAT=""
 
 usage() {
     cat <<EOF
@@ -46,6 +47,9 @@ Usage: run_perf.sh [options]
   --label NAME        results go to baseline_<core>_<NAME>.csv (and its _stack.csv) and the builds are tagged, so the committed baselines stay
   --timeout N          per-run cycle budget passed as +TIMEOUT (default 2000000)
   --ilptrace DIR       also write each run's +ILPTRACE lines (perf_stack.sv) to DIR/<kernel>[_s]_<config>.ilp
+  --memlat L[,B[,W]]   the cache configuration only, with a memory that answers a read in L cycles (B for the next
+                       dword of a line right behind the last read, W for a write; wb4_sram_lat.sv); results labelled
+                       lat<L> (plus --label), never the baselines
   --wall-timeout N      real seconds per run before it's killed (default 120)
   -h, --help
 EOF
@@ -63,6 +67,7 @@ while [ $# -gt 0 ]; do
         --timeout) MAX_CYCLES="$2"; shift 2 ;;
         --wall-timeout) WALL_TIMEOUT="$2"; shift 2 ;;
         --ilptrace) ILPDIR="$2"; shift 2 ;;
+        --memlat) MEMLAT="$2"; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "Unknown argument: $1" >&2; usage; exit 1 ;;
     esac
@@ -114,6 +119,14 @@ elif [ "$ORACLE" == "early" ]; then
 elif [ -n "$ORACLE" ]; then
     echo "Unknown --oracle: $ORACLE (expected store or early)" >&2; exit 1
 fi
+MEMLAT_PLUS=""
+if [ -n "$MEMLAT" ]; then
+    IFS=, read -r ML_L ML_B ML_W <<< "$MEMLAT"
+    ML_B=${ML_B:-$ML_L}; ML_W=${ML_W:-$ML_L}
+    DESIGN_FILES="${DESIGN_FILES/design\/wb4_sram.sv/verification/perf/wb4_sram_lat.sv}"
+    MEMLAT_PLUS="+MEMLAT_L=$ML_L +MEMLAT_B=$ML_B +MEMLAT_W=$ML_W"
+    LABEL="lat${ML_L}_${ML_B}_${ML_W}${LABEL:+_$LABEL}"
+fi
 [ -n "$LABEL" ] && TAG="${TAG}_${LABEL}"
 DEF_FLAGS=""
 for d in $DEFINES; do DEF_FLAGS="$DEF_FLAGS -D$d"; done
@@ -142,7 +155,7 @@ build_tb() {
     fi
 }
 
-if [ "$ORACLE" != "store" ]; then build_tb 0 "$OUTDIR/perf_tb_${TAG}_sram.vvp" "$OUTDIR/build_${TAG}_sram.log"; fi
+if [ "$ORACLE" != "store" ] && [ -z "$MEMLAT" ]; then build_tb 0 "$OUTDIR/perf_tb_${TAG}_sram.vvp" "$OUTDIR/build_${TAG}_sram.log"; fi
 build_tb 1 "$OUTDIR/perf_tb_${TAG}_cache.vvp" "$OUTDIR/build_${TAG}_cache.log"
 
 # ---------------- run every kernel against both configs ----------------
@@ -188,7 +201,7 @@ run_one() {
     local out
     local plus=""
     [ -n "$ILPDIR" ] && plus="+ILPTRACE"
-    out=$(timeout "$WALL_TIMEOUT" vvp "$vvp" +HEXFILE="$hex" +PERF_RESULT_ADDR="$addr" +TIMEOUT="$MAX_CYCLES" $plus 2>&1 | grep -v "Unable to open")
+    out=$(timeout "$WALL_TIMEOUT" vvp "$vvp" +HEXFILE="$hex" +PERF_RESULT_ADDR="$addr" +TIMEOUT="$MAX_CYCLES" $plus $MEMLAT_PLUS 2>&1 | grep -v "Unable to open")
     if [ -n "$ILPDIR" ]; then
         mkdir -p "$ILPDIR"
         echo "$out" | grep "^ILP " > "$ILPDIR/${kernel}${SFX}_${cfg_name}.ilp"
@@ -236,7 +249,7 @@ run_one() {
 
 echo "=== running kernels ==="
 for kernel in $KERNELS; do
-    if [ "$ORACLE" != "store" ]; then run_one "$kernel" "sram" "$OUTDIR/perf_tb_${TAG}_sram.vvp"; fi
+    if [ "$ORACLE" != "store" ] && [ -z "$MEMLAT" ]; then run_one "$kernel" "sram" "$OUTDIR/perf_tb_${TAG}_sram.vvp"; fi
     run_one "$kernel" "cache" "$OUTDIR/perf_tb_${TAG}_cache.vvp"
 done
 
