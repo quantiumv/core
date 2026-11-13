@@ -22,27 +22,27 @@ never do.
 (and `make clean` in this directory for the kernels): re-run from clean after any
 RTL change.
 
-## Results (after O1, the reservation station, 2026-11, branch `OOO`)
+## Results (after O4, two-wide, 2026-11, branch `OOO`)
 
 CPI (cycles per retired instruction), M mode:
 
-| Kernel | reference, sram | core, sram | reference, cache | core, cache | core before O1, cache | core after O2, cache | core at P10, cache | core before P9, cache |
-|---|---|---|---|---|---|---|---|---|
-| memcpy | 3.77 | 1.75 | 3.90 | 1.17 | 1.17 | 1.53 | 1.74 | 2.36 |
-| crc32 | 3.03 | 1.12 | 3.03 | 1.11 | 1.11 | 1.11 | 1.12 | 1.25 |
-| qsort | 3.55 | 1.68 | 3.59 | 1.56 | 1.56 | 1.62 | 1.86 | 2.46 |
-| matmul | 3.62 | 1.38 | 3.66 | 1.16 | 1.16 | 1.16 | 1.63 | 1.78 |
-| sieve | 3.97 | 1.51 | 3.98 | 1.04 | 1.04 | 1.04 | 1.28 | 2.00 |
-| listchase | 3.80 | 1.60 | 3.90 | 1.09 | 1.09 | 1.09 | 1.90 | 1.91 |
-| mixedint | 3.99 | 1.64 | 4.01 | 1.10 | 1.10 | 1.37 | 1.58 | 2.14 |
-| trap (P10.0) | 4.00 | 1.79 | 4.00 | 1.79 | 1.83 | 2.25 | 2.40 | |
+| Kernel | reference, sram | core, sram | reference, cache | core, cache | core after O1, cache | core before O1, cache | core after O2, cache | core at P10, cache | core before P9, cache |
+|---|---|---|---|---|---|---|---|---|---|
+| memcpy | 3.77 | 1.65 | 3.90 | 1.15 | 1.17 | 1.17 | 1.53 | 1.74 | 2.36 |
+| crc32 | 3.03 | 0.78 | 3.03 | 0.79 | 1.11 | 1.11 | 1.11 | 1.12 | 1.25 |
+| qsort | 3.55 | 1.54 | 3.59 | 1.34 | 1.56 | 1.56 | 1.62 | 1.86 | 2.46 |
+| matmul | 3.62 | 1.38 | 3.66 | 1.00 | 1.16 | 1.16 | 1.16 | 1.63 | 1.78 |
+| sieve | 3.97 | 1.51 | 3.98 | 1.03 | 1.04 | 1.04 | 1.04 | 1.28 | 2.00 |
+| listchase | 3.80 | 1.28 | 3.90 | 0.91 | 1.09 | 1.09 | 1.09 | 1.90 | 1.91 |
+| mixedint | 3.99 | 1.60 | 4.01 | 1.06 | 1.10 | 1.10 | 1.37 | 1.58 | 2.14 |
+| trap (P10.0) | 4.00 | 1.75 | 4.00 | 1.76 | 1.79 | 1.83 | 2.25 | 2.40 | |
 
-The core is 2.1 to 3.8 times faster than the reference on every kernel, and 2.2 times on `trap` (an OS trap path)
-since P10c stopped CSR reads and trap-CSR writes from flushing the pipeline (it was 3.58 on the SoC at P10.0). The
-load/store queue (O2) is the step from the "at P10" column to the "after O2" one, the D$ store pass-through the step
-from there to "before O1" (the reference runs behind the same D$, so its cache column moved too), and the reservation
-station (O1) the step from there to the core's: small here, larger in S mode and on `fpmix` (see "The reservation
-station").
+The core is 2.3 to 4.3 times faster than the reference on every kernel, and 2.3 times on `trap` (an OS trap path).
+It dispatches and commits two instructions a cycle (O4), so CPI can go below 1: `crc32` and `listchase` do on the SoC
+(and `crc32`, `matmul` and `sieve` in S mode). The load/store queue (O2) is the step from the "at P10" column to the
+"after O2" one, the D$ store pass-through the step from there to "before O1" (the reference runs behind the same D$, so
+its cache column moved too), the reservation station (O1) the step to "after O1", and two-wide (O4) the step to the
+core's (see "Two-wide").
 
 ## F/D kernels
 
@@ -127,7 +127,11 @@ shared-SRAM harness (fetch and data on one bus):
 | reference (`ref_core.sv`) | 8400 | 11400 | 1.35 |
 | core before P9 (all knobs off) | 4805 | 5113 | 1.06 |
 | core after P9 | 3908 | 5106 | 1.30 |
-| core (after P10) | 3908 | 3915 | 1.00 |
+| core after P10 | 3908 | 3915 | 1.00 |
+| core after O1 (every O4 knob at 1) | 3304 | 3311 | 1.00 |
+| core (after O4, two-wide) | 3198 | 3262 | 1.02 |
+
+(The regression row runs it at one retirement a cycle, `QV_PIPE_COMMIT_W=1`: 3206 and 3307, 1.03.)
 
 A translated fetch dword and a translated access each take one more cycle
 (the answer is registered before it is used); the pipeline hides most of it. P9 made the M-mode loop 19 %
@@ -424,6 +428,46 @@ The size: 4 entries against 2 and 8 change only these rows; every other row is t
 A ROB of 16 is not built. The model gives `fpmix` -10.7 % and the geometric mean -1.6 % against -1.0 %, and nothing else
 moves much: issue stops on a full ROB in 1.2 % of the window cycles on the SoC (`is_rob`, M mode; 16 cycles in all before the station).
 
+## Two-wide (O4, branch `OOO`)
+
+The core dispatches two uops a cycle, issues to two ALU ports and commits two a cycle (`QV_PIPE_DISPATCH_W`,
+`QV_PIPE_ALU_PORTS`, `QV_PIPE_COMMIT_W`, all 2 by default). A pair follows the rules of O4.0 (one memory op, one uop
+touching FP state, CSR/SYS/FENCE/divide/FP divide/atomic/trapping uops alone, branches and multiplies on port 0; the
+second retirement never traps and a pair writes FP state once). With every O4 knob at 1 (and
+`QV_PIPE_SB_YIELD_READY=1`) the six CSVs are byte-for-byte O1's. Cycles, SoC, then the change in the other builds,
+against O1:
+
+| kernel | M, O1 | M, O4 | change | S change | M, sram | S, sram |
+|---|---|---|---|---|---|---|
+| memcpy | 770 | 760 | -1.3 % | -0.8 % | -5.7 % | +2.6 % |
+| crc32 | 9785 | 6955 | -28.9 % | -19.3 % | -29.8 % | -19.0 % |
+| qsort | 7188 | 6172 | -14.1 % | -14.1 % | -8.6 % | -7.2 % |
+| matmul | 4959 | 4293 | -13.4 % | -20.0 % | -0.3 % | -1.8 % |
+| sieve | 6117 | 6053 | -1.0 % | -23.5 % | -0.4 % | -0.5 % |
+| listchase | 2786 | 2323 | -16.6 % | -0.1 % | -20.0 % | -0.1 % |
+| mixedint | 4835 | 4654 | -3.7 % | -4.9 % | -2.5 % | -1.7 % |
+| trap | 10032 | 9834 | -2.0 % | 0.0 % | -2.0 % | -0.0 % |
+| fmatmul | 4624 | 4134 | -10.6 % | -8.3 % | -4.6 % | -11.6 % |
+| fpmix | 4131 | 4122 | -0.2 % | -0.2 % | +0.0 % | -0.8 % |
+| geomean | | | -9.7 % | -9.6 % | -7.9 % | -4.2 % |
+
+No kernel gets slower on the SoC, and instret is unchanged on every row. The flat SRAM harness, where fetch and data
+share one bus, loses 2.6 % on S `memcpy` (not gated: the SoC decides, as for the station).
+
+- The O4.0 model said -10.6 % (M) and -14.5 % (S) against the core before the station, which is -9.8 % and -12.2 %
+  against O1: the M figure lands within 0.1 point. S mode falls short by 2.6 points, nearly all of it `sieve` (the
+  model -44.6 %, measured -23.5 %) and `matmul`, whose fetch the model copied from a one-wide trace (its frontend
+  residuals) rather than modelled. OX.0 refits the model on traces of the two-wide core.
+- `sieve` M and `listchase` S barely move: two retirements a cycle need two instructions a cycle from the frontend
+  and work the one memory engine does not hold up (sieve M's loop straddles two dwords, see O4.0).
+- O4f (`QV_PIPE_SB_YIELD_READY`, default 0): the store buffer's drain yields only to a load near the head, no longer to
+  any memory op that is ready (P9d's rule, `=1`). At two-wide the trap handler's restores reached the LSU while one of
+  its saves was still in the buffer; the drain kept yielding to the five restores that did not match it, and the sixth,
+  which did, then waited a beat. `trap` M 10034 to 9834 cycles (-2.0 %), S back to O1's; every other row identical; at
+  one-wide the cycles are identical either way (the side counters move, so it is the fourth knob of "every O4 knob at
+  1").
+- The Sv39 loop of `core_sv39_cpi_tb`: 3198 cycles in M mode and 3262 in S mode under Sv39 (O1: 3304 and 3311).
+
 ## CPI stack
 
 `perf_stack.sv` (instantiated by `perf_tb.sv`, not part of the reference build) splits every cycle of a
@@ -680,4 +724,5 @@ What it says:
 - The measured frontend is the largest gap: with an ideal one the same core gains 18.5 % (16.9 %) instead of 10.6 %
   (14.5 %), almost all on sieve's M build (its loop straddles two dwords), matmul and crc32. The model keeps the
   measured frontend gaps, which at one-wide include the IQ's back-pressure, so it cannot say how much of that the real
-  frontend already has at two-wide: that is measured on the two-wide core (O4f).
+  frontend already has at two-wide: OX.0 measures it on the two-wide core (O4f became the store-buffer rule, see
+  "Two-wide").

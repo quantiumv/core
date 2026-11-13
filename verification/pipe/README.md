@@ -378,6 +378,72 @@ configurations, on a snapshot of `7eb955f`:
 - Module proofs and riscv-formal: run separately (they take days); their results go to
   `../riscv-formal/quantiumv_pipe/README.md` ("After O1").
 
+### O4: two-wide (branch `OOO`)
+
+Two uops are dispatched, issued to two ALU ports and committed a cycle. Each step is behind a knob, and with every O4
+knob at 1 (`QV_PIPE_COMMIT_W`, `QV_PIPE_DISPATCH_W`, `QV_PIPE_ALU_PORTS`, and `QV_PIPE_SB_YIELD_READY=1`) the six perf
+CSVs are byte-identical to O1's:
+- O4.0 (`f61f4c5`): the pair rules as model knobs. Together they cost under half a point, so all of them went in:
+  one memory op and one FP-state uop per dispatch pair, CSR/SYS/FENCE/divide/FP divide/atomic/trapping uops alone,
+  branches and multiplies on port 0; the second retirement never traps, and a pair writes FP state once.
+- O4a (`9239d02`, `519bdc5`, `60ceeb7`): the width knobs and an RVFI channel per retirement; the tracer prints one
+  line per channel; lockstep mode B, where the reference sees interrupts, halts and MAGIC clears only at the
+  boundaries of the core's retirement groups (a level raised after retirement K would otherwise stop the reference
+  after K and the core after K+1). The late modes stay cycle-delayed on the core's side, so a core that samples late
+  still diverges.
+- O4b (`2e49d50`, `d61090b`): two retirements a cycle. `qv_commit`'s pair rule (the head retires plainly; the second
+  is complete, takes no trap, is no CSR, SYS, FENCE or atomic; one posted store, one control-flow instruction and one
+  FP write per pair), two pops in the ROB and the queue, a second producer-table clear, and the LR/SC reservation
+  cleared by a store in either slot.
+- O4c (`b58765c`): two dispatches. `qv_decode2` holds two uops; a slot-1 uop that reads slot 0's destination takes a
+  station entry (its value exists only next cycle) and its operand is never late (a stale late bit would wake only on
+  the commit bus, which carries slot 1 only, and the core would hang).
+- O4d (`2eedfd4`, `dbe87b6`): one copy of the waiting-operand rules, shared by issue, the station and the queue; the
+  second ALU port (no multiplier, no branches).
+- O4e (`84b5831`, `0591205`): two-wide by default. The 23 regression rows that place events at exact retirements run
+  at one retirement a cycle (`-DQV_PIPE_COMMIT_W=1`), and the one-channel riscv-formal models pin it.
+- O4f (`656580e`): the store buffer's drain yields only to a load near the head (`QV_PIPE_SB_YIELD_READY=0`); see
+  `../perf/README.md` ("Two-wide").
+- Results: `../perf/README.md` ("Two-wide").
+
+Unit tests and proofs: `qv_commit_pair_tb` (the pair rule), `qv_dispatch2_tb` (the dispatch pair rules and port
+allocation against a golden model), `qv_decode2_tb`, the ROB, IQ and station rows at two pushes and two pops, `rs2_props`
+(the station with two pushes and two ALU ports: port 1 exactly once, never a multiply, no lost wakeup), `sb_props` at
+the new drain rule. Mutation: `o4b_unit_commit` 42/42, `o4c_unit_issue` 53/53, `o4c_unit_decode2` 11/11, `_fifo` 5/5,
+`_rob` 9/9, `o4d_unit_issue` 16/16, `_rs` 12/12, `_wake` 13/13, `_wake_lsq` 5/5, `o4f_unit_sb` 3/3; seven `rs2` and one
+`sb` formal mutants. Stimulus: `qvgen --pair` (runs of independent ALU ops, dependent and same-destination pairs, a
+multiply, a memory op or a branch in either slot, an FP op beside an integer one, LR / ALU / store / SC).
+
+The exit gate (2026-11-11 to 2026-11-13), the core against the reference, Verilator, four memory configurations, on a
+snapshot of `272882c` (two-wide by default):
+- Perf: with every O4 knob at 1 the six CSVs are byte-identical to O1's; at the default no SoC kernel is slower and
+  instret is unchanged.
+- Regression: core 183/183 at the default and 183/183 with every O4 knob at 1; reference 79/79. Lint clean (three
+  builds). The RVFI diff with `--ooo`: 150/150. OpenOCD smoke 29/29 on both cores; `make run` on both.
+- ACT: 202/204 and 426/430, the known fails (S-00 and `sv39_satp_access_test` in both configs, the two Zalrsc SC tests
+  in the FD config).
+- Lockstep, mode B, fresh seeds (`--pair --ooo` on the FP Sv39 profile with interrupts and the debug script):
+  - 2,500 x 4: 9,996 pass (342.9 M retirements, 11.07 M interrupt entries); with `--mem-dense --pair` 1,000 x 4:
+    3,996 (250.8 M, 7.28 M); the late modes 500 x 4: 1,996 (61.2 M, 1.86 M); interrupts off 500 x 4: 2,000/2,000
+    (24.6 M); an M-mode body 500 x 4: 2,000/2,000 (22.1 M, 0.74 M); every O4 knob at 1, 100 x 4: 396 (14.3 M); one
+    retirement a cycle, 100 x 4: 400/400 (14.4 M);
+  - the corpora x 4 (act-fd 1,704, act + fw + 100 random 1,228, smc, irq, dbg 800) all pass; Icarus 24 x 4 96/96;
+    REF vs REF 200/200; the corruption self-test catches every field class at the targeted retirement; the kill
+    matrix 18/18.
+  - The 4 programs the gate flagged, one each in the 2,500 x 4, mem-dense, late-mode and every-knob-at-1 stages, were
+    invalid stimulus, not the core: `qvgen --pair`'s "a load or a store beside an ALU op" put an ALU op between the address
+    setup and the access, and the ALU op could write the address register (`li x21, ...; subw x21, ...; sd x17,
+    0(x21)`), a wild store into the trap handler's code with no FENCE.I. Where the I$ held the old code the cores
+    fetched different bytes (a FAIL on the cache configuration); where both saw the new bytes they agreed on every
+    retirement and the corrupted handler never ended (a TIMEOUT). `smc_hazard.py` and a scan of every retirement
+    found the store in all four. Fixed in `ce711b2`; on the fixed generator the four programs, regenerated, pass on all four
+    configurations, and fresh batches pass in full: FP + pair + ooo 500 x 4, mem-dense 300 x 4, the late modes
+    200 x 4 and every O4 knob at 1 100 x 4 (3,600 programs).
+- Mutation: `check_patterns.py` 1,283/1,283; the end-to-end specs `p5a_e2e` 12/12, `p5b_e2e` 14/14, `f5_lockstep`
+  17/17.
+- Module proofs and riscv-formal: run separately; their results go to `../riscv-formal/quantiumv_pipe/README.md`
+  ("After O4").
+
 ## Where the core differs from ref_core.sv
 
 Architectural behavior is the same: the lockstep gate compares every retirement, a CSR snapshot, the bus

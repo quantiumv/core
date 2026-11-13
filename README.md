@@ -7,9 +7,9 @@ Join the [Discord](https://discord.gg/sQjhBvWXjF) if you want to take part.
 
 **Core** (`design/pipe/core.sv`, module `core`): a pipelined core that one hart runs on.
 Fetch, align (RVC), decode, in-order dispatch into a reorder buffer, out-of-order issue from a small
-reservation station to the ALU / branch / divide / floating-point units, a load/store unit, and in-order
+reservation station to two ALUs and the branch / divide / floating-point units, a load/store unit, and in-order
 commit, which owns every architectural effect (register writes, CSRs, traps, privilege changes, interrupts
-and debug entry). One instruction dispatched and one committed a cycle; fetch runs back to back and
+and debug entry). Two instructions dispatched and two committed a cycle; fetch runs back to back and
 predicts branches (a target buffer, a history table, a return-address stack); memory ops wait for their
 operands in a load/store queue and are performed one at a time in program order, a plain load from RAM before it
 reaches the head of the ROB, and stores to RAM retire into a store buffer that writes them out behind it.
