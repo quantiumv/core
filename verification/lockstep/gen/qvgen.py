@@ -636,7 +636,9 @@ def emit_pair(p: Program, recent: list[int]):
         _sandbox_addr(p, addr, width=8)
         first_alu = p.rng.random() < 0.5
         if first_alu:
-            alu()
+            # not into the address register: the load or store below would use the ALU result as its address, a
+            # wild store that can land in the code with no FENCE.I (the cores may then fetch different bytes)
+            alu(rd=fresh(addr))
         if p.rng.random() < 0.5:
             rd = fresh(addr)
             p.e(f"    {p.rng.choice(['ld', 'lw', 'lwu', 'lh', 'lbu']):<7} x{rd}, 0(x{addr})")
