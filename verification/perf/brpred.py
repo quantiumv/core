@@ -10,6 +10,10 @@ control-flow instruction retired inside a kernel's window) and replays them thro
   ras        + a return-address stack for JALR returns (calls: JAL/JALR with rd x1/x5; returns: JALR with
              rd x0 and rs1 x1/x5)
   btb        + a direct-mapped target buffer: a taken branch/jump found in it costs no fetch bubble
+  gshare     (OX.0) conditional branches from a table of 2-bit counters indexed by pc[k:1] xor the global history
+             of the last h conditional outcomes
+  tage       (OX.0) a TAGE-lite: a bimodal base and three tagged tables indexed with 4, 12 and 32 bits of global
+             history; the longest hit predicts, a mispredict allocates in a longer table
 
 Cost model (cycles, measured on the core): a mispredict that commit redirects on costs MISP (the refill,
 about 8 from the branch's issue to the first new instruction's commit); a predicted-taken branch that the
@@ -66,10 +70,68 @@ def decode(raw, pc, nxt):
     return None, False, 0, 0, False, 0
 
 
+class Tage:
+    """TAGE-lite: base = 2-bit counters by pc; T1..T3 tagged, 2^bits entries each, 3-bit counters, a useful bit"""
+    HIST = (4, 12, 32)
+
+    def __init__(self, bits=8, tag_bits=8):
+        self.bits, self.tag_bits = bits, tag_bits
+        self.base = {}
+        self.t = [dict() for _ in self.HIST]       # idx -> [tag, ctr (0..7), u]
+        self.ghr = 0
+
+    def _fold(self, h, n, w):
+        v = h & ((1 << n) - 1)
+        out = 0
+        while v:
+            out ^= v & ((1 << w) - 1)
+            v >>= w
+        return out
+
+    def _idx(self, pc, i):
+        return ((pc >> 1) ^ self._fold(self.ghr, self.HIST[i], self.bits)) & ((1 << self.bits) - 1)
+
+    def _tag(self, pc, i):
+        return ((pc >> 1) ^ self._fold(self.ghr, self.HIST[i], self.tag_bits) * 3) & ((1 << self.tag_bits) - 1)
+
+    def predict(self, pc, static):
+        for i in range(len(self.HIST) - 1, -1, -1):
+            e = self.t[i].get(self._idx(pc, i))
+            if e is not None and e[0] == self._tag(pc, i):
+                return e[1] >= 4, i
+        c = self.base.get((pc >> 1) & 0xFFF)
+        return (static if c is None else c >= 2), -1
+
+    def update(self, pc, taken, static):
+        pred, prov = self.predict(pc, static)
+        if prov >= 0:
+            e = self.t[prov][self._idx(pc, prov)]
+            e[1] = min(7, e[1] + 1) if taken else max(0, e[1] - 1)
+            if pred == taken:
+                e[2] = 1
+        else:
+            k = (pc >> 1) & 0xFFF
+            c = self.base.get(k, 2 if static else 1)
+            self.base[k] = min(3, c + 1) if taken else max(0, c - 1)
+        if pred != taken:
+            for i in range(prov + 1, len(self.HIST)):
+                j = self._idx(pc, i)
+                e = self.t[i].get(j)
+                if e is None or e[2] == 0:
+                    self.t[i][j] = [self._tag(pc, i), 4 if taken else 3, 0]
+                    break
+                e[2] = 0
+        self.ghr = ((self.ghr << 1) | int(taken)) & ((1 << 64) - 1)
+
+
 class Pred:
-    def __init__(self, bht=0, ras=0, btb=0):
+    def __init__(self, bht=0, ras=0, btb=0, gshare=None, tage=False):
         self.bht_bits = bht
         self.bht = {}
+        self.gs = gshare                    # (history bits, index bits)
+        self.gs_t = {}
+        self.ghr = 0
+        self.tage = Tage() if tage else None
         self.ras_n = ras
         self.ras = []
         self.btb_n = btb
@@ -87,7 +149,13 @@ class Pred:
             btb_hit = self.btb_n and self.btb.get(pc % self.btb_n) == (pc, nxt)
             if kind == "cond":
                 r["cond"] += 1
-                if self.bht_bits:
+                if self.tage is not None:
+                    pred, _ = self.tage.predict(pc, st_taken)
+                elif self.gs:
+                    gidx = ((pc >> 1) ^ (self.ghr & ((1 << self.gs[0]) - 1))) & ((1 << self.gs[1]) - 1)
+                    c = self.gs_t.get(gidx)
+                    pred = st_taken if c is None else c >= 2
+                elif self.bht_bits:
                     idx = (pc >> 1) & ((1 << self.bht_bits) - 1)
                     c = self.bht.get(idx)
                     pred = st_taken if c is None else c >= 2
@@ -100,7 +168,15 @@ class Pred:
                     if not btb_hit:
                         r["bubbles"] += 1
                         r["cycles"] += BUBBLE
-                if self.bht_bits:
+                if self.tage is not None:
+                    self.tage.update(pc, taken, st_taken)
+                elif self.gs:
+                    c = self.gs_t.get(gidx)
+                    if c is None:
+                        c = 2 if st_taken else 1
+                    self.gs_t[gidx] = min(3, c + 1) if taken else max(0, c - 1)
+                    self.ghr = (self.ghr << 1) | int(taken)
+                elif self.bht_bits:
                     c = self.bht.get(idx)
                     if c is None:
                         c = 2 if st_taken else 1
@@ -139,18 +215,31 @@ class Pred:
 
 
 def load(path):
+    """BR lines (+BRTRACE), or ILP lines (+ILPTRACE, OX.0): every retirement in program order, both commit
+    channels (BRTRACE prints the first channel's only), so a control-flow instruction's next pc is the next line's
+    pc; a trapping one and the window's last line are left out"""
     t = []
+    ilp = []
     for line in open(path):
         p = line.split()
         if len(p) == 4 and p[0] == "BR":
             t.append((int(p[1], 16), int(p[2], 16), int(p[3], 16)))
+        elif len(p) >= 13 and p[0] == "ILP":
+            ilp.append((int(p[1], 16), int(p[2], 16), p[12] != "0"))
+    for k in range(len(ilp) - 1):
+        pc, raw, trap = ilp[k]
+        if not trap and decode(raw, pc, 0)[0] is not None:
+            t.append((pc, raw, ilp[k + 1][0]))
     return t
 
 
 def main():
     cfgs = [("static", dict()), ("ras8", dict(ras=8)), ("bht512", dict(bht=9)), ("bht512+ras8", dict(bht=9, ras=8)),
             ("btb32+ras8", dict(btb=32, ras=8)), ("bht512+btb32+ras8", dict(bht=9, btb=32, ras=8)),
-            ("bht64+btb32+ras8", dict(bht=6, btb=32, ras=8)), ("bht2k+btb64+ras8", dict(bht=11, btb=64, ras=8))]
+            ("bht64+btb32+ras8", dict(bht=6, btb=32, ras=8)), ("bht2k+btb64+ras8", dict(bht=11, btb=64, ras=8)),
+            ("gshare h8 1k+btb32+ras8", dict(gshare=(8, 10), btb=32, ras=8)),
+            ("gshare h12 4k+btb32+ras8", dict(gshare=(12, 12), btb=32, ras=8)),
+            ("tage-lite+btb32+ras8", dict(tage=True, btb=32, ras=8))]
     for path in sys.argv[1:]:
         tr = load(path)
         print(f"== {path}: {len(tr)} control-flow instructions")
