@@ -205,7 +205,14 @@ BASE = dict(w=1, rs=0, rob=8, iq=8, lsq=4, sb=4, handoff=True, early=True, lsu_b
             mshr=0, hit_lat=2, miss_add=0,
             # (OX.0) frontend: fe_blk, the bytes fetched a cycle with fe='ideal'; fe_taken, the bubble after a taken
             # branch the aligner redirected on (None: as traced); nomp: no mispredicts (what one costs)
-            fe_blk=8, fe_taken=None, nomp=False)
+            fe_blk=8, fe_taken=None, nomp=False,
+            # (OX.0) fe='ideal' details: fb, the fetch buffer's blocks (a block is fetched only once the block fb
+            # before it has been used up); iq_room2, the aligner pushes only with room for two in the IQ (fetch
+            # streaming off); al1dw, the aligner as built: two pushes in one cycle only from one block, the one each
+            # ends in (a crossing instruction pairs with the next one), and a crossing instruction's first half is
+            # stashed in one of the cycle's two slots before it goes (after a pair: a cycle later); fe_btb, the bubble after a taken branch that
+            # crosses into the next block and that the aligner did not redirect on (the frontend as built: a cycle)
+            fb=4, iq_room2=False, al1dw=False, fe_btb=0)
 
 
 class DPort:
@@ -315,7 +322,8 @@ def sim(tr, p, res=None, fit=False, t0=None):
     dc = DPort(p['sb'], p['db'])
     t_open = t0 if t0 is not None else (tr[0].commit - 1 if tr else 0)
     seg_start = t_open
-    first_dword_push = None         # (fe ideal) the push of the first instruction of the current dword
+    fe_blks = []                    # (fe ideal) the current stream's blocks: [block, arrival, last use]
+    fe_k0 = 0                       # (fe ideal) the stream's first instruction
     neg = 0
     ld_idx = []; st_idx = []        # (lq/sq) the loads and the stores, in order
     eng_end = []                    # (mem_ooo) when each busy engine's op completes
@@ -380,35 +388,65 @@ def sim(tr, p, res=None, fit=False, t0=None):
         prev = tr[k - 1] if k else None
         prev_redir = prev is not None and (redir_of(prev) or prev.trap)
         blk = q.pc >> shift
+        bhi = (q.pc + (2 if q.rvc else 4) - 1) >> shift   # a crossing instruction needs the next block too
         # ---- frontend: push into the IQ ----
         if prev_redir:
             seg_start = com[k - 1]
             if p['xr'] and prev.redir in (1, 4) and not prev.trap:
                 seg_start = min(seg_start, cmpl[k - 1] + p['xr_lat'])     # recovered at execute (O3)
             c = seg_start
-            first_dword_push = None
+            fe_blks = []
+            fe_k0 = k
         else:
             c = seg_start if k == 0 else push[k - 1]
             if k >= 2 and push[k - 2] >= c:
                 c = max(c, push[k - 2] + 1)                   # at most two pushes a cycle
             if k >= p['iq']:
                 c = max(c, pop[k - p['iq']] + 1)              # room in the IQ
-            if p['fe'] == 'ideal' and k > 0 and blk != (prev.pc >> shift):
-                if first_dword_push is not None:
-                    c = max(c, first_dword_push + p['fe_rate'])   # one block a cycle (fe_rate cycles)
-            if p['fe'] == 'ideal' and p['fe_taken'] is not None and prev is not None and prev.ared:
-                c = max(c, push[k - 1] + p['fe_taken'])          # the bubble after a taken branch
+            if p['iq_room2'] and k + 1 >= p['iq']:
+                c = max(c, pop[k + 1 - p['iq']] + 1)          # the aligner waits for room for two
+            if (p['fe'] == 'ideal' and p['al1dw'] and k > 0 and push[k - 1] >= c
+                    and bhi != ((prev.pc + (2 if prev.rvc else 4) - 1) >> shift)):
+                c = max(c, push[k - 1] + 1)                   # a pair only from one block
+            if (p['fe'] == 'ideal' and p['al1dw'] and k > fe_k0 and bhi != blk
+                    and q.pc == prev.pc + (2 if prev.rvc else 4)):
+                pair = k - 2 >= fe_k0 and push[k - 2] == push[k - 1]
+                c = max(c, push[k - 1] + (2 if pair else 1))  # its first half was stashed after the last push
+            if p['fe'] == 'ideal' and fe_blks and k > 0:
+                seq = q.pc == prev.pc + (2 if prev.rvc else 4)
+                b = fe_blks[-1][0] + 1 if seq else blk
+                while b <= bhi:                               # each block not fetched yet: fe_rate cycles after the
+                    t = fe_blks[-1][1] + p['fe_rate']         # last one, once the fetch buffer has room for it
+                    if (not seq and b == blk and not prev.ared
+                            and ((prev.pc + (2 if prev.rvc else 4) - 1) >> shift) != (prev.pc >> shift)):
+                        t += p['fe_btb']                      # a taken crossing branch the aligner did not redirect on
+                    if len(fe_blks) >= p['fb']:
+                        t = max(t, fe_blks[-p['fb']][2] + 1)
+                    if not seq and b == blk and prev.ared:    # the bubble after a taken branch the aligner
+                        t = max(t, push[k - 1] + (p['fe_taken'] if p['fe_taken'] is not None   # redirected on:
+                                                  else q.push - tr[k - 1].push))               # as traced (None)
+                    fe_blks.append([b, t, t])
+                    b += 1
+                c = max(c, fe_blks[-1][1])
         if replay_at is not None:
             c = max(c, replay_at)                             # a load before it violated: refetched from there
             replay_at = None
         nomp_skip = p['nomp'] and prev is not None and prev.redir in (1, 4) and not prev.trap
-        if not fit and (nomp_skip or (p['fe'] == 'ideal' and not prev_redir and k > 0 and (
-                not prev.ared or p['fe_taken'] is not None))):
+        if not fit and (nomp_skip or (p['fe'] == 'ideal' and not prev_redir and k > 0)):
             push[k] = c                                         # no frontend residual within a fetch stream
         else:
             push[k] = put('push', k, c, q.push)
-        if k == 0 or blk != (prev.pc >> shift) or prev_redir:
-            first_dword_push = push[k]
+        if p['fe'] == 'ideal' and not fit:
+            nb = bhi - blk + 1
+            if not fe_blks:                                   # a stream starts: its first blocks arrive with it
+                fe_blks = [[b, push[k], push[k]] for b in range(blk, bhi + 1)]
+            elif push[k] > c:                                 # a traced bubble was kept: the blocks came that late
+                for e in fe_blks[-nb:]:
+                    e[1] = max(e[1], push[k])
+            for e in fe_blks[-nb:]:
+                e[2] = push[k]                                # the block's last use so far
+            if len(fe_blks) > 4 * p['fb'] + 4:
+                del fe_blks[:len(fe_blks) - (4 * p['fb'] + 4)]
         # ---- decode ----
         c = push[k] + 1
         if k >= 1: c = max(c, pop[k - 1] + (1 if W == 1 else 0))
@@ -580,6 +618,8 @@ def sim(tr, p, res=None, fit=False, t0=None):
         com[k] = put('com', k, c, q.commit)
         if q.posted:
             dc.push(com[k] + 1, q.addr)
+    if p.get('_dbg') is not None:                   # (debugging) the replayed cycles, for a caller to compare
+        p['_dbg'].update(push=push, pop=pop, disp=disp, com=com)
     return com[-1] - t_open, neg
 
 
@@ -603,7 +643,7 @@ VALID = [  # label, model knobs
     ('v_early0', dict(early=False)),
     ('v_byp0', dict(bypass=False)),
     ('v_sb2', dict(sb=2)),
-    ('v_fs0', dict(iq=4, fe='ideal', fe_rate=2)),
+    ('v_fs0', dict(iq=4, fe='ideal', fe_rate=2, fb=2, iq_room2=True, al1dw=True)),
 ]
 
 CONFIGS = [  # name, knobs
@@ -633,7 +673,7 @@ VALID_O4 = [  # label, model knobs against BASE_O4: runs of the core with one th
     ('v_w1', dict(w=1, alu_ports=1)),
     ('v_rs0', dict(rs=0)),
     ('v_sb2', dict(sb=2)),
-    ('v_fs0', dict(iq=4, fe='ideal', fe_rate=2)),
+    ('v_fs0', dict(iq=4, fe='ideal', fe_rate=2, fb=2, iq_room2=True, al1dw=True)),
 ]
 
 def cfg(*parts, **kw):
@@ -649,6 +689,7 @@ MEM = dict(mem_ooo=True, engines=2, lq=8, sq=8, fwd=True, spec_ld=True, mdp='ide
 FE = dict(fe='ideal', fe_blk=16, fe_taken=0)                                             # O8 at full stretch
 CONFIGS_OX = [  # name, knobs against BASE_O4: what each milestone of the complete-OOO track would buy
     ('base', cfg()),                                                    # the fit replayed: must be +0.0% everywhere
+    ('fe-core', cfg(fe='ideal', al1dw=True, fe_btb=1)),                 # the frontend model of the core as built: near 0
     ('xr', cfg(XR)),                                                    # O3
     ('xr comb', cfg(XR, xr_lat=0)),                                     # D7
     ('xr nomp', cfg(XR, nomp=True)),                                    # what a mispredict costs (D5)
