@@ -12,8 +12,11 @@
  *    after MAX_AGE cycles, or at the end;
  *  - a wrong value or flags;
  *  - a divide or square root taken while o_ds_free is low.
+ * (O3) Kills by tag at random times too (a random subset of what is in flight, as a recovery at execute kills the
+ * younger part): a killed tag must not write back in its kill cycle nor after it, its tag may come back at once, and
+ * the rest must be unaffected.
  *
- *     +SEED=<n> +CYCLES=<n> +FLUSH=<per mille> +VEC=<file>
+ *     +SEED=<n> +CYCLES=<n> +FLUSH=<per mille> +KILL=<per mille> +VEC=<file>
  */
 module qv_exu_fpu_tb;
     import qv_pkg::*;
@@ -26,7 +29,9 @@ module qv_exu_fpu_tb;
     fpu_req_t req;
     wb_fp_t   wb;
     logic     ds_free;
-    qv_exu_fpu dut (.clk(clk), .rst(rst), .i_flush(flush), .i_req(req), .o_ds_free(ds_free), .o_wb(wb));
+    logic [(1<<QV_ROB_TAG_W)-1:0] kill_vec = '0;
+    qv_exu_fpu dut (.clk(clk), .rst(rst), .i_flush(flush), .i_req(req), .i_kill_vec(kill_vec), .o_ds_free(ds_free),
+                    .o_wb(wb));
 
     logic [31:0] insn;
     logic [2:0]  frm;
@@ -65,7 +70,7 @@ module qv_exu_fpu_tb;
     logic [63:0] e_res [0:15];
     logic [4:0]  e_fl  [0:15];
     int          e_vec [0:15];
-    int pass_count = 0, fail_count = 0, n_flush = 0, n_ds = 0, n_pipe = 0, n_killed = 0;
+    int pass_count = 0, fail_count = 0, n_flush = 0, n_ds = 0, n_pipe = 0, n_killed = 0, n_kill = 0, n_tkilled = 0;
 
     task automatic fail(string msg);
         fail_count++;
@@ -79,6 +84,8 @@ module qv_exu_fpu_tb;
 
     always @(posedge clk) begin
         if (!rst && wb.valid && flush) fail($sformatf("a writeback in a flush cycle (tag %0d, t=%0t)", wb.tag, $time));
+        if (!rst && wb.valid && kill_vec[wb.tag])
+            fail($sformatf("a writeback for tag %0d in the cycle it is killed (t=%0t)", wb.tag, $time));
         for (int t = 0; t < 16; t++)
             if (alive[t]) begin
                 age[t] = age[t] + 1;
@@ -97,10 +104,12 @@ module qv_exu_fpu_tb;
         if (!rst && flush) begin                          // everything in flight is dead
             for (int t = 0; t < 16; t++) if (alive[t]) begin alive[t] = 1'b0; n_killed++; end
         end
+        if (!rst) for (int t = 0; t < 16; t++)            // (O3) the killed tags are dead from here on
+            if (kill_vec[t] && alive[t]) begin alive[t] = 1'b0; n_tkilled++; end
     end
 
     string path;
-    int    fd, n, seed, cycles, fpm, k, tag, r;
+    int    fd, n, seed, cycles, fpm, kpm, k, tag, r;
     logic [31:0] t_insn;
     logic [3:0]  t_frm;
     logic [63:0] t_a, t_b, t_c, t_res;
@@ -112,6 +121,7 @@ module qv_exu_fpu_tb;
         if (!$value$plusargs("SEED=%d", seed)) seed = 1;
         if (!$value$plusargs("CYCLES=%d", cycles)) cycles = 30000;
         if (!$value$plusargs("FLUSH=%d", fpm)) fpm = 15;
+        if (!$value$plusargs("KILL=%d", kpm)) kpm = 15;
         r = $urandom(seed);
         fd = $fopen(path, "r");
         if (fd == 0) begin
@@ -138,6 +148,13 @@ module qv_exu_fpu_tb;
             @(negedge clk);
             req = '0;
             flush = 1'b0;
+            kill_vec = '0;
+            r = $urandom % 1000;
+            if (r < kpm && cyc < cycles / 2) begin        // (O3) a kill of some of what is in flight
+                for (int t = 0; t < 16; t++) if (alive[t] && ($urandom % 2)) kill_vec[t] = 1'b1;
+                n_kill++;
+                continue;
+            end
             r = $urandom % 1000;
             // flushes only in the first half: in the second a lost result cannot hide behind one
             if (r < fpm && cyc < cycles / 2) begin        // a flush: nothing issues in its cycle
@@ -164,12 +181,12 @@ module qv_exu_fpu_tb;
             req.rm = d_rm; req.a = v_a[k]; req.b = v_b[k]; req.c = v_c[k];
             alive[tag] = 1'b1; e_res[tag] = v_res[k]; e_fl[tag] = v_fl[k][4:0]; e_vec[tag] = k; age[tag] = 0;
         end
-        @(negedge clk) begin req = '0; flush = 1'b0; end
+        @(negedge clk) begin req = '0; flush = 1'b0; kill_vec = '0; end
         repeat (200) @(negedge clk);
         for (int t = 0; t < 16; t++) if (alive[t]) fail($sformatf("tag %0d never written back", t));
         $display("");
-        $display("qv_exu_fpu_tb: %0d pipeline and %0d divide/sqrt ops, %0d flushes killing %0d", n_pipe, n_ds,
-                 n_flush, n_killed);
+        $display("qv_exu_fpu_tb: %0d pipeline and %0d divide/sqrt ops, %0d flushes killing %0d, %0d kills of %0d", n_pipe,
+                 n_ds, n_flush, n_killed, n_kill, n_tkilled);
         $display("qv_exu_fpu_tb: %0d passed, %0d failed", pass_count, fail_count);
         if (fail_count > 0) $display("qv_exu_fpu_tb: FAILURES PRESENT");
         $finish;

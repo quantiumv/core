@@ -11,6 +11,12 @@
  * wraparound -- including reusing an index whose previous occupant
  * completed -- the mispredict next-pc override, and flush. Run at
  * ROB_DEPTH=8, 4 and 2.
+ *
+ * (O3) Kills: the tail goes back to the entry after the branch, the kill
+ * vector marks exactly the younger tags at every position of the pointers
+ * (across the wrap too), an allocation in the kill cycle is dropped, the
+ * branch may retire in its kill cycle, a flush beats a kill, and a
+ * mispredict written back as recovered is marked so.
  */
 module qv_rob_tb #(
     parameter int ROB_DEPTH = 8
@@ -46,6 +52,9 @@ module qv_rob_tb #(
     rob_entry_t              head1;
     logic [QV_ROB_TAG_W-1:0] head1_tag;
     rob_ctrl_t               head1_ctrl;
+    logic                    kill = 1'b0, wb_recover = 1'b0;       // O3
+    logic [QV_ROB_TAG_W-1:0] kill_tag = '0;
+    logic [(1<<QV_ROB_TAG_W)-1:0] kill_vec;
 
     qv_rob #(.ROB_DEPTH(ROB_DEPTH)) dut (
         .clk(clk), .rst(rst), .i_flush(flush),
@@ -59,7 +68,8 @@ module qv_rob_tb #(
         .o_head_valid(head_valid), .o_head_entry(head), .o_head_tag(head_tag),
         .o_head_ctrl(head_ctrl), .i_commit_pop(pop),
         .o_head1_valid(head1_valid), .o_head1_entry(head1), .o_head1_tag(head1_tag), .o_head1_ctrl(head1_ctrl),
-        .i_commit_pop2(pop2)
+        .i_commit_pop2(pop2),
+        .i_kill(kill), .i_kill_tag(kill_tag), .o_kill_vec(kill_vec), .i_wb_recover(wb_recover)
     );
 
     // Entry n's fields are a pure function of n, so any slot can be
@@ -371,6 +381,74 @@ module qv_rob_tb #(
         check("two pops and a flush: empty", {63'b0, empty}, 64'd1);
         check("two pops and a flush: the tail is past both", {60'b0, alloc_tag},
               64'((int'(tag_of[base]) + 2) % (2 * ROB_DEPTH)));
+
+        // ---- O3: kill everything younger than a branch, at every position of the pointers ----
+        for (int r = 0; r < 2 * ROB_DEPTH; r++) begin
+            int nk, bad;
+            nk = (ROB_DEPTH < 3) ? ROB_DEPTH : 3;
+            base = seq;
+            for (i = 0; i < nk; i++) do_alloc();
+            @(negedge clk);
+            kill = 1'b1; kill_tag = tag_of[base];
+            alloc_valid = 1'b1;                          // an allocation in the kill cycle is dropped
+            #1;
+            bad = 0;
+            for (int t = 0; t < (1 << QV_ROB_TAG_W); t++) begin
+                logic exp;
+                exp = 1'b0;
+                for (int j = 1; j < nk; j++) if (QV_ROB_TAG_W'(t) == tag_of[base + j]) exp = 1'b1;
+                if (kill_vec[t] !== exp) bad++;
+            end
+            check($sformatf("kill %0d: the vector marks exactly the younger tags", r), 64'(bad), 64'd0);
+            @(posedge clk); #1;
+            kill = 1'b0; alloc_valid = 1'b0;
+            check($sformatf("kill %0d: nothing is left behind the branch", r), {63'b0, head1_valid}, 64'd0);
+            check($sformatf("kill %0d: the branch is the head", r), {60'b0, head_tag}, {60'b0, tag_of[base]});
+            check($sformatf("kill %0d: the next tag is the one after the branch", r), {60'b0, alloc_tag},
+                  64'((int'(tag_of[base]) + 1) % (2 * ROB_DEPTH)));
+            check($sformatf("kill %0d: no kill, no vector", r), 64'(kill_vec), 64'd0);
+            seq = base + 1;                              // the killed entries' numbers (and tags) are reused
+            do_complete(base);
+            @(negedge clk); pop = 1'b1; @(posedge clk); #1; pop = 1'b0;
+        end
+        // the branch is the head and retires in its kill cycle
+        base = seq;
+        do_alloc(); do_alloc();
+        do_complete(base);
+        @(negedge clk); kill = 1'b1; kill_tag = tag_of[base]; pop = 1'b1; @(posedge clk); #1;
+        kill = 1'b0; pop = 1'b0;
+        check("kill as the branch retires: empty", {63'b0, empty}, 64'd1);
+        check("kill as the branch retires: the next tag is the one after it", {60'b0, alloc_tag},
+              64'((int'(tag_of[base]) + 1) % (2 * ROB_DEPTH)));
+        seq = base + 1;
+        // a flush beats a kill
+        base = seq;
+        do_alloc(); do_alloc();
+        @(negedge clk); kill = 1'b1; kill_tag = tag_of[base]; flush = 1'b1; @(posedge clk); #1;
+        kill = 1'b0; flush = 1'b0;
+        check("flush and kill: empty", {63'b0, empty}, 64'd1);
+        check("flush and kill: the tail is back at the head", {60'b0, alloc_tag}, {60'b0, tag_of[base]});
+        seq = base;
+        // a mispredict recovered at execute is marked; a new allocation clears the mark
+        base = seq;
+        do_alloc();
+        @(negedge clk);
+        wb = '0; wb.valid = 1'b1; wb.tag = tag_of[base]; wb.value = val_of(base); wb.mispredict = 1'b1;
+        wb.next_pc = 64'h7777_0000; wb_recover = 1'b1;
+        @(posedge clk); #1;
+        wb = '0; wb_recover = 1'b0;
+        check("recovered: mispredict", {63'b0, head.mispredict}, 64'd1);
+        check("recovered: marked", {63'b0, head.recovered}, 64'd1);
+        check("recovered: the resolved next pc", head.next_pc, 64'h7777_0000);
+        @(negedge clk); pop = 1'b1; @(posedge clk); #1; pop = 1'b0;
+        base = seq;
+        do_alloc();
+        @(negedge clk);
+        wb = '0; wb.valid = 1'b1; wb.tag = tag_of[base]; wb.value = val_of(base); wb.mispredict = 1'b1;
+        @(posedge clk); #1;
+        wb = '0;
+        check("a mispredict not recovered: not marked", {63'b0, head.recovered}, 64'd0);
+        @(negedge clk); pop = 1'b1; @(posedge clk); #1; pop = 1'b0;
 
         $display("");
         $display("qv_rob_tb (ROB_DEPTH=%0d): %0d passed, %0d failed", ROB_DEPTH, pass_count, fail_count);

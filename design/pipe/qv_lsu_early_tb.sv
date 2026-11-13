@@ -24,6 +24,10 @@
  * current op completes on the bus or is posted, and goes to the bus in the next; both results are right. It is not
  * taken in the cycle of a completion without the bus (a misaligned op at the head), nor in a flush cycle. Without
  * HANDOFF it is taken only from IDLE, a cycle after the completion.
+ * (O3) A kill (i_kill_vec at the held op's tag, a recovery at execute; the op is never the head): one that waits is
+ * dropped with no bus access; an early load on the bus drains (no writeback); one that could start in the kill cycle
+ * presents nothing; one whose response comes in the kill cycle writes nothing back; a store that could be posted is
+ * not. A kill of another tag changes nothing.
  */
 module qv_lsu_early_tb #(
     parameter bit EARLY_ST = 1'b1,
@@ -63,9 +67,11 @@ module qv_lsu_early_tb #(
     logic                    satp_on = 1'b0, xlreq, rq_xl = 1'b0, xl_seen = 1'b0;
     logic [43:0]             rq_ppn = '0;
     always @(posedge clk) if (xlreq) xl_seen <= 1'b1;
+    logic [(1<<QV_ROB_TAG_W)-1:0] kill_vec = '0;
 
     qv_lsu #(.SB_EN(SB_EN), .PMA_RAM_BASE(64'h0), .PMA_RAM_SIZE(64'h400), .EARLY(1'b1), .EARLY_ST(EARLY_ST),
              .HANDOFF(HANDOFF)) dut (
+        .i_kill_vec(kill_vec),
         .clk(clk), .rst(rst), .i_flush(flush),
         .i_req(req), .o_free(free),
         .i_head_valid(head_valid), .i_head_tag(head_tag), .i_early(early_ok),
@@ -544,6 +550,96 @@ module qv_lsu_early_tb #(
             settle();
             check("... and the LSU is idle after", b(free), 64'd1);
             wait_fix = 0;
+        end
+
+        // ---- (O3) kills: the held op is killed by a recovery at execute (never the head) ----
+        begin
+            logic wb_seen, cyc_seen;
+            int   wr0;
+            settle();
+            // a waiting op (a barrier older): dropped at once, nothing on the bus, nothing written back
+            early_ok = 1'b0;
+            dispatch(1'b0, QV_AMO_LR, 1'b0, 2'd3, 64'h0B0, 64'd0);
+            @(negedge clk); head_valid = 1'b1; head_tag = last_tag - 1'b1;
+            kill_vec = '0; kill_vec[last_tag] = 1'b1; #1;
+            check("kill, waiting: no writeback in the kill cycle", b(wb.valid), 64'd0);
+            check("kill, waiting: no request", b(cyc), 64'd0);
+            @(posedge clk); #1; kill_vec = '0; head_valid = 1'b0;
+            check("kill, waiting: the slot is free at once", b(free), 64'd1);
+            settle();
+            check("... and nothing after", b(cyc), 64'd0);
+            early_ok = 1'b1;
+
+            // an early load on the bus: the request is held to its response (drained), nothing written back
+            wait_fix = 3;
+            dispatch(1'b0, QV_AMO_LR, 1'b0, 2'd3, 64'h0B8, 64'd0);
+            @(negedge clk); head_valid = 1'b1; head_tag = last_tag - 1'b1;
+            @(posedge clk); #1;
+            check("kill, on the bus: the early load is on the bus", b(cyc), 64'd1);
+            @(negedge clk); kill_vec[last_tag] = 1'b1; #1;
+            check("kill, on the bus: no writeback in the kill cycle", b(wb.valid), 64'd0);
+            @(posedge clk); #1; kill_vec = '0; head_valid = 1'b0;
+            check("kill, on the bus: the request is held (drained)", b(cyc), 64'd1);
+            wb_seen = 1'b0;
+            for (int c = 0; c < 10; c++) begin #1; if (wb.valid) wb_seen = 1'b1; @(posedge clk); end
+            check("kill, on the bus: no writeback", b(wb_seen), 64'd0);
+            check("kill, on the bus: the slot is free after the response", b(free), 64'd1);
+
+            // one that could start in the kill cycle (the drain beat held it off until now) presents nothing
+            wait_fix = 0;
+            sb_beat = 1'b1;
+            dispatch(1'b0, QV_AMO_LR, 1'b0, 2'd3, 64'h0C0, 64'd0);
+            @(negedge clk); head_valid = 1'b1; head_tag = last_tag - 1'b1;
+            @(posedge clk); #1;
+            @(negedge clk); sb_beat = 1'b0; kill_vec[last_tag] = 1'b1; #1;
+            check("kill in the would-be start cycle: no request", b(cyc), 64'd0);
+            @(posedge clk); #1; kill_vec = '0; head_valid = 1'b0;
+            settle();
+            check("... and none after", b(cyc), 64'd0);
+            check("... the slot is free", b(free), 64'd1);
+
+            // its response comes in the kill cycle: nothing written back, and the LSU is idle after
+            wait_fix = 2;
+            dispatch(1'b0, QV_AMO_LR, 1'b0, 2'd3, 64'h0C8, 64'd0);
+            @(negedge clk); head_valid = 1'b1; head_tag = last_tag - 1'b1;
+            cyc_seen = 1'b0; wb_seen = 1'b0;
+            for (int c = 0; c < 20; c++) begin
+                @(negedge clk);
+                if (ack) begin
+                    kill_vec[last_tag] = 1'b1; #1;
+                    cyc_seen = 1'b1;
+                    if (wb.valid) wb_seen = 1'b1;
+                    c = 20;
+                end
+            end
+            check("kill in the response cycle: the response came", b(cyc_seen), 64'd1);
+            check("kill in the response cycle: no writeback", b(wb_seen), 64'd0);
+            @(posedge clk); #1; kill_vec = '0; head_valid = 1'b0;
+            check("... the slot is free", b(free), 64'd1);
+            for (int c = 0; c < 6; c++) begin #1; if (wb.valid) wb_seen = 1'b1; @(posedge clk); end
+            check("... and no writeback after", b(wb_seen), 64'd0);
+            wait_fix = 0;
+
+            // a store that could be posted before the head is not
+            if (SB_EN && EARLY_ST) begin
+                wr0 = writes;
+                dispatch(1'b0, QV_AMO_LR, 1'b1, 2'd3, 64'h0D0, 64'h1111_2222_3333_4444);
+                @(negedge clk); head_valid = 1'b1; head_tag = last_tag - 1'b1;
+                kill_vec[last_tag] = 1'b1; #1;
+                check("kill, a store that could be posted: not posted", b(wb.valid), 64'd0);
+                @(posedge clk); #1; kill_vec = '0; head_valid = 1'b0;
+                check("... the slot is free", b(free), 64'd1);
+                settle();
+                check("... nothing written", 64'(writes - wr0), 64'd0);
+            end
+
+            // a kill of another tag changes nothing: the early load completes with its data
+            dispatch(1'b0, QV_AMO_LR, 1'b0, 2'd3, 64'h0D8, 64'd0);
+            kill_vec[last_tag + 1'b1] = 1'b1;
+            before_head(20);
+            kill_vec = '0;
+            check("kill of another tag: the early load completes", b(got_wb), 64'd1);
+            check("... with its data", wb_value, mem[8'h1B]);
         end
 
         settle();

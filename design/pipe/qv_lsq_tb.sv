@@ -17,6 +17,10 @@
  * slot's reuse.
  * Random: 4000 cycles of dispatches, completions, retirements and flushes, checking that the engine sees the ops in
  * dispatch order, that every retirement reads its own op's result, and that o_free is "fewer than DEPTH in the queue".
+ * (O3) Kills too: a recovery at execute kills the youngest ops (a random suffix of what is dispatched); none is
+ * offered to the engine from its kill cycle on, the engine drops the one it holds, the next dispatch reuses the first
+ * killed tag (as the ROB's tail does), and everything that survives retires with its own result. Directed: a killed
+ * op's slot and tag come back for a new op, which the engine then takes with its own address.
  */
 module qv_lsq_tb #(
     parameter int DEPTH  = 4,
@@ -58,8 +62,11 @@ module qv_lsq_tb #(
     function automatic logic [43:0] page_of(input logic [63:0] va); return va[55:12] ^ 44'h0AB_CDEF_0123; endfunction
 
     logic                    e_take;             // the model engine takes eng_req (below)
+    logic                    kill = 1'b0;        // (O3) a recovery at execute
+    logic [QV_ROB_TAG_W-1:0] kill_tag = '0;
+    logic [(1<<QV_ROB_TAG_W)-1:0] kill_vec = '0;
     qv_lsq #(.DEPTH(DEPTH), .PRE_XL(PRE_XL)) dut (
-        .clk(clk), .rst(rst), .i_flush(flush),
+        .clk(clk), .rst(rst), .i_flush(flush), .i_kill(kill), .i_kill_tag(kill_tag), .i_kill_vec(kill_vec),
         .i_req(req), .o_free(free),
         .o_eng_req(eng_req), .i_eng_take(e_take), .i_eng_wb(eng_wb), .i_eng_res(eng_res),
         .i_pop(pop), .i_pop_tag(pop_tag), .o_head_res(head_res),
@@ -97,7 +104,7 @@ module qv_lsq_tb #(
     int                      e_lat = 0;          // the latency of the next op the engine takes (set by the test)
     assign eng_free = !e_busy && !e_drain;
     assign e_take = eng_free && eng_req.valid && !flush;
-    wire e_done = e_busy && (e_cnt == 0) && !flush;
+    wire e_done = e_busy && (e_cnt == 0) && !flush && !kill_vec[e_tag];   // (a killed op writes nothing back)
     always_comb begin
         eng_wb       = '0;
         eng_wb.valid = e_done;
@@ -111,7 +118,7 @@ module qv_lsq_tb #(
             if (e_take) begin
                 e_busy <= 1'b1; e_tag <= eng_req.tag; e_a <= eng_req.a; e_cnt <= e_lat;
                 seen_tags.push_back(int'(eng_req.tag));
-            end else if (e_busy && flush) begin
+            end else if (e_busy && (flush || kill_vec[e_tag])) begin
                 e_busy <= 1'b0;
                 if ($urandom_range(0, 1)) begin e_drain <= 1'b1; e_cnt <= $urandom_range(1, 3); end
             end else if (e_done) begin
@@ -471,16 +478,49 @@ module qv_lsq_tb #(
             next_a = 64'h100;
         end
 
+        // ---- (O3) a kill: the killed ops' slots and tags come back for new ops ----
+        if (DEPTH >= 4) begin
+            flush = 1'b1; tick(); flush = 1'b0;
+            next_tag = 4'd2;
+            e_lat = 3;
+            present(t0, a0); tick(); idle();               // t0 goes straight to the engine (held 3 cycles)
+            present(t1, a1); tick(); idle();               // t1, t2 queue behind it
+            present(t2, a2); tick(); idle();
+            kill = 1'b1; kill_tag = t0; kill_vec = '0; kill_vec[t1] = 1'b1; kill_vec[t2] = 1'b1; #1;
+            check("kill: a killed op is not offered", b(eng_req.valid && kill_vec[eng_req.tag]), 64'd0);
+            tick();
+            kill = 1'b0; kill_vec = '0;
+            check("kill: room again", b(free), 64'd1);
+            next_tag = t1;                                 // the ROB reuses the killed tags
+            next_a = 64'hBEE00;
+            present(t1, a1); tick(); idle();
+            while (!(e_take && eng_req.tag == t1)) tick();
+            check("kill: the new op with the reused tag reaches the engine with its own address", eng_req.a, a1);
+            tick();
+            while (q_tag.size() > 0) void'(q_tag.pop_front());
+            flush = 1'b1; tick(); flush = 1'b0;
+            next_a = 64'h100;
+        end
+
         // ---- random ----
         seen_tags.delete();
         begin
-            int n_pops, n_flush, n_pairs;
-            n_pops = 0; n_flush = 0; n_pairs = 0;
+            int n_pops, n_flush, n_pairs, n_kill, n_killed;
+            int kidx;
+            n_pops = 0; n_flush = 0; n_pairs = 0; n_kill = 0; n_killed = 0;
             for (int k = 0; k < 4000; k++) begin
                 // drive this cycle's inputs
-                idle(); pop = 1'b0; pop2 = 1'b0; flush = 1'b0;
+                idle(); pop = 1'b0; pop2 = 1'b0; flush = 1'b0; kill = 1'b0; kill_vec = '0;
                 e_lat = $urandom_range(0, 3);
-                if (free && $urandom_range(0, 2) != 0) begin
+                // (O3) a kill of the youngest ops, from a random one on (no dispatch in its cycle)
+                kidx = -1;
+                if (q_tag.size() > 0 && $urandom_range(0, 99) == 0) begin
+                    kidx = $urandom_range(0, q_tag.size() - 1);
+                    kill = 1'b1;
+                    kill_tag = q_tag[kidx] - 1'b1;                // the ROB entry before the first killed one
+                    for (int i = kidx; i < q_tag.size(); i++) kill_vec[q_tag[i]] = 1'b1;
+                end
+                if (!kill && free && $urandom_range(0, 2) != 0) begin
                     present(t0, a0);
                     q_tag.push_back(t0); q_a.push_back(a0); q_done.push_back(-1);
                 end
@@ -500,8 +540,14 @@ module qv_lsq_tb #(
                     pop = 1'b1; pop_tag = next_tag + 4'd8;        // two retirements, neither a memory op
                     pop2 = 1'b1; pop2_tag = next_tag + 4'd9;
                 end
-                if ($urandom_range(0, 199) == 0) flush = 1'b1;
+                if (!kill && $urandom_range(0, 199) == 0) flush = 1'b1;
+                // (a killed op never retires: the ROB retires only what is older than the branch)
+                if (kill && pop && q_tag.size() > 0 && pop_tag == q_tag[0] && kidx == 0) begin pop = 1'b0; pop2 = 1'b0; end
+                if (kill && pop2 && q_tag.size() > 1 && pop2_tag == q_tag[1] && kidx <= 1) pop2 = 1'b0;
+                if (kill && pop2 && pop2_tag == q_tag[0] && kidx == 0) pop2 = 1'b0;
                 #1;
+                if (kill) check("random: a killed op is not offered to the engine",
+                                b(eng_req.valid && kill_vec[eng_req.tag]), 64'd0);
                 // checks on this cycle's combinational outputs
                 check("random: o_free is fewer than DEPTH in the queue", b(free),
                       b(q_tag.size() - (req.valid ? 1 : 0) < DEPTH));
@@ -524,6 +570,14 @@ module qv_lsq_tb #(
                 if (flush) begin
                     q_tag.delete(); q_a.delete(); q_done.delete(); n_flush++;
                 end else begin
+                    if (kill) begin                                  // the killed suffix leaves; its tags come back
+                        n_kill++;
+                        n_killed += q_tag.size() - kidx;
+                        next_tag = q_tag[kidx];
+                        while (q_tag.size() > kidx) begin
+                            void'(q_tag.pop_back()); void'(q_a.pop_back()); void'(q_done.pop_back());
+                        end
+                    end
                     if (eng_wb.valid) begin
                         for (int i = 0; i < q_tag.size(); i++)
                             if (q_tag[i] == eng_wb.tag && q_done[i] < 0) begin q_done[i] = cyc; break; end
@@ -543,6 +597,8 @@ module qv_lsq_tb #(
             check("random: retirements happened", b(n_pops > 500), 64'd1);
             check("random: flushes happened", b(n_flush > 5), 64'd1);
             check("random: pairs happened", b(n_pairs > 20), 64'd1);
+            $display("qv_lsq_tb: random: %0d kills of %0d ops", n_kill, n_killed);
+            check("random: kills happened", b(n_kill > 10), 64'd1);
         end
 
         $display("");
@@ -557,6 +613,8 @@ module qv_lsq_tb #(
     always @(posedge clk) if (!rst) begin
         if (flush) pushed.delete();
         else begin
+            // (O3) killed ops the engine never took leave the record of what is due
+            if (kill) for (int i = pushed.size() - 1; i >= 0; i--) if (kill_vec[pushed[i]]) pushed.delete(i);
             if (req.valid) pushed.push_back(int'(req.tag));
             if (e_take) begin
                 if (pushed.size() == 0) begin

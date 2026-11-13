@@ -8,7 +8,9 @@
  * offsets, a taken branch to the next instruction, JALR with an odd sum,
  * RVC fall-through), then random operands. Also: the one-cycle latency,
  * tag passthrough, no writeback (and so no mispredict) without a valid
- * request, and flush killing a request in flight.
+ * request, and flush killing a request in flight. (O3) A request whose
+ * tag a recovery at execute kills writes nothing back and resolves no
+ * mispredict in its writeback cycle; another tag's still does.
  */
 module qv_exu_bru_tb;
     import qv_pkg::*;
@@ -25,8 +27,9 @@ module qv_exu_bru_tb;
     logic    flush = 1'b0;
     fu_req_t req = '0;
     wb_t     wb;
+    logic [(1<<QV_ROB_TAG_W)-1:0] kill_vec = '0;
 
-    qv_exu_bru dut (.clk(clk), .rst(rst), .i_flush(flush), .i_req(req), .o_wb(wb));
+    qv_exu_bru dut (.clk(clk), .rst(rst), .i_flush(flush), .i_req(req), .i_kill_vec(kill_vec), .o_wb(wb));
 
     function automatic logic golden_taken(input qv_bru_op_e op, input logic [63:0] a, input logic [63:0] b);
         case (op)
@@ -172,6 +175,21 @@ module qv_exu_bru_tb;
         req   = '0;
         check("flush: no writeback", {63'b0, wb.valid}, 64'd0);
         check("flush: no mispredict", {63'b0, wb.mispredict}, 64'd0);
+
+        // ---- (O3) a killed tag writes nothing back, in the cycle of its kill ----
+        @(negedge clk);
+        req = '0; req.valid = 1'b1; req.tag = 5; req.op = 5'(QV_BR_JAL); req.pc = PC; req.imm = 64'd64;
+        req.pred_next = PC + 64'd4;                      // a mispredict, were it not killed
+        @(posedge clk); #1;
+        req = '0;
+        kill_vec[5] = 1'b1; #1;
+        check("kill: no writeback", {63'b0, wb.valid}, 64'd0);
+        check("kill: no mispredict", {63'b0, wb.mispredict}, 64'd0);
+        kill_vec = '0;
+        kill_vec[6] = 1'b1; #1;
+        check("another tag's kill: it writes back", {63'b0, wb.valid}, 64'd1);
+        check("another tag's kill: its mispredict stands", {63'b0, wb.mispredict}, 64'd1);
+        kill_vec = '0;
 
         $display("");
         $display("qv_exu_bru_tb: %0d passed, %0d failed", pass_count, fail_count);

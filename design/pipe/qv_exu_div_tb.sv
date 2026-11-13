@@ -35,8 +35,10 @@ module qv_exu_div_tb;
     fu_req_t req   = '0;
     logic    free;
     wb_t     wb;
+    logic [(1<<QV_ROB_TAG_W)-1:0] kill_vec = '0;      // (O3) a recovery at execute's killed tags
 
-    qv_exu_div dut (.clk(clk), .rst(rst), .i_flush(flush), .i_req(req), .o_free(free), .o_wb(wb));
+    qv_exu_div dut (.clk(clk), .rst(rst), .i_flush(flush), .i_req(req), .i_kill_vec(kill_vec), .o_free(free),
+                    .o_wb(wb));
 
     // ---------------- golden model ----------------
     localparam logic [63:0] MIN64 = 64'h8000_0000_0000_0000;
@@ -175,6 +177,37 @@ module qv_exu_div_tb;
         divide($sformatf("after kill@%0d (rem, W)", k), 1'b0, 1'b1, 1'b1, 64'd1000, 64'd13);
     endtask
 
+    // ---------------- (O3) its tag killed at a chosen moment (k >= 1: the cycle ending at the k-th edge after the
+    // accepting one), the same outcome as a flush; other: a kill of some other tag, which changes nothing
+    task automatic kill_tag_at(input int k, input logic other = 1'b0);
+        logic [QV_ROB_TAG_W-1:0] tag;
+        int saw_valid_with_kill;
+        tag = QV_ROB_TAG_W'(n_tag++);
+        saw_valid_with_kill = 0;
+        while (!free) @(posedge clk);
+        @(negedge clk);
+        pulses = 0;
+        req = mk(1'b1, 1'b1, 1'b0, 64'd100, 64'd7, tag);
+        @(posedge clk); #1;
+        req = '0;
+        for (int j = 1; j <= 100; j++) begin
+            @(negedge clk);
+            kill_vec = '0;
+            if (j == k) kill_vec[other ? tag + 1'b1 : tag] = 1'b1;
+            #1;
+            if (j == k && !other && wb.valid) saw_valid_with_kill++;
+            @(posedge clk); #1;
+            kill_vec = '0;
+            if (j == k && !other) check($sformatf("kill tag@%0d: free right after it", k), {63'b0, free}, 64'd1);
+        end
+        check($sformatf("kill tag@%0d%s: no writeback in the kill cycle", k, other ? " (other)" : ""),
+              64'(saw_valid_with_kill), 64'd0);
+        check($sformatf("kill tag@%0d%s: writeback pulses", k, other ? " (other)" : ""), 64'(pulses),
+              (other || k >= 67) ? 64'd1 : 64'd0);
+        divide($sformatf("after kill tag@%0d", k), 1'b1, 1'b1, 1'b0, 64'd1000, 64'd13);
+    endtask
+
+    int kmoments [0:8] = '{1, 2, 3, 30, 64, 65, 66, 67, 68};
     int seed = 20261012;
     initial begin
         pulses = 0;
@@ -240,6 +273,10 @@ module qv_exu_div_tb;
         kill_at(66);      // the pulse cycle itself: masked
         kill_at(67);      // after the pulse: too late, the pulse stands
         kill_at(68);
+        // (O3) the same moments, killed by tag
+        foreach (kmoments[i]) kill_tag_at(kmoments[i]);
+        kill_tag_at(30, 1'b1);
+        kill_tag_at(66, 1'b1);
 
         // ---- back-to-back with a flush in between ----
         for (int k = 0; k < 6; k++) begin

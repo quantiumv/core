@@ -25,6 +25,10 @@
  *
  * ALU_PORTS 2 (O4d): the second ALU port takes the oldest ready ALU entry whose op is no multiply, other than the one
  * port 0 takes; its writeback is a sixth producer bus (bus 5), a same-cycle source under BYPASS_EN like port 0's.
+ *
+ * (O3) Kills at random: a recovery at execute kills the youngest entries (from a random one to the newest, nothing
+ * pushed in that cycle). A killed entry is never selected, not even in its kill cycle, and leaves at the edge; its
+ * tag is free again at once, so a killed entry that stayed would be woken and sent later as someone else.
  */
 module qv_rs_tb #(
     parameter int DEPTH      = 4,
@@ -61,9 +65,10 @@ module qv_rs_tb #(
     logic      sel_ab, sel_div, sel_fpu, sel_p1;
     fu_req_t   alu_req, bru_req, div_req, alu1_req;
     fpu_req_t  fpu_req;
+    logic [(1<<QV_ROB_TAG_W)-1:0] kill_vec = '0;
 
     qv_rs #(.DEPTH(DEPTH), .BYPASS_EN(BYPASS_EN), .LSU_BYPASS(LSU_BYPASS), .ALU_PORTS(ALU_PORTS)) dut (
-        .clk(clk), .rst(rst), .i_flush(flush),
+        .clk(clk), .rst(rst), .i_flush(flush), .i_kill_vec(kill_vec),
         .i_push(push), .i_push_e(push_e), .o_room(room), .o_has_div(has_div), .o_has_fds(has_fds),
         .i_push2(push2), .i_push2_e(push2_e), .o_room2(room2),
         .i_wb(wb), .i_wbp(wbp), .i_wbl(wbl), .i_wbd(wbd), .i_wbf(wbf), .i_wbc(wbc),
@@ -170,6 +175,7 @@ module qv_rs_tb #(
     int          g_bus  [0:3*DEPTH-1];
     logic        g_late [0:3*DEPTH-1];
     logic [63:0] g_val  [0:3*DEPTH-1];
+    logic        g_kill [0:DEPTH-1];                    // (O3) killed in this cycle
 
     function automatic logic avail(input int i, input int k, input int t);
         int x;
@@ -206,13 +212,13 @@ module qv_rs_tb #(
     endtask
 
     // ---------------- coverage ----------------
-    int n_p1, n_p1_mul_skip, n_p1_flush;
+    int n_p1, n_p1_mul_skip, n_p1_flush, n_kill, n_killed, n_kill_sel;
     int n_push, n_push2, n_ab, n_alu, n_bru, n_div, n_fpu, n_fds, n_flush, n_capture, n_same, n_late, n_ooo, n_div_hold,
         n_fds_hold, n_full;
 
     // ---------------- the run ----------------
     int  t, e_ab, e_div, e_fds, e_fpu, e_p1, div_busy_until, ds_busy_until, old_gn;
-    logic f_ab, f_div, f_fds, f_fpu, f_p1, x_div, x_fpu, pushed_now, pushed2_now;
+    logic f_ab, f_div, f_fds, f_fpu, f_p1, x_div, x_fpu, pushed_now, pushed2_now, kill_now;
     rs_entry_t gf;
     int        seed_v;
 
@@ -237,7 +243,7 @@ module qv_rs_tb #(
         for (int i = 0; i < NP; i++) p_live[i] = 1'b0;
         for (int bb = 0; bb < 6; bb++) for (int k = 0; k < RING; k++) begin s_p[bb][k] = -1; s_garb[bb][k] = 1'b0; end
         gn = 0;
-        n_p1 = 0; n_p1_mul_skip = 0; n_p1_flush = 0;
+        n_p1 = 0; n_p1_mul_skip = 0; n_p1_flush = 0; n_kill = 0; n_killed = 0; n_kill_sel = 0;
         n_push = 0; n_push2 = 0; n_ab = 0; n_alu = 0; n_bru = 0; n_div = 0; n_fpu = 0; n_fds = 0; n_flush = 0; n_capture = 0;
         n_same = 0; n_late = 0; n_ooo = 0; n_div_hold = 0; n_fds_hold = 0; n_full = 0;
         div_busy_until = -1; ds_busy_until = -1;
@@ -265,6 +271,17 @@ module qv_rs_tb #(
                     endcase
                 end
             end
+            // (O3) a kill of the youngest entries, from a random one on (never with a flush or a push)
+            kill_now = !flush && gn > 0 && ($urandom % 150) == 0;
+            kill_vec = '0;
+            begin
+                int kidx;
+                kidx = kill_now ? int'($urandom % gn) : DEPTH;
+                for (int i = 0; i < DEPTH; i++) begin
+                    g_kill[i] = (i < gn) && (i >= kidx);
+                    if (g_kill[i]) kill_vec[g_tag[i]] = 1'b1;
+                end
+            end
             div_free = (t > div_busy_until) && ($urandom % 6 != 0);
             ds_free  = (t > ds_busy_until) && ($urandom % 6 != 0);
 
@@ -274,7 +291,7 @@ module qv_rs_tb #(
             for (int sl = 0; sl < (PUSH2 ? 2 : 1); sl++) begin
               int gi;
               gi = gn + sl;
-              if (!flush && gi < DEPTH && (sl == 0 || push) && ($urandom % 100) < 55 && free_tags() > 0) begin
+              if (!flush && !kill_now && gi < DEPTH && (sl == 0 || push) && ($urandom % 100) < 55 && free_tags() > 0) begin
                 int kind, tg;
                 rs_entry_t e;
                 kind = $urandom % 100;
@@ -347,21 +364,21 @@ module qv_rs_tb #(
             // ---- expected selection for cycle t (from the entries as they stand: the push joins at the edge) ----
             f_ab = 1'b0; e_ab = 0; f_div = 1'b0; e_div = 0; f_fds = 1'b0; e_fds = 0; f_fpu = 1'b0; e_fpu = 0;
             for (int i = gn - 1; i >= 0; i--) begin
-                if (g_ready(i, t) && (g_kind[i] == 0 || g_kind[i] == 1)) begin f_ab = 1'b1; e_ab = i; end
+                if (g_ready(i, t) && !g_kill[i] && (g_kind[i] == 0 || g_kind[i] == 1)) begin f_ab = 1'b1; e_ab = i; end
                 if (g_kind[i] == 2) begin f_div = 1'b1; e_div = i; end
                 if (g_kind[i] == 4) begin f_fds = 1'b1; e_fds = i; end
             end
             for (int i = gn - 1; i >= 0; i--)
-                if (g_ready(i, t) && (g_kind[i] == 3 || (g_kind[i] == 4 && i == e_fds && ds_free))) begin
+                if (g_ready(i, t) && !g_kill[i] && (g_kind[i] == 3 || (g_kind[i] == 4 && i == e_fds && ds_free))) begin
                     f_fpu = 1'b1; e_fpu = i;
                 end
-            x_div = f_div && g_ready(e_div, t) && div_free;
+            x_div = f_div && g_ready(e_div, t) && !g_kill[e_div] && div_free;
             // (ALU_PORTS 2) the second ALU port: the oldest ready ALU entry that is no multiply, other than port 0's
             f_p1 = 1'b0; e_p1 = 0;
             if (ALU_PORTS > 1)
                 for (int i = gn - 1; i >= 0; i--) begin
                     gf = g_e[i];
-                    if (g_ready(i, t) && g_kind[i] == 0 && !(f_ab && i == e_ab)) begin
+                    if (g_ready(i, t) && !g_kill[i] && g_kind[i] == 0 && !(f_ab && i == e_ab)) begin
                         if (!m_mul(gf.op)) begin f_p1 = 1'b1; e_p1 = i; end
                         else n_p1_mul_skip++;
                     end
@@ -405,6 +422,10 @@ module qv_rs_tb #(
 
             // ---- coverage of the interesting cases ----
             if (gn == DEPTH) n_full++;
+            if (kill_now) begin
+                n_kill++;
+                if (f_ab || x_div || x_fpu || f_p1) n_kill_sel++;   // a survivor sent in the kill cycle
+            end
             if (f_ab) begin
                 n_ab++;
                 if (g_kind[e_ab] == 0) n_alu++; else n_bru++;
@@ -429,6 +450,8 @@ module qv_rs_tb #(
             #1;
             push = 1'b0;
             push2 = 1'b0;
+            kill_vec = '0;
+            for (int i = 0; i < gn; i++) if (g_kill[i]) begin tag_used[g_tag[i]] = 1'b0; n_killed++; end
             if (f_ab)  begin tag_used[g_tag[e_ab]] = 1'b0; end
             if (f_p1)  begin tag_used[g_tag[e_p1]] = 1'b0; n_p1++; end
             if (x_div) begin tag_used[g_tag[e_div]] = 1'b0; div_busy_until = t + 1 + int'($urandom % 10); end
@@ -441,7 +464,7 @@ module qv_rs_tb #(
             // old_gn, is not touched), then append the pushed one
             for (int i = DEPTH - 1; i >= 0; i--)
                 if (i < gn && ((f_ab && i == e_ab) || (x_div && i == e_div) || (x_fpu && i == e_fpu)
-                               || (f_p1 && i == e_p1))) g_remove(i);
+                               || (f_p1 && i == e_p1) || g_kill[i])) g_remove(i);
             if (pushed_now) begin
                 g_move(old_gn, gn);
                 gn++;
@@ -491,6 +514,10 @@ module qv_rs_tb #(
         check("coverage: late operands", b(n_late > 20), 1);
         check("coverage: the station was full", b(n_full > 50), 1);
         check("coverage: flushes", b(n_flush > 20), 1);
+        $display("qv_rs_tb: %0d kills of %0d entries, %0d with a survivor sent in the same cycle", n_kill, n_killed,
+                 n_kill_sel);
+        check("coverage: kills", b(n_kill > 50), 1);
+        if (DEPTH > 1) check("coverage: a survivor sent in a kill cycle", b(n_kill_sel > 5), 1);
         if (BYPASS_EN) check("coverage: same-cycle bypass operands", b(n_same > 50), 1);
         $display("");
         $display("qv_rs_tb: %0d passed, %0d failed", pass_count, fail_count);
