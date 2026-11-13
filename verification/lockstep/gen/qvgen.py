@@ -577,6 +577,121 @@ def emit_ooo(p: Program, recent: list[int]):
     del recent[:-8]
 
 
+def emit_xr(p: Program, recent: list[int]):
+    """--xr: what recovery at execute (O3) has to get right. A forward branch that is always taken but resolves late
+    (on a divide by x0, all ones, or on a load of the branch's own encoding) is predicted not taken the first times,
+    so the block it skips runs only on the wrong path, killed when the branch writes back: stores and loads, AMOs and
+    LR/SC to the sandbox, divides (one started and killed), FP divides, ALU writes, FENCE and FENCE.I, CSR reads,
+    ECALL / EBREAK / an illegal word, a device read, a jump to the join, a nested always-taken branch that resolves
+    first (the younger recovers first, then the older kills it). The join reads registers the block wrote: they hold
+    their values from before the branch. Some shapes put an ALU op beside the branch (a dispatch pair either way), and
+    one puts a trap older than a fast mispredict (behind a divide the trap retires late; the branch recovers first).
+    Everything in a block is harmless if it ever runs for real (the branch's producer trapped)."""
+    have_m = "m" in p.args.isa and not p.args.no_div
+    have_f = "f" in p.args.isa
+    have_a = "a" in p.args.isa
+
+    def fresh(*excl):
+        r = p.reg()
+        while r in excl:
+            r = p.reg()
+        return r
+
+    def alu(rd=None):
+        rd = fresh() if rd is None else rd
+        p.e(f"    {p.rng.choice(['add', 'sub', 'xor', 'or', 'and', 'sll']):<7} x{rd}, x{p.reg_biased(recent)}, x{p.reg_biased(recent)}")
+        recent.append(rd)
+        return rd
+
+    def wrong_path(join, written, depth=0):
+        for _ in range(p.rng.randint(1, 6)):
+            k = p.rng.random()
+            if k < 0.16:
+                p.e(f"    {p.rng.choice(['sd', 'sw', 'sh', 'sb']):<7} x{p.reg()}, {p.rng.randrange(0, 0x400, 8)}(x27)")
+            elif k < 0.28:
+                rd = fresh()
+                p.e(f"    {p.rng.choice(['ld', 'lw', 'lbu']):<7} x{rd}, {p.rng.randrange(0, 0x400, 8)}(x27)")
+                written.append(rd)
+            elif k < 0.40:
+                written.append(alu())
+            elif k < 0.48 and have_m:
+                rd = fresh()
+                p.e(f"    {p.rng.choice(['div', 'remu', 'divw']):<7} x{rd}, x{p.reg()}, x{p.reg()}")
+                written.append(rd)
+            elif k < 0.53 and have_f:
+                p.e(f"    fdiv.d  f{p.rng.randrange(32)}, f{p.rng.randrange(32)}, f{p.rng.randrange(32)}")
+            elif k < 0.60 and have_a:
+                a = fresh()
+                p.e(f"    addi    x{a}, x27, {p.rng.randrange(0, 0x400, 8)}")
+                written.append(a)
+                if p.rng.random() < 0.5:
+                    rd = fresh(a)
+                    p.e(f"    amoadd.d x{rd}, x{fresh(a)}, (x{a})")
+                else:
+                    rd = fresh(a)
+                    p.e(f"    lr.d    x{rd}, (x{a})")
+                    p.e(f"    sc.d    x{fresh(a)}, x{fresh(a)}, (x{a})")
+                written.append(rd)
+            elif k < 0.66:
+                p.e(f"    {p.rng.choice(['fence', 'fence.i'])}")
+            elif k < 0.71:
+                rd = fresh()
+                p.e(f"    csrr    x{rd}, {'sscratch' if p.args.priv == 'msu' else 'mscratch'}")
+                written.append(rd)
+            elif k < 0.78:
+                emit_fault(p, p.rng.choice(["ecall", "ebreak", "illegal"]))
+            elif k < 0.84:
+                m = fresh()
+                p.li(m, 0x0400F018)                       # a device read (never on the wrong path)
+                rd = fresh(m)
+                p.e(f"    lbu     x{rd}, 0(x{m})")
+                written += [m, rd]
+            elif k < 0.90:
+                p.e(f"    j       {join}")
+            elif depth == 0:
+                inner = Label("xri")                       # a younger mispredict that resolves first
+                p.e(f"    beqz    x0, {inner}")
+                wrong_path(inner, written, depth + 1)
+                p.e(f"{inner}:")
+            else:
+                written.append(alu())
+
+    join = Label("xr")
+    written: list[int] = []
+    if p.rng.random() < 0.15:
+        # a trap older than a fast mispredict: the illegal word retires behind a divide, after the branch recovered
+        if have_m:
+            p.e(f"    div     x{fresh()}, x{p.reg()}, x{p.reg()}")
+        emit_fault(p, "illegal")
+        p.e(f"    beqz    x0, {join}")
+        wrong_path(join, written)
+    else:
+        t = fresh()
+        own = None
+        if have_m and p.rng.random() < 0.6:
+            p.e(f"    {p.rng.choice(['div', 'divu']):<7} x{t}, x{fresh(t)}, x0")     # by zero: all ones
+        else:
+            own = Label("xro")
+            a = fresh(t)
+            p.e(f"    la      x{a}, {own}")
+            p.e(f"    lbu     x{t}, 0(x{a})")                                         # its own encoding's low byte: not 0
+        side = p.rng.random()
+        if side < 0.25:
+            alu()                                                                     # an ALU op, then the branch
+        if own is not None:
+            p.e(f"{own}:")
+        p.e(f"    bnez    x{t}, {join}")
+        if 0.25 <= side < 0.5:
+            alu()                                                                     # the branch, then an ALU op
+        wrong_path(join, written)
+    p.e(f"{join}:")
+    for r in written[:3]:
+        rd = fresh()
+        p.e(f"    add     x{rd}, x{r}, x{p.reg_biased(recent)}")
+        recent.append(rd)
+    del recent[:-8]
+
+
 def emit_pair(p: Program, recent: list[int]):
     """--pair: what a core that dispatches, executes and retires two a cycle (O4) has to get right. Runs of independent
     ALU ops (both slots, both ALU ports, commit pairs); a pair whose second reads the first's destination (it waits
@@ -2487,6 +2602,9 @@ def emit_main_body(p: Program):
         if getattr(a, "pair", False) and p.rng.random() < 0.30:
             emit_pair(p, recent)
             return
+        if getattr(a, "xr", False) and p.rng.random() < 0.15:
+            emit_xr(p, recent)
+            return
         if getattr(a, "mem_dense", False) and p.rng.random() < 0.30:
             emit_mem_pair(p, recent)
             return
@@ -2692,6 +2810,9 @@ def main():
     ap.add_argument("--pair", action="store_true",
                     help="a third of the instructions are shaped to pair at dispatch and commit, with the hazards of "
                          "a pair (see emit_pair): for the two-wide core (O4)")
+    ap.add_argument("--xr", action="store_true",
+                    help="some instructions are late, always-taken branches with a wrong path of everything that "
+                         "must never take effect (see emit_xr): for recovery at execute (O3)")
     ap.add_argument("--no-div", action="store_true", dest="no_div",
                     help="keep M to the multiplies (for cores without a divider yet)")
     ap.add_argument("--len", type=int, default=200)
