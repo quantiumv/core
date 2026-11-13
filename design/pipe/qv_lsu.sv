@@ -130,7 +130,8 @@ module qv_lsu #(
     parameter bit          PROBE        = 1'b0,      // the translation is looked up before the head (P10b)
     parameter bit          EARLY        = 1'b0,      // a plain RAM load or store goes before the head (O2)
     parameter bit          EARLY_ST     = 1'b1,      // ... the stores too (EARLY 1, this 0: only the loads)
-    parameter bit          HANDOFF      = 1'b0       // the next op is taken in the cycle the last one completes (O2b)
+    parameter bit          HANDOFF      = 1'b0,      // the next op is taken in the cycle the last one completes (O2b)
+    parameter int          ROB_DEPTH    = qv_pkg::QV_ROB_DEPTH     // the ROB's size (its tags' wrap bit)
 ) (
     input  logic                             clk,
     input  logic                             rst,
@@ -321,8 +322,8 @@ module qv_lsu #(
     wire start     = start_raw && !i_ptw_beat && !i_sb_beat && !i_sb_go && !i_fetch_start;
 
     // a load that does not wait for the buffer, among the three oldest ROB entries (the tags carry a wrap bit,
-    // so the difference modulo the tag width is the distance): the drain yields to it
-    wire [QV_ROB_TAG_W-1:0] head_dist = tag_q - i_head_tag;
+    // so the difference modulo the ROB's pointer width is the distance): the drain yields to it
+    wire [QV_ROB_TAG_W-1:0] head_dist = qv_rob_dist(tag_q, i_head_tag, $clog2(ROB_DEPTH) + 1);
     assign o_load_near = (state_q == S_WAIT_HEAD) && i_head_valid && match_case && pa_valid && !i_sb_match
                          && !misaligned_q && !pmp_deny && (head_dist <= QV_ROB_TAG_W'(2))
                          && (!EARLY || i_early || head_dist == '0);       // (EARLY) one that may start now

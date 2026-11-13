@@ -86,6 +86,14 @@ package qv_pkg;
     localparam int QV_ROB_DEPTH = 8;
     localparam int QV_ROB_TAG_W = $clog2(QV_ROB_DEPTH) + 1;  // index + wrap bit
 
+    // (O3) The distance from ROB pointer p to tag t. Both are pointers of a ROB whose pointers are ptr_w bits
+    // (the index and the wrap bit), zero-extended to QV_ROB_TAG_W; when the ROB is smaller than QV_ROB_DEPTH the
+    // wrap bit is bit ptr_w-1, not the tag's top bit, so the difference is taken modulo 2^ptr_w.
+    function automatic logic [QV_ROB_TAG_W-1:0] qv_rob_dist(input logic [QV_ROB_TAG_W-1:0] t,
+                                                            input logic [QV_ROB_TAG_W-1:0] p, input int ptr_w);
+        return (t - p) & QV_ROB_TAG_W'((1 << ptr_w) - 1);
+    endfunction
+
     // Frontend -> instruction queue.
     typedef struct packed {
         logic [63:0] pc;

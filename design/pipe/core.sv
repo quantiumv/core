@@ -887,7 +887,7 @@ module core
     logic     lsq_early, lsq_match;         // (the queue) no barrier is older than lsu0's op; a posted store matches
     qv_lsu #(.SB_EN(SB_DEPTH > 0), .PMA_RAM_BASE(PMA_RAM_BASE), .PMA_RAM_SIZE(PMA_RAM_SIZE),
              .PROBE(SV39_EN && DTLB_PROBE), .EARLY(LSQ_DEPTH > 0 && LSQ_EARLY), .EARLY_ST(LSQ_EARLY_ST),
-             .HANDOFF(LSQ_DEPTH > 0 && LSQ_HANDOFF)) lsu0 (
+             .HANDOFF(LSQ_DEPTH > 0 && LSQ_HANDOFF), .ROB_DEPTH(ROB_DEPTH)) lsu0 (
         .clk(clk), .rst(rst), .i_flush(flush),
         .i_req(eng_req), .o_free(eng_free),
         .i_head_valid(head_valid), .i_head_tag(head_tag), .i_early(lsq_early),
