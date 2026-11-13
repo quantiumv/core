@@ -29,6 +29,13 @@
 #   its third operand, room in a full station, a flush that keeps the entries; and in a two-wide core (rs2: two
 #   pushes, two ALU ports) a multiply or port 0's entry on port 1, port 1 in a flush cycle or keeping its entry, a
 #   second push without the dispatch-cycle capture or ahead of the first, port 1's bus lost).
+#   (O3) kill.sby (issue's producer tables and the ROB's kill, together) and ras.sby (the circular return-address
+#   stack against the shift stack it replaced, no restores): prove, bmc and cover; --mutants: a kill that rebuilds
+#   nothing, the oldest writer winning, late not rebuilt, no tail rollback, killed entries or this cycle's retirements
+#   among the survivors, a kill vector that takes the tail; a flush copy in the wrong order, the second op's push
+#   lost, a pop that wraps an empty count; and the kills the other proofs now take (rs, rs2, fpu, lsu, lsq): a killed
+#   entry selected or kept, a pipeline stage or a divide that ignores its kill, a killed op written back, a killed op
+#   offered to the engine, a queue that does not roll back.
 set -u
 cd "$(dirname "$0")" || exit 1
 HERE=$(pwd)
@@ -38,7 +45,7 @@ fail=0
 
 status() { grep -o 'DONE ([A-Z]*' | head -1 | sed 's/DONE (//'; }
 
-for unit in fetch lsu dbg ptw sb fpu rs rs2; do
+for unit in fetch lsu dbg ptw sb fpu rs rs2 kill ras; do
     for task in prove bmc cover; do
         r=$(sby -f $unit.sby $task 2>&1 | status)
         printf '%-12s %s\n' "$unit $task" "$r"
@@ -260,6 +267,43 @@ EOF
     rs2_mutant rs2_push2_no_capture   's/y.a = qv_opnd_wake(y.a, i_wb, i_wbp, i_wbl, i_wbd, i_wbf, i_wbc);/y.a = y.a;/'
     rs2_mutant rs2_push2_ahead        's/k   = j + (i_push ? 1 : 0);/k   = j;/'
     rs2_mutant rs2_p1_bus_lost        's/else if (wbp.valid \&\& wbp.tag == o.tag) begin n.rdy = 1.b1; n.value = wbp.value; end//' qv_pkg
+    # (O3) a proof over several design files: copy what its .sby lists, mutate one of them, run its bmc task
+    multi_mutant() {
+        local name=$1 sbyf=$2 f=$3 expr=$4
+        local d=$T/$name
+        mkdir -p "$d"
+        for src in $(sed -n '/^\[files\]/,$p' "$HERE/$sbyf" | grep -v '^\['); do cp "$HERE/$src" "$d/"; done
+        sed "$expr" "$REPO/design/pipe/$f.sv" > "$d/$f.sv"
+        if cmp -s "$d/$f.sv" "$REPO/design/pipe/$f.sv"; then
+            printf '%-30s %s\n' "mutant $name" "sed changed nothing"; fail=1; return
+        fi
+        sed -e 's#^\.\./\.\./\.\./design/pipe/##' "$HERE/$sbyf" > "$d/$sbyf"
+        local r
+        r=$(cd "$d" && sby -f $sbyf bmc 2>&1 | status)
+        if [ "$r" == "FAIL" ]; then
+            printf '%-30s %s\n' "mutant $name" "caught"
+        else
+            printf '%-30s %s\n' "mutant $name" "NOT CAUGHT ($r)"; fail=1
+        fi
+    }
+    multi_mutant kill_no_rebuild        kill.sby qv_issue 's/        end else if (i_kill) begin/        end else if (1'"'"'b0) begin/'
+    multi_mutant kill_oldest_wins       kill.sby qv_issue 's/            for (int j = 0; j < QV_ROB_DEPTH; j++) begin/            for (int j = QV_ROB_DEPTH - 1; j >= 0; j--) begin/'
+    multi_mutant kill_late_lost         kill.sby qv_issue 's/prod_late_q\[i_surv_rd\[j\]\] <= CSR_LATE \&\& i_surv_csr\[j\];/prod_late_q[i_surv_rd[j]] <= 1'"'"'b0;/'
+    multi_mutant kill_no_rollback       kill.sby qv_rob   's/                tail_q <= kill_from;/                tail_q <= tail_q;/'
+    multi_mutant kill_killed_survive    kill.sby qv_rob   "s/QV_ROB_TAG_W'(kill_from), QV_ROB_TAG_W'(head_next), PTR_W);/QV_ROB_TAG_W'(tail_q), QV_ROB_TAG_W'(head_next), PTR_W);/"
+    multi_mutant kill_retired_survive   kill.sby qv_rob   "s/            p = head_next + PTR_W'(j);/            p = head_q + PTR_W'(j);/"
+    multi_mutant kill_vec_takes_tail    kill.sby qv_rob   "s/                                < qv_rob_dist(QV_ROB_TAG_W'(tail_q)/                                <= qv_rob_dist(QV_ROB_TAG_W'(tail_q)/"
+    multi_mutant ras_flush_order        ras.sby  qv_ras   's/a_q\[j\] <= c_next\[64\*((DEPTH - j) % DEPTH) +: 64\];/a_q[j] <= c_next[64*j +: 64];/'
+    multi_mutant ras_push1_lost         ras.sby  qv_ras   's/if (i_sp_op1 == 2.b01) a_q\[p1\] <= i_sp_addr1;//'
+    multi_mutant ras_pop_wraps          ras.sby  qv_ras   "s/if (op == 2'b10 \&\& n != '0) return/if (op == 2'b10) return/"
+    # (O3) the kills the other proofs now take
+    multi_mutant rs_killed_selected     rs.sby   qv_rs    's/ready\[i\] = v_q\[i\] \&\& !killed\[i\] \&\&/ready[i] = v_q[i] \&\&/'
+    multi_mutant rs2_killed_kept        rs2.sby  qv_rs    's/if (v_q\[i\] \&\& !issued\[i\] \&\& !killed\[i\]) begin/if (v_q[i] \&\& !issued[i]) begin/'
+    multi_mutant fpu_stage_kill_lost    fpu.sby  qv_fpu_pipe    "s/        if (i_kill_vec\[r1_tag\]) r2_valid <= 1'b0;//"
+    multi_mutant fpu_ds_kill_lost       fpu.sby  qv_fpu_divsqrt "s/            if (st_q != S_IDLE \&\& i_kill_vec\[tag_q\]) st_q <= S_IDLE;//"
+    multi_mutant lsu_killed_writes_back lsq.sby  qv_lsu   "s/        if (killed) o_wb.valid = 1'b0;//"
+    multi_mutant lsq_killed_offered     lsq.sby  qv_lsq   "s/        if (i_kill_vec\[o_eng_req.tag\]) o_eng_req.valid = 1'b0;.*//"
+    multi_mutant lsq_no_rollback        lsq.sby  qv_lsq   "s/                tail_q <= keep_tail;//"
     rm -rf "$T"
 fi
 

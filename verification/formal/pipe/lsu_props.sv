@@ -27,6 +27,10 @@
  *     from its first request cycle through the response cycle of its last
  *     request (the write's, or the read's if that errors or is abandoned),
  *     continuously, and never at any other time.
+ * (O3) A kill (i_kill_vec, a recovery at execute) under the core's contract: the ROB head is never killed (it is
+ * older than the branch), no flush comes with it, no killed op is offered; here, with no early accesses, an op
+ * that has started is the head, so a kill finds the op still waiting. The killed op is dropped: no access, no
+ * writeback, the LSU free again.
  */
 module lsu_props (
     input logic                             clk,
@@ -43,7 +47,8 @@ module lsu_props (
     input logic [1:0]                       priv,
     input logic                             mprv,
     input logic [1:0]                       mpp,
-    input logic [63:0]                      pmpcfg0, pmpaddr0, pmpaddr1, pmpaddr2, pmpaddr3
+    input logic [63:0]                      pmpcfg0, pmpaddr0, pmpaddr1, pmpaddr2, pmpaddr3,
+    input logic [(1<<qv_pkg::QV_ROB_TAG_W)-1:0] kv
 );
     import qv_pkg::*;
 
@@ -55,7 +60,7 @@ module lsu_props (
     lsu_res_t    res;
 
     qv_lsu dut (
-        .clk(clk), .rst(rst), .i_flush(flush),
+        .clk(clk), .rst(rst), .i_flush(flush), .i_kill_vec(kv),
         .i_req(req), .o_free(free),
         .i_head_valid(head_valid), .i_head_tag(head_tag),
         .i_res_valid(res_valid), .i_res_addr(res_addr),
@@ -125,7 +130,7 @@ module lsu_props (
                 if (nreq == 2'd0) g_busaddr <= addr;
             end
             if (wb.valid)         done <= 1'b1;
-            if (wb.valid || flush) live <= 1'b0;
+            if (wb.valid || flush || (live && kv[g_tag])) live <= 1'b0;
             // the AMO's read was answered without an error, and nothing flushed it
             if (resp && g_amo && nreq == 2'd1 && ack && !err && !flush && live) read_ok <= 1'b1;
         end
@@ -138,6 +143,11 @@ module lsu_props (
     // ---------------- environment ----------------
     always @* begin
         if (init) assume (rst);
+        // (O3) the kill's contract
+        if (kv != '0) assume (!flush);
+        if (head_valid) assume (!kv[head_tag]);
+        if (live && nreq != 2'd0) assume (!kv[g_tag]);
+        if (req.valid) assume (!kv[req.tag]);
         if (!(p_valid && p_out)) assume (!ack && !err);
         if (req.op[4]) assume (req.op[3:0] <= 4'(QV_AMO_MAXU));   // only real A-extension operations
     end
@@ -165,6 +175,8 @@ module lsu_props (
                 assert (addr == p_addr && we == p_we && sel == p_sel && wdat == p_wdat);
             end
             if (wb.valid) assert (live && !done && wb.tag == g_tag);
+            if (wb.valid) assert (!kv[wb.tag]);                       // (O3) a killed op writes nothing back
+            cover (live && kv[g_tag]);
             // a completion with no request at all: misaligned, denied by the PMP, or an SC without its reservation
             if (wb.valid && nreq == 2'd0) assert (g_mis || g_sc || dut.pmp_deny);
 

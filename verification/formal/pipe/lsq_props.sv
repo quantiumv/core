@@ -30,6 +30,12 @@
  *     source now: the ALU/BRU and FPU buses, the engine's own writeback), and it takes them with exactly those values;
  *   - an op dispatched and taken in one cycle (nothing queued) had its operands ready.
  * Bounded at depth 10 (opw) with covers to depth 20 (opw_cover).
+ *
+ * (O3) Kills: a recovery at execute names a live entry as the branch (never in a flush cycle; nothing is dispatched
+ * in its cycle); every younger entry is killed (i_kill_vec), the model's tail goes back to the entry after the branch,
+ * and the killed memory ops leave the dispatch order (they are its youngest). Then, besides everything above (which
+ * now also holds across kills: the order of what the engine takes, the results that retire): nothing killed is taken
+ * by the engine or written back in its kill cycle.
  */
 module lsq_props (
     input logic                             clk,
@@ -45,6 +51,9 @@ module lsq_props (
     // commit
     input logic                             other_done,     // a head that is not a memory op is complete
     input logic                             want_pop,
+    // (O3) a recovery at execute: the branch is the entry kill_k from the head
+    input logic                             want_kill,
+    input logic [1:0]                       kill_k,
     // the rest of the engine's world
     input logic                             res_valid,
     input logic [63:0]                      res_addr,
@@ -74,9 +83,15 @@ module lsq_props (
     wire  [1:0]              hi = head_t[1:0], ti = tail_t[1:0];
 
     logic lsq_free;
-    wire  d_mem   = !rst && !flush && want_mem && lsq_free && rob_room;
-    wire  d_other = !rst && !flush && !d_mem && want_other && rob_room;
     wire  head_valid    = (count != '0);
+    wire  kill    = !rst && !flush && want_kill && (QV_ROB_TAG_W'(kill_k) < count);
+    wire  [QV_ROB_TAG_W-1:0] kill_tag = head_t + QV_ROB_TAG_W'(kill_k);
+    logic [(1<<QV_ROB_TAG_W)-1:0] kv;
+    always_comb
+        for (int g = 0; g < (1 << QV_ROB_TAG_W); g++)
+            kv[g] = kill && ((QV_ROB_TAG_W'(g) - head_t) < count) && ((kill_tag - head_t) < (QV_ROB_TAG_W'(g) - head_t));
+    wire  d_mem   = !rst && !flush && !kill && want_mem && lsq_free && rob_room;
+    wire  d_other = !rst && !flush && !kill && !d_mem && want_other && rob_room;
     wire  head_complete = is_mem[hi] ? done[hi] : other_done;
     wire  pop     = !rst && !flush && want_pop && head_valid && head_complete;
 
@@ -105,12 +120,12 @@ module lsq_props (
 
 `ifdef LSQ_OPW
     qv_lsq #(.DEPTH(QD), .OPW(1'b1), .BYPASS_EN(1'b1), .LSU_BYPASS(1'b1)) lsq (
-        .clk(clk), .rst(rst), .i_flush(flush),
+        .clk(clk), .rst(rst), .i_flush(flush), .i_kill(kill), .i_kill_tag(kill_tag), .i_kill_vec(kv),
         .i_req(req), .o_free(lsq_free), .i_opa(opa_in), .i_opb(opb_in),
         .i_wb(xwb), .i_wbd(xwbd), .i_wbf(xwbf), .i_wbc(xwbc),
 `else
     qv_lsq #(.DEPTH(QD)) lsq (
-        .clk(clk), .rst(rst), .i_flush(flush),
+        .clk(clk), .rst(rst), .i_flush(flush), .i_kill(kill), .i_kill_tag(kill_tag), .i_kill_vec(kv),
         .i_req(req), .o_free(lsq_free),
 `endif
         .o_eng_req(eng_req), .i_eng_take(eng_take), .i_eng_wb(wb), .i_eng_res(eng_res),
@@ -120,7 +135,7 @@ module lsq_props (
     );
 
     qv_lsu #(.SB_EN(1'b1), .PMA_RAM_BASE(64'h0), .PMA_RAM_SIZE(64'h1000), .EARLY(1'b1), .HANDOFF(1'b1)) lsu (
-        .clk(clk), .rst(rst), .i_flush(flush),
+        .clk(clk), .rst(rst), .i_flush(flush), .i_kill_vec(kv),
         .i_req(eng_req), .o_free(eng_free),
         .i_head_valid(head_valid), .i_head_tag(head_t), .i_early(early),
         .i_res_valid(res_valid), .i_res_addr(res_addr),
@@ -154,6 +169,18 @@ module lsq_props (
     reg [1:0]         cmpl_i_d;                  // ... this one
     wire              start = cyc && stb && !p_out;
     wire [1:0]        eti = lsu.tag_q[1:0];
+
+    // (O3) the memory ops a kill removes, and the dispatched ones the engine has not taken (after this cycle's take)
+    logic [1:0] nk_mem, pend2;
+    always_comb begin
+        nk_mem = '0;
+        for (int k = 0; k < ROB; k++) begin
+            logic [QV_ROB_TAG_W-1:0] t;
+            t = head_t + QV_ROB_TAG_W'(k);
+            if (kv[t] && is_mem[t[1:0]]) nk_mem = nk_mem + 2'd1;
+        end
+        pend2 = n_disp - n_take - (eng_take ? 2'd1 : 2'd0);
+    end
 
     always @(posedge clk) begin
         init    <= 1'b0;
@@ -190,6 +217,21 @@ module lsq_props (
             if (pop) begin
                 head_t <= head_t + 1'b1;
                 posted[hi] <= 1'b0; is_bar[hi] <= 1'b0;
+            end
+            // (O3) a kill: the tail goes back, the killed entries are gone, the killed memory ops (the youngest
+            // dispatched) leave the order; if the engine had taken some of them, what it has taken is the survivors
+            if (kill) begin
+                tail_t <= kill_tag + 1'b1;
+                for (int k = 0; k < ROB; k++) begin
+                    logic [QV_ROB_TAG_W-1:0] t;
+                    t = head_t + QV_ROB_TAG_W'(k);
+                    if (kv[t]) begin
+                        is_mem[t[1:0]] <= 1'b0; done[t[1:0]] <= 1'b0; is_bar[t[1:0]] <= 1'b0;
+                        posted[t[1:0]] <= 1'b0; res_ok[t[1:0]] <= 1'b0;
+                    end
+                end
+                n_disp <= n_disp - nk_mem;
+                n_take <= (nk_mem > pend2) ? n_disp - nk_mem : n_take + (eng_take ? 2'd1 : 2'd0);
             end
         end
     end
@@ -252,6 +294,9 @@ module lsq_props (
                 assert (addr == p_addr && we == p_we && sel == p_sel && wdat == p_wdat);
             end
             if (req.valid) assert (lsq_free);
+            // (O3) nothing killed goes on
+            if (eng_take) assert (!kv[eng_req.tag]);
+            if (wb.valid) assert (!kv[wb.tag]);
         end
     end
 
@@ -354,6 +399,8 @@ module lsq_props (
             cover (lsq_match && lsu.state_q == 2'd1 && !lsu.at_head);           // a load waits for a posted store
             cover (pop && is_mem[hi] && res_ok[hi]);                            // a memory op retires from its copy
             cover (lsu.start && lsu.at_head && bar_older == 1'b0 && count > 2); // a head access with others behind
+            cover (kill && lsu.state_q == 2'd2 && kv[lsu.tag_q]);               // an early load on the bus killed
+            cover (kill && n_disp != n_take && nk_mem != '0 && !kv[lsu.tag_q]); // queued ops killed, the engine's kept
         end
     end
 endmodule

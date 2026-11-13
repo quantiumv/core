@@ -22,6 +22,10 @@
  *     no older one of its kind, the unit free, and no flush), its port is taken, by T or by an entry older than T;
  *     a divide or a divide/square root never goes while an older one of its kind waits;
  *   - ALU and BRU are never sent together; o_room, o_has_div and o_has_fds follow the set.
+ * (O3) A kill (a recovery at execute) drops the tags of i_kill_vec, under the core's contract: nothing is pushed in a
+ * kill cycle, a flush never comes with one, and the killed tags are the youngest (one older than T killed means T is
+ * too). Nothing killed is sent in the kill cycle, the set loses the killed tags, and T's obligations end if it is
+ * killed.
  */
 module rs_props (
     input logic                             clk,
@@ -36,7 +40,8 @@ module rs_props (
     input qv_pkg::wb_t                      wbc,
     input logic                             div_free,
     input logic                             ds_free,
-    input logic [qv_pkg::QV_ROB_TAG_W-1:0]  T
+    input logic [qv_pkg::QV_ROB_TAG_W-1:0]  T,
+    input logic [(1<<qv_pkg::QV_ROB_TAG_W)-1:0] kv
 );
     import qv_pkg::*;
     localparam int DEPTH = 2;
@@ -48,7 +53,7 @@ module rs_props (
     fpu_req_t fpu_req;
 
     qv_rs #(.DEPTH(DEPTH), .BYPASS_EN(1'b1), .LSU_BYPASS(1'b1)) dut (
-        .clk(clk), .rst(rst), .i_flush(flush),
+        .clk(clk), .rst(rst), .i_flush(flush), .i_kill_vec(kv),
         .i_push(push), .i_push_e(push_e), .o_room(room), .o_has_div(has_div), .o_has_fds(has_fds),
         .i_wb(wb), .i_wbl(wbl), .i_wbd(wbd), .i_wbf(wbf), .i_wbc(wbc),
         .i_div_free(div_free), .i_fpu_ds_free(ds_free),
@@ -139,9 +144,9 @@ module rs_props (
         if (rst || flush) begin
             inset <= '0; older <= '0; tr_v <= 1'b0;
         end else begin
-            inset <= (inset & ~gone) | (push ? (NT'(1) << push_e.tag) : '0);
-            older <= older & ~gone;
-            if (tr_v && gone[T]) tr_v <= 1'b0;
+            inset <= (inset & ~gone & ~kv) | (push ? (NT'(1) << push_e.tag) : '0);
+            older <= older & ~gone & ~kv;
+            if (tr_v && (gone[T] || kv[T])) tr_v <= 1'b0;
             if (push) kind_of[push_e.tag] <= 3'(push_e.kind);
             // T's operands take their first delivery
             if (tr_v) begin
@@ -184,6 +189,9 @@ module rs_props (
         if (wbd.valid && wbf.valid) assume (wbd.tag != wbf.tag);
         if (wbd.valid && wbc.valid) assume (wbd.tag != wbc.tag);
         if (wbf.valid && wbc.valid) assume (wbf.tag != wbc.tag);
+        // (O3) a kill: no push and no flush in its cycle, and the killed are the youngest
+        if (kv != '0) assume (!push && !flush);
+        if (tr_v && (kv & older) != '0) assume (kv[T]);
     end
 
     // ---- properties ----
@@ -195,6 +203,8 @@ module rs_props (
             assert (sel_div == div_req.valid);
             assert (sel_fpu == fpu_req.valid);
             if (flush) assert (!sel_ab && !sel_div && !sel_fpu);
+            // (O3) nothing killed is sent
+            assert (!(issue_ab && kv[ab_tag]) && !(div_req.valid && kv[div_req.tag]) && !(fpu_req.valid && kv[fpu_req.tag]));
             // exactly once: a request is an entry the station holds, and one tag goes to one port
             if (issue_ab)      assert (inset[ab_tag]);
             if (div_req.valid) assert (inset[div_req.tag]);
@@ -236,7 +246,7 @@ module rs_props (
                 assert (fpu_req.a == vn[0] && fpu_req.b == vn[1] && fpu_req.c == vn[2]);
             end
             // no lost wakeup, oldest first: once T can go, its port is taken by T or by an older entry
-            if (tr_ready && !flush) begin
+            if (tr_ready && !flush && !kv[T]) begin
                 if (tr_e.kind == QV_RS_ALU || tr_e.kind == QV_RS_BRU)
                     assert (issue_ab && (ab_tag == T || older[ab_tag]));
                 if (tr_e.kind == QV_RS_DIV && !older_div && div_free)
@@ -312,6 +322,8 @@ module rs_props (
             cover (sel_ab && sel_fpu);                                            // two ports in one cycle (of two entries)
             cover (sel_div && sel_fpu);
             cover (!room && push == 1'b0 && sel_ab);
+            cover (kv != '0 && tr_v && !kv[T] && older != '0);                   // a kill that T survives
+            cover (tr_v && kv[T] && older != '0);                                 // T killed, an older one kept
         end
     end
 endmodule
