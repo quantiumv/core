@@ -161,9 +161,15 @@ SIDE_KEYS="$SIDE_KEYS ear_ser_ro ear_ser_trapw ear_ser_csr ear_ser_sys is_rs"
 # the load/store queue's counters (O2), a file of their own so the stack's stays as it was
 LSQ_CSV="${STACK_CSV%_stack.csv}_lsq.csv"
 LSQ_KEYS="early_ld early_st bar_wait match_wait qmatch_wait handoff drain"
+# the two-wide core's counters (OX.0): the second commit slot's classes (they add up to the window) and the caches'
+# refills, again a file of their own
+OX_CSV="${STACK_CSV%_stack.csv}_ox.csv"
+OX_KEYS="s1_retire s1_idle s1_none s1_wait_lsu s1_wait_div s1_wait_fpu s1_wait_alu s1_rule_head s1_rule_pair"
+OX_KEYS="$OX_KEYS dc_miss dc_cyc ic_miss ic_cyc"
 if [ "$CORE" == "pipe" ] && [ "$ORACLE" != "store" ]; then
     echo "kernel,config,$(echo $STACK_KEYS $SIDE_KEYS | tr ' ' ',')" > "$STACK_CSV"
     echo "kernel,config,$(echo $LSQ_KEYS | tr ' ' ',')" > "$LSQ_CSV"
+    echo "kernel,config,$(echo $OX_KEYS | tr ' ' ',')" > "$OX_CSV"
 fi
 
 # kv "<line>" key: the number after key= in a PERF_ line
@@ -220,6 +226,11 @@ run_one() {
         row="${kernel},${cfg_name}"
         for k in $LSQ_KEYS; do row="$row,$(kv "$qline" $k)"; done
         echo "$row" >> "$LSQ_CSV"
+        local xline
+        xline=$(echo "$out" | grep "^PERF_OX:" | head -1)
+        row="${kernel},${cfg_name}"
+        for k in $OX_KEYS; do row="$row,$(kv "$xline" $k)"; done
+        echo "$row" >> "$OX_CSV"
     fi
 }
 

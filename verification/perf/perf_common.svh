@@ -23,9 +23,10 @@
 `define PERF_RESULT_AND_STACK(STACK, MEM_ARRAY, ADDR) `PERF_REPORT(MEM_ARRAY, ADDR)
 `else
 // the monitor, named `stack`, wired to the core's own nets (CORE is the hierarchical path to the core instance)
-// (WIN_CSR: the window's CSR, a localparam of the instantiating module)
-`define PERF_STACK_INST(CORE, BUSWAIT) \
-    perf_stack #(.WIN_CSR(WIN_CSR)) stack ( \
+// (WIN_CSR: the window's CSR, a localparam of the instantiating module; DCREF/ICREF: the D$ and I$ refill a line,
+// 0 without caches)
+`define PERF_STACK_INST(CORE, BUSWAIT, DCREF, ICREF) \
+    perf_stack #(.WIN_CSR(WIN_CSR), .TAG_W(qv_pkg::QV_ROB_TAG_W)) stack ( \
         .clk(clk), .rst(rst), \
         .commit(CORE.commit_now_w), .instr_retired(CORE.c_instr_retired), \
         .instr_retired2(CORE.c_instr_retired2), .mispredict2(CORE.commit_pop2 && CORE.head1_entry.mispredict), \
@@ -62,7 +63,17 @@
         .lsu_go_tag(CORE.lsu0.tag_q), \
         .wb2_valid(CORE.lsu_wb.valid), .wb2_tag(CORE.lsu_wb.tag), .wb3_valid(CORE.div_wb.valid), .wb3_tag(CORE.div_wb.tag), \
         .wb4_valid(CORE.fpu_wb.valid), .wb4_tag(CORE.fpu_wb.tag), \
-        .trap(CORE.trap_taken), .mem_addr(CORE.lsu_res.mem_addr) \
+        .trap(CORE.trap_taken), .mem_addr(CORE.lsu_res.mem_addr), \
+        .commit2(CORE.commit_pop2), .head1_pc(CORE.head1_entry.pc), .head1_raw(CORE.head1_entry.raw), \
+        .head1_tag(CORE.head1_tag), .head1_mispredict(CORE.head1_entry.mispredict), .mem_addr1(CORE.lsu_res1.mem_addr), \
+        .head1_valid(CORE.head1_valid), .head1_complete(CORE.head1_entry.complete), .head1_cls(CORE.head1_ctrl.cls), \
+        .plain1(CORE.commit0.plain1), .alloc2_valid(CORE.alloc2_valid), .alloc_tag1(CORE.alloc_tag1), \
+        .iq_pop2(CORE.iq_pop2), .wb5_valid(CORE.wbp_bus.valid), .wb5_tag(CORE.wbp_bus.tag), \
+        .req_alu(CORE.alu_req.valid), .req_alu_tag(CORE.alu_req.tag), .req_alu1(CORE.alu1_req.valid), \
+        .req_alu1_tag(CORE.alu1_req.tag), .req_bru(CORE.bru_req.valid), .req_bru_tag(CORE.bru_req.tag), \
+        .req_div(CORE.div_req.valid), .req_div_tag(CORE.div_req.tag), .req_fpu(CORE.fpu_req.valid), \
+        .req_fpu_tag(CORE.fpu_req.tag), .fb_push(CORE.fetch0.fb_push), .fb_pop(CORE.fetch0.fb_pop), \
+        .fb_flush(CORE.fetch_redirect), .lsu_in_bus(CORE.lsu0.in_bus), .dc_refill(DCREF), .ic_refill(ICREF) \
     );
 `define PERF_STACK_REPORT(STACK, MEM_ARRAY, ADDR) \
     begin \

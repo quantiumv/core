@@ -136,7 +136,42 @@ module perf_stack #(
     input logic             wb4_valid = 1'b0,
     input logic [TAG_W-1:0] wb4_tag = '0,
     input logic             trap = 1'b0,            // the retiring instruction takes a synchronous exception
-    input logic [63:0]      mem_addr = '0           // the head memory op's physical dword
+    input logic [63:0]      mem_addr = '0,          // the head memory op's physical dword
+
+    // (OX.0) the two-wide core. The second retirement (commit channel 1) and why it did not happen, the second
+    // dispatch, the IQ's second pop, the second ALU port's writeback, the units' requests (when an op issued), the
+    // fetch buffer (when an instruction's dword arrived), and the caches' refills (the SoC configuration).
+    input logic             commit2 = 1'b0,
+    input logic [63:0]      head1_pc = '0,
+    input logic [31:0]      head1_raw = '0,
+    input logic [TAG_W-1:0] head1_tag = '0,
+    input logic             head1_mispredict = 1'b0,
+    input logic [63:0]      mem_addr1 = '0,
+    input logic             head1_valid = 1'b0,
+    input logic             head1_complete = 1'b0,
+    input logic [2:0]       head1_cls = '0,
+    input logic             plain1 = 1'b0,          // qv_commit's plain1: the head commits and may be the first of a pair
+    input logic             alloc2_valid = 1'b0,
+    input logic [TAG_W-1:0] alloc_tag1 = '0,
+    input logic             iq_pop2 = 1'b0,
+    input logic             wb5_valid = 1'b0,
+    input logic [TAG_W-1:0] wb5_tag = '0,
+    input logic             req_alu = 1'b0,
+    input logic [TAG_W-1:0] req_alu_tag = '0,
+    input logic             req_alu1 = 1'b0,
+    input logic [TAG_W-1:0] req_alu1_tag = '0,
+    input logic             req_bru = 1'b0,
+    input logic [TAG_W-1:0] req_bru_tag = '0,
+    input logic             req_div = 1'b0,
+    input logic [TAG_W-1:0] req_div_tag = '0,
+    input logic             req_fpu = 1'b0,
+    input logic [TAG_W-1:0] req_fpu_tag = '0,
+    input logic             fb_push = 1'b0,         // a fetched dword enters the fetch buffer
+    input logic             fb_pop = 1'b0,          // the aligner is done with the buffer's head
+    input logic             fb_flush = 1'b0,        // a redirect empties it
+    input logic             lsu_in_bus = 1'b0,      // the LSU's op is on the bus
+    input logic             dc_refill = 1'b0,       // the D$ refills a line
+    input logic             ic_refill = 1'b0        // the I$ refills a line
 );
     localparam logic [2:0] FU_DIV = 3'd2;
     localparam logic [2:0] FU_LSU = 3'd3;
@@ -169,6 +204,11 @@ module perf_stack #(
     longint unsigned c_xl_req, c_xl_reuse, c_xl_cyc, c_dx_n, c_dx_hit, c_dx_save;
     longint unsigned c_re_ser [0:3];
     longint unsigned c_ear_ser [0:3];
+    // (OX.0) the second commit slot: every window cycle once more, in exactly one of these (they add up to window)
+    longint unsigned c_s1_retire, c_s1_idle, c_s1_none, c_s1_wait_lsu, c_s1_wait_div, c_s1_wait_fpu, c_s1_wait_alu;
+    longint unsigned c_s1_rule_head, c_s1_rule_pair;
+    longint unsigned c_dc_miss, c_dc_cyc, c_ic_miss, c_ic_cyc;
+    logic            dc_refill_q, ic_refill_q;
     src_e   shadow_q;                // the source of the redirect whose refill shadow is running
     int     shadow_kind_q;           // ... and, for a serializing one, its ser_kind
     longint unsigned cycle_q;
@@ -194,62 +234,106 @@ module perf_stack #(
             $display("BR %h %h %h", head_pc, head_raw, head_next_pc);
 
     // +ILPTRACE: one line per instruction retired inside the window, with the cycles of its way through the core:
-    //   ILP pc raw push pop disp acc go cmpl commit early ared trap redir addr
+    //   ILP pc raw push pop disp acc go cmpl commit early ared trap redir addr iss ds cs fr dcm
     // push/pop: entered/left the instruction queue; disp: issued (ROB allocation); acc/go: the LSU took it / started
     // its access (0 for other ops); cmpl: its writeback; ared: the aligner redirected fetch after it (a taken branch
     // or a hint it did not confirm); redir: the commit redirect it caused (0 none, 1 mispredict, 2 serializing,
-    // 3 other: a trap or xRET); addr: its physical dword (memory ops). Cycles count from reset.
+    // 3 other: a trap or xRET; 4 is kept for a mispredict recovered at execute); addr: its physical dword (memory
+    // ops). (OX.0) iss: the cycle its unit took it (acc for a memory op); ds/cs: its dispatch slot and its commit
+    // channel; fr: the cycle the fetch buffer got the dword it was aligned from; dcm: the D$ refilled a line while its
+    // access was on the bus. A pair retires as two lines, the older first. Cycles count from reset.
     bit ilptrace;
     initial ilptrace = $test$plusargs("ILPTRACE");
     localparam int IQ_MIRROR = 16;
+    localparam int FB_MIRROR = 16;
     longint unsigned iqm_push [0:IQ_MIRROR-1];       // the instruction queue's entries, mirrored
     bit              iqm_ared [0:IQ_MIRROR-1];
+    longint unsigned iqm_fr   [0:IQ_MIRROR-1];
     int              iqm_rd, iqm_n;
-    longint unsigned dec_push, dec_pop;              // the uop decode holds
-    bit              dec_ared;
+    longint unsigned fbm_push [0:FB_MIRROR-1];       // the fetch buffer's entries: when each arrived
+    int              fbm_rd, fbm_n;
+    longint unsigned dq_push [0:1], dq_pop [0:1], dq_fr [0:1];   // the uops decode holds (one, or two at two-wide)
+    bit              dq_ared [0:1];
+    int              dq_n;
     longint unsigned t_push [0:(1<<TAG_W)-1], t_pop [0:(1<<TAG_W)-1], t_disp [0:(1<<TAG_W)-1];
     longint unsigned t_acc [0:(1<<TAG_W)-1], t_go [0:(1<<TAG_W)-1], t_cmpl [0:(1<<TAG_W)-1];
-    bit              t_early [0:(1<<TAG_W)-1], t_ared [0:(1<<TAG_W)-1];
-    initial begin iqm_rd = 0; iqm_n = 0; end
+    longint unsigned t_iss [0:(1<<TAG_W)-1], t_fr [0:(1<<TAG_W)-1];
+    bit              t_early [0:(1<<TAG_W)-1], t_ared [0:(1<<TAG_W)-1], t_ds [0:(1<<TAG_W)-1], t_dcm [0:(1<<TAG_W)-1];
+    initial begin iqm_rd = 0; iqm_n = 0; fbm_rd = 0; fbm_n = 0; dq_n = 0; end
+
+    task automatic ilp_line(input logic [63:0] pc, input logic [31:0] raw, input logic [TAG_W-1:0] t, input bit trp,
+                            input int rdr, input logic [63:0] ma, input int cs);
+        $display("ILP %h %h %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %h %0d %0d %0d %0d %0d", pc, raw,
+                 t_push[t], t_pop[t], t_disp[t], t_acc[t], t_go[t], t_cmpl[t], cycle_q, t_early[t], t_ared[t], trp,
+                 rdr, ma, t_iss[t], t_ds[t], cs, t_fr[t], t_dcm[t]);
+    endtask
+    task automatic ilp_disp(input logic [TAG_W-1:0] t, input int k, input int slot);
+        t_push[t] = dq_push[k]; t_pop[t] = dq_pop[k]; t_disp[t] = cycle_q; t_ared[t] = dq_ared[k]; t_fr[t] = dq_fr[k];
+        t_acc[t] = 0; t_go[t] = 0; t_cmpl[t] = 0; t_iss[t] = 0; t_early[t] = 0; t_ds[t] = slot; t_dcm[t] = 0;
+    endtask
+    task automatic ilp_pop();
+        dq_push[dq_n] = iqm_push[iqm_rd]; dq_ared[dq_n] = iqm_ared[iqm_rd]; dq_fr[dq_n] = iqm_fr[iqm_rd];
+        dq_pop[dq_n] = cycle_q;
+        dq_n = dq_n + 1;
+        iqm_rd = (iqm_rd + 1) % IQ_MIRROR; iqm_n = iqm_n - 1;
+    endtask
+    task automatic ilp_push();
+        iqm_push[(iqm_rd + iqm_n) % IQ_MIRROR] = cycle_q; iqm_ared[(iqm_rd + iqm_n) % IQ_MIRROR] = 0;
+        iqm_fr[(iqm_rd + iqm_n) % IQ_MIRROR] = (fbm_n > 0) ? fbm_push[fbm_rd] : cycle_q;
+        iqm_n = iqm_n + 1;
+    endtask
+
     always @(posedge clk) if (ilptrace && !rst) begin
-        // retire first: the head's entry is read before this cycle's events touch it
+        // retire first: the head's entry is read before this cycle's events touch it. A pair's redirect is its
+        // second's (a mispredicted branch: the head of a pair can cause none)
         if (win_q == 1 && commit)
-            $display("ILP %h %h %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %h", head_pc, head_raw,
-                     t_push[head_tag], t_pop[head_tag], t_disp[head_tag], t_acc[head_tag], t_go[head_tag],
-                     t_cmpl[head_tag], cycle_q, t_early[head_tag], t_ared[head_tag], trap,
-                     !flush ? 0 : head_mispredict ? 1 : head_serialize ? 2 : 3, mem_addr);
-        // dispatch takes the uop decode holds (before a pop this cycle replaces it)
-        if (alloc_valid) begin
-            t_push[alloc_tag] = dec_push; t_pop[alloc_tag] = dec_pop; t_disp[alloc_tag] = cycle_q;
-            t_ared[alloc_tag] = dec_ared; t_acc[alloc_tag] = 0; t_go[alloc_tag] = 0; t_cmpl[alloc_tag] = 0;
-            t_early[alloc_tag] = 0;
+            ilp_line(head_pc, head_raw, head_tag, trap,
+                     (!flush || commit2) ? 0 : head_mispredict ? 1 : head_serialize ? 2 : 3, mem_addr, 0);
+        if (win_q == 1 && commit2)
+            ilp_line(head1_pc, head1_raw, head1_tag, 1'b0, (flush && head1_mispredict) ? 1 : 0, mem_addr1, 1);
+        // dispatch takes the uops decode holds, the older first (before this cycle's pops refill them)
+        if (alloc_valid)  ilp_disp(alloc_tag, 0, 0);
+        if (alloc2_valid) ilp_disp(alloc_tag1, 1, 1);
+        if (alloc2_valid) begin
+            dq_n = 0;
+        end else if (alloc_valid) begin
+            dq_push[0] = dq_push[1]; dq_pop[0] = dq_pop[1]; dq_fr[0] = dq_fr[1]; dq_ared[0] = dq_ared[1];
+            dq_n = (dq_n > 0) ? dq_n - 1 : 0;
         end
-        if (lsu_acc) t_acc[lsu_acc_tag] = cycle_q;
+        if (lsu_acc) begin t_acc[lsu_acc_tag] = cycle_q; t_iss[lsu_acc_tag] = cycle_q; end
         if (lsu_go)  begin t_go[lsu_go_tag] = cycle_q; t_early[lsu_go_tag] = lsu_go_early; end
+        if (lsu_in_bus && dc_refill) t_dcm[lsu_go_tag] = 1;
+        if (req_alu)  t_iss[req_alu_tag]  = cycle_q;
+        if (req_alu1) t_iss[req_alu1_tag] = cycle_q;
+        if (req_bru)  t_iss[req_bru_tag]  = cycle_q;
+        if (req_div)  t_iss[req_div_tag]  = cycle_q;
+        if (req_fpu)  t_iss[req_fpu_tag]  = cycle_q;
         // a writeback for a tag dispatched in this same cycle is a flushed op's (only the LSU's is not masked)
         if (wb_valid  && cycle_q > t_disp[wb_tag])  t_cmpl[wb_tag]  = cycle_q;
         if (wb2_valid && cycle_q > t_disp[wb2_tag]) t_cmpl[wb2_tag] = cycle_q;
         if (wb3_valid && cycle_q > t_disp[wb3_tag]) t_cmpl[wb3_tag] = cycle_q;
         if (wb4_valid && cycle_q > t_disp[wb4_tag]) t_cmpl[wb4_tag] = cycle_q;
-        // the instruction queue: decode pops its head into its register; pushes go to the tail
+        if (wb5_valid && cycle_q > t_disp[wb5_tag]) t_cmpl[wb5_tag] = cycle_q;
+        // the instruction queue: decode pops its head (and at two-wide the entry behind it); pushes go to the tail,
+        // each remembering when the fetch buffer got the dword it came from
         if (flush) begin
             iqm_n = 0;
+            dq_n = 0;
         end else begin
-            if (iq_pop && iqm_n > 0) begin
-                dec_push = iqm_push[iqm_rd]; dec_ared = iqm_ared[iqm_rd]; dec_pop = cycle_q;
-                iqm_rd = (iqm_rd + 1) % IQ_MIRROR; iqm_n = iqm_n - 1;
-            end
-            if (iq_push0) begin
-                iqm_push[(iqm_rd + iqm_n) % IQ_MIRROR] = cycle_q; iqm_ared[(iqm_rd + iqm_n) % IQ_MIRROR] = 0;
-                iqm_n = iqm_n + 1;
-            end
-            if (iq_push1) begin
-                iqm_push[(iqm_rd + iqm_n) % IQ_MIRROR] = cycle_q; iqm_ared[(iqm_rd + iqm_n) % IQ_MIRROR] = 0;
-                iqm_n = iqm_n + 1;
-            end
+            if (iq_pop && iqm_n > 0 && dq_n < 2) ilp_pop();
+            if (iq_pop2 && iqm_n > 0 && dq_n < 2) ilp_pop();
+            if (iq_push0) ilp_push();
+            if (iq_push1) ilp_push();
             // an align redirect follows the last instruction pushed (in this cycle or before)
             if (fe_redirect && iqm_n > 0) iqm_ared[(iqm_rd + iqm_n - 1) % IQ_MIRROR] = 1;
-            else if (fe_redirect && (iq_pop || alloc_valid)) dec_ared = 1;
+            else if (fe_redirect && (iq_pop || alloc_valid) && dq_n > 0) dq_ared[dq_n - 1] = 1;
+        end
+        // the fetch buffer: the aligner is done with its head after this cycle's pushes read it
+        if (fb_flush) begin
+            fbm_n = 0;
+        end else begin
+            if (fb_pop && fbm_n > 0) begin fbm_rd = (fbm_rd + 1) % FB_MIRROR; fbm_n = fbm_n - 1; end
+            if (fb_push) begin fbm_push[(fbm_rd + fbm_n) % FB_MIRROR] = cycle_q; fbm_n = fbm_n + 1; end
         end
     end
 
@@ -280,6 +364,10 @@ module perf_stack #(
             c_xl_req <= 0; c_xl_reuse <= 0; c_xl_cyc <= 0; c_dx_n <= 0; c_dx_hit <= 0; c_dx_save <= 0;
             c_lq_ld <= 0; c_lq_st <= 0; c_lq_bar <= 0; c_lq_match <= 0; c_lq_qmatch <= 0; c_lq_hand <= 0; c_lq_drain <= 0;
             for (int k = 0; k < 4; k++) begin c_re_ser[k] <= 0; c_ear_ser[k] <= 0; end
+            c_s1_retire <= 0; c_s1_idle <= 0; c_s1_none <= 0; c_s1_wait_lsu <= 0; c_s1_wait_div <= 0;
+            c_s1_wait_fpu <= 0; c_s1_wait_alu <= 0; c_s1_rule_head <= 0; c_s1_rule_pair <= 0;
+            c_dc_miss <= 0; c_dc_cyc <= 0; c_ic_miss <= 0; c_ic_cyc <= 0;
+            dc_refill_q <= 1'b0; ic_refill_q <= 1'b0;
             shadow_q <= SRC_NONE;
             shadow_kind_q <= 0;
             lp_valid_q <= 1'b0;
@@ -360,8 +448,26 @@ module perf_stack #(
                     else if (uop_fu == FU_LSU && !lsu_free)       c_is_lsu  <= c_is_lsu + 1;
                     else if (uop_fu == FU_DIV && !div_free)       c_is_div  <= c_is_div + 1;
                 end
+                // (OX.0) the second commit slot: it retired, the first did not either (slot 0's class says why), or
+                // the first did and the second could not: no entry behind it, it is not done, the head may not be
+                // the first of a pair (qv_commit's plain1), or the pair rule refused the second
+                if (commit2)                                       c_s1_retire    <= c_s1_retire + 1;
+                else if (!commit)                                  c_s1_idle      <= c_s1_idle + 1;
+                else if (!head1_valid)                             c_s1_none      <= c_s1_none + 1;
+                else if (!head1_complete) begin
+                    if      (head1_cls == FU_LSU)                  c_s1_wait_lsu  <= c_s1_wait_lsu + 1;
+                    else if (head1_cls == FU_DIV)                  c_s1_wait_div  <= c_s1_wait_div + 1;
+                    else if (head1_cls == FU_FPU)                  c_s1_wait_fpu  <= c_s1_wait_fpu + 1;
+                    else                                           c_s1_wait_alu  <= c_s1_wait_alu + 1;
+                end
+                else if (!plain1)                                  c_s1_rule_head <= c_s1_rule_head + 1;
+                else                                               c_s1_rule_pair <= c_s1_rule_pair + 1;
+                if (dc_refill) begin c_dc_cyc <= c_dc_cyc + 1; if (!dc_refill_q) c_dc_miss <= c_dc_miss + 1; end
+                if (ic_refill) begin c_ic_cyc <= c_ic_cyc + 1; if (!ic_refill_q) c_ic_miss <= c_ic_miss + 1; end
+
                 if (flush) begin
-                    if (commit && head_mispredict)                c_re_mispred <= c_re_mispred + 1;
+                    if ((commit && head_mispredict) || (commit2 && head1_mispredict))
+                                                                  c_re_mispred <= c_re_mispred + 1;
                     else if (commit && head_serialize) begin
                         c_re_serial  <= c_re_serial + 1;
                         c_re_ser[ser_kind(head_cls, head_csr_wsup, head_csr_addr)] <=
@@ -396,17 +502,29 @@ module perf_stack #(
                     end
                 end
 
-                if (commit && head_mispredict && flush) begin
-                    c_mp_n <= c_mp_n + 1;
-                    case (mp_kind(head_raw))
-                        0: c_mp_cond <= c_mp_cond + 1;
-                        1: c_mp_jal  <= c_mp_jal + 1;
-                        default: c_mp_jalr <= c_mp_jalr + 1;
-                    endcase
-                    if (mp_done_valid[head_tag])
-                        c_mp_wait <= c_mp_wait + (cycle_q - mp_done_cycle[head_tag] - 1);   // 0 when it commits the cycle after it finished
+                // every mispredicted branch that retires, on either commit channel (O4: the second can be one)
+                begin
+                    int n_c, n_j, n_r;
+                    longint unsigned w;
+                    n_c = 0; n_j = 0; n_r = 0; w = 0;
+                    if (commit && head_mispredict) begin
+                        case (mp_kind(head_raw)) 0: n_c = n_c + 1; 1: n_j = n_j + 1; default: n_r = n_r + 1; endcase
+                        if (mp_done_valid[head_tag])
+                            w = w + (cycle_q - mp_done_cycle[head_tag] - 1);   // 0 when it commits the cycle after it finished
+                    end
+                    if (commit2 && head1_mispredict) begin
+                        case (mp_kind(head1_raw)) 0: n_c = n_c + 1; 1: n_j = n_j + 1; default: n_r = n_r + 1; endcase
+                        if (mp_done_valid[head1_tag]) w = w + (cycle_q - mp_done_cycle[head1_tag] - 1);
+                    end
+                    c_mp_n    <= c_mp_n + n_c + n_j + n_r;
+                    c_mp_cond <= c_mp_cond + n_c;
+                    c_mp_jal  <= c_mp_jal + n_j;
+                    c_mp_jalr <= c_mp_jalr + n_r;
+                    c_mp_wait <= c_mp_wait + w;
                 end
             end
+            dc_refill_q <= dc_refill;
+            ic_refill_q <= ic_refill;
 
             if (is_win_csr) begin
                 if (win_q == 0)      win_q <= 1;
@@ -435,6 +553,12 @@ module perf_stack #(
                  c_is_rs);
         $display("PERF_LSQ: early_ld=%0d early_st=%0d bar_wait=%0d match_wait=%0d qmatch_wait=%0d handoff=%0d drain=%0d",
                  c_lq_ld, c_lq_st, c_lq_bar, c_lq_match, c_lq_qmatch, c_lq_hand, c_lq_drain);
+        $display("PERF_OX: s1_retire=%0d s1_idle=%0d s1_none=%0d s1_wait_lsu=%0d s1_wait_div=%0d s1_wait_fpu=%0d s1_wait_alu=%0d s1_rule_head=%0d s1_rule_pair=%0d dc_miss=%0d dc_cyc=%0d ic_miss=%0d ic_cyc=%0d",
+                 c_s1_retire, c_s1_idle, c_s1_none, c_s1_wait_lsu, c_s1_wait_div, c_s1_wait_fpu, c_s1_wait_alu,
+                 c_s1_rule_head, c_s1_rule_pair, c_dc_miss, c_dc_cyc, c_ic_miss, c_ic_cyc);
+        if (c_s1_retire + c_s1_idle + c_s1_none + c_s1_wait_lsu + c_s1_wait_div + c_s1_wait_fpu + c_s1_wait_alu
+                + c_s1_rule_head + c_s1_rule_pair != c_window)
+            $display("PERF_STACK_WARN: the second slot's classes do not add up to the window");
         if (win_q != 2)
             $display("PERF_STACK_WARN: the window never closed (state %0d)", win_q);
         if (sum != c_window)

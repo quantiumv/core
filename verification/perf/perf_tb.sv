@@ -57,7 +57,7 @@ module perf_tb #(
 
 `ifndef QV_REF_AS_CORE
             // the LSU's request waits for the arbiter while fetch holds the shared SRAM
-            `PERF_STACK_INST(dut.core0, (dut.wbm_cyc && !dut.fetch_mem_arb0.grant))
+            `PERF_STACK_INST(dut.core0, (dut.wbm_cyc && !dut.fetch_mem_arb0.grant), 1'b0, 1'b0)
 `endif
 
             always @(posedge clk)
@@ -83,7 +83,7 @@ module perf_tb #(
             soc dut (.clk(clk), .rst(rst));
 
 `ifndef QV_REF_AS_CORE
-            `PERF_STACK_INST(dut.core0, 1'b0)
+            `PERF_STACK_INST(dut.core0, 1'b0, (dut.cache0.dcache0.state_q == 1), (dut.cache0.icache0.state_q == 1))
 `endif
 
             always @(posedge clk)
