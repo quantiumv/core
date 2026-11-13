@@ -32,6 +32,7 @@ module qv_exu_div (
     /* verilator lint_off UNUSEDSIGNAL */
     input  qv_pkg::fu_req_t i_req,
     /* verilator lint_on UNUSEDSIGNAL */
+    input  logic [(1<<qv_pkg::QV_ROB_TAG_W)-1:0] i_kill_vec = '0,   // (O3) tags killed by a recovery at execute
     output logic            o_free,
     output qv_pkg::wb_t     o_wb
 );
@@ -47,6 +48,8 @@ module qv_exu_div (
 
     // (a request in a flush cycle never gets this far: the reset-or-flush arm below comes first)
     wire accept = i_req.valid && !busy_q;
+    // (O3) the divide in progress is killed by a recovery at execute: dropped as a flush drops it
+    wire kill   = busy_q && i_kill_vec[tag_q];
 
     always_ff @(posedge clk) begin
         if (rst || i_flush) begin
@@ -66,6 +69,10 @@ module qv_exu_div (
                 pend_q <= 1'b0;
             end
             if (div_done) busy_q <= 1'b0;
+            if (kill) begin
+                busy_q <= 1'b0;
+                pend_q <= 1'b0;
+            end
         end
     end
     assign o_free = !busy_q;
@@ -77,7 +84,7 @@ module qv_exu_div (
     divider divider0 (
         .i_clk(clk), .i_rst(rst),
         .i_start(pend_q), .i_dividend(dividend), .i_divisor(divisor), .i_signed(signed_q),
-        .i_kill(i_flush),
+        .i_kill(i_flush || kill),
         /* verilator lint_off PINCONNECTEMPTY */
         .o_busy(),
         /* verilator lint_on PINCONNECTEMPTY */
@@ -87,7 +94,7 @@ module qv_exu_div (
     wire [63:0] raw = quot_q ? quotient : remainder;
     always_comb begin
         o_wb       = '0;
-        o_wb.valid = div_done && !i_flush;
+        o_wb.valid = div_done && !i_flush && !kill;
         o_wb.tag   = tag_q;
         o_wb.value = word_q ? {{32{raw[31]}}, raw[31:0]} : raw;
     end

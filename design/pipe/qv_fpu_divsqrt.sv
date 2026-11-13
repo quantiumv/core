@@ -23,7 +23,8 @@ module qv_fpu_divsqrt (
     output logic             o_busy,      // computing or holding a result
     output logic             o_done,      // o_res is valid; held until i_ack
     output qv_pkg::wb_fp_t   o_res,
-    input  logic             i_ack
+    input  logic             i_ack,
+    input  logic [(1<<qv_pkg::QV_ROB_TAG_W)-1:0] i_kill_vec = '0   // (O3) tags killed by a recovery at execute
 );
     import qv_pkg::*;
 
@@ -174,6 +175,8 @@ module qv_fpu_divsqrt (
                 S_DONE: if (i_ack) st_q <= S_IDLE;
                 default: st_q <= S_IDLE;
             endcase
+            // (O3) killed: dropped wherever it is (a result killed in its own cycle is masked by qv_exu_fpu)
+            if (st_q != S_IDLE && i_kill_vec[tag_q]) st_q <= S_IDLE;
         end
     end
 

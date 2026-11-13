@@ -23,6 +23,7 @@ module qv_fpu_pipe (
     input  logic             rst,
     input  logic             i_flush,
     input  qv_pkg::fpu_req_t i_req,        // valid: an op other than DIV/SQRT, accepted every cycle
+    input  logic [(1<<qv_pkg::QV_ROB_TAG_W)-1:0] i_kill_vec = '0,   // (O3) tags killed by a recovery at execute
     output qv_pkg::wb_fp_t   o_wb
 );
     import qv_pkg::*;
@@ -343,6 +344,7 @@ module qv_fpu_pipe (
     always_ff @(posedge clk) begin
         if (rst || i_flush) r1_valid <= 1'b0;
         else                r1_valid <= r0.valid;
+        if (i_kill_vec[r0.tag]) r1_valid <= 1'b0;                  // (O3) killed: it goes no further
         r1_tag <= r0.tag; r1_fmt <= r0.fmt; r1_rm <= r0.rm;
         r1_done <= a_done; r1_res <= a_res; r1_flags <= a_flags;
         r1_p <= a_p; r1_c <= a_c; r1_sub <= a_sub; r1_sp <= a_sp; r1_sc <= a_sc; r1_qacc <= a_qacc;
@@ -370,6 +372,7 @@ module qv_fpu_pipe (
     always_ff @(posedge clk) begin
         if (rst || i_flush) r2_valid <= 1'b0;
         else                r2_valid <= r1_valid;
+        if (i_kill_vec[r1_tag]) r2_valid <= 1'b0;
         r2_tag <= r1_tag; r2_fmt <= r1_fmt; r2_rm <= r1_rm;
         r2_done <= r1_done; r2_res <= r1_res; r2_flags <= r1_flags;
         r2_x <= b_x; r2_s <= b_s; r2_qacc <= r1_qacc;
@@ -409,6 +412,7 @@ module qv_fpu_pipe (
     always_ff @(posedge clk) begin
         if (rst || i_flush) r3_valid <= 1'b0;
         else                r3_valid <= r2_valid;
+        if (i_kill_vec[r2_tag]) r3_valid <= 1'b0;
         r3_tag <= r2_tag; r3_fmt <= r2_fmt; r3_rm <= r2_rm;
         r3_done <= c_done; r3_res <= c_res; r3_flags <= r2_flags;
         r3_s <= r2_s; r3_m <= c_m; r3_st <= c_st; r3_e <= c_e;
@@ -428,7 +432,7 @@ module qv_fpu_pipe (
 `endif
     always_comb begin
         o_wb       = '0;
-        o_wb.valid = r3_valid && !i_flush;
+        o_wb.valid = r3_valid && !i_flush && !i_kill_vec[r3_tag];
         o_wb.tag   = r3_tag;
 `ifdef QV_FORMAL_FPU_ABSTRACT
         o_wb.value = abs_value;

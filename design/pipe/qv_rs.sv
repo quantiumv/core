@@ -44,6 +44,7 @@ module qv_rs #(
     input  logic                             clk,
     input  logic                             rst,
     input  logic                             i_flush,
+    input  logic [(1<<qv_pkg::QV_ROB_TAG_W)-1:0] i_kill_vec = '0,   // (O3) tags killed by a recovery at execute
 
     // issue
     input  logic                             i_push,           // only with o_room
@@ -98,6 +99,7 @@ module qv_rs #(
     logic [63:0] vb      [0:DEPTH-1];
     logic [63:0] vc      [0:DEPTH-1];
     logic        issued  [0:DEPTH-1];
+    logic        killed  [0:DEPTH-1];         // (O3) its tag is killed by a recovery at execute: never sent, dropped
     logic [4:0]  eop     [0:DEPTH-1];         // the op (for an ALU entry: is it a multiply)
     int          ab_i, div_i, fds_i, fpu_i;    // the chosen ALU/BRU entry, the oldest DIV and FDS, the chosen FPU one
     logic        ab_f, div_f, fds_f, fpu_f;    // ... exists
@@ -112,7 +114,8 @@ module qv_rs #(
             x        = e_q[i];
             kind[i]  = x.kind;
             eop[i]   = x.op;
-            ready[i] = v_q[i] && (x.a.rdy || qv_opnd_byp(x.a, i_wb, i_wbp, i_wbl, i_wbf, BYPASS_EN, LSU_BYPASS))
+            killed[i] = i_kill_vec[x.tag];
+            ready[i] = v_q[i] && !killed[i] && (x.a.rdy || qv_opnd_byp(x.a, i_wb, i_wbp, i_wbl, i_wbf, BYPASS_EN, LSU_BYPASS))
                               && (x.b.rdy || qv_opnd_byp(x.b, i_wb, i_wbp, i_wbl, i_wbf, BYPASS_EN, LSU_BYPASS))
                               && (x.c.rdy || qv_opnd_byp(x.c, i_wb, i_wbp, i_wbl, i_wbf, BYPASS_EN, LSU_BYPASS));
             va[i]    = qv_opnd_now(x.a, i_wb, i_wbp, i_wbl, i_wbf);
@@ -220,7 +223,7 @@ module qv_rs #(
             n_v[i] = 1'b0;
         end
         for (int i = 0; i < DEPTH; i++) begin
-            if (v_q[i] && !issued[i]) begin
+            if (v_q[i] && !issued[i] && !killed[i]) begin
                 x      = e_q[i];
                 x.a    = qv_opnd_wake(x.a, i_wb, i_wbp, i_wbl, i_wbd, i_wbf, i_wbc);
                 x.b    = qv_opnd_wake(x.b, i_wb, i_wbp, i_wbl, i_wbd, i_wbf, i_wbc);

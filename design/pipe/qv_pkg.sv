@@ -178,6 +178,7 @@ package qv_pkg;
         logic [63:0] next_pc;      // the predicted next pc until the result overrides it
         logic        mispredict;   // next_pc differs from the prediction: redirect at commit
         logic [4:0]  fflags;       // F/D: the exception flags an FPU op raised, accrued into fflags at commit
+        logic        recovered;    // (O3) the mispredict was recovered at execute: commit does not redirect again
     } rob_entry_t;
 
     // A memory op's outcome, held by the LSU from its completion until it

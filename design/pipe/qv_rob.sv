@@ -24,6 +24,15 @@
  * Flush (a redirect at commit) empties everything behind the head
  * entry, which may itself be committing that cycle. A pop while empty,
  * or an allocation while full, is ignored.
+ *
+ * (O3) A kill (a mispredict recovered at execute) drops every entry younger
+ * than i_kill_tag: the tail goes back to the entry after it, nothing is
+ * allocated in that cycle (the tail's update puts the kill before the
+ * allocation), and o_kill_vec marks every killed tag so the
+ * units, the station and the load/store queue drop what they hold for them
+ * in the same cycle (the next allocations reuse those tags). A flush beats a
+ * kill. A mispredict written back with i_wb_recover is marked recovered, so
+ * commit retires it without a second redirect.
  */
 module qv_rob #(
     parameter int ROB_DEPTH = qv_pkg::QV_ROB_DEPTH
@@ -107,7 +116,13 @@ module qv_rob #(
     output qv_pkg::rob_entry_t               o_head1_entry,
     output logic [qv_pkg::QV_ROB_TAG_W-1:0]  o_head1_tag,
     output qv_pkg::rob_ctrl_t                o_head1_ctrl,
-    input  logic                             i_commit_pop2 = 1'b0
+    input  logic                             i_commit_pop2 = 1'b0,
+
+    // (O3) kill everything younger than i_kill_tag; which tags that is
+    input  logic                             i_kill = 1'b0,
+    input  logic [qv_pkg::QV_ROB_TAG_W-1:0]  i_kill_tag = '0,
+    output logic [(1<<qv_pkg::QV_ROB_TAG_W)-1:0] o_kill_vec,
+    input  logic                             i_wb_recover = 1'b0     // i_wb's mispredict is recovered at execute
 );
     import qv_pkg::*;
 
@@ -124,6 +139,7 @@ module qv_rob #(
     logic               complete_q[0:ROB_DEPTH-1];
     logic [4:0]         fflags_q  [0:ROB_DEPTH-1];
     rob_ctrl_t          ctrl_q    [0:ROB_DEPTH-1];
+    logic               recovered_q[0:ROB_DEPTH-1];
 
     logic [PTR_W-1:0] head_q, tail_q;
 
@@ -145,6 +161,15 @@ module qv_rob #(
     wire [PTR_W-1:0] count = tail_q - head_q;
     assign o_head1_valid = count >= PTR_W'(2);
     wire pop2  = pop && i_commit_pop2 && o_head1_valid;
+
+    // (O3) the killed tags: from the entry after the branch up to the tail, in the ROB's pointer width (a tag with a
+    // bit above it is no pointer of this ROB)
+    wire [PTR_W-1:0] kill_from = i_kill_tag[PTR_W-1:0] + PTR_W'(1);
+    always_comb
+        for (int k = 0; k < (1 << QV_ROB_TAG_W); k++)
+            o_kill_vec[k] = i_kill && ((k >> PTR_W) == 0)
+                            && (qv_rob_dist(QV_ROB_TAG_W'(k), QV_ROB_TAG_W'(kill_from), PTR_W)
+                                < qv_rob_dist(QV_ROB_TAG_W'(tail_q), QV_ROB_TAG_W'(kill_from), PTR_W));
 
     // operand lookups
     wire [IDX_W-1:0] l1_idx = i_lookup1_tag[IDX_W-1:0];
@@ -178,6 +203,7 @@ module qv_rob #(
         o_head_entry.next_pc    = next_pc_q[head_idx];
         o_head_entry.mispredict = mispredict_q[head_idx];
         o_head_entry.fflags     = fflags_q[head_idx];
+        o_head_entry.recovered  = recovered_q[head_idx];
     end
     assign o_head_ctrl   = ctrl_q[head_idx];
 
@@ -196,6 +222,7 @@ module qv_rob #(
         o_head1_entry.next_pc    = next_pc_q[head1_idx];
         o_head1_entry.mispredict = mispredict_q[head1_idx];
         o_head1_entry.fflags     = fflags_q[head1_idx];
+        o_head1_entry.recovered  = recovered_q[head1_idx];
     end
     assign o_head1_ctrl  = ctrl_q[head1_idx];
 
@@ -215,6 +242,8 @@ module qv_rob #(
             head_q <= head_next;
             if (i_flush) begin
                 tail_q <= head_next;
+            end else if (i_kill) begin
+                tail_q <= kill_from;
             end else if (alloc) begin
                 tail_q                 <= tail_q + PTR_W'(1);
                 pc_q[tail_idx]         <= i_alloc_pc;
@@ -226,6 +255,7 @@ module qv_rob #(
                 complete_q[tail_idx]   <= 1'b0;
                 mispredict_q[tail_idx] <= 1'b0;
                 fflags_q[tail_idx]     <= 5'b0;
+                recovered_q[tail_idx]  <= 1'b0;
                 if (alloc2) begin
                     tail_q                  <= tail_q + PTR_W'(2);
                     pc_q[tail1_idx]         <= i_alloc2_pc;
@@ -237,6 +267,7 @@ module qv_rob #(
                     complete_q[tail1_idx]   <= 1'b0;
                     mispredict_q[tail1_idx] <= 1'b0;
                     fflags_q[tail1_idx]     <= 5'b0;
+                    recovered_q[tail1_idx]  <= 1'b0;
                 end
             end
             if (i_wb.valid && !i_flush) begin
@@ -245,6 +276,7 @@ module qv_rob #(
                 if (i_wb.mispredict) begin
                     next_pc_q[wb_idx]    <= i_wb.next_pc;
                     mispredict_q[wb_idx] <= 1'b1;
+                    recovered_q[wb_idx]  <= i_wb_recover;
                 end
             end
             if (i_wb2.valid && !i_flush) begin
@@ -266,4 +298,16 @@ module qv_rob #(
             end
         end
     end
+
+`ifndef SYNTHESIS
+    // (O3) a kill names an entry the ROB holds, and never cuts below this cycle's retirements (the branch retires
+    // at the most as the last of them: commit pairs nothing behind a mispredicted head)
+    wire [QV_ROB_TAG_W-1:0] k_dist = qv_rob_dist(QV_ROB_TAG_W'(kill_from), QV_ROB_TAG_W'(head_q), PTR_W);
+    always @(posedge clk) if (!rst && i_kill && !i_flush) begin
+        if (k_dist == '0 || k_dist > qv_rob_dist(QV_ROB_TAG_W'(tail_q), QV_ROB_TAG_W'(head_q), PTR_W))
+            $error("qv_rob: kill behind a tag the ROB does not hold");
+        if (qv_rob_dist(QV_ROB_TAG_W'(head_next), QV_ROB_TAG_W'(head_q), PTR_W) > k_dist)
+            $error("qv_rob: kill below this cycle's retirements");
+    end
+`endif
 endmodule

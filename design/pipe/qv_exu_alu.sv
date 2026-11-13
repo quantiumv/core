@@ -22,6 +22,7 @@ module qv_exu_alu #(
     input  logic            rst,
     input  logic            i_flush,
     input  qv_pkg::fu_req_t i_req,
+    input  logic [(1<<qv_pkg::QV_ROB_TAG_W)-1:0] i_kill_vec = '0,   // (O3) tags killed by a recovery at execute
     output qv_pkg::wb_t     o_wb
 );
     import qv_pkg::*;
@@ -46,7 +47,7 @@ module qv_exu_alu #(
 
     always_comb begin
         o_wb       = '0;
-        o_wb.valid = req_q.valid;
+        o_wb.valid = req_q.valid && !i_kill_vec[req_q.tag];     // (O3) a killed op writes nothing back
         o_wb.tag   = req_q.tag;
         o_wb.value = req_q.is_word ? {{32{result[31]}}, result[31:0]} : result;
     end

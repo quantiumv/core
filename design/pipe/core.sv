@@ -649,6 +649,7 @@ module core
     logic [4:0]              rs1_sel, rs2_sel;
     logic [63:0]             rs1_data, rs2_data;
     logic                    alloc_valid, alloc_rd_wen, alloc_ready, rob_empty;
+    logic [(1<<QV_ROB_TAG_W)-1:0] kill_vec;  // (O3) the tags a recovery at execute kills (all 0 until it is wired)
     logic [63:0]             alloc_pc, alloc_next_pc;
     logic [31:0]             alloc_raw;
     logic [4:0]              alloc_rd;
@@ -707,7 +708,7 @@ module core
                .LSU_BYPASS(LSQ_DEPTH > 0 && LSQ_BYPASS), .RS_DEPTH(RS_DEPTH),
                .LSQ_WAIT(RS_DEPTH > 0 && LSQ_DEPTH > 0 && LSQ_WAIT), .DISPATCH_W(DISPATCH_W),
                .ALU_PORTS(ALU_PORTS)) issue0 (
-        .clk(clk), .rst(rst), .i_flush(flush),
+        .clk(clk), .rst(rst), .i_flush(flush), .i_kill_vec(kill_vec),
         .o_alu1_req(alu1_req), .i_wbp(wbp_bus),
         .i_uop_valid(uop_valid), .i_uop(uop), .o_issue(issue_fire),
         .i_uop1_valid(uop1_valid), .i_uop1(uop1), .i_pb_active(pb_active), .o_issue2(issue_fire2),
@@ -773,22 +774,23 @@ module core
         .o_head_valid(head_valid), .o_head_entry(head_entry), .o_head_tag(head_tag),
         .o_head_ctrl(head_ctrl), .i_commit_pop(commit_pop),
         .o_head1_valid(head1_valid), .o_head1_entry(head1_entry), .o_head1_tag(head1_tag),
-        .o_head1_ctrl(head1_ctrl), .i_commit_pop2(commit_pop2)
+        .o_head1_ctrl(head1_ctrl), .i_commit_pop2(commit_pop2),
+        .o_kill_vec(kill_vec)
     );
 
     // ---------------- X: ALU, BRU -> writeback bus ----------------
     wb_t alu_wb, bru_wb;
-    qv_exu_alu exu_alu0 (.clk(clk), .rst(rst), .i_flush(flush), .i_req(alu_req), .o_wb(alu_wb));
+    qv_exu_alu exu_alu0 (.clk(clk), .rst(rst), .i_flush(flush), .i_req(alu_req), .i_kill_vec(kill_vec), .o_wb(alu_wb));
     // (O4d) the second ALU port: no multiplier and no branches (issue sends it neither), its own writeback bus
     generate
         if (ALU_PORTS > 1) begin : g_alu1
             qv_exu_alu #(.HAS_MUL(1'b0)) exu_alu1 (.clk(clk), .rst(rst), .i_flush(flush), .i_req(alu1_req),
-                                                   .o_wb(wbp_bus));
+                                                   .i_kill_vec(kill_vec), .o_wb(wbp_bus));
         end else begin : g_noalu1
             assign wbp_bus = '0;
         end
     endgenerate
-    qv_exu_bru exu_bru0 (.clk(clk), .rst(rst), .i_flush(flush), .i_req(bru_req), .o_wb(bru_wb));
+    qv_exu_bru exu_bru0 (.clk(clk), .rst(rst), .i_flush(flush), .i_req(bru_req), .i_kill_vec(kill_vec), .o_wb(bru_wb));
 
     // Both units take one cycle and issue sends at most one uop per
     // cycle, so at most one result is ever valid. The multi-cycle units
@@ -799,15 +801,16 @@ module core
     // ---------------- X: divider -> slow writeback port ----------------
     // Like the LSU, no bypass: a dependent reads the ROB the next cycle.
     // Every flush kills a divide in flight.
-    qv_exu_div exu_div0 (.clk(clk), .rst(rst), .i_flush(flush), .i_req(div_req), .o_free(div_free), .o_wb(div_wb));
+    qv_exu_div exu_div0 (.clk(clk), .rst(rst), .i_flush(flush), .i_req(div_req), .i_kill_vec(kill_vec), .o_free(div_free),
+                         .o_wb(div_wb));
 
     // ---------------- X: FPU -> its own writeback port and the bypass ----------------
     // A 4-cycle pipeline for everything but divide and square root, which run one at a time beside it (issue waits
     // for fpu_ds_free). Every flush kills both.
     generate
         if (FPU_EN) begin : g_fpu
-            qv_exu_fpu fpu0 (.clk(clk), .rst(rst), .i_flush(flush), .i_req(fpu_req), .o_ds_free(fpu_ds_free),
-                             .o_wb(fpu_wb));
+            qv_exu_fpu fpu0 (.clk(clk), .rst(rst), .i_flush(flush), .i_req(fpu_req), .i_kill_vec(kill_vec),
+                             .o_ds_free(fpu_ds_free), .o_wb(fpu_wb));
         end else begin : g_no_fpu
             assign fpu_ds_free = 1'b1;
             assign fpu_wb      = '0;
@@ -888,6 +891,7 @@ module core
     qv_lsu #(.SB_EN(SB_DEPTH > 0), .PMA_RAM_BASE(PMA_RAM_BASE), .PMA_RAM_SIZE(PMA_RAM_SIZE),
              .PROBE(SV39_EN && DTLB_PROBE), .EARLY(LSQ_DEPTH > 0 && LSQ_EARLY), .EARLY_ST(LSQ_EARLY_ST),
              .HANDOFF(LSQ_DEPTH > 0 && LSQ_HANDOFF), .ROB_DEPTH(ROB_DEPTH)) lsu0 (
+        .i_kill_vec(kill_vec),
         .clk(clk), .rst(rst), .i_flush(flush),
         .i_req(eng_req), .o_free(eng_free),
         .i_head_valid(head_valid), .i_head_tag(head_tag), .i_early(lsq_early),
@@ -920,7 +924,7 @@ module core
         if (LSQ_DEPTH > 0) begin : g_lsq
             qv_lsq #(.DEPTH(LSQ_DEPTH), .PRE_XL(SV39_EN && LSQ_PRE_XL), .OPW(RS_DEPTH > 0 && LSQ_WAIT),
                      .BYPASS_EN(BYPASS_EN), .LSU_BYPASS(LSQ_BYPASS)) lsq0 (
-                .clk(clk), .rst(rst), .i_flush(flush),
+                .clk(clk), .rst(rst), .i_flush(flush), .i_kill_vec(kill_vec),
                 .i_req(lsu_req), .o_free(lsu_free), .i_opa(lsu_opa), .i_opb(lsu_opb),
                 .i_wb(wb_bus), .i_wbp(wbp_bus), .i_wbd(div_wb), .i_wbf(fpu_wb), .i_wbc(c_bus),
                 .o_eng_req(eng_req), .i_eng_take(eng_take), .i_eng_wb(lsu_wb), .i_eng_res(eng_res),

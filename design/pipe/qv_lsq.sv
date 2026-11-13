@@ -61,6 +61,10 @@ module qv_lsq #(
     input  logic                             clk,
     input  logic                             rst,
     input  logic                             i_flush,
+    // (O3) a recovery at execute kills every op younger than i_kill_tag (a suffix of the queue)
+    input  logic                             i_kill = 1'b0,
+    input  logic [qv_pkg::QV_ROB_TAG_W-1:0]  i_kill_tag = '0,
+    input  logic [(1<<qv_pkg::QV_ROB_TAG_W)-1:0] i_kill_vec = '0,   // (O3) tags killed by a recovery at execute
 
     // issue
     input  qv_pkg::fu_req_t                  i_req,
@@ -166,6 +170,7 @@ module qv_lsq #(
             o_eng_req.b = qv_opnd_now(sb, i_wb, i_wbp, i_eng_wb, i_wbf);
         end
         o_eng_req.valid = has_q ? s_ok : (i_req.valid && in_ok);
+        if (i_kill_vec[o_eng_req.tag]) o_eng_req.valid = 1'b0;     // (O3) a killed op goes no further
     end
     wire send = i_eng_take && !i_flush;                        // the engine takes it
 
@@ -184,7 +189,18 @@ module qv_lsq #(
 
     // ---------------- barriers ----------------
     wire bar_retire = i_pop && !i_flush;             // the ROB head retires: is it a barrier someone waits for?
-    assign o_early  = (cmpl_q != send_q) && !bar_q[cmpl_i];
+    assign o_early  = (cmpl_q != send_q) && !bar_q[cmpl_i] && !i_kill_vec[tag_q[cmpl_i]];
+
+    // ---------------- (O3) a kill: the entries that survive it ----------------
+    // The killed ops are the youngest (everything after the branch), so the survivors are the first `keep` from the
+    // head: the tail comes back to them, and the engine's and the completion pointers no further than it.
+    logic [IW:0] keep;
+    always_comb begin
+        keep = count;
+        for (int i = DEPTH - 1; i >= 0; i--)
+            if ((IW + 1)'(i) < count && i_kill_vec[tag_q[IW'(head_i + IW'(i))]]) keep = (IW + 1)'(i);
+    end
+    wire [IW:0] keep_tail = head_q + keep;
 
     // ---------------- the posted stores not retired yet ----------------
     logic [DEPTH-1:0] posted_hit;
@@ -266,6 +282,18 @@ module qv_lsq #(
             if (copy_q) res_q[copy_idx_q] <= i_eng_res;
             copy_q     <= cmpl;
             copy_idx_q <= cmpl_i;
+            if (i_kill) begin
+                tail_q <= keep_tail;
+                if (send_q + (IW + 1)'(send) - head_q > keep) send_q <= keep_tail;
+                if (cmpl_q + (IW + 1)'(cmpl) - head_q > keep) cmpl_q <= keep_tail;
+                // the youngest barrier was killed: a later op waits for the branch instead (it retires after any
+                // older barrier that survives, so nothing goes early that should not); the branch retiring in this
+                // very cycle leaves nothing to wait for
+                if (i_kill_vec[lbar_tag_q] && !i_bar_alloc) begin
+                    lbar_tag_q <= i_kill_tag;
+                    if ((i_pop && i_pop_tag == i_kill_tag) || (i_pop2 && i_pop2_tag == i_kill_tag)) lbar_q <= 1'b0;
+                end
+            end
         end
     end
 
@@ -281,6 +309,11 @@ module qv_lsq #(
             $error("qv_lsq: an op retires before it is done");
         if (pop2 && (pop ? head1_q : head_q) == cmpl_q)
             $error("qv_lsq: a second op retires before it is done");
+        if (i_kill && (push || i_bar_alloc))
+            $error("qv_lsq: a dispatch in a kill cycle");
+        for (int i = 0; i < DEPTH; i++)                   // the killed ops are a suffix
+            if ((IW + 1)'(i) >= keep && (IW + 1)'(i) < count && !i_kill_vec[tag_q[IW'(head_i + IW'(i))]])
+                $error("qv_lsq: an op survives a kill behind a killed one");
     end
 `endif
 endmodule: qv_lsq

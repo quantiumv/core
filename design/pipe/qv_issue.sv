@@ -83,6 +83,7 @@ module qv_issue #(
     input  logic                             clk,
     input  logic                             rst,
     input  logic                             i_flush,
+    input  logic [(1<<qv_pkg::QV_ROB_TAG_W)-1:0] i_kill_vec = '0,   // (O3) tags killed by a recovery at execute
 
     input  logic                             i_uop_valid,
     // code is kept for debugging only
@@ -640,7 +641,7 @@ module qv_issue #(
                 pe1.c.rdy     = c1_ready;  pe1.c.late = 1'b0;     pe1.c.tag = q3_tag;  pe1.c.value = opc1;
             end
             qv_rs #(.DEPTH(RS_DEPTH), .BYPASS_EN(BYPASS_EN), .LSU_BYPASS(LSU_BYPASS), .ALU_PORTS(ALU_PORTS)) rs0 (
-                .clk(clk), .rst(rst), .i_flush(i_flush),
+                .clk(clk), .rst(rst), .i_flush(i_flush), .i_kill_vec(i_kill_vec),
                 .i_push(o_issue && to_rs), .i_push_e(pe), .o_room(rs_room),
                 .i_push2(o_issue2 && to_rs1), .i_push2_e(pe1), .o_room2(rs_room2),
                 .o_has_div(rs_has_div), .o_has_fds(rs_has_fds),

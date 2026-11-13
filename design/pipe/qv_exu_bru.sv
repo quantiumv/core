@@ -24,6 +24,7 @@ module qv_exu_bru (
     input  logic            rst,
     input  logic            i_flush,
     input  qv_pkg::fu_req_t i_req,
+    input  logic [(1<<qv_pkg::QV_ROB_TAG_W)-1:0] i_kill_vec = '0,   // (O3) tags killed by a recovery at execute
     output qv_pkg::wb_t     o_wb
 );
     import qv_pkg::*;
@@ -61,10 +62,10 @@ module qv_exu_bru (
 
     always_comb begin
         o_wb            = '0;
-        o_wb.valid      = req_q.valid;
+        o_wb.valid      = req_q.valid && !i_kill_vec[req_q.tag];    // (O3) a killed branch resolves nothing
         o_wb.tag        = req_q.tag;
         o_wb.value      = fallthrough;
         o_wb.next_pc    = next_pc;
-        o_wb.mispredict = req_q.valid && (next_pc != req_q.pred_next);
+        o_wb.mispredict = req_q.valid && !i_kill_vec[req_q.tag] && (next_pc != req_q.pred_next);
     end
 endmodule

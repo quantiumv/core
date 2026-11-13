@@ -133,6 +133,7 @@ module qv_lsu #(
     parameter bit          HANDOFF      = 1'b0,      // the next op is taken in the cycle the last one completes (O2b)
     parameter int          ROB_DEPTH    = qv_pkg::QV_ROB_DEPTH     // the ROB's size (its tags' wrap bit)
 ) (
+    input  logic [(1<<qv_pkg::QV_ROB_TAG_W)-1:0] i_kill_vec = '0,   // (O3) tags killed by a recovery at execute
     input  logic                             clk,
     input  logic                             rst,
     input  logic                             i_flush,
@@ -314,7 +315,11 @@ module qv_lsu #(
     wire ram_ld    = pa_in_window && !store_q && !atomic_q && !i_pmp_bypass;
     wire early     = EARLY && i_early && (state_q == S_WAIT_HEAD) && !at_head && !i_flush
                      && (ram_ld || (EARLY_ST && postable));
-    wire go        = at_head || early;
+    // (O3) the held op is killed by a recovery at execute: never the head (that is older than the branch), so it
+    // waits or is an early load on the bus; it starts nothing (an access presented now could not be dropped), writes
+    // nothing back, leaves WAIT_HEAD, and a bus access drains
+    wire killed = ((state_q == S_WAIT_HEAD) || (state_q == S_BUS)) && i_kill_vec[tag_q];
+    wire go        = at_head || (early && !killed);
     logic early_q;                         // the access on the bus was started early
 
     wire post_done = go && !misaligned_q && !pmp_deny && pa_valid && postable;
@@ -394,6 +399,7 @@ module qv_lsu #(
     always_comb begin
         o_wb       = '0;
         o_wb.valid = done_bus || done_nobus || post_done;
+        if (killed) o_wb.valid = 1'b0;
         o_wb.tag   = tag_q;
         if (sc_fail_done)                             o_wb.value = 64'd1;
         else if (done_bus && !wb_mem_err_i && amo_q)  o_wb.value = old_q;
@@ -451,6 +457,10 @@ module qv_lsu #(
                 S_DRAIN: if (resp) state_q <= S_IDLE;
                 default: state_q <= S_IDLE;
             endcase
+            if (killed && !(handoff && accept)) begin
+                if (state_q == S_WAIT_HEAD)  state_q <= S_IDLE;
+                else if (!resp)              state_q <= S_DRAIN;
+            end
 
             if (done_bus || done_nobus || post_done) begin
                 o_res        <= '0;

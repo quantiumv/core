@@ -23,6 +23,7 @@ module qv_exu_fpu (
     input  logic             rst,
     input  logic             i_flush,
     input  qv_pkg::fpu_req_t i_req,
+    input  logic [(1<<qv_pkg::QV_ROB_TAG_W)-1:0] i_kill_vec = '0,   // (O3) tags killed by a recovery at execute
     output logic             o_ds_free,    // a divide or square root would be taken now
     output qv_pkg::wb_fp_t   o_wb
 );
@@ -41,14 +42,15 @@ module qv_exu_fpu (
     wb_fp_t pwb, dres;
     logic   ds_busy, ds_done, ds_ack;
 
-    qv_fpu_pipe pipe0 (.clk(clk), .rst(rst), .i_flush(i_flush), .i_req(preq), .o_wb(pwb));
+    qv_fpu_pipe pipe0 (.clk(clk), .rst(rst), .i_flush(i_flush), .i_req(preq), .i_kill_vec(i_kill_vec), .o_wb(pwb));
     qv_fpu_divsqrt ds0 (.clk(clk), .rst(rst), .i_flush(i_flush), .i_req(dreq), .o_busy(ds_busy), .o_done(ds_done),
-                        .o_res(dres), .i_ack(ds_ack));
+                        .o_res(dres), .i_ack(ds_ack), .i_kill_vec(i_kill_vec));
+    wire ds_live = ds_done && !i_kill_vec[dres.tag];   // (O3) not a result a recovery at execute has killed
 
     assign o_ds_free = !ds_busy;
-    assign ds_ack    = ds_done && !pwb.valid && !i_flush;
+    assign ds_ack    = ds_live && !pwb.valid && !i_flush;
     always_comb begin
         o_wb = pwb.valid ? pwb : dres;
-        o_wb.valid = (pwb.valid || ds_done) && !i_flush;
+        o_wb.valid = (pwb.valid || ds_live) && !i_flush;
     end
 endmodule
