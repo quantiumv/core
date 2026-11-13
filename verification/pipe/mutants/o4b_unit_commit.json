@@ -179,7 +179,7 @@
   },
   {
    "name": "a mispredicted second does not redirect",
-   "old": "                              || (commit2 && i_head1_entry.mispredict);",
+   "old": "                              || (commit2 && i_head1_entry.mispredict && !i_head1_entry.recovered);",
    "new": "                              ;"
   },
   {
