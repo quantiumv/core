@@ -325,6 +325,59 @@ The gate (2026-11-01), the core against the reference, Verilator, four memory co
   among them, and all 68 known-bad versions are caught (9 of them the queue's).
 - riscv-formal: `../riscv-formal/quantiumv_pipe/README.md`.
 
+### O1: out-of-order issue (branch `OOO`)
+
+Dispatch and commit stay one a cycle and in order; what changes is that a uop whose operands are not ready no longer
+stops everything behind it. Each slice is behind a knob, and `QV_PIPE_RS_DEPTH=0` is the core before O1 cycle for
+cycle (the six perf CSVs are byte-identical to the ones before the switch):
+- O1.0 (`057d2a2`, `9fdd2c9`): `+ILPTRACE` and a trace-driven model (`../perf/ilp.py`) said out-of-order issue alone
+  buys about 1 % on the kernels, and that the D$ write path was the bigger lever at one-wide; the D$ store
+  pass-through (`ad0b820`) came first.
+- O1.1 (`9e5af95`, then `f541ab2`, `2441a3b`): the RVFI source values stop living in an issue-time shadow. The plan
+  read them from `regfile0` at commit; that made every riscv-formal instruction check as hard as `reg` (`insn_add`
+  over 2 h of CPU against about 5 min), so the core keeps each uop's operands by ROB index instead: recorded at
+  dispatch when they are ready, and when the unit takes them when they had to wait.
+- O1a (`9ddc83c`): `qv_rs`, a 4-entry station (2 under `QV_FORMAL_SMALL`). Oldest ready first on each port (ALU or
+  BRU, divide, FPU), divides and FP divide/square root in program order, woken by every writeback bus and by a commit
+  bus (a CSR result, which exists only at commit).
+- O1b (`26ef0c2`): issue sends a uop to its unit at dispatch when it can, and to the station otherwise.
+- O1c (`b46c1d2`, `QV_PIPE_LSQ_WAIT`): a memory op dispatches with its address or store data still to come and waits
+  for them in the load/store queue, woken like the station; the engine is offered the oldest op only once both
+  operands exist (a load's own writeback counts in its cycle, so pointer chasing keeps its handoff).
+- O1d (ROB 16) is not built: issue stops on a full ROB in 1.2 % of the window cycles on the SoC, and the model gives
+  -1.6 % against -1.0 % for the geometric mean.
+- The station is on by default from `23e74da`. Results: `../perf/README.md` ("The reservation station").
+
+Unit tests and proofs: `qv_rs_tb` and `qv_lsq_opw_tb` predict every port every cycle against exact golden models;
+`rs_props` (k-induction: a per-tag ghost, each uop delivered exactly once with its producers' values, no lost wakeup,
+oldest first, divides in order) and `lsq_props` with `LSQ_OPW` (the engine takes an op only once both operands exist,
+with their values; a BMC at depth 10). Mutation: `o1a_unit_rs` 29/29 and 11 formal mutants, `o1b_unit_issue` 10/10
+(+1 equivalent), `o1c_unit_lsq` 11/11. Stimulus: `qvgen --ooo` and `gen_alu.py --ooo` (long producers
+followed by independent work and delayed consumers, WAW/WAR in a divide's shadow, two divides with the younger ready
+first, addresses and store data from a divide, CSR reads feeding loads, pointer chasing).
+
+The exit gate (2026-11-05 to 2026-11-10), the core against the reference, Verilator, four memory
+configurations, on a snapshot of `7eb955f`:
+- Perf: with `QV_PIPE_RS_DEPTH=0` the six CSVs are byte-identical to the ones before the switch; with the station on
+  no SoC kernel is slower and instret is unchanged.
+- Regression: core 162/162 with the station on and with it off; reference 79/79. Lint clean. The RVFI diff with
+  `--ooo`: 150/150. OpenOCD smoke 29/29 on both cores; `make run` on both.
+- ACT: 202/204 and 426/430 on the core, the known fails (S-00 and `sv39_satp_access_test` in both configs, the two
+  Zalrsc SC tests in the FD config).
+- Lockstep, fresh seeds:
+  - the FP profile 2,500 x 4 = 10,000/10,000 (453.4 M retirements, 14.18 M interrupt entries); with `--ooo` 2,000/2,000
+    (85.0 M, 2.75 M); with `--mem-dense` 4,000/4,000 (370.6 M, 10.60 M); the late modes 2,000/2,000 (80.8 M, 2.49 M);
+    interrupts off 2,000/2,000 (31.3 M); an M-mode body 2,000/2,000 (27.2 M, 0.92 M);
+  - 100 x 4 each with the station off, with the queue's wait off and with an 8-entry station: 400/400 each;
+  - the corpora x 4 (act-fd 1,704, act + fw + 100 random 1,228, smc, irq, dbg 800) all pass; Icarus 24 x 4 96/96;
+    REF vs REF 200/200, the corruption self-test catches every field class at the targeted retirement, the kill
+    matrix 18/18.
+- Mutation: the end-to-end specs `p5a_e2e` 12/12, `p5b_e2e` 14/14, `f5_lockstep` 17/17. `check_patterns.py` found four
+  patterns in `o1b_unit_issue` and `o2c_unit_lsq` that O1c had left matching nothing; they are re-anchored
+  (`c38347e`, both specs 11/11 again) and all 1,127 match.
+- Module proofs and riscv-formal: run separately (they take days); their results go to
+  `../riscv-formal/quantiumv_pipe/README.md` ("After O1").
+
 ## Where the core differs from ref_core.sv
 
 Architectural behavior is the same: the lockstep gate compares every retirement, a CSR snapshot, the bus

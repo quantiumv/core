@@ -22,25 +22,27 @@ never do.
 (and `make clean` in this directory for the kernels): re-run from clean after any
 RTL change.
 
-## Results (after the D$ store pass-through, 2026-11, branch `OOO`)
+## Results (after O1, the reservation station, 2026-11, branch `OOO`)
 
 CPI (cycles per retired instruction), M mode:
 
-| Kernel | reference, sram | core, sram | reference, cache | core, cache | core after O2, cache | core at P10, cache | core before P9, cache |
-|---|---|---|---|---|---|---|---|
-| memcpy | 3.77 | 1.70 | 3.90 | 1.17 | 1.53 | 1.74 | 2.36 |
-| crc32 | 3.03 | 1.12 | 3.03 | 1.11 | 1.11 | 1.12 | 1.25 |
-| qsort | 3.55 | 1.68 | 3.59 | 1.56 | 1.62 | 1.86 | 2.46 |
-| matmul | 3.62 | 1.38 | 3.66 | 1.16 | 1.16 | 1.63 | 1.78 |
-| sieve | 3.97 | 1.51 | 3.98 | 1.04 | 1.04 | 1.28 | 2.00 |
-| listchase | 3.80 | 1.60 | 3.90 | 1.09 | 1.09 | 1.90 | 1.91 |
-| mixedint | 3.99 | 1.62 | 4.01 | 1.10 | 1.37 | 1.58 | 2.14 |
-| trap (P10.0) | 4.00 | 1.86 | 4.00 | 1.83 | 2.25 | 2.40 | |
+| Kernel | reference, sram | core, sram | reference, cache | core, cache | core before O1, cache | core after O2, cache | core at P10, cache | core before P9, cache |
+|---|---|---|---|---|---|---|---|---|
+| memcpy | 3.77 | 1.75 | 3.90 | 1.17 | 1.17 | 1.53 | 1.74 | 2.36 |
+| crc32 | 3.03 | 1.12 | 3.03 | 1.11 | 1.11 | 1.11 | 1.12 | 1.25 |
+| qsort | 3.55 | 1.68 | 3.59 | 1.56 | 1.56 | 1.62 | 1.86 | 2.46 |
+| matmul | 3.62 | 1.38 | 3.66 | 1.16 | 1.16 | 1.16 | 1.63 | 1.78 |
+| sieve | 3.97 | 1.51 | 3.98 | 1.04 | 1.04 | 1.04 | 1.28 | 2.00 |
+| listchase | 3.80 | 1.60 | 3.90 | 1.09 | 1.09 | 1.09 | 1.90 | 1.91 |
+| mixedint | 3.99 | 1.64 | 4.01 | 1.10 | 1.10 | 1.37 | 1.58 | 2.14 |
+| trap (P10.0) | 4.00 | 1.79 | 4.00 | 1.79 | 1.83 | 2.25 | 2.40 | |
 
 The core is 2.1 to 3.8 times faster than the reference on every kernel, and 2.2 times on `trap` (an OS trap path)
 since P10c stopped CSR reads and trap-CSR writes from flushing the pipeline (it was 3.58 on the SoC at P10.0). The
-load/store queue (O2) is the step from the "at P10" column to the "after O2" one, and the D$ store pass-through the
-step from there to the core's (the reference runs behind the same D$, so its cache column moved too).
+load/store queue (O2) is the step from the "at P10" column to the "after O2" one, the D$ store pass-through the step
+from there to "before O1" (the reference runs behind the same D$, so its cache column moved too), and the reservation
+station (O1) the step from there to the core's: small here, larger in S mode and on `fpmix` (see "The reservation
+station").
 
 ## F/D kernels
 
@@ -371,6 +373,56 @@ SRAM rows are unchanged. Cycles, SoC:
   780, trap 800 to 1,200), and trap's 1,000 match-wait cycles are gone: its restores no longer find the dwords they
   read still in the buffer.
 - The reference runs behind the same D$, so its SoC rows gain too (sieve's stores each waited out the D$ there).
+
+## The reservation station (O1, branch `OOO`)
+
+A uop whose operands are not ready waits in a small station (`qv_rs`, 4 entries; `QV_PIPE_RS_DEPTH=0` is the core
+before O1, and its six CSVs are byte-for-byte those from before the switch) instead of stopping everything behind it,
+and a memory op waits for its operands in the load/store queue (`QV_PIPE_LSQ_WAIT`). Dispatch and commit stay one a
+cycle, in order. Cycles, SoC, then the change in the other builds:
+
+| kernel | M before | M after | change | S change | M, sram | S, sram |
+|---|---|---|---|---|---|---|
+| memcpy | 770 | 770 | 0.0 % | 0.0 % | +3.0 % | 0.0 % |
+| crc32 | 9785 | 9785 | 0.0 % | 0.0 % | 0.0 % | 0.0 % |
+| qsort | 7195 | 7188 | -0.1 % | -0.2 % | 0.0 % | -0.0 % |
+| matmul | 4988 | 4959 | -0.6 % | -8.6 % | +0.1 % | -5.1 % |
+| sieve | 6117 | 6117 | 0.0 % | -0.1 % | -0.1 % | -0.2 % |
+| listchase | 2806 | 2786 | -0.7 % | -14.6 % | 0.0 % | 0.0 % |
+| mixedint | 4839 | 4835 | -0.1 % | 0.0 % | +1.7 % | +4.1 % |
+| trap | 10232 | 10032 | -2.0 % | -1.9 % | -3.8 % | -5.4 % |
+| fmatmul | 4663 | 4624 | -0.8 % | -9.3 % | +0.1 % | +1.4 % |
+| fpmix | 4356 | 4131 | -5.2 % | -5.7 % | -5.1 % | -5.7 % |
+| geomean | | | -1.0 % | -4.2 % | -0.4 % | -1.2 % |
+
+No kernel gets slower on the SoC, in M or S mode, and instret is unchanged on every row.
+
+- It passes the rule a step stays on by (P9's decision 4: at least 3 % on some kernel, no SoC kernel slower): `fpmix`
+  in M mode, and `listchase`, `fmatmul`, `matmul`, `fpmix` in S mode. The O1.0 model below predicted the M column (its
+  "OOO, RS 8": -0.4 % against -0.6 % on matmul, -0.7, -2.0 and -0.8 % on listchase, trap and fmatmul, -5.5 % on fpmix
+  at the size it modelled) and S matmul and fmatmul (-8.4, -9.0 against -8.6, -9.3). It did not predict S `listchase`.
+- S `listchase`: both loads of an iteration (`p->value`, `p->next`) wait in the queue for `p`, so the queue
+  pre-translates the second while the first is on the bus. The DTLB lookups at the head go from 996 to 513 and the
+  waits for an operand at issue from 747 cycles to none. It now takes 2836 cycles against 2786 in M mode.
+- `fpmix`: the divides overlap the work behind them, and the ROB starts to fill behind a divide (`is_rob` 0 to 98
+  cycles, `is_rs` 3613: what is left waits on the one divide unit).
+- The flat SRAM harness, where fetch and data share one bus, loses a little on `memcpy` and `mixedint` (and on S
+  `fmatmul`). The memory ops no longer stop issue, so the data side takes the bus earlier and more often and fetch
+  gets less of it: the head's wait for the LSU goes down (`memcpy` 353 to 265 cycles, `mixedint` 2041 to 1801) and the
+  empty frontend goes up by more (32 to 76, 181 to 541). The SoC has separate paths. Accepted, since the SoC decides.
+
+The size: 4 entries against 2 and 8 change only these rows; every other row is the same at all three.
+
+| | RS 2 | RS 4 | RS 8 |
+|---|---|---|---|
+| fpmix, M, cache | -3.6 % | -5.2 % | -5.5 % |
+| fpmix, M, sram | -3.6 % | -5.1 % | -5.1 % |
+| fpmix, S, cache | -3.5 % | -5.7 % | -6.0 % |
+| fpmix, S, sram | -3.6 % | -5.7 % | -6.4 % |
+| matmul, S, sram | -2.0 % | -5.1 % | -5.1 % |
+
+A ROB of 16 is not built. The model gives `fpmix` -10.7 % and the geometric mean -1.6 % against -1.0 %, and nothing else
+moves much: issue stops on a full ROB in 1.2 % of the window cycles on the SoC (`is_rob`, M mode; 16 cycles in all before the station).
 
 ## CPI stack
 
