@@ -12,7 +12,7 @@
  "profile": "--isa imafdc --priv msu --pmp --irq --smc --sv39 --pair --ooo --xr",
  "extra": [
   "--defines",
-  "QV_FPU_EN=1 QV_PIPE_EXEC_REDIRECT=1",
+  "QV_FPU_EN=1 QV_PIPE_EXEC_REDIRECT=1 QV_PIPE_XR_EARLY=1",
   "--irq-mode",
   "2",
   "--irq-density",
@@ -36,7 +36,7 @@
   {
    "name": "core: the frontend is not flushed by a kill",
    "file": "core.sv",
-   "old": "    wire                     fe_flush = flush || xr_kill;",
+   "old": "    wire                     fe_flush = flush || xr_fe;",
    "new": "    wire                     fe_flush = flush;"
   },
   {
@@ -48,10 +48,10 @@
   {
    "name": "core: the aligner's redirect beats the execute redirect",
    "file": "core.sv",
-   "old": "    assign fetch_redirect_pc = redirect_valid ? redirect_pc : xr_kill ? xr_pc : fe_redirect_pc;",
-   "new": "    assign fetch_redirect_pc = redirect_valid ? redirect_pc : fe_redirect_valid ? fe_redirect_pc : xr_pc;",
+   "old": "    assign fetch_redirect_pc = redirect_valid ? redirect_pc : xr_fe ? xr_fe_pc : fe_redirect_pc;",
+   "new": "    assign fetch_redirect_pc = redirect_valid ? redirect_pc : fe_redirect_valid ? fe_redirect_pc : xr_fe_pc;",
    "equivalent": true,
-   "why": "the aligner emits nothing, and so redirects nowhere, in a cycle it is flushed (qv_align: go needs !i_flush), and the kill cycle flushes it: the two never meet"
+   "why": "the aligner emits nothing, and so redirects nowhere, in a cycle it is flushed (qv_align: go needs !i_flush), and a restart at execute (xr_fe) flushes it: the two never meet"
   },
   {
    "name": "core: the queue does not roll back",
@@ -103,6 +103,20 @@
    "new": "i_head_entry.mispredict",
    "equivalent": true,
    "why": "commit then redirects to the resolved target fetch already restarted at: the same instructions retire, later"
+  },
+  {
+   "name": "core: the early restart takes the last caught target",
+   "file": "core.sv",
+   "old": "    assign xr_fe_pc = XR_EARLY ? wb_bus.next_pc : xr_pc;",
+   "new": "    assign xr_fe_pc = XR_EARLY ? x_q_pc : xr_pc;"
+  },
+  {
+   "name": "core: the kill cycle restarts fetch again (to the same target: time only)",
+   "file": "core.sv",
+   "old": "    assign xr_fe    = XR_EARLY ? x_cap : xr_kill;",
+   "new": "    assign xr_fe    = XR_EARLY ? (x_cap || xr_kill) : xr_kill;",
+   "equivalent": true,
+   "why": "the second restart goes to the target fetch already restarted at, and nothing of the new path is in the frontend yet: the same instructions retire, later"
   }
  ]
 }
