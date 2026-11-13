@@ -585,7 +585,8 @@ def emit_xr(p: Program, recent: list[int]):
     ECALL / EBREAK / an illegal word, a device read, a jump to the join, a nested always-taken branch that resolves
     first (the younger recovers first, then the older kills it). The join reads registers the block wrote: they hold
     their values from before the branch. Some shapes put an ALU op beside the branch (a dispatch pair either way), and
-    one puts a trap older than a fast mispredict (behind a divide the trap retires late; the branch recovers first).
+    one puts a trap older than a fast mispredict (behind a divide the trap retires late; the branch recovers first);
+    one is a branch that resolves at once over a chain of jumps (the aligner redirects in the kill cycle).
     Everything in a block is harmless if it ever runs for real (the branch's producer trapped)."""
     have_m = "m" in p.args.isa and not p.args.no_div
     have_f = "f" in p.args.isa
@@ -646,8 +647,12 @@ def emit_xr(p: Program, recent: list[int]):
                 rd = fresh(m)
                 p.e(f"    lbu     x{rd}, 0(x{m})")
                 written += [m, rd]
-            elif k < 0.90:
+            elif k < 0.87:
                 p.e(f"    j       {join}")
+            elif k < 0.92:
+                # a jump past the join's reads: a frontend that followed the wrong path's redirect instead of the
+                # branch's own target would skip them
+                p.e(f"    j       {skip}")
             elif depth == 0:
                 inner = Label("xri")                       # a younger mispredict that resolves first
                 p.e(f"    beqz    x0, {inner}")
@@ -657,8 +662,20 @@ def emit_xr(p: Program, recent: list[int]):
                 written.append(alu())
 
     join = Label("xr")
+    skip = Label("xrs")
     written: list[int] = []
-    if p.rng.random() < 0.15:
+    shape = p.rng.random()
+    if shape < 0.2:
+        # a branch that resolves at once over a chain of forward jumps: the aligner redirects nearly every cycle on
+        # the wrong path, so one of its redirects meets the kill; the one fetch must take is the branch's own
+        p.e(f"    beqz    x0, {join}")
+        for _ in range(p.rng.randint(3, 6)):
+            hop = Label("xrh")
+            p.e(f"    j       {hop}")
+            p.e(f"    {p.rng.choice(['nop', 'addi    x0, x0, 1'])}")
+            p.e(f"{hop}:")
+        written.append(alu())
+    elif shape < 0.35:
         # a trap older than a fast mispredict: the illegal word retires behind a divide, after the branch recovered
         if have_m:
             p.e(f"    div     x{fresh()}, x{p.reg()}, x{p.reg()}")
@@ -689,6 +706,9 @@ def emit_xr(p: Program, recent: list[int]):
         rd = fresh()
         p.e(f"    add     x{rd}, x{r}, x{p.reg_biased(recent)}")
         recent.append(rd)
+    if not written:
+        written.append(alu())
+    p.e(f"{skip}:")
     del recent[:-8]
 
 
