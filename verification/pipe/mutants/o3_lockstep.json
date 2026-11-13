@@ -1,0 +1,108 @@
+{
+ "counts": [
+  8,
+  24,
+  64
+ ],
+ "memcfg": "sram",
+ "delay": 0,
+ "jobs": 3,
+ "inner_jobs": 2,
+ "sim": "verilator",
+ "profile": "--isa imafdc --priv msu --pmp --irq --smc --sv39 --pair --ooo --xr",
+ "extra": [
+  "--defines",
+  "QV_FPU_EN=1 QV_PIPE_EXEC_REDIRECT=1",
+  "--irq-mode",
+  "2",
+  "--irq-density",
+  "1",
+  "--dbg-mode",
+  "1"
+ ],
+ "mutants": [
+  {
+   "name": "core: the kill never fires",
+   "file": "core.sv",
+   "old": "    assign xr_kill     = x_q_valid && !flush;",
+   "new": "    assign xr_kill     = 1'b0;"
+  },
+  {
+   "name": "core: a mispredict is caught in a flush cycle",
+   "file": "core.sv",
+   "old": "wb_bus.mispredict && !pb_active && !flush;",
+   "new": "wb_bus.mispredict && !pb_active;"
+  },
+  {
+   "name": "core: the frontend is not flushed by a kill",
+   "file": "core.sv",
+   "old": "    wire                     fe_flush = flush || xr_kill;",
+   "new": "    wire                     fe_flush = flush;"
+  },
+  {
+   "name": "core: a uop is dispatched in the kill cycle",
+   "file": "core.sv",
+   "old": "        .i_uop_valid(uop_valid && !xr_kill), .i_uop(uop), .o_issue(issue_fire),",
+   "new": "        .i_uop_valid(uop_valid), .i_uop(uop), .o_issue(issue_fire),"
+  },
+  {
+   "name": "core: the aligner's redirect beats the execute redirect",
+   "file": "core.sv",
+   "old": "    assign fetch_redirect_pc = redirect_valid ? redirect_pc : xr_kill ? xr_pc : fe_redirect_pc;",
+   "new": "    assign fetch_redirect_pc = redirect_valid ? redirect_pc : fe_redirect_valid ? fe_redirect_pc : xr_pc;",
+   "equivalent": true,
+   "why": "the aligner emits nothing, and so redirects nowhere, in a cycle it is flushed (qv_align: go needs !i_flush), and the kill cycle flushes it: the two never meet"
+  },
+  {
+   "name": "core: the queue does not roll back",
+   "file": "core.sv",
+   "old": "                .i_kill(xr_kill), .i_kill_tag(xr_kill_tag),\n                .i_req(lsu_req)",
+   "new": "                .i_kill(1'b0), .i_kill_tag(xr_kill_tag),\n                .i_req(lsu_req)"
+  },
+  {
+   "name": "core: the ROB does not roll back",
+   "file": "core.sv",
+   "old": "        .i_kill(xr_kill), .i_kill_tag(xr_kill_tag), .o_kill_vec(kill_vec), .i_wb_recover(x_cap),",
+   "new": "        .i_kill(1'b0), .i_kill_tag(xr_kill_tag), .o_kill_vec(kill_vec), .i_wb_recover(x_cap),"
+  },
+  {
+   "name": "issue: no rebuild at a kill",
+   "file": "qv_issue.sv",
+   "old": "        end else if (i_kill) begin",
+   "new": "        end else if (1'b0) begin"
+  },
+  {
+   "name": "alu: a killed op writes back",
+   "file": "qv_exu_alu.sv",
+   "old": "o_wb.valid = req_q.valid && !i_kill_vec[req_q.tag];",
+   "new": "o_wb.valid = req_q.valid;"
+  },
+  {
+   "name": "bru: a killed branch writes back",
+   "file": "qv_exu_bru.sv",
+   "old": "o_wb.valid      = req_q.valid && !i_kill_vec[req_q.tag];",
+   "new": "o_wb.valid      = req_q.valid;"
+  },
+  {
+   "name": "lsu: a killed op may start in its kill cycle",
+   "file": "qv_lsu.sv",
+   "old": "wire go        = at_head || (early && !killed);",
+   "new": "wire go        = at_head || early;",
+   "unit_only": "a kill landing in the very cycle a held-off early load would start is rare in generated programs (the load is usually on the bus or still waiting for its operands then); qv_lsu_early_tb kills it (\"kill in the would-be start cycle\"), and o3c_unit_lsu.json"
+  },
+  {
+   "name": "rs: a killed entry is selected",
+   "file": "qv_rs.sv",
+   "old": "ready[i] = v_q[i] && !killed[i] &&",
+   "new": "ready[i] = v_q[i] &&"
+  },
+  {
+   "name": "commit: a recovered mispredict redirects again (to the same target: time only)",
+   "file": "qv_commit.sv",
+   "old": "i_head_entry.mispredict && !i_head_entry.recovered",
+   "new": "i_head_entry.mispredict",
+   "equivalent": true,
+   "why": "commit then redirects to the resolved target fetch already restarted at: the same instructions retire, later"
+  }
+ ]
+}
