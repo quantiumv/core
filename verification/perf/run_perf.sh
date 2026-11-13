@@ -178,7 +178,7 @@ LSQ_KEYS="early_ld early_st bar_wait match_wait qmatch_wait handoff drain"
 # refills, again a file of their own
 OX_CSV="${STACK_CSV%_stack.csv}_ox.csv"
 OX_KEYS="s1_retire s1_idle s1_none s1_wait_lsu s1_wait_div s1_wait_fpu s1_wait_alu s1_rule_head s1_rule_pair"
-OX_KEYS="$OX_KEYS dc_miss dc_cyc ic_miss ic_cyc"
+OX_KEYS="$OX_KEYS dc_miss dc_cyc ic_miss ic_cyc xr_n xr_killed xr_head xr_save mp_commit ear_mp_x"
 if [ "$CORE" == "pipe" ] && [ "$ORACLE" != "store" ]; then
     echo "kernel,config,$(echo $STACK_KEYS $SIDE_KEYS | tr ' ' ',')" > "$STACK_CSV"
     echo "kernel,config,$(echo $LSQ_KEYS | tr ' ' ',')" > "$LSQ_CSV"

@@ -146,6 +146,13 @@ module perf_stack #(
     input logic [31:0]      head1_raw = '0,
     input logic [TAG_W-1:0] head1_tag = '0,
     input logic             head1_mispredict = 1'b0,
+    // (O3) a recovery at execute: its kill cycle, the branch's tag and the tags killed; the heads' mispredicts that
+    // were recovered (commit retires them without a redirect)
+    input logic             xr_fire = 1'b0,
+    input logic [TAG_W-1:0] xr_tag = '0,
+    input logic [(1<<TAG_W)-1:0] kill_vec = '0,
+    input logic             head_recovered = 1'b0,
+    input logic             head1_recovered = 1'b0,
     input logic [63:0]      mem_addr1 = '0,
     input logic             head1_valid = 1'b0,
     input logic             head1_complete = 1'b0,
@@ -190,7 +197,7 @@ module perf_stack #(
         return 2;
     endfunction
 
-    typedef enum int { SRC_NONE, SRC_ALIGN, SRC_MISPRED, SRC_SERIAL, SRC_OTHER } src_e;
+    typedef enum int { SRC_NONE, SRC_ALIGN, SRC_MISPRED, SRC_SERIAL, SRC_OTHER, SRC_XR } src_e;
 
     int win_q;                       // 0: not opened yet, 1: open, 2: closed
     longint unsigned c_window, c_retire, c_blk_lsu, c_blk_div, c_blk_alu, c_blk_sys, c_blk_fpu;
@@ -208,6 +215,11 @@ module perf_stack #(
     longint unsigned c_s1_retire, c_s1_idle, c_s1_none, c_s1_wait_lsu, c_s1_wait_div, c_s1_wait_fpu, c_s1_wait_alu;
     longint unsigned c_s1_rule_head, c_s1_rule_pair;
     longint unsigned c_dc_miss, c_dc_cyc, c_ic_miss, c_ic_cyc;
+    // (O3) recoveries at execute: how many, the entries they killed, the ones whose branch retired in its kill cycle
+    // (no gain), the cycles they redirected ahead of the branch's commit, the mispredicts commit still redirected on,
+    // and the refill-shadow cycles after them (also in ear_mispred)
+    longint unsigned c_xr_n, c_xr_killed, c_xr_head, c_xr_save, c_mp_commit, c_ear_mp_x;
+    longint unsigned xr_cycle [0:(1<<TAG_W)-1];
     logic            dc_refill_q, ic_refill_q;
     src_e   shadow_q;                // the source of the redirect whose refill shadow is running
     int     shadow_kind_q;           // ... and, for a serializing one, its ser_kind
@@ -288,9 +300,11 @@ module perf_stack #(
         // second's (a mispredicted branch: the head of a pair can cause none)
         if (win_q == 1 && commit)
             ilp_line(head_pc, head_raw, head_tag, trap,
-                     (!flush || commit2) ? 0 : head_mispredict ? 1 : head_serialize ? 2 : 3, mem_addr, 0);
+                     (head_mispredict && head_recovered) ? 4
+                     : (!flush || commit2) ? 0 : head_mispredict ? 1 : head_serialize ? 2 : 3, mem_addr, 0);
         if (win_q == 1 && commit2)
-            ilp_line(head1_pc, head1_raw, head1_tag, 1'b0, (flush && head1_mispredict) ? 1 : 0, mem_addr1, 1);
+            ilp_line(head1_pc, head1_raw, head1_tag, 1'b0,
+                     (head1_mispredict && head1_recovered) ? 4 : (flush && head1_mispredict) ? 1 : 0, mem_addr1, 1);
         // dispatch takes the uops decode holds, the older first (before this cycle's pops refill them)
         if (alloc_valid)  ilp_disp(alloc_tag, 0, 0);
         if (alloc2_valid) ilp_disp(alloc_tag1, 1, 1);
@@ -367,6 +381,7 @@ module perf_stack #(
             c_s1_retire <= 0; c_s1_idle <= 0; c_s1_none <= 0; c_s1_wait_lsu <= 0; c_s1_wait_div <= 0;
             c_s1_wait_fpu <= 0; c_s1_wait_alu <= 0; c_s1_rule_head <= 0; c_s1_rule_pair <= 0;
             c_dc_miss <= 0; c_dc_cyc <= 0; c_ic_miss <= 0; c_ic_cyc <= 0;
+            c_xr_n <= 0; c_xr_killed <= 0; c_xr_head <= 0; c_xr_save <= 0; c_mp_commit <= 0; c_ear_mp_x <= 0;
             dc_refill_q <= 1'b0; ic_refill_q <= 1'b0;
             shadow_q <= SRC_NONE;
             shadow_kind_q <= 0;
@@ -384,12 +399,15 @@ module perf_stack #(
                 if ((commit && head_mispredict) || mispredict2) shadow_q <= SRC_MISPRED;
                 else if (commit && head_serialize)  begin shadow_q <= SRC_SERIAL; shadow_kind_q <= ser_kind(head_cls, head_csr_wsup, head_csr_addr); end
                 else                                shadow_q <= SRC_OTHER;
+            end else if (xr_fire) begin
+                shadow_q <= SRC_XR;
             end else if (fe_redirect) begin
                 shadow_q <= SRC_ALIGN;
             end else if (issue_fire) begin
                 shadow_q <= SRC_NONE;
             end
 
+            if (xr_fire && !flush) xr_cycle[xr_tag] = cycle_q;
             // ---- mispredicted branches: when they finish, and how long they wait for the head ----
             if (wb_valid && wb_mispredict) begin
                 mp_done_valid[wb_tag] = 1'b1;
@@ -428,6 +446,7 @@ module perf_stack #(
                     case (shadow_q)
                         SRC_ALIGN:   c_ear_align   <= c_ear_align + 1;
                         SRC_MISPRED: c_ear_mispred <= c_ear_mispred + 1;
+                        SRC_XR:      begin c_ear_mispred <= c_ear_mispred + 1; c_ear_mp_x <= c_ear_mp_x + 1; end
                         SRC_SERIAL:  begin
                                      c_ear_serial  <= c_ear_serial + 1;
                                      c_ear_ser[shadow_kind_q] <= c_ear_ser[shadow_kind_q] + 1;
@@ -474,8 +493,27 @@ module perf_stack #(
                             c_re_ser[ser_kind(head_cls, head_csr_wsup, head_csr_addr)] + 1;
                     end
                     else                                          c_re_other   <= c_re_other + 1;
+                end else if (xr_fire) begin
+                    c_re_mispred <= c_re_mispred + 1;
                 end else if (fe_redirect) begin
                     c_re_align <= c_re_align + 1;
+                end
+                if (xr_fire && !flush) begin
+                    int nk;
+                    nk = 0;
+                    for (int i = 0; i < (1<<TAG_W); i++) if (kill_vec[i]) nk = nk + 1;
+                    c_xr_n      <= c_xr_n + 1;
+                    c_xr_killed <= c_xr_killed + nk;
+                    if (commit && head_tag == xr_tag) c_xr_head <= c_xr_head + 1;
+                end
+                if (flush && ((commit && head_mispredict && !head_recovered) || (commit2 && head1_mispredict && !head1_recovered)))
+                    c_mp_commit <= c_mp_commit + 1;
+                begin
+                    longint unsigned sv;
+                    sv = 0;
+                    if (commit && head_mispredict && head_recovered)    sv = sv + (cycle_q - xr_cycle[head_tag]);
+                    if (commit2 && head1_mispredict && head1_recovered) sv = sv + (cycle_q - xr_cycle[head1_tag]);
+                    c_xr_save <= c_xr_save + sv;
                 end
                 if (lsu_bus_wait) c_bus_wait <= c_bus_wait + 1;
                 // O2: what the load/store queue's engine does before the head, and what holds it back
@@ -553,9 +591,10 @@ module perf_stack #(
                  c_is_rs);
         $display("PERF_LSQ: early_ld=%0d early_st=%0d bar_wait=%0d match_wait=%0d qmatch_wait=%0d handoff=%0d drain=%0d",
                  c_lq_ld, c_lq_st, c_lq_bar, c_lq_match, c_lq_qmatch, c_lq_hand, c_lq_drain);
-        $display("PERF_OX: s1_retire=%0d s1_idle=%0d s1_none=%0d s1_wait_lsu=%0d s1_wait_div=%0d s1_wait_fpu=%0d s1_wait_alu=%0d s1_rule_head=%0d s1_rule_pair=%0d dc_miss=%0d dc_cyc=%0d ic_miss=%0d ic_cyc=%0d",
+        $display("PERF_OX: s1_retire=%0d s1_idle=%0d s1_none=%0d s1_wait_lsu=%0d s1_wait_div=%0d s1_wait_fpu=%0d s1_wait_alu=%0d s1_rule_head=%0d s1_rule_pair=%0d dc_miss=%0d dc_cyc=%0d ic_miss=%0d ic_cyc=%0d xr_n=%0d xr_killed=%0d xr_head=%0d xr_save=%0d mp_commit=%0d ear_mp_x=%0d",
                  c_s1_retire, c_s1_idle, c_s1_none, c_s1_wait_lsu, c_s1_wait_div, c_s1_wait_fpu, c_s1_wait_alu,
-                 c_s1_rule_head, c_s1_rule_pair, c_dc_miss, c_dc_cyc, c_ic_miss, c_ic_cyc);
+                 c_s1_rule_head, c_s1_rule_pair, c_dc_miss, c_dc_cyc, c_ic_miss, c_ic_cyc,
+                 c_xr_n, c_xr_killed, c_xr_head, c_xr_save, c_mp_commit, c_ear_mp_x);
         if (c_s1_retire + c_s1_idle + c_s1_none + c_s1_wait_lsu + c_s1_wait_div + c_s1_wait_fpu + c_s1_wait_alu
                 + c_s1_rule_head + c_s1_rule_pair != c_window)
             $display("PERF_STACK_WARN: the second slot's classes do not add up to the window");

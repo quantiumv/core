@@ -65,7 +65,9 @@
         .wb4_valid(CORE.fpu_wb.valid), .wb4_tag(CORE.fpu_wb.tag), \
         .trap(CORE.trap_taken), .mem_addr(CORE.lsu_res.mem_addr), \
         .commit2(CORE.commit_pop2), .head1_pc(CORE.head1_entry.pc), .head1_raw(CORE.head1_entry.raw), \
-        .head1_tag(CORE.head1_tag), .head1_mispredict(CORE.head1_entry.mispredict), .mem_addr1(CORE.lsu_res1.mem_addr), \
+        .head1_tag(CORE.head1_tag), .head1_mispredict(CORE.head1_entry.mispredict), \
+        .xr_fire(CORE.xr_kill), .xr_tag(CORE.xr_kill_tag), .kill_vec(CORE.kill_vec), \
+        .head_recovered(CORE.head_entry.recovered), .head1_recovered(CORE.head1_entry.recovered), .mem_addr1(CORE.lsu_res1.mem_addr), \
         .head1_valid(CORE.head1_valid), .head1_complete(CORE.head1_entry.complete), .head1_cls(CORE.head1_ctrl.cls), \
         .plain1(CORE.commit0.plain1), .alloc2_valid(CORE.alloc2_valid), .alloc_tag1(CORE.alloc_tag1), \
         .iq_pop2(CORE.iq_pop2), .wb5_valid(CORE.wbp_bus.valid), .wb5_tag(CORE.wbp_bus.tag), \
