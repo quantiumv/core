@@ -100,6 +100,11 @@
 `ifndef QV_PIPE_FETCH_YIELD
 `define QV_PIPE_FETCH_YIELD 1'b0
 `endif
+// (O3) A mispredicted branch recovers at execute: the cycle after its writeback everything younger is killed and
+// fetch restarts at the resolved target (commit then retires it without a redirect). 0: commit redirects, as before.
+`ifndef QV_PIPE_EXEC_REDIRECT
+`define QV_PIPE_EXEC_REDIRECT 1'b0
+`endif
 // (O3) What a recovery at execute puts back in the return-address stack: 0 nothing, 1 its index and count, 2 also
 // its top entry (qv_ras REPAIR). The formal models keep the smaller snapshot.
 `ifndef QV_PIPE_RAS_REPAIR
@@ -265,6 +270,7 @@ module core
     parameter int BTB_ENTRIES  = `QV_PIPE_BTB_ENTRIES,    // branch target buffer entries, 0: none
     parameter int RAS_DEPTH    = `QV_PIPE_RAS_DEPTH,      // return-address stack entries, 0: none (>= 2 otherwise)
     parameter int RAS_REPAIR   = `QV_PIPE_RAS_REPAIR,     // (O3) 0 none, 1 index and count, 2 also the top entry
+    parameter bit EXEC_REDIRECT = `QV_PIPE_EXEC_REDIRECT, // (O3) a mispredict recovers at execute
     parameter int BHT_ENTRIES  = `QV_PIPE_BHT_ENTRIES,    // branch history table counters, 0: none (>= 8 otherwise)
     parameter bit SV39_EN   = `QV_PIPE_SV39_EN,     // address translation present
     parameter int TLB_ENTRIES = `QV_PIPE_TLB_ENTRIES, // entries in each of the two TLBs
@@ -449,8 +455,9 @@ module core
     logic        redirect_valid, fe_redirect_valid;
     logic [63:0] redirect_pc, fe_redirect_pc;
     wire         flush = redirect_valid;
-    wire         fetch_redirect    = redirect_valid || fe_redirect_valid;
-    wire [63:0]  fetch_redirect_pc = redirect_valid ? redirect_pc : fe_redirect_pc;
+    // (O3) a redirect from commit wins, then one from execute (xr_kill, below), then the aligner's
+    logic        fetch_redirect;
+    logic [63:0] fetch_redirect_pc;
 
     // ---------------- F: fetch ----------------
     logic        fb_valid, fb_err, fb_pop, fb_xl;
@@ -517,11 +524,16 @@ module core
         end
     endgenerate
 
-    // (O3) a recovery at execute: the mispredicted branch's tag (tied off until it is wired)
+    // (O3) a recovery at execute: the kill cycle and the mispredicted branch's tag (x_q, below); the frontend (align,
+    // the instruction queue, decode) is flushed by it as by a redirect from commit
     logic                    xr_kill;
     logic [QV_ROB_TAG_W-1:0] xr_kill_tag;
-    assign xr_kill     = 1'b0;
-    assign xr_kill_tag = '0;
+    logic [63:0]             xr_pc;
+    logic                    x_cap;          // a mispredict written back this cycle is caught for recovery
+    wire                     fe_flush = flush || xr_kill;
+
+    assign fetch_redirect    = redirect_valid || xr_kill || fe_redirect_valid;
+    assign fetch_redirect_pc = redirect_valid ? redirect_pc : xr_kill ? xr_pc : fe_redirect_pc;
 
     // ---------------- the return-address stack ----------------
     logic        ras_has1, ras_push, ras_pop;
@@ -585,7 +597,7 @@ module core
     assign iq_head1 = iq1_bits;
 
     qv_align #(.ONE_OK(FETCH_STREAM)) align0 (
-        .clk(clk), .rst(rst), .i_flush(flush),
+        .clk(clk), .rst(rst), .i_flush(fe_flush),
         .i_buf_valid(fb_valid), .i_buf_pc(fb_pc), .i_buf_data(fb_data), .i_buf_err(fb_err),
         .i_buf_cause(fb_cause), .i_buf_xl(fb_xl), .i_buf_pg(fb_pg),
         .i_buf_hint(fb_hint), .i_buf_hoff(fb_hoff), .i_buf_hx(fb_hx), .i_buf_htgt(fb_htgt),
@@ -621,7 +633,7 @@ module core
     assign p1_data  = a1_snapd;
 
     qv_fifo #(.WIDTH(FE_W), .DEPTH(IQ_DEPTH)) iq0 (
-        .clk(clk), .rst(rst), .i_flush(flush),
+        .clk(clk), .rst(rst), .i_flush(fe_flush),
         .i_push0_valid(p0_valid), .i_push0_data(p0_data),
         .i_push1_valid(p1_valid), .i_push1_data(p1_data),
         .o_push_ready(iq_push_ready), .o_push_ready1(iq_push_ready1),
@@ -639,7 +651,7 @@ module core
     generate
         if (DISPATCH_W > 1) begin : g_dec2
             qv_decode2 #(.CSR_NOSER(CSR_NOSER), .FPU_EN(FPU_EN), .ZICNTR_EN(ZICNTR_EN)) decode0 (
-                .clk(clk), .rst(rst), .i_flush(flush),
+                .clk(clk), .rst(rst), .i_flush(fe_flush),
                 .i_fs(mstatus_fs_w), .i_frm(frm_w),
                 .i_mcounteren(mcounteren_w), .i_scounteren(scounteren_w),
                 .i_priv(priv), .i_tsr(mstatus_tsr_w), .i_tvm(mstatus_tvm_w), .i_in_debug(dbg_in_debug),
@@ -654,7 +666,7 @@ module core
             );
         end else begin : g_dec1
             qv_decode #(.CSR_NOSER(CSR_NOSER), .FPU_EN(FPU_EN), .ZICNTR_EN(ZICNTR_EN)) decode0 (
-                .clk(clk), .rst(rst), .i_flush(flush),
+                .clk(clk), .rst(rst), .i_flush(fe_flush),
                 .i_fs(mstatus_fs_w), .i_frm(frm_w),
                 .i_mcounteren(mcounteren_w), .i_scounteren(scounteren_w),
                 .i_priv(priv), .i_tsr(mstatus_tsr_w), .i_tvm(mstatus_tvm_w), .i_in_debug(dbg_in_debug), .i_pb_active(pb_active),
@@ -744,8 +756,8 @@ module core
         .i_kill(xr_kill), .i_surv_live(surv_live), .i_surv_tag(surv_tag), .i_surv_rd(surv_rd),
         .i_surv_int(surv_int), .i_surv_fp(surv_fp), .i_surv_csr(surv_csr),
         .o_alu1_req(alu1_req), .i_wbp(wbp_bus),
-        .i_uop_valid(uop_valid), .i_uop(uop), .o_issue(issue_fire),
-        .i_uop1_valid(uop1_valid), .i_uop1(uop1), .i_pb_active(pb_active), .o_issue2(issue_fire2),
+        .i_uop_valid(uop_valid && !xr_kill), .i_uop(uop), .o_issue(issue_fire),
+        .i_uop1_valid(uop1_valid && !xr_kill), .i_uop1(uop1), .i_pb_active(pb_active), .o_issue2(issue_fire2),
         .o_rs1b_sel(rs1b_sel), .o_rs2b_sel(rs2b_sel), .i_rs1b_data(rs1b_data), .i_rs2b_data(rs2b_data),
         .o_lookup4_tag(l4_tag), .i_lookup4_complete(l4_complete), .i_lookup4_value(l4_value),
         .o_lookup5_tag(l5_tag), .i_lookup5_complete(l5_complete), .i_lookup5_value(l5_value),
@@ -809,7 +821,7 @@ module core
         .o_head_ctrl(head_ctrl), .i_commit_pop(commit_pop),
         .o_head1_valid(head1_valid), .o_head1_entry(head1_entry), .o_head1_tag(head1_tag),
         .o_head1_ctrl(head1_ctrl), .i_commit_pop2(commit_pop2),
-        .i_kill(xr_kill), .i_kill_tag(xr_kill_tag), .o_kill_vec(kill_vec),
+        .i_kill(xr_kill), .i_kill_tag(xr_kill_tag), .o_kill_vec(kill_vec), .i_wb_recover(x_cap),
         .o_surv_live(surv_live), .o_surv_tag(surv_tag), .o_surv_rd(surv_rd),
         .o_surv_int(surv_int), .o_surv_fp(surv_fp), .o_surv_csr(surv_csr),
         .i_alloc_snap(uop.ras_snap), .i_alloc2_snap(uop1.ras_snap), .o_kill_snap(kill_snap)
@@ -834,6 +846,35 @@ module core
     // (LSU, divider) each have a writeback port of their own into the ROB
     // instead, so they never contend for this one.
     assign wb_bus = bru_wb.valid ? bru_wb : alu_wb;
+
+    // ---------------- (O3) recovery at execute ----------------
+    // A branch that writes back a mispredict (the BRU's port; outside a Program Buffer run, which keeps the commit
+    // redirect) is caught in x_q. The next cycle is the kill cycle: everything younger than it is killed (the ROB's
+    // tail goes back to the entry after it; the units, the station, the queue and the LSU drop the killed tags; issue
+    // rebuilds its producer tables; the return-address stack goes back to the branch's snapshot), nothing is
+    // dispatched, and the frontend restarts at the resolved target. A redirect from commit in either cycle wins: it
+    // flushes everything, the branch included. An older branch resolving in a kill cycle survives it and is caught
+    // for the next (its kill is a superset); a younger one's writeback is masked by the kill.
+    assign x_cap = EXEC_REDIRECT && wb_bus.valid && wb_bus.mispredict && !pb_active && !flush;
+    logic                    x_q_valid;
+    logic [QV_ROB_TAG_W-1:0] x_q_tag;
+    logic [63:0]             x_q_pc;
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            x_q_valid <= 1'b0;
+            x_q_tag   <= '0;
+            x_q_pc    <= 64'b0;
+        end else begin
+            x_q_valid <= x_cap;
+            if (x_cap) begin
+                x_q_tag <= wb_bus.tag;
+                x_q_pc  <= wb_bus.next_pc;
+            end
+        end
+    end
+    assign xr_kill     = x_q_valid && !flush;
+    assign xr_kill_tag = x_q_tag;
+    assign xr_pc       = x_q_pc;
 
     // ---------------- X: divider -> slow writeback port ----------------
     // Like the LSU, no bypass: a dependent reads the ROB the next cycle.
@@ -962,6 +1003,7 @@ module core
             qv_lsq #(.DEPTH(LSQ_DEPTH), .PRE_XL(SV39_EN && LSQ_PRE_XL), .OPW(RS_DEPTH > 0 && LSQ_WAIT),
                      .BYPASS_EN(BYPASS_EN), .LSU_BYPASS(LSQ_BYPASS)) lsq0 (
                 .clk(clk), .rst(rst), .i_flush(flush), .i_kill_vec(kill_vec),
+                .i_kill(xr_kill), .i_kill_tag(xr_kill_tag),
                 .i_req(lsu_req), .o_free(lsu_free), .i_opa(lsu_opa), .i_opb(lsu_opb),
                 .i_wb(wb_bus), .i_wbp(wbp_bus), .i_wbd(div_wb), .i_wbf(fpu_wb), .i_wbc(c_bus),
                 .o_eng_req(eng_req), .i_eng_take(eng_take), .i_eng_wb(lsu_wb), .i_eng_res(eng_res),
@@ -1571,6 +1613,28 @@ module core
         if (fpu_wb.valid) assert (rob_holds(fpu_wb.tag, rob_h, rob_t) && !rob0.complete_q[fpu_wb.tag[RIW-1:0]]);
         if (wbp_bus.valid) assert (rob_holds(wbp_bus.tag, rob_h, rob_t) && !rob0.complete_q[wbp_bus.tag[RIW-1:0]]
                                    && !(wb_bus.valid && wb_bus.tag == wbp_bus.tag));
+        // (O3) recovery at execute. In the kill cycle nothing carries a killed tag (no unit request, no offer to the
+        // LSU, no writeback: a killed tag is about to be given to a new uop), nothing is dispatched, and the branch is
+        // a live, complete, recovered mispredict whose resolved target fetch restarts at
+        if (xr_kill) begin
+            assert (!(alu_req.valid && kill_vec[alu_req.tag]) && !(alu1_req.valid && kill_vec[alu1_req.tag])
+                    && !(bru_req.valid && kill_vec[bru_req.tag]) && !(div_req.valid && kill_vec[div_req.tag])
+                    && !(fpu_req.valid && kill_vec[fpu_req.tag]) && !(eng_req.valid && kill_vec[eng_req.tag]));
+            assert (!(wb_bus.valid && kill_vec[wb_bus.tag]) && !(wbp_bus.valid && kill_vec[wbp_bus.tag])
+                    && !(lsu_wb.valid && kill_vec[lsu_wb.tag]) && !(div_wb.valid && kill_vec[div_wb.tag])
+                    && !(fpu_wb.valid && kill_vec[fpu_wb.tag]));
+            assert (!issue_fire && !issue_fire2 && !alloc_valid && !alloc2_valid);
+            assert (rob_holds(xr_kill_tag, rob_h, rob_t) && rob0.complete_q[xr_kill_tag[RIW-1:0]]
+                    && rob0.mispredict_q[xr_kill_tag[RIW-1:0]] && rob0.recovered_q[xr_kill_tag[RIW-1:0]]);
+            assert (fetch_redirect && fetch_redirect_pc == rob0.next_pc_q[xr_kill_tag[RIW-1:0]]);
+        end
+        // a killed access on the bus is an early plain load (it drains; nothing the head started is ever killed)
+        if (lsu0.killed && lsu0.state_q == 2'd2) assert (lsu0.early_q && !lsu0.store_q && !lsu0.atomic_q);
+        // a mispredicted head retires alone (in its kill cycle the entry behind it is a killed one)
+        assert (!(commit_pop2 && head_entry.mispredict));
+        // what the LSU and the divider hold names an entry in the ROB (after a kill too: the killed ones are dropped)
+        if (lsu0.state_q == 2'd1 || lsu0.state_q == 2'd2) assert (rob_holds(lsu0.tag_q, rob_h, rob_t));
+        if (exu_div0.busy_q) assert (rob_holds(exu_div0.tag_q, rob_h, rob_t));
     end
 
     // The translators are safe only while a client keeps to one rule: a request it holds does not change (what it

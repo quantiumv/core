@@ -589,10 +589,11 @@ module qv_commit #(
     // A debug entry redirects to the architectural pc (fetch is held, so it only records it and everything
     // in flight is flushed); a resume restarts at the live dpc.
     // (O4) a pair redirects only for its second, a mispredicted branch: its head can do none of these
+    // (O3) a mispredict recovered at execute has redirected fetch already: none for it here
     assign o_redirect_valid = irq || halt_take || head_dbg_entry || i_dbg_resume
-                              || (commit && (trap_fx || mret_fx || sret_fx || i_head_entry.mispredict
+                              || (commit && (trap_fx || mret_fx || sret_fx || i_head_entry.mispredict && !i_head_entry.recovered
                                              || i_head_ctrl.serialize))
-                              || (commit2 && i_head1_entry.mispredict);
+                              || (commit2 && i_head1_entry.mispredict && !i_head1_entry.recovered);
     assign o_redirect_pc    = irq ? irq_vector : (halt_take || head_dbg_entry) ? arch_pc_q : i_dbg_resume ? i_dpc
                             : commit2 ? i_head1_entry.next_pc : actual_next_pc;
     assign o_redirect_ctx   = irq || (commit && (trap_fx || mret_fx || sret_fx || i_head_ctrl.serialize));
