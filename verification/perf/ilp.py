@@ -443,6 +443,20 @@ def sim(tr, p, res=None, fit=False, t0=None):
             c = max(c, ready)                                 # in order: operands at dispatch
             if q.cls == 'div' and last_div is not None: c = max(c, cmpl[last_div] + 1)
             if q.cls == 'fds' and last_fds is not None: c = max(c, cmpl[last_fds] + 1)
+        if p['rs'] > 0 and q.cls != 'lsu':
+            pt = port_of(q)
+
+            def earliest(d):
+                t = max(d, ready)
+                if q.cls == 'div' and last_div is not None: t = max(t, cmpl[last_div] + 1, iss[last_div] + 1)
+                if q.cls == 'fds' and last_fds is not None: t = max(t, cmpl[last_fds] + 1, iss[last_fds] + 1)
+                return free_port(pt, t)
+            # (OX.0) a uop that will wait for its operands or its unit needs a station entry to dispatch: that wait
+            # is part of the constraint, so a fit of a run whose station filled does not keep it as a residual (a
+            # configuration with no station, or a bigger one, would add it back where it does not happen)
+            if earliest(c) > c:
+                while sum(1 for (d, i) in rs_occ if d < c <= i) >= p['rs']:
+                    c += 1
         disp[k] = put('disp', k, c, q.disp)
         # ---- issue (non-memory) ----
         if q.cls != 'lsu':
@@ -452,11 +466,6 @@ def sim(tr, p, res=None, fit=False, t0=None):
                     disp[k] = free_port(pt, disp[k])          # in order: a busy port holds the dispatch
                 icons = take_port(pt, disp[k]) if not fit else disp[k]
             else:
-                def earliest(d):
-                    t = max(d, ready)
-                    if q.cls == 'div' and last_div is not None: t = max(t, cmpl[last_div] + 1, iss[last_div] + 1)
-                    if q.cls == 'fds' and last_fds is not None: t = max(t, cmpl[last_fds] + 1, iss[last_fds] + 1)
-                    return free_port(pt, t)
                 t = earliest(disp[k])
                 if t > disp[k]:
                     # it waits in a reservation-station entry (from its dispatch to its issue): dispatch needs room
@@ -683,8 +692,8 @@ CONFIGS_O4 = [  # name, knobs: two-wide with the pair rules (O4.0)
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--traces', required=True)
-    ap.add_argument('--validate', help='directory of baseline_pipe_<label>.csv runs with one knob changed')
-    ap.add_argument('--base', default=os.path.join(os.path.dirname(os.path.abspath(__file__)), 'baseline_pipe.csv'))
+    ap.add_argument('--validate', help='directory of baseline_pipe[_s]_<label>.csv runs with one knob changed')
+    ap.add_argument('--base', help="the traced runs' cycles (default: verification/perf/baseline_pipe[_s].csv by --mode)")
     ap.add_argument('--config', default='cache')
     ap.add_argument('--mode', default='m')
     ap.add_argument('--kernels', default=' '.join(KERNELS))
@@ -697,14 +706,14 @@ def main():
     a = ap.parse_args()
     configs = {'o1': CONFIGS, 'o4': CONFIGS_O4, 'ox': CONFIGS_OX}[a.set]
     sfx = '_s' if a.mode == 's' else ''
-    base = load_csv(a.base)
+    base = load_csv(a.base or os.path.join(os.path.dirname(os.path.abspath(__file__)), 'baseline_pipe%s.csv' % sfx))
     fitp = dict(BASE_O4) if a.fit == 'o4' else dict(BASE)
     fitp['db'] = a.db
     valid = VALID_O4 if a.fit == 'o4' else VALID
     vals = {}
     if a.validate:
         for lab, _ in valid:
-            f = os.path.join(a.validate, 'baseline_pipe_%s.csv' % lab)
+            f = os.path.join(a.validate, 'baseline_pipe%s_%s.csv' % (sfx, lab))
             if os.path.exists(f):
                 vals[lab] = load_csv(f)
     hdr = ['kernel', 'cycles', 'fit', 'neg']
