@@ -105,6 +105,11 @@
 `ifndef QV_PIPE_EXEC_REDIRECT
 `define QV_PIPE_EXEC_REDIRECT 1'b0
 `endif
+// (O3, D7) With a recovery at execute, fetch and the frontend restart in the mispredict's writeback cycle rather than
+// the kill cycle after it (the backend's kill stays registered). 0: fetch restarts in the kill cycle.
+`ifndef QV_PIPE_XR_EARLY
+`define QV_PIPE_XR_EARLY 1'b0
+`endif
 // (O3) What a recovery at execute puts back in the return-address stack: 0 nothing, 1 its index and count, 2 also
 // its top entry (qv_ras REPAIR). The formal models keep the smaller snapshot.
 `ifndef QV_PIPE_RAS_REPAIR
@@ -271,6 +276,7 @@ module core
     parameter int RAS_DEPTH    = `QV_PIPE_RAS_DEPTH,      // return-address stack entries, 0: none (>= 2 otherwise)
     parameter int RAS_REPAIR   = `QV_PIPE_RAS_REPAIR,     // (O3) 0 none, 1 index and count, 2 also the top entry
     parameter bit EXEC_REDIRECT = `QV_PIPE_EXEC_REDIRECT, // (O3) a mispredict recovers at execute
+    parameter bit XR_EARLY     = `QV_PIPE_XR_EARLY,      // (O3, D7) ... and fetch restarts in its writeback cycle
     parameter int BHT_ENTRIES  = `QV_PIPE_BHT_ENTRIES,    // branch history table counters, 0: none (>= 8 otherwise)
     parameter bit SV39_EN   = `QV_PIPE_SV39_EN,     // address translation present
     parameter int TLB_ENTRIES = `QV_PIPE_TLB_ENTRIES, // entries in each of the two TLBs
@@ -530,10 +536,12 @@ module core
     logic [QV_ROB_TAG_W-1:0] xr_kill_tag;
     logic [63:0]             xr_pc;
     logic                    x_cap;          // a mispredict written back this cycle is caught for recovery
-    wire                     fe_flush = flush || xr_kill;
+    logic                    xr_fe;          // fetch restarts for it: in the kill cycle, or with XR_EARLY in x_cap's
+    logic [63:0]             xr_fe_pc;
+    wire                     fe_flush = flush || xr_fe;
 
-    assign fetch_redirect    = redirect_valid || xr_kill || fe_redirect_valid;
-    assign fetch_redirect_pc = redirect_valid ? redirect_pc : xr_kill ? xr_pc : fe_redirect_pc;
+    assign fetch_redirect    = redirect_valid || xr_fe || fe_redirect_valid;
+    assign fetch_redirect_pc = redirect_valid ? redirect_pc : xr_fe ? xr_fe_pc : fe_redirect_pc;
 
     // ---------------- the return-address stack ----------------
     logic        ras_has1, ras_push, ras_pop;
@@ -875,6 +883,12 @@ module core
     assign xr_kill     = x_q_valid && !flush;
     assign xr_kill_tag = x_q_tag;
     assign xr_pc       = x_q_pc;
+    // (D7) with XR_EARLY the frontend restarts at the resolved target in the writeback cycle itself (x_cap: never with
+    // a redirect from commit, and a younger branch's writeback is masked in an older one's kill cycle, so it is the
+    // oldest mispredict resolving); the kill cycle then leaves fetch alone (the new path reaches the aligner two
+    // cycles later, after the return-address stack is restored)
+    assign xr_fe    = XR_EARLY ? x_cap : xr_kill;
+    assign xr_fe_pc = XR_EARLY ? wb_bus.next_pc : xr_pc;
 
     // ---------------- X: divider -> slow writeback port ----------------
     // Like the LSU, no bypass: a dependent reads the ROB the next cycle.
@@ -1626,8 +1640,9 @@ module core
             assert (!issue_fire && !issue_fire2 && !alloc_valid && !alloc2_valid);
             assert (rob_holds(xr_kill_tag, rob_h, rob_t) && rob0.complete_q[xr_kill_tag[RIW-1:0]]
                     && rob0.mispredict_q[xr_kill_tag[RIW-1:0]] && rob0.recovered_q[xr_kill_tag[RIW-1:0]]);
-            assert (fetch_redirect && fetch_redirect_pc == rob0.next_pc_q[xr_kill_tag[RIW-1:0]]);
+            if (!XR_EARLY) assert (fetch_redirect && fetch_redirect_pc == rob0.next_pc_q[xr_kill_tag[RIW-1:0]]);
         end
+        if (XR_EARLY && x_cap) assert (fetch_redirect && fetch_redirect_pc == wb_bus.next_pc && !redirect_valid);
         // a killed access on the bus is an early plain load (it drains; nothing the head started is ever killed)
         if (lsu0.killed && lsu0.state_q == 2'd2) assert (lsu0.early_q && !lsu0.store_q && !lsu0.atomic_q);
         // a mispredicted head retires alone (in its kill cycle the entry behind it is a killed one)
