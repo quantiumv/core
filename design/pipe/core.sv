@@ -650,6 +650,15 @@ module core
     logic [63:0]             rs1_data, rs2_data;
     logic                    alloc_valid, alloc_rd_wen, alloc_ready, rob_empty;
     logic [(1<<QV_ROB_TAG_W)-1:0] kill_vec;  // (O3) the tags a recovery at execute kills (all 0 until it is wired)
+    // (O3) a recovery at execute (the branch's tag; tied off until it is wired), and the ROB entries it leaves, from
+    // which issue rebuilds its producer tables
+    logic                    xr_kill;
+    logic [QV_ROB_TAG_W-1:0] xr_kill_tag;
+    assign xr_kill     = 1'b0;
+    assign xr_kill_tag = '0;
+    logic [QV_ROB_DEPTH-1:0]                   surv_live, surv_int, surv_fp, surv_csr;
+    logic [QV_ROB_DEPTH-1:0][QV_ROB_TAG_W-1:0] surv_tag;
+    logic [QV_ROB_DEPTH-1:0][4:0]              surv_rd;
     logic [63:0]             alloc_pc, alloc_next_pc;
     logic [31:0]             alloc_raw;
     logic [4:0]              alloc_rd;
@@ -709,6 +718,8 @@ module core
                .LSQ_WAIT(RS_DEPTH > 0 && LSQ_DEPTH > 0 && LSQ_WAIT), .DISPATCH_W(DISPATCH_W),
                .ALU_PORTS(ALU_PORTS)) issue0 (
         .clk(clk), .rst(rst), .i_flush(flush), .i_kill_vec(kill_vec),
+        .i_kill(xr_kill), .i_surv_live(surv_live), .i_surv_tag(surv_tag), .i_surv_rd(surv_rd),
+        .i_surv_int(surv_int), .i_surv_fp(surv_fp), .i_surv_csr(surv_csr),
         .o_alu1_req(alu1_req), .i_wbp(wbp_bus),
         .i_uop_valid(uop_valid), .i_uop(uop), .o_issue(issue_fire),
         .i_uop1_valid(uop1_valid), .i_uop1(uop1), .i_pb_active(pb_active), .o_issue2(issue_fire2),
@@ -775,7 +786,9 @@ module core
         .o_head_ctrl(head_ctrl), .i_commit_pop(commit_pop),
         .o_head1_valid(head1_valid), .o_head1_entry(head1_entry), .o_head1_tag(head1_tag),
         .o_head1_ctrl(head1_ctrl), .i_commit_pop2(commit_pop2),
-        .o_kill_vec(kill_vec)
+        .i_kill(xr_kill), .i_kill_tag(xr_kill_tag), .o_kill_vec(kill_vec),
+        .o_surv_live(surv_live), .o_surv_tag(surv_tag), .o_surv_rd(surv_rd),
+        .o_surv_int(surv_int), .o_surv_fp(surv_fp), .o_surv_csr(surv_csr)
     );
 
     // ---------------- X: ALU, BRU -> writeback bus ----------------

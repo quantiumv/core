@@ -33,6 +33,10 @@
  * in the same cycle (the next allocations reuse those tags). A flush beats a
  * kill. A mispredict written back with i_wb_recover is marked recovered, so
  * commit retires it without a second redirect.
+ * The o_surv_* view lists the entries from this cycle's new head (after its
+ * retirements) in age order, oldest first, with what each writes; o_surv_live
+ * marks those a kill this cycle leaves (up to and including the branch). Issue
+ * rebuilds its producer tables from them in the kill cycle.
  */
 module qv_rob #(
     parameter int ROB_DEPTH = qv_pkg::QV_ROB_DEPTH
@@ -122,7 +126,13 @@ module qv_rob #(
     input  logic                             i_kill = 1'b0,
     input  logic [qv_pkg::QV_ROB_TAG_W-1:0]  i_kill_tag = '0,
     output logic [(1<<qv_pkg::QV_ROB_TAG_W)-1:0] o_kill_vec,
-    input  logic                             i_wb_recover = 1'b0     // i_wb's mispredict is recovered at execute
+    input  logic                             i_wb_recover = 1'b0,    // i_wb's mispredict is recovered at execute
+    output logic [qv_pkg::QV_ROB_DEPTH-1:0]  o_surv_live,
+    output logic [qv_pkg::QV_ROB_DEPTH-1:0][qv_pkg::QV_ROB_TAG_W-1:0] o_surv_tag,
+    output logic [qv_pkg::QV_ROB_DEPTH-1:0][4:0] o_surv_rd,
+    output logic [qv_pkg::QV_ROB_DEPTH-1:0]  o_surv_int,       // writes an integer register (not x0)
+    output logic [qv_pkg::QV_ROB_DEPTH-1:0]  o_surv_fp,        // writes an FP register
+    output logic [qv_pkg::QV_ROB_DEPTH-1:0]  o_surv_csr        // a CSR op (its rd value is made at commit)
 );
     import qv_pkg::*;
 
@@ -232,6 +242,26 @@ module qv_rob #(
     wire [IDX_W-1:0] wb3_idx   = i_wb3.tag[IDX_W-1:0];
     wire [IDX_W-1:0] wb4_idx   = i_wb4.tag[IDX_W-1:0];
     wire [IDX_W-1:0] wb5_idx   = i_wb5.tag[IDX_W-1:0];
+
+    // (O3) the survivors of a kill: from the new head through the branch
+    wire [QV_ROB_TAG_W-1:0] n_surv = qv_rob_dist(QV_ROB_TAG_W'(kill_from), QV_ROB_TAG_W'(head_next), PTR_W);
+    always_comb
+        for (int j = 0; j < QV_ROB_DEPTH; j++) begin : surv
+            logic [PTR_W-1:0] p;
+            logic [IDX_W-1:0] x;
+            /* verilator lint_off UNUSEDSIGNAL */
+            rob_ctrl_t        c;                  // the whole entry (iverilog cannot select a field of an array element)
+            /* verilator lint_on UNUSEDSIGNAL */
+            p = head_next + PTR_W'(j);
+            x = p[IDX_W-1:0];
+            c = ctrl_q[x];
+            o_surv_live[j] = (j < ROB_DEPTH) && (QV_ROB_TAG_W'(j) < n_surv);
+            o_surv_tag[j]  = QV_ROB_TAG_W'(p);
+            o_surv_rd[j]   = rd_q[x];
+            o_surv_int[j]  = rd_wen_q[x] && !c.rd_fp && (rd_q[x] != 5'd0);
+            o_surv_fp[j]   = rd_wen_q[x] && c.rd_fp;
+            o_surv_csr[j]  = (c.cls == QV_FU_CSR);
+        end
 
     always_ff @(posedge clk) begin
         if (rst) begin

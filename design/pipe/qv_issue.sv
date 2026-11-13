@@ -84,6 +84,15 @@ module qv_issue #(
     input  logic                             rst,
     input  logic                             i_flush,
     input  logic [(1<<qv_pkg::QV_ROB_TAG_W)-1:0] i_kill_vec = '0,   // (O3) tags killed by a recovery at execute
+    // (O3) a recovery at execute this cycle, and the ROB entries it leaves (qv_rob's o_surv_*, oldest first): the
+    // producer tables are rebuilt from them
+    input  logic                             i_kill = 1'b0,
+    input  logic [qv_pkg::QV_ROB_DEPTH-1:0]  i_surv_live = '0,
+    input  logic [qv_pkg::QV_ROB_DEPTH-1:0][qv_pkg::QV_ROB_TAG_W-1:0] i_surv_tag = '0,
+    input  logic [qv_pkg::QV_ROB_DEPTH-1:0][4:0] i_surv_rd = '0,
+    input  logic [qv_pkg::QV_ROB_DEPTH-1:0]  i_surv_int = '0,
+    input  logic [qv_pkg::QV_ROB_DEPTH-1:0]  i_surv_fp = '0,
+    input  logic [qv_pkg::QV_ROB_DEPTH-1:0]  i_surv_csr = '0,
 
     input  logic                             i_uop_valid,
     // code is kept for debugging only
@@ -673,6 +682,24 @@ module qv_issue #(
         if (rst || i_flush) begin
             for (int r = 0; r < 32; r++) begin
                 prod_busy_q[r] <= 1'b0; prod_late_q[r] <= 1'b0; fprod_busy_q[r] <= 1'b0;
+            end
+        end else if (i_kill) begin
+            // (O3) a recovery at execute: each register's producer is the youngest surviving entry that writes it
+            // (the survivors come oldest first, so the last write wins), as the claims made it; no claim is made in
+            // this cycle (nothing dispatches) and this cycle's retirements are not among the survivors
+            for (int r = 0; r < 32; r++) begin
+                prod_busy_q[r] <= 1'b0; prod_late_q[r] <= 1'b0; fprod_busy_q[r] <= 1'b0;
+            end
+            for (int j = 0; j < QV_ROB_DEPTH; j++) begin
+                if (i_surv_live[j] && i_surv_int[j]) begin
+                    prod_busy_q[i_surv_rd[j]] <= 1'b1;
+                    prod_tag_q[i_surv_rd[j]]  <= i_surv_tag[j];
+                    prod_late_q[i_surv_rd[j]] <= CSR_LATE && i_surv_csr[j];
+                end
+                if (i_surv_live[j] && i_surv_fp[j]) begin
+                    fprod_busy_q[i_surv_rd[j]] <= 1'b1;
+                    fprod_tag_q[i_surv_rd[j]]  <= i_surv_tag[j];
+                end
             end
         end else begin
             if (i_commit_valid && i_commit_rd_wen && i_commit_rd != 5'd0 && !i_commit_rd_fp
