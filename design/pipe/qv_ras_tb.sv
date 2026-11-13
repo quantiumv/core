@@ -12,8 +12,17 @@
  *
  * Random: every cycle random aligner and commit operations and flushes against the model, depth 4 so that it
  * overflows.
+ *
+ * (O3) REPAIR 1 and 2 (the circular stack): the same checks, and o_snap0/o_snap1 (the count, and at REPAIR 2 the
+ * top) against the model after op 0 and after both, every cycle of the random run. Restores: a snapshot is kept, a
+ * wrong path pushes, and the restore gives the whole stack back (popped down to the bottom); a wrong path pops and
+ * pushes (overwriting the snapshot's top): REPAIR 2 gives that top back, REPAIR 1 the wrong path's; a random run of
+ * snapshots, wrong paths and restores, checking the count and (REPAIR 2) the top right after each restore; a flush
+ * beats a restore in the same cycle.
  */
-module qv_ras_tb;
+module qv_ras_tb #(
+    parameter int REPAIR = 0
+);
     int   pass_count = 0;
     int   fail_count = 0;
     logic quiet_on_pass = 1'b1;
@@ -31,12 +40,15 @@ module qv_ras_tb;
     logic        cpush = 1'b0, cpop = 1'b0, flush = 1'b0;
     logic [63:0] top;
     logic        has1;
+    qv_pkg::ras_snap_t snap0, snap1, rsnap = '0;
+    logic        restore = 1'b0;
 
-    qv_ras #(.DEPTH(DEPTH)) dut (
+    qv_ras #(.DEPTH(DEPTH), .REPAIR(REPAIR)) dut (
         .clk(clk), .rst(rst),
         .i_sp_op0(op0), .i_sp_addr0(a0), .i_sp_op1(op1), .i_sp_addr1(a1),
         .i_cm_push(cpush), .i_cm_addr(ca), .i_cm_pop(cpop), .i_flush(flush),
-        .o_top(top), .o_has1(has1)
+        .o_top(top), .o_has1(has1),
+        .o_snap0(snap0), .o_snap1(snap1), .i_restore(restore), .i_restore_snap(rsnap)
     );
 
     // ---------------- model ----------------
@@ -71,6 +83,7 @@ module qv_ras_tb;
                          input logic cp, input logic [63:0] cx, input logic cq, input logic fl);
         @(negedge clk);
         go = g; op0 = g ? o0 : 2'b00; a0 = x0; op1 = g ? o1 : 2'b00; a1 = x1; cpush = cp; ca = cx; cpop = cq; flush = fl;
+        if (REPAIR > 0 && g) check_snaps(o0, x0, o1, x1);
         @(posedge clk); #1;
         go = 1'b0; op0 = 2'b00; op1 = 2'b00; cpush = 1'b0; cpop = 1'b0; flush = 1'b0;
         if (cq) m_pop_c();
@@ -82,6 +95,55 @@ module qv_ras_tb;
             if (o0 == 2'b01) m_push_s(x0); else if (o0 == 2'b10) m_pop_s();
             if (o1 == 2'b01) m_push_s(x1); else if (o1 == 2'b10) m_pop_s();
         end
+    endtask
+
+    // (O3) the model's stack after op 0 and after both (in copies), against o_snap0/o_snap1
+    task automatic check_snaps(input logic [1:0] o0, input logic [63:0] x0, input logic [1:0] o1, input logic [63:0] x1);
+        logic [63:0] keep [0:DEPTH-1];
+        int keep_n;
+        #1;
+        for (int i = 0; i < DEPTH; i++) keep[i] = ms[i];
+        keep_n = ms_n;
+        if (o0 == 2'b01) m_push_s(x0); else if (o0 == 2'b10) m_pop_s();
+        check("snapshot after op 0: count", 64'(snap0.cnt), 64'(ms_n));
+        if (REPAIR > 1 && ms_n > 0) check("snapshot after op 0: top", snap0.top, ms[0]);
+        if (o1 == 2'b01) m_push_s(x1); else if (o1 == 2'b10) m_pop_s();
+        check("snapshot after op 1: count", 64'(snap1.cnt), 64'(ms_n));
+        if (REPAIR > 1 && ms_n > 0) check("snapshot after op 1: top", snap1.top, ms[0]);
+        for (int i = 0; i < DEPTH; i++) ms[i] = keep[i];
+        ms_n = keep_n;
+    endtask
+
+    // (O3) one cycle that restores (the model goes back to the kept state)
+    logic [63:0] kept [0:DEPTH-1];
+    int          kept_n;
+    qv_pkg::ras_snap_t kept_snap;
+    task automatic keep_now();             // after a cycle: what the stack is now, as a branch emitted then left it
+        for (int i = 0; i < DEPTH; i++) kept[i] = ms[i];
+        kept_n = ms_n;
+    endtask
+    task automatic restore_cycle(input logic fl);
+        @(negedge clk);
+        restore = 1'b1; rsnap = kept_snap; flush = fl;
+        @(posedge clk); #1;
+        restore = 1'b0; flush = 1'b0;
+        if (fl) begin
+            for (int i = 0; i < DEPTH; i++) ms[i] = mc[i];
+            ms_n = mc_n;
+        end else begin
+            for (int i = 0; i < DEPTH; i++) ms[i] = kept[i];
+            ms_n = kept_n;
+        end
+    endtask
+    // a cycle with one push whose snapshot is kept (the "branch")
+    task automatic branch_push(input logic [63:0] x);
+        @(negedge clk);
+        go = 1'b1; op0 = 2'b01; a0 = x; op1 = 2'b00;
+        #1 kept_snap = snap0;
+        @(posedge clk); #1;
+        go = 1'b0; op0 = 2'b00;
+        m_push_s(x);
+        keep_now();
     endtask
 
     task automatic compare(input string name);
@@ -132,6 +194,65 @@ module qv_ras_tb;
             compare("random");
         end
         check("random run: no mismatch", 64'(fail_count - errs0), 64'd0);
+
+        if (REPAIR > 0) begin
+            int n_rest;
+            // a snapshot, a wrong path of pushes (into the free entries: more would overwrite the oldest), the
+            // restore: the whole stack is back
+            for (int k = 0; k < DEPTH; k++) cycle(0, 0, 0, 0, 0, 0, 0, 1, 1);   // both stacks empty
+            cycle(1, 2'b01, 64'h1100, 2'b00, 0, 0, 0, 0, 0);
+            branch_push(64'h3300);
+            cycle(1, 2'b01, 64'hDEAD1, 2'b01, 64'hDEAD2, 0, 0, 0, 0);
+            restore_cycle(1'b0);
+            compare("restore after pushes");
+            check("restore after pushes: the branch's top", top, 64'h3300);
+            cycle(1, 2'b10, 0, 2'b00, 0, 0, 0, 0, 0);            compare("restore after pushes: pop 1");
+            check("... then the one below", top, 64'h1100);
+            cycle(1, 2'b10, 0, 2'b00, 0, 0, 0, 0, 0);            compare("restore after pushes: empty");
+            check("... and nothing more", {63'b0, has1}, 64'd0);
+            // a wrong path that pops and pushes overwrites the snapshot's top: REPAIR 2 puts it back
+            cycle(0, 0, 0, 0, 0, 0, 0, 0, 1);
+            cycle(1, 2'b01, 64'h4400, 2'b00, 0, 0, 0, 0, 0);
+            branch_push(64'h5500);
+            cycle(1, 2'b10, 0, 2'b01, 64'hBAD5, 0, 0, 0, 0);
+            restore_cycle(1'b0);
+            check("restore after a pop and a push: the count", {63'b0, has1}, 64'd1);
+            if (REPAIR > 1) check("restore after a pop and a push: REPAIR 2 gives the top back", top, 64'h5500);
+            else            check("restore after a pop and a push: REPAIR 1 keeps the wrong path's top", top, 64'hBAD5);
+            ms[0] = top;                                          // (the model follows what REPAIR 1 left)
+            cycle(1, 2'b10, 0, 2'b00, 0, 0, 0, 0, 0);
+            check("... the entry below is untouched", top, 64'h4400);
+            // a flush beats a restore in the same cycle
+            cycle(0, 0, 0, 0, 0, 1, 64'hC0DE, 0, 0);             // the committed stack: C0DE
+            branch_push(64'h6600);
+            restore_cycle(1'b1);
+            compare("flush and restore in one cycle: the flush wins");
+            check("... the committed top", top, 64'hC0DE);
+            // random: snapshots, wrong paths and restores (the count and, REPAIR 2, the top right after each)
+            errs0 = fail_count;
+            n_rest = 0;
+            for (int i = 0; i < 3000; i++) begin
+                cycle(0, 0, 0, 0, 0, 0, 0, 0, 1);                // from the committed stack, of any size
+                for (int j = $urandom_range(0, 5); j > 0; j--)
+                    cycle(1, 2'($urandom % 3), 64'($urandom), 2'b00, 0, 0, 0, 0, 0);
+                if ($urandom_range(0, 1)) branch_push(64'($urandom));
+                else begin                                        // a branch that is no call: the stack as it is
+                    @(negedge clk); go = 1'b1; op0 = 2'b00; op1 = 2'b00; #1 kept_snap = snap0;
+                    @(posedge clk); #1; go = 1'b0;
+                    keep_now();
+                end
+                for (int j = $urandom_range(0, 4); j > 0; j--)
+                    cycle(1, 2'($urandom % 3), 64'($urandom), 2'($urandom % 3), 64'($urandom), 0, 0, 0, 0);
+                restore_cycle(1'b0);
+                n_rest++;
+                #1;
+                check("random restore: has one", {63'b0, has1}, {63'b0, kept_n >= 1});
+                if (REPAIR > 1 && kept_n >= 1) check("random restore: top", top, kept[0]);
+                if ($urandom_range(0, 3) == 0) cycle(0, 0, 0, 0, 0, 1, 64'($urandom), 0, 0);
+            end
+            check("random restores: no mismatch", 64'(fail_count - errs0), 64'd0);
+            $display("qv_ras_tb: REPAIR %0d, %0d random restores", REPAIR, n_rest);
+        end
 
         $display("");
         $display("qv_ras_tb: %0d passed, %0d failed", pass_count, fail_count);
