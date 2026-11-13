@@ -140,7 +140,8 @@ def decode(raw):
 
 class Ins:
     __slots__ = ('pc', 'raw', 'push', 'pop', 'disp', 'acc', 'go', 'cmpl', 'commit', 'early', 'ared', 'trap', 'redir',
-                 'addr', 'cls', 'dst', 'srcs', 'mem', 'posted', 'prod', 'dword', 'rvc', 'fpw', 'fp', 'alone', 'mul')
+                 'addr', 'cls', 'dst', 'srcs', 'mem', 'posted', 'prod', 'dword', 'rvc', 'fpw', 'fp', 'alone', 'mul',
+                 'iss', 'ds', 'cs', 'fr', 'dcm')
 
 
 def read_trace(path):
@@ -155,6 +156,14 @@ def read_trace(path):
             (i.push, i.pop, i.disp, i.acc, i.go, i.cmpl, i.commit, i.early, i.ared, i.trap,
              i.redir) = (int(x) for x in p[3:14])
             i.addr = int(p[14], 16)
+            # (OX.0) the cycle its unit took it, its dispatch slot and commit channel, when the fetch buffer got its
+            # dword, whether its access met a D$ refill; older traces have none (issue = dispatch)
+            if len(p) >= 20:
+                i.iss, i.ds, i.cs, i.fr, i.dcm = (int(x) for x in p[15:20])
+            else:
+                i.iss, i.ds, i.cs, i.fr, i.dcm = 0, 0, 0, i.push, 0
+            if not i.iss:
+                i.iss = i.acc if i.acc else i.disp
             i.rvc = (i.raw & 3) != 3
             i.cls, i.dst, i.srcs, i.mem = decode(i.raw)
             if i.dst is not None and i.dst == ('x', 0):
@@ -180,7 +189,23 @@ def read_trace(path):
 
 BASE = dict(w=1, rs=0, rob=8, iq=8, lsq=4, sb=4, handoff=True, early=True, lsu_bypass=True, bypass=True,
             alu_ports=1, fe='res', fe_rate=1, db=2,
-            mem1=False, fp1=False, alone=False, p0=False, slot2=False, fpw1=False, dispatch1=False)
+            mem1=False, fp1=False, alone=False, p0=False, slot2=False, fpw1=False, dispatch1=False,
+            # (OX.0) iss_res: the issue cycle is traced and fitted (a unit's latency counts from its issue, not its
+            # dispatch), so a trace of the core with the station replays exactly; xr/xr_lat: a mispredict restarts
+            # fetch xr_lat cycles after the branch's writeback, not at its commit (O3)
+            iss_res=False, xr=False, xr_lat=1,
+            # (OX.0) memory: lq/sq split the queue (0: one queue of lsq); mem_ooo: a memory op starts once its operands
+            # are ready and one of `engines` is free, not after the older ones; fwd: a load takes an older store's
+            # bytes instead of waiting for its drain; spec_ld: a load does not wait for older stores whose address is
+            # unknown (a same-dword one resolving later is a violation: the load and what follows restart `replay`
+            # cycles after it), mdp: none / waitbit (a load that violated waits next time) / ideal; mshr: misses in
+            # flight at once (0: the D$ blocks), hit_lat: how long a hit holds the D$ when it does not; miss_add: more
+            # cycles on every access that met a refill (a slower memory than the traced one)
+            lq=0, sq=0, mem_ooo=False, engines=1, fwd=False, spec_ld=False, mdp='none', replay=8,
+            mshr=0, hit_lat=2, miss_add=0,
+            # (OX.0) frontend: fe_blk, the bytes fetched a cycle with fe='ideal'; fe_taken, the bubble after a taken
+            # branch the aligner redirected on (None: as traced); nomp: no mispredicts (what one costs)
+            fe_blk=8, fe_taken=None, nomp=False)
 
 
 class DPort:
@@ -214,7 +239,7 @@ class DPort:
         e[1], e[2] = s0, s0 + self.db
         self.drain_avail = e[2]
         self.beats.append((s0, e[2]))
-        if len(self.beats) > 64:
+        if len(self.beats) > max(64, 4 * self.depth):
             self.beats.pop(0)
         self.nd += 1
 
@@ -279,8 +304,9 @@ def sim(tr, p, res=None, fit=False, t0=None):
     push = [0] * n; pop = [0] * n; disp = [0] * n; iss = [0] * n
     acc = [0] * n; go = [0] * n; cmpl = [0] * n; com = [0] * n
     if fit:
-        for k in ('push', 'pop', 'disp', 'acc', 'go', 'com', 'lat', 'bus'):
+        for k in ('push', 'pop', 'disp', 'acc', 'go', 'com', 'lat', 'bus', 'iss'):
             res[k] = [0] * n
+    trim = 4 * max(16, p['rob'], p['rs'])       # how far back the occupancy lists look
     ports = {}                      # (port, cycle) -> uses
     cap = {'alu': p['alu_ports'], 'bru': 1, 'fpu': 1, 'p0': 1}     # p0: port 0's own (branches, multiplies)
     rs_occ = []                     # (disp, issue) of uops that waited in the RS
@@ -291,6 +317,16 @@ def sim(tr, p, res=None, fit=False, t0=None):
     seg_start = t_open
     first_dword_push = None         # (fe ideal) the push of the first instruction of the current dword
     neg = 0
+    ld_idx = []; st_idx = []        # (lq/sq) the loads and the stores, in order
+    eng_end = []                    # (mem_ooo) when each busy engine's op completes
+    miss_iv = []                    # (mshr) the misses in flight: (go, cmpl)
+    waitbit = set()                 # (mdp waitbit) the loads that violated
+    replay_at = None                # a load violated: what follows it restarts from here
+    shift = max(3, (p['fe_blk'] - 1).bit_length())
+
+    def redir_of(q):
+        """the commit redirect an instruction causes in this configuration (nomp: never a mispredict)"""
+        return 0 if (p['nomp'] and q.redir in (1, 4)) else q.redir
 
     def avail(k):
         """when a consumer may take producer k's value (the cycle it issues in)"""
@@ -342,9 +378,13 @@ def sim(tr, p, res=None, fit=False, t0=None):
 
     for k, q in enumerate(tr):
         prev = tr[k - 1] if k else None
+        prev_redir = prev is not None and (redir_of(prev) or prev.trap)
+        blk = q.pc >> shift
         # ---- frontend: push into the IQ ----
-        if prev is not None and (prev.redir or prev.trap):
+        if prev_redir:
             seg_start = com[k - 1]
+            if p['xr'] and prev.redir in (1, 4) and not prev.trap:
+                seg_start = min(seg_start, cmpl[k - 1] + p['xr_lat'])     # recovered at execute (O3)
             c = seg_start
             first_dword_push = None
         else:
@@ -353,15 +393,21 @@ def sim(tr, p, res=None, fit=False, t0=None):
                 c = max(c, push[k - 2] + 1)                   # at most two pushes a cycle
             if k >= p['iq']:
                 c = max(c, pop[k - p['iq']] + 1)              # room in the IQ
-            if p['fe'] == 'ideal' and k > 0 and q.dword != prev.dword:
+            if p['fe'] == 'ideal' and k > 0 and blk != (prev.pc >> shift):
                 if first_dword_push is not None:
-                    c = max(c, first_dword_push + p['fe_rate'])   # one dword a cycle (fe_rate cycles)
-        if not fit and p['fe'] == 'ideal' and not (prev is not None and (prev.redir or prev.trap)) and not (
-                prev is not None and prev.ared) and k > 0:
+                    c = max(c, first_dword_push + p['fe_rate'])   # one block a cycle (fe_rate cycles)
+            if p['fe'] == 'ideal' and p['fe_taken'] is not None and prev is not None and prev.ared:
+                c = max(c, push[k - 1] + p['fe_taken'])          # the bubble after a taken branch
+        if replay_at is not None:
+            c = max(c, replay_at)                             # a load before it violated: refetched from there
+            replay_at = None
+        nomp_skip = p['nomp'] and prev is not None and prev.redir in (1, 4) and not prev.trap
+        if not fit and (nomp_skip or (p['fe'] == 'ideal' and not prev_redir and k > 0 and (
+                not prev.ared or p['fe_taken'] is not None))):
             push[k] = c                                         # no frontend residual within a fetch stream
         else:
             push[k] = put('push', k, c, q.push)
-        if k == 0 or q.dword != prev.dword or (prev is not None and (prev.redir or prev.trap)):
+        if k == 0 or blk != (prev.pc >> shift) or prev_redir:
             first_dword_push = push[k]
         # ---- decode ----
         c = push[k] + 1
@@ -374,7 +420,8 @@ def sim(tr, p, res=None, fit=False, t0=None):
         if k >= 1: c = max(c, disp[k - 1] + (1 if W == 1 else 0))
         if k >= 2 and W == 2: c = max(c, disp[k - 2] + 1)
         if p['dispatch1'] and k >= 1: c = max(c, disp[k - 1] + 1)
-        if W == 2 and k >= 1 and disp[k - 1] >= c and not fit:
+        # (in the fit too: a two-wide trace is fitted with its rules, or a replay would count a split pair twice)
+        if W == 2 and k >= 1 and disp[k - 1] >= c:
             pq = tr[k - 1]                                    # would pair with the uop before it: the pair rules
             if ((p['mem1'] and q.cls == 'lsu' and pq.cls == 'lsu') or (p['fp1'] and q.fp and pq.fp)
                     or (p['alone'] and (q.alone or pq.alone))):
@@ -382,7 +429,11 @@ def sim(tr, p, res=None, fit=False, t0=None):
         if k >= p['rob']: c = max(c, com[k - p['rob']] + 1)
         if q.cls == 'lsu':
             mi = len(mem_idx)
-            if p['lsq'] > 0 and mi >= p['lsq']:
+            if p['lq'] and p['sq']:                           # split queues: a load needs a load entry, a store a store one
+                own, cap_q = (st_idx, p['sq']) if q.mem == 'st' else (ld_idx, p['lq'])
+                if len(own) >= cap_q:
+                    c = max(c, com[own[len(own) - cap_q]] + 1)
+            elif p['lsq'] > 0 and mi >= p['lsq']:
                 c = max(c, com[mem_idx[mi - p['lsq']]] + 1)
             if p['lsq'] == 0 and mem_idx:
                 pm = mem_idx[-1]
@@ -399,7 +450,7 @@ def sim(tr, p, res=None, fit=False, t0=None):
             if p['rs'] == 0:
                 if not fit and W > 1:
                     disp[k] = free_port(pt, disp[k])          # in order: a busy port holds the dispatch
-                iss[k] = take_port(pt, disp[k]) if not fit else disp[k]
+                icons = take_port(pt, disp[k]) if not fit else disp[k]
             else:
                 def earliest(d):
                     t = max(d, ready)
@@ -414,11 +465,12 @@ def sim(tr, p, res=None, fit=False, t0=None):
                     t = earliest(disp[k])
                     if t > disp[k]:
                         rs_occ.append((disp[k], t))
-                        if len(rs_occ) > 64:
+                        if len(rs_occ) > trim:
                             rs_occ.pop(0)
-                iss[k] = take_port(pt, t)
+                icons = take_port(pt, t)
+            iss[k] = put('iss', k, icons, q.iss) if p['iss_res'] else icons
             if fit:
-                res['lat'][k] = q.cmpl - q.disp
+                res['lat'][k] = (q.cmpl - q.iss) if p['iss_res'] else (q.cmpl - q.disp)
             cmpl[k] = iss[k] + max(1, res['lat'][k])
             if q.cls == 'div': last_div = k
             if q.cls == 'fds': last_fds = k
@@ -427,41 +479,88 @@ def sim(tr, p, res=None, fit=False, t0=None):
             c = disp[k]
             if p['rs'] > 0 and p['lsq'] > 0:
                 c = max(c, ready)
-            if mem_idx:
+            eligible = p['early'] and p['lsq'] > 0 and q.mem in ('ld', 'st') and not q.trap
+            ooo = p['mem_ooo'] and eligible
+            if ooo:
+                # (OX.0) out-of-order memory: one of `engines` free, not after the older ops
+                eng_end[:] = [e for e in eng_end if e > c]
+                if len(eng_end) >= p['engines']:
+                    c = max(c, sorted(eng_end)[len(eng_end) - p['engines']])
+            elif mem_idx:
                 pm = mem_idx[-1]
                 hand = p['handoff'] and p['lsq'] > 0 and (tr[pm].posted or (tr[pm].go and tr[pm].cmpl > tr[pm].go))
                 c = max(c, cmpl[pm] if hand else cmpl[pm] + 1)
             acc[k] = put('acc', k, c, q.acc if q.acc else q.disp)
             c = acc[k] + 1
-            eligible = p['early'] and p['lsq'] > 0 and q.mem in ('ld', 'st') and not q.trap
             if not eligible:
                 c = max(c, (com[k - 1] + 1) if k else c)      # at the head
             if fit:
                 res['bus'][k] = q.cmpl - (q.go if q.go else q.cmpl)
+            lat = res['bus'][k] + (p['miss_add'] if q.dcm else 0)
             if q.mem == 'ld' and not q.trap:
-                # a load waits for an older store to its dword to leave the store buffer, then for the D$
-                m = dc.last_store_to(q.addr)
                 hold = c
-                if m is not None and dc.resp_of(m) + 1 > c:
-                    c = hold = dc.resp_of(m) + 1
-                elif not eligible:
-                    # a load waiting for the head holds the drain off once it is among the three oldest
-                    hold = max(acc[k] + 1, (com[k - 3] + 1) if k >= 3 else acc[k] + 1)
+                fwd_from = None
+                if ooo:
+                    # the older stores still in flight: an unknown address holds the load (unless it speculates),
+                    # a known one to its dword forwards (fwd) or makes it wait for the drain
+                    for s in reversed(st_idx):
+                        if com[s] < c:
+                            break
+                        known = acc[s] + 1
+                        same = tr[s].addr == q.addr
+                        if known > c:
+                            wait = (not p['spec_ld'] or (p['mdp'] == 'ideal' and same)
+                                    or (p['mdp'] == 'waitbit' and q.pc in waitbit))
+                            if wait:
+                                c = max(c, known)
+                            elif same:
+                                replay_at = max(replay_at or 0, known + p['replay'])   # a violation
+                                if p['mdp'] == 'waitbit':
+                                    waitbit.add(q.pc)
+                        if same and p['fwd'] and fwd_from is None:
+                            fwd_from = s
+                    hold = c
+                if fwd_from is not None:
+                    c = max(c, go[fwd_from])                  # its bytes merged when the store has its data
+                else:
+                    # a load waits for an older store to its dword to leave the store buffer, then for the D$
+                    m = dc.last_store_to(q.addr)
+                    if m is not None and dc.resp_of(m) + 1 > c:
+                        c = hold = dc.resp_of(m) + 1
+                    elif not eligible:
+                        # a load waiting for the head holds the drain off once it is among the three oldest
+                        hold = max(acc[k] + 1, (com[k - 3] + 1) if k >= 3 else acc[k] + 1)
+                if q.dcm and p['mshr'] > 0:
+                    while sum(1 for (a, b) in miss_iv if a <= c < b) >= p['mshr']:
+                        c += 1                                # every miss handler is busy
                 gcons = dc.place_load(c, hold)
                 go[k] = put('go', k, gcons, q.go if q.go else q.cmpl)
-                cmpl[k] = go[k] + res['bus'][k]
-                dc.load_done(go[k], cmpl[k])
+                cmpl[k] = go[k] + lat
+                if replay_at is not None and replay_at > cmpl[k]:
+                    cmpl[k] = replay_at                       # it ran again after the violation
+                if q.dcm and p['mshr'] > 0:
+                    miss_iv.append((go[k], cmpl[k]))
+                    if len(miss_iv) > trim:
+                        miss_iv.pop(0)
+                # a blocking D$ is busy until the load's data; a non-blocking one only for a hit's time
+                dc.load_done(go[k], cmpl[k] if p['mshr'] == 0 else go[k] + p['hit_lat'])
             else:
                 go[k] = put('go', k, c, q.go if q.go else q.cmpl)
-                cmpl[k] = go[k] + res['bus'][k]
+                cmpl[k] = go[k] + lat
+            if ooo:
+                eng_end.append(cmpl[k])
             mem_idx.append(k)
+            if q.mem == 'st':
+                st_idx.append(k)
+            else:
+                ld_idx.append(k)
         # ---- commit ----
         c = cmpl[k] + 1
         if k >= 1:
             c = max(c, com[k - 1] + 1)
             if W == 2:
                 pq = tr[k - 1]
-                plain = not (pq.trap or pq.redir or pq.cls in ('csr', 'sys', 'fence'))
+                plain = not (pq.trap or redir_of(pq) or pq.cls in ('csr', 'sys', 'fence'))
                 pair = plain and not (pq.posted and q.posted) and not (pq.cls == 'bru' and q.cls == 'bru')
                 if p['slot2'] and (q.trap or q.cls in ('csr', 'sys', 'fence')): pair = False
                 if p['fpw1'] and q.fpw and pq.fpw: pair = False
@@ -517,6 +616,50 @@ CONFIGS = [  # name, knobs
 RULES = dict(mem1=True, fp1=True, alone=True, p0=True, slot2=True, fpw1=True)
 W2 = dict(w=2, alu_ports=2)
 
+# (OX.0) the core as built after O4: two-wide with its pair rules, the 4-entry station, ROB 8, fitted on traces of the
+# core itself (its issue cycles traced)
+BASE_O4 = dict(BASE, rs=4, iss_res=True, **W2, **RULES)
+
+VALID_O4 = [  # label, model knobs against BASE_O4: runs of the core with one thing changed (run_perf.sh --label ...)
+    ('v_w1', dict(w=1, alu_ports=1)),
+    ('v_rs0', dict(rs=0)),
+    ('v_sb2', dict(sb=2)),
+    ('v_fs0', dict(iq=4, fe='ideal', fe_rate=2)),
+]
+
+def cfg(*parts, **kw):
+    out = {}
+    for d in parts:
+        out.update(d)
+    out.update(kw)
+    return out
+
+
+XR = dict(xr=True)
+MEM = dict(mem_ooo=True, engines=2, lq=8, sq=8, fwd=True, spec_ld=True, mdp='ideal')     # O5/6 at full stretch
+FE = dict(fe='ideal', fe_blk=16, fe_taken=0)                                             # O8 at full stretch
+CONFIGS_OX = [  # name, knobs against BASE_O4: what each milestone of the complete-OOO track would buy
+    ('base', cfg()),                                                    # the fit replayed: must be +0.0% everywhere
+    ('xr', cfg(XR)),                                                    # O3
+    ('xr comb', cfg(XR, xr_lat=0)),                                     # D7
+    ('xr nomp', cfg(XR, nomp=True)),                                    # what a mispredict costs (D5)
+    ('xr fe8', cfg(XR, fe='ideal')),                                    # O8: one dword a cycle, bubbles as traced
+    ('xr fe16', cfg(XR, FE)),                                           # O8: 16 bytes a cycle, no taken bubble
+    ('xr mem-io fwd', cfg(XR, fwd=True, mem_ooo=True, engines=1, lq=8, sq=8)),
+    ('xr mem nospec', cfg(XR, MEM, spec_ld=False)),
+    ('xr mem none', cfg(XR, MEM, mdp='none')),                          # D6
+    ('xr mem waitbit', cfg(XR, MEM, mdp='waitbit')),
+    ('xr mem', cfg(XR, MEM)),                                           # O5/6
+    ('xr mem mshr4', cfg(XR, MEM, mshr=4)),
+    ('xr rob16 rs8', cfg(XR, rob=16, rs=8)),                            # O7 alone
+    ('xr fe16 mem mshr4', cfg(XR, FE, MEM, mshr=4)),
+    ('xr fe16 mem mshr4 rob16 rs8', cfg(XR, FE, MEM, mshr=4, rob=16, rs=8)),   # O7 on top
+    ('xr fe16 mem mshr4 rob32 rs16', cfg(XR, FE, MEM, mshr=4, rob=32, rs=16)),
+    ('L20', cfg(miss_add=20)),                                          # a slower memory (D1's L=20)
+    ('L20 xr fe16', cfg(XR, FE, miss_add=20)),
+    ('L20 xr mem mshr4', cfg(XR, MEM, mshr=4, miss_add=20)),
+]
+
 CONFIGS_O4 = [  # name, knobs: two-wide with the pair rules (O4.0)
     ('ooo rs4', dict(rs=4)),
     ('commit2 rob8 rs4', dict(w=2, rs=4, dispatch1=True, slot2=True, fpw1=True)),
@@ -546,20 +689,26 @@ def main():
     ap.add_argument('--mode', default='m')
     ap.add_argument('--kernels', default=' '.join(KERNELS))
     ap.add_argument('--db', type=int, default=2, help='cycles from a drain beat to its response (2: the D$ passes a store through)')
-    ap.add_argument('--set', default='o1', choices=('o1', 'o4'), help='o1: the O1.0 configurations; o4: two-wide with the pair rules')
+    ap.add_argument('--set', default='o1', choices=('o1', 'o4', 'ox'),
+                    help='o1: the O1.0 configurations; o4: two-wide with the pair rules; ox: the complete-OOO milestones')
+    ap.add_argument('--fit', default='o1', choices=('o1', 'o4'),
+                    help='o1: fit one-wide traces with the station off (O1.0, O4.0); o4: fit traces of the core as built '
+                         'after O4 (two-wide, the station on, issue cycles traced: OX.0)')
     a = ap.parse_args()
-    configs = CONFIGS if a.set == 'o1' else CONFIGS_O4
+    configs = {'o1': CONFIGS, 'o4': CONFIGS_O4, 'ox': CONFIGS_OX}[a.set]
     sfx = '_s' if a.mode == 's' else ''
     base = load_csv(a.base)
-    BASE['db'] = a.db
+    fitp = dict(BASE_O4) if a.fit == 'o4' else dict(BASE)
+    fitp['db'] = a.db
+    valid = VALID_O4 if a.fit == 'o4' else VALID
     vals = {}
     if a.validate:
-        for lab, _ in VALID:
+        for lab, _ in valid:
             f = os.path.join(a.validate, 'baseline_pipe_%s.csv' % lab)
             if os.path.exists(f):
                 vals[lab] = load_csv(f)
     hdr = ['kernel', 'cycles', 'fit', 'neg']
-    hdr += ['%s (meas)' % lab for lab, _ in VALID if lab in vals]
+    hdr += ['%s (meas)' % lab for lab, _ in valid if lab in vals]
     hdr += [c for c, _ in configs]
     print('| ' + ' | '.join(hdr) + ' |')
     print('|' + '---|' * len(hdr))
@@ -574,23 +723,23 @@ def main():
         meas = int(base[(kern, a.config)]['cycles']) if (kern, a.config) in base else 0
         t0 = tr[-1].commit - meas if meas else None
         res = {}
-        fitc, neg = sim(tr, dict(BASE), res, fit=True, t0=t0)
+        fitc, neg = sim(tr, dict(fitp), res, fit=True, t0=t0)
         row = [kern, str(meas), str(fitc), str(neg)]
-        for lab, kn in VALID:
+        for lab, kn in valid:
             if lab not in vals:
                 continue
-            p = dict(BASE); p.update(kn)
+            p = dict(fitp); p.update(kn)
             pc, _ = sim(tr, p, res, t0=t0)
             m = int(vals[lab][(kern, a.config)]['cycles']) if (kern, a.config) in vals[lab] else 0
             row.append('%+.1f%% (%+.1f%%)' % (100.0 * (pc - fitc) / fitc, 100.0 * (m - meas) / meas if meas else 0))
         for ci, (_, kn) in enumerate(configs):
-            p = dict(BASE); p.update(kn)
+            p = dict(fitp); p.update(kn)
             pc, _ = sim(tr, p, res, t0=t0)
             row.append('%+.1f%%' % (100.0 * (pc - fitc) / fitc))
             logs.setdefault(ci, []).append(math.log(pc / fitc))
         print('| ' + ' | '.join(row) + ' |')
     if logs:
-        row = ['geomean', '', '', ''] + [''] * len([l for l, _ in VALID if l in vals])
+        row = ['geomean', '', '', ''] + [''] * len([l for l, _ in valid if l in vals])
         row += ['%+.1f%%' % (100.0 * (math.exp(sum(v) / len(v)) - 1)) for ci, v in sorted(logs.items())]
         print('| ' + ' | '.join(row) + ' |')
 
