@@ -337,7 +337,8 @@ module core_lsq_tb;
         emit(encode_csr(`CSR_PMPCFG0, 5'd20, `FUNCT3_CSRRW, 5'd0, `OPC_SYSTEM));
         pc_div = here(); emit(div_(5, 6, 7));
         t = here();
-        emit(encode_b(8 * 4, 5'd0, 5'd0, 3'b000, `OPC_BRANCH));         // beq x0, x0, +32 (taken; predicted not taken)
+        emit(encode_b(8 * 4, 5'd5, 5'd5, 3'b000, `OPC_BRANCH));         // beq x5, x5, +32 (taken; predicted not taken; it waits
+                                                                        // for the DIV, so the wrong path runs even when the core recovers at execute)
         emit(ld_(32'h18, 1, 3'b011, 16));                               // wrong path: a RAM load
         emit(ld_(0, 9, 3'b011, 15));                                    // wrong path: denied by the PMP
         emit(ld_(0, 8, 3'b011, 14));                                    // wrong path: outside the window
