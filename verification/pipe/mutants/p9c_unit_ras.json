@@ -2,6 +2,7 @@
  "dut": "design/pipe/qv_ras.sv",
  "tb": "design/pipe/qv_ras_tb.sv",
  "files": [
+  "design/pipe/qv_pkg.sv",
   "design/pipe/qv_ras.sv"
  ],
  "flags": [
