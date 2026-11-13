@@ -132,7 +132,11 @@ module qv_rob #(
     output logic [qv_pkg::QV_ROB_DEPTH-1:0][4:0] o_surv_rd,
     output logic [qv_pkg::QV_ROB_DEPTH-1:0]  o_surv_int,       // writes an integer register (not x0)
     output logic [qv_pkg::QV_ROB_DEPTH-1:0]  o_surv_fp,        // writes an FP register
-    output logic [qv_pkg::QV_ROB_DEPTH-1:0]  o_surv_csr        // a CSR op (its rd value is made at commit)
+    output logic [qv_pkg::QV_ROB_DEPTH-1:0]  o_surv_csr,       // a CSR op (its rd value is made at commit)
+    // (O3) each entry's return-address-stack snapshot (qv_pkg::ras_snap_t), and the branch's at a kill
+    input  qv_pkg::ras_snap_t                i_alloc_snap = '0,
+    input  qv_pkg::ras_snap_t                i_alloc2_snap = '0,
+    output qv_pkg::ras_snap_t                o_kill_snap
 );
     import qv_pkg::*;
 
@@ -150,6 +154,7 @@ module qv_rob #(
     logic [4:0]         fflags_q  [0:ROB_DEPTH-1];
     rob_ctrl_t          ctrl_q    [0:ROB_DEPTH-1];
     logic               recovered_q[0:ROB_DEPTH-1];
+    ras_snap_t          snap_q    [0:ROB_DEPTH-1];
 
     logic [PTR_W-1:0] head_q, tail_q;
 
@@ -243,6 +248,10 @@ module qv_rob #(
     wire [IDX_W-1:0] wb4_idx   = i_wb4.tag[IDX_W-1:0];
     wire [IDX_W-1:0] wb5_idx   = i_wb5.tag[IDX_W-1:0];
 
+    // (O3) the branch's return-address-stack snapshot
+    wire [IDX_W-1:0] kill_idx = i_kill_tag[IDX_W-1:0];
+    assign o_kill_snap = snap_q[kill_idx];
+
     // (O3) the survivors of a kill: from the new head through the branch
     wire [QV_ROB_TAG_W-1:0] n_surv = qv_rob_dist(QV_ROB_TAG_W'(kill_from), QV_ROB_TAG_W'(head_next), PTR_W);
     always_comb
@@ -286,6 +295,7 @@ module qv_rob #(
                 mispredict_q[tail_idx] <= 1'b0;
                 fflags_q[tail_idx]     <= 5'b0;
                 recovered_q[tail_idx]  <= 1'b0;
+                snap_q[tail_idx]       <= i_alloc_snap;
                 if (alloc2) begin
                     tail_q                  <= tail_q + PTR_W'(2);
                     pc_q[tail1_idx]         <= i_alloc2_pc;
@@ -298,6 +308,7 @@ module qv_rob #(
                     mispredict_q[tail1_idx] <= 1'b0;
                     fflags_q[tail1_idx]     <= 5'b0;
                     recovered_q[tail1_idx]  <= 1'b0;
+                    snap_q[tail1_idx]       <= i_alloc2_snap;
                 end
             end
             if (i_wb.valid && !i_flush) begin

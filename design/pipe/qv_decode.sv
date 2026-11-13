@@ -514,6 +514,7 @@ module qv_decode #(
                           || (sys_op == QV_SYS_FENCE_I) || is_sfence;
         uop_d.pred_taken = i_iq_data.pred_taken;
         uop_d.pred_tgt   = i_iq_data.pred_tgt;
+        uop_d.ras_snap   = i_iq_data.ras_snap;
         uop_d.mem_size   = is_atomic ? (atomic_word ? 2'd2 : 2'd3) : mem_size;
         uop_d.mem_signed = mem_signed;                   // (atomics: the LSU always sign-extends them)
         uop_d.is_atomic  = is_atomic;

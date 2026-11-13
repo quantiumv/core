@@ -18,9 +18,18 @@
  * The aligner emits up to two instructions a cycle, and each can be a call (push its return address) or a return
  * (pop): ops 0 and 1, in program order. Only the top is read: a return that is predicted redirects fetch, so no
  * instruction follows it in the same cycle, and one that is not (an empty stack) has nothing behind it to pop.
+ *
+ * (O3) REPAIR > 0: the speculative stack is circular instead (an array, the top's index and a count; a push onto a
+ * full one overwrites its oldest entry), which behaves the same at its outputs, and o_snap0/o_snap1 say how op 0, and
+ * ops 0 and 1, leave it (qv_pkg::ras_snap_t): each instruction carries its own to the ROB. A recovery at execute
+ * (i_restore, with the mispredicted branch's snapshot) puts the index and the count back (REPAIR 1) and the top entry
+ * too (REPAIR 2: a wrong path that popped and pushed overwrote it); deeper entries a wrong path overwrote stay
+ * overwritten (a later return mispredicts, which is all it costs). A flush still wins, and copies the committed stack
+ * in with its top at index 0. REPAIR 0 is the shift stack above, and o_snap* are 0.
  */
 module qv_ras #(
-    parameter int DEPTH = 8
+    parameter int DEPTH = 8,
+    parameter int REPAIR = 0
 ) (
     input  logic        clk,
     input  logic        rst,
@@ -40,7 +49,13 @@ module qv_ras #(
     input  logic        i_flush,
 
     output logic [63:0] o_top,              // the speculative stack's top
-    output logic        o_has1              // ... and whether there is one
+    output logic        o_has1,             // ... and whether there is one
+
+    // (O3, REPAIR > 0) the stack after op 0 and after ops 0 and 1, and a recovery at execute
+    output qv_pkg::ras_snap_t o_snap0,
+    output qv_pkg::ras_snap_t o_snap1,
+    input  logic              i_restore = 1'b0,
+    input  qv_pkg::ras_snap_t i_restore_snap = '0
 );
     localparam int CNT_W = $clog2(DEPTH + 1);
     localparam int W = DEPTH * 64;
@@ -48,8 +63,10 @@ module qv_ras #(
     logic [W-1:0]     s_q, c_q;             // entry 0 in bits [63:0]
     logic [CNT_W-1:0] s_n_q, c_n_q;
 
-    assign o_top  = s_q[63:0];
-    assign o_has1 = (s_n_q != '0);
+    logic [63:0] cr_top;
+    logic        cr_has1;
+    assign o_top  = (REPAIR > 0) ? cr_top  : s_q[63:0];
+    assign o_has1 = (REPAIR > 0) ? cr_has1 : (s_n_q != '0);
 
     /* verilator lint_off UNUSEDSIGNAL */
     function automatic logic [W-1:0] push(input logic [W-1:0] st, input logic [63:0] a);
@@ -100,4 +117,67 @@ module qv_ras #(
             end
         end
     end
+
+    // ---------------- (O3) REPAIR > 0: the circular speculative stack ----------------
+    localparam int PTR_W = $clog2(DEPTH);
+    generate
+        if (REPAIR > 0) begin : g_circ
+            logic [63:0]      a_q [0:DEPTH-1];
+            logic [PTR_W-1:0] p_q;                  // the top's index
+            logic [CNT_W-1:0] n_q;
+            logic [PTR_W-1:0] p0, p1;
+            logic [CNT_W-1:0] n0, n1;
+            logic [63:0]      top0, top1;
+            wire  [PTR_W-1:0] rs_ptr = PTR_W'(i_restore_snap.ptr);
+            // one operation: a push moves the top up (a full stack loses its oldest), a pop down (none on an empty one)
+            function automatic logic [PTR_W+CNT_W-1:0] step(input logic [PTR_W-1:0] p, input logic [CNT_W-1:0] n,
+                                                            input logic [1:0] op);
+                if (op == 2'b01) return {p + PTR_W'(1), n_push(n)};
+                if (op == 2'b10 && n != '0) return {p - PTR_W'(1), n - CNT_W'(1)};
+                return {p, n};
+            endfunction
+            always_comb begin
+                {p0, n0} = step(p_q, n_q, i_sp_op0);
+                {p1, n1} = step(p0, n0, i_sp_op1);
+                top0 = (i_sp_op0 == 2'b01) ? i_sp_addr0 : a_q[p0];
+                top1 = (i_sp_op1 == 2'b01) ? i_sp_addr1 : ((i_sp_op0 == 2'b01) && (p1 == p0)) ? i_sp_addr0 : a_q[p1];
+                o_snap0     = '0;
+                o_snap0.ptr = 3'(p0);
+                o_snap0.cnt = 4'(n0);
+                o_snap0.top = (REPAIR > 1) ? top0 : 64'b0;
+                o_snap1     = '0;
+                o_snap1.ptr = 3'(p1);
+                o_snap1.cnt = 4'(n1);
+                o_snap1.top = (REPAIR > 1) ? top1 : 64'b0;
+            end
+            assign cr_top  = a_q[p_q];
+            assign cr_has1 = (n_q != '0);
+            always_ff @(posedge clk) begin
+                if (rst) begin
+                    p_q <= '0; n_q <= '0;
+                    for (int i = 0; i < DEPTH; i++) a_q[i] <= 64'b0;
+                end else if (i_flush) begin
+                    // the committed stack after this cycle's retirement, its entry i at index -i (so index j holds
+                    // entry -j); the index on the left is the loop's own (iverilog misplaces a computed one here)
+                    for (int j = 0; j < DEPTH; j++) a_q[j] <= c_next[64*((DEPTH - j) % DEPTH) +: 64];
+                    p_q <= '0;
+                    n_q <= c_next_n;
+                end else if (i_restore) begin
+                    p_q <= rs_ptr;
+                    n_q <= CNT_W'(i_restore_snap.cnt);
+                    if (REPAIR > 1) a_q[rs_ptr] <= i_restore_snap.top;
+                end else begin
+                    if (i_sp_op0 == 2'b01) a_q[p0] <= i_sp_addr0;
+                    if (i_sp_op1 == 2'b01) a_q[p1] <= i_sp_addr1;
+                    p_q <= p1;
+                    n_q <= n1;
+                end
+            end
+        end else begin : g_shift
+            assign cr_top  = 64'b0;
+            assign cr_has1 = 1'b0;
+            assign o_snap0 = '0;
+            assign o_snap1 = '0;
+        end
+    endgenerate
 endmodule

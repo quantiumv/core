@@ -94,6 +94,15 @@ package qv_pkg;
         return (t - p) & QV_ROB_TAG_W'((1 << ptr_w) - 1);
     endfunction
 
+    // (O3) the speculative return-address stack as an instruction left it (qv_ras with REPAIR > 0; every field 0
+    // otherwise): its top entry's index, how many entries it holds and that top entry. A recovery at execute puts
+    // the stack back as the mispredicted branch left it. Sized for qv_ras DEPTH up to 8.
+    typedef struct packed {
+        logic [2:0]  ptr;
+        logic [3:0]  cnt;
+        logic [63:0] top;
+    } ras_snap_t;
+
     // Frontend -> instruction queue.
     typedef struct packed {
         logic [63:0] pc;
@@ -111,6 +120,7 @@ package qv_pkg;
         logic        xl;
         logic [43:0] pg_lo;
         logic [43:0] pg_hi;
+        ras_snap_t   ras_snap;     // (O3) the return-address stack after this instruction (core.sv adds it)
     } fe_instr_t;
 
     // Decode -> issue.
@@ -164,6 +174,7 @@ package qv_pkg;
         logic        fp_fmt;
         logic [1:0]  fp_ityp;
         logic [2:0]  fp_rm;
+        ras_snap_t   ras_snap;     // (O3) fe_instr_t's, to the ROB
     } uop_t;
 
     // One reorder-buffer entry.

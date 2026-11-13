@@ -100,6 +100,15 @@
 `ifndef QV_PIPE_FETCH_YIELD
 `define QV_PIPE_FETCH_YIELD 1'b0
 `endif
+// (O3) What a recovery at execute puts back in the return-address stack: 0 nothing, 1 its index and count, 2 also
+// its top entry (qv_ras REPAIR). The formal models keep the smaller snapshot.
+`ifndef QV_PIPE_RAS_REPAIR
+`ifdef QV_FORMAL_SMALL
+`define QV_PIPE_RAS_REPAIR 1
+`else
+`define QV_PIPE_RAS_REPAIR 2
+`endif
+`endif
 // Branch prediction (P9c). QV_PIPE_BP 0 leaves all of it out; the pieces size themselves, each 0 = absent.
 `ifndef QV_PIPE_BP
 `define QV_PIPE_BP 1
@@ -255,6 +264,7 @@ module core
     parameter bit FETCH_YIELD  = `QV_PIPE_FETCH_YIELD,    // fetch gives way to the memory port's masters (shared bus)
     parameter int BTB_ENTRIES  = `QV_PIPE_BTB_ENTRIES,    // branch target buffer entries, 0: none
     parameter int RAS_DEPTH    = `QV_PIPE_RAS_DEPTH,      // return-address stack entries, 0: none (>= 2 otherwise)
+    parameter int RAS_REPAIR   = `QV_PIPE_RAS_REPAIR,     // (O3) 0 none, 1 index and count, 2 also the top entry
     parameter int BHT_ENTRIES  = `QV_PIPE_BHT_ENTRIES,    // branch history table counters, 0: none (>= 8 otherwise)
     parameter bit SV39_EN   = `QV_PIPE_SV39_EN,     // address translation present
     parameter int TLB_ENTRIES = `QV_PIPE_TLB_ENTRIES, // entries in each of the two TLBs
@@ -507,21 +517,31 @@ module core
         end
     endgenerate
 
+    // (O3) a recovery at execute: the mispredicted branch's tag (tied off until it is wired)
+    logic                    xr_kill;
+    logic [QV_ROB_TAG_W-1:0] xr_kill_tag;
+    assign xr_kill     = 1'b0;
+    assign xr_kill_tag = '0;
+
     // ---------------- the return-address stack ----------------
     logic        ras_has1, ras_push, ras_pop;
     logic [1:0]  ras_op0, ras_op1;
     logic [63:0] ras_addr0, ras_addr1, ras_top, ras_c_addr;
+    ras_snap_t   ras_snap0, ras_snap1, kill_snap;   // (O3) the stack after the aligner's ops; the branch's at a kill
     generate
         if (RAS_DEPTH > 0) begin : g_ras
-            qv_ras #(.DEPTH(RAS_DEPTH)) ras0 (
+            qv_ras #(.DEPTH(RAS_DEPTH), .REPAIR(RAS_REPAIR)) ras0 (
                 .clk(clk), .rst(rst),
                 .i_sp_op0(ras_op0), .i_sp_addr0(ras_addr0), .i_sp_op1(ras_op1), .i_sp_addr1(ras_addr1),
                 .i_cm_push(ras_push), .i_cm_addr(ras_c_addr), .i_cm_pop(ras_pop), .i_flush(flush),
-                .o_top(ras_top), .o_has1(ras_has1)
+                .o_top(ras_top), .o_has1(ras_has1),
+                .o_snap0(ras_snap0), .o_snap1(ras_snap1), .i_restore(xr_kill), .i_restore_snap(kill_snap)
             );
         end else begin : g_noras
-            assign ras_top  = 64'b0;
-            assign ras_has1 = 1'b0;
+            assign ras_top   = 64'b0;
+            assign ras_has1  = 1'b0;
+            assign ras_snap0 = '0;
+            assign ras_snap1 = '0;
         end
     endgenerate
 
@@ -587,10 +607,18 @@ module core
         inj_data.pc   = arch_pc;
         inj_data.raw  = i_progbuf_data;
     end
+    // (O3) each instruction the aligner emits carries the return-address stack as it left it
+    fe_instr_t    a0_snapd, a1_snapd;
+    always_comb begin
+        a0_snapd          = a0_data;
+        a0_snapd.ras_snap = ras_snap0;
+        a1_snapd          = a1_data;
+        a1_snapd.ras_snap = ras_snap1;
+    end
     assign p0_valid = dbg_in_debug ? inj_valid : a0_valid;
-    assign p0_data  = dbg_in_debug ? inj_data  : a0_data;
+    assign p0_data  = dbg_in_debug ? inj_data  : a0_snapd;
     assign p1_valid = dbg_in_debug ? 1'b0      : a1_valid;
-    assign p1_data  = a1_data;
+    assign p1_data  = a1_snapd;
 
     qv_fifo #(.WIDTH(FE_W), .DEPTH(IQ_DEPTH)) iq0 (
         .clk(clk), .rst(rst), .i_flush(flush),
@@ -650,12 +678,7 @@ module core
     logic [63:0]             rs1_data, rs2_data;
     logic                    alloc_valid, alloc_rd_wen, alloc_ready, rob_empty;
     logic [(1<<QV_ROB_TAG_W)-1:0] kill_vec;  // (O3) the tags a recovery at execute kills (all 0 until it is wired)
-    // (O3) a recovery at execute (the branch's tag; tied off until it is wired), and the ROB entries it leaves, from
-    // which issue rebuilds its producer tables
-    logic                    xr_kill;
-    logic [QV_ROB_TAG_W-1:0] xr_kill_tag;
-    assign xr_kill     = 1'b0;
-    assign xr_kill_tag = '0;
+    // (O3) the ROB entries a recovery at execute (xr_kill, above) leaves, from which issue rebuilds its producer tables
     logic [QV_ROB_DEPTH-1:0]                   surv_live, surv_int, surv_fp, surv_csr;
     logic [QV_ROB_DEPTH-1:0][QV_ROB_TAG_W-1:0] surv_tag;
     logic [QV_ROB_DEPTH-1:0][4:0]              surv_rd;
@@ -788,7 +811,8 @@ module core
         .o_head1_ctrl(head1_ctrl), .i_commit_pop2(commit_pop2),
         .i_kill(xr_kill), .i_kill_tag(xr_kill_tag), .o_kill_vec(kill_vec),
         .o_surv_live(surv_live), .o_surv_tag(surv_tag), .o_surv_rd(surv_rd),
-        .o_surv_int(surv_int), .o_surv_fp(surv_fp), .o_surv_csr(surv_csr)
+        .o_surv_int(surv_int), .o_surv_fp(surv_fp), .o_surv_csr(surv_csr),
+        .i_alloc_snap(uop.ras_snap), .i_alloc2_snap(uop1.ras_snap), .o_kill_snap(kill_snap)
     );
 
     // ---------------- X: ALU, BRU -> writeback bus ----------------
