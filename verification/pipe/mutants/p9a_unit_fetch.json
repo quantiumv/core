@@ -51,8 +51,8 @@
   },
   {
    "name": "cyc dropped in the answer's cycle",
-   "old": "assign wb_fetch_cyc_o  = bus && (!(wb_fetch_ack_i || wb_fetch_err_i) || stream_go);",
-   "new": "assign wb_fetch_cyc_o  = bus && !(wb_fetch_ack_i || wb_fetch_err_i);"
+   "old": "assign wb_fetch_cyc_o  = (bus && (!(wb_fetch_ack_i || wb_fetch_err_i) || stream_go)) || idle_go;",
+   "new": "assign wb_fetch_cyc_o  = (bus && !(wb_fetch_ack_i || wb_fetch_err_i)) || idle_go;"
   },
   {
    "name": "room for one response too few",

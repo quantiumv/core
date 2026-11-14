@@ -20,8 +20,8 @@
  "mutants": [
   {
    "name": "the stream presents the virtual page of a reused request",
-   "old": "assign wb_fetch_addr_o = stream_go  ? (stream_reuse ? {lp_ppn_q[19:0], fpc_q[11:3], 3'b000} : {fpc_q[31:3], 3'b000})",
-   "new": "assign wb_fetch_addr_o = stream_go  ? {fpc_q[31:3], 3'b000}"
+   "old": "assign wb_fetch_addr_o = fpc_go     ? (stream_reuse ? {lp_ppn_q[19:0], fpc_q[11:3], 3'b000} : {fpc_q[31:3], 3'b000})",
+   "new": "assign wb_fetch_addr_o = fpc_go     ? {fpc_q[31:3], 3'b000}"
   },
   {
    "name": "a reused request on the bus uses the stale physical page register",
