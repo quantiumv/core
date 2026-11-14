@@ -6,7 +6,9 @@
  * 2^BITS two-bit counters, each with a trained bit, indexed by the branch's pc[BITS:1] XOR the global history (the
  * last H conditional outcomes, the newest in bit 0, XORed into the index's low bits). A counter is set weakly towards
  * the first outcome it is trained with, then counts up when taken and down when not, saturating; taken from 2 up.
- * core.sv takes the counter's direction where it has been trained and the branch history table's (qv_bht) where not.
+ * A counter is known (o_known) only while it is strong, 0 or 3: core.sv takes its direction then, and the branch history
+ * table's (qv_bht) while it is weak or untrained (a counter the history has just moved to, trained once, would
+ * otherwise overrule a table that already predicts the branch right).
  *
  * Two histories:
  *   - the speculative one (o_hist), the one the aligner looks up with: every conditional branch the aligner sends out
@@ -80,13 +82,13 @@ module qv_gshare #(
     for (genvar pg = 0; pg < 4; pg++) begin : g_pos
         wire [BITS-1:0] ix  = idx({i_base_pc[BITS:3], 2'(pg)}, h_q);
         wire [BITS-1:0] ix1 = idx({i_base1_pc[BITS:3], 2'(pg)}, h_q);
-        assign o_known[pg]  = v_q[ix];
+        assign o_known[pg]  = v_q[ix] && (ctr_q[ix] == 2'b00 || ctr_q[ix] == 2'b11);
         assign o_taken[pg]  = v_q[ix] && ctr_q[ix][1];
-        assign o_known1[pg] = v_q[ix1];
+        assign o_known1[pg] = v_q[ix1] && (ctr_q[ix1] == 2'b00 || ctr_q[ix1] == 2'b11);
         assign o_taken1[pg] = v_q[ix1] && ctr_q[ix1][1];
     end
     wire [BITS-1:0] pix = idx(i_pend_pc[BITS:1], h_q);
-    assign o_pend_known = v_q[pix];
+    assign o_pend_known = v_q[pix] && (ctr_q[pix] == 2'b00 || ctr_q[pix] == 2'b11);
     assign o_pend_taken = v_q[pix] && ctr_q[pix][1];
     assign o_hist   = h_q;
     assign o_hist_c = hc_q;
