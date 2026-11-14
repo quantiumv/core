@@ -459,6 +459,45 @@ module qv_align_hint_tb #(
             if (p1_valid) count_hint_taken(p1_data);
         end
     end
+    // a hint is taken up on exactly its own instruction: one predicted taken with no redirect had a hint for it, and a
+    // right hint (a direct branch or jump to the hint's target the table does not veto, or an indirect jump) is always
+    // taken up. The hint an instruction answers to: its entry's at its halfword (WIN: the head's, or the next entry's
+    // when the head has none); a crossing one's, the entry it ends in (with hx)
+    int hint_errs = 0;
+    task automatic check_hint_use(input fe_instr_t i, input string slot);
+        int          hwi;
+        logic        hh, right, xing, in_head, in_next;
+        logic [63:0] ht;
+        hwi     = int'(i.pc[11:1]);
+        xing   = !i.rvc && (i.pc[2:1] == 2'b11);
+        in_head = (i.pc[63:3] == buf_pc[63:3]);
+        in_next = WIN && buf1_valid && (i.pc[63:3] == buf1_pc[63:3]) && !in_head;
+        hh = 1'b0;
+        ht = '0;
+        if (xing && in_head) begin
+            hh = WIN && buf1_valid && !buf_hint && buf1_hint && buf1_hx;  ht = buf1_htgt;
+        end else if (xing && !in_next) begin                 // finished from the stash: the head is where it ends
+            hh = buf_hint && buf_hx;                             ht = buf_htgt;
+        end else if (in_head) begin
+            hh = buf_hint && !buf_hx && (buf_hoff == i.pc[2:1]); ht = buf_htgt;
+        end else if (in_next) begin
+            hh = !buf_hint && buf1_hint && !buf1_hx && (buf1_hoff == i.pc[2:1]); ht = buf1_htgt;
+        end
+        right = hh && ((kind_at[hwi] == 3'd2 && tgt_at[hwi] == ht && (!cond_at[hwi] || i.pred_taken))
+                       || kind_at[hwi] == 3'd3);
+        if (right && !(i.pred_taken && !fe_redir)) begin
+            hint_errs++; $display("HINT_TB: %s: a right hint on %h was not taken up", slot, i.pc);
+        end
+        if (i.pred_taken && !fe_redir && !hh) begin
+            hint_errs++; $display("HINT_TB: %s: %h predicted taken with no redirect and no hint of its own", slot, i.pc);
+        end
+    endtask
+    always @(posedge clk) begin
+        if (!rst && !flush && !restart) begin
+            if (p0_valid) check_hint_use(p0_data, "slot 0");
+            if (p1_valid) check_hint_use(p1_data, "slot 1");
+        end
+    end
     // training: a random outcome for every conditional branch that comes out of the queue (biased per branch)
     always @(posedge clk) begin
         bht_upd_valid <= 1'b0;
@@ -587,6 +626,7 @@ module qv_align_hint_tb #(
             check($sformatf("program %0d: the aligner made progress", prog), 64'((popped - n0) > 300), 64'd1);
         end
         check("every instruction out was on a valid path", 64'(errs), 64'd0);
+        check("a hint was taken up on exactly its own instruction", 64'(hint_errs), 64'd0);
         // the hints were taken up: forward branches, indirect jumps and crossing branches predicted taken at all
         // (the static prediction makes none of these), in the runs where the hints were right
         check("hints made forward branches predicted taken", 64'(n_fwd > 20), 64'd1);
