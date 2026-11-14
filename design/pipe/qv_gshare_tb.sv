@@ -6,7 +6,7 @@
  * back the mispredicted branch's history and then its real direction (the opposite of its prediction) when it is a
  * conditional, its history alone when not; a flush copies the committed history as this cycle's retirement leaves
  * it; flush beats restore beats the shift; a counter is trained at the branch's pc XOR the committed history, set
- * weakly towards its first outcome and saturating; an untrained counter is not known. A branch that alternates is
+ * weakly towards its first outcome and saturating; only a strong counter (0 or 3) is known. A branch that alternates is
  * learned through the history (its two counters), which a table indexed by the pc alone cannot do.
  *
  * Random: lookups at random dwords and pending pcs, the aligner's conditional, restores, flushes and training at
@@ -62,7 +62,9 @@ module qv_gshare_tb #(
         return int'(a ^ BITS'(h));
     endfunction
     function automatic logic m_known(input logic [63:0] pc);
-        return m_v[m_idx(pc, m_h)];
+        int i;
+        i = m_idx(pc, m_h);
+        return m_v[i] && (m_ctr[i] == 2'b00 || m_ctr[i] == 2'b11);      // known only while strong
     endfunction
     function automatic logic m_taken(input logic [63:0] pc);
         int i;
@@ -173,7 +175,8 @@ module qv_gshare_tb #(
         check("... and not taken", {63'b0, taken[0]}, 64'd0);
         train(64'h3008, 1'b1);                                    // 00 -> 01, committed history now 1
         base_pc = 64'h3008; #1;
-        check("training does not move the speculative history", {63'b0, known[0]}, 64'd1);
+        check("training does not move the speculative history", 64'(hist), 64'd0);
+        check("a weak counter (01) is not known: the table decides", {63'b0, known[0]}, 64'd0);
         flush = 1'b1; cycle("flush to the committed history");
         base_pc = 64'h3008; #1;
         check("the history moved: a different counter, not trained yet", {63'b0, known[0]}, 64'd0);
