@@ -156,6 +156,8 @@ pipe_ras_tb|design/pipe/qv_ras_tb.sv||design|pipe|pass|
 pipe_ras_tb_r1|design/pipe/qv_ras_tb.sv||design|pipe|pass||-Pqv_ras_tb.REPAIR=1
 pipe_ras_tb_r2|design/pipe/qv_ras_tb.sv||design|pipe|pass||-Pqv_ras_tb.REPAIR=2
 pipe_bht_tb|design/pipe/qv_bht_tb.sv||design|pipe|pass|
+pipe_gshare_tb|design/pipe/qv_gshare_tb.sv||design|pipe|pass|
+pipe_gshare_small_tb|design/pipe/qv_gshare_tb.sv||design|pipe|pass||-Pqv_gshare_tb.H=3 -Pqv_gshare_tb.BITS=3
 pipe_decode_tb|design/pipe/qv_decode_tb.sv||design|pipe|pass|
 pipe_decode_noser_tb|design/pipe/qv_decode_tb.sv||design|pipe|pass||-Pqv_decode_tb.CSR_NOSER=1
 pipe_decode_fp_tb|design/pipe/qv_decode_tb.sv||design|pipe|pass||-Pqv_decode_tb.FPU_EN=1
