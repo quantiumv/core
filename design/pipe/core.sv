@@ -94,6 +94,11 @@
 `ifndef QV_PIPE_FETCH_STREAM
 `define QV_PIPE_FETCH_STREAM 1'b1
 `endif
+// (O8b) The aligner works on a window of two fetch-buffer entries (qv_align2): any two instructions a cycle, a
+// crossing one with no cycle of its own. 0: one entry at a time (qv_align).
+`ifndef QV_PIPE_ALIGN_WIN
+`define QV_PIPE_ALIGN_WIN 1'b0
+`endif
 // Where the fetch port shares a bus with the memory port through an arbiter (the SRAM harnesses), the stream
 // must pause for a cycle now and then so the other master is granted: FETCH_YIELD, set by the instantiating
 // harness (the SoC's fetch has the instruction cache to itself).
@@ -271,6 +276,7 @@ module core
     parameter int IQ_DEPTH  = `QV_PIPE_IQ_DEPTH,    // power of 2, >= 2
     parameter int FB_DEPTH  = `QV_PIPE_FB_DEPTH,    // fetch buffer entries
     parameter bit FETCH_STREAM = `QV_PIPE_FETCH_STREAM,   // back-to-back fetch requests
+    parameter bit ALIGN_WIN    = `QV_PIPE_ALIGN_WIN,      // (O8b) the aligner's two-entry window
     parameter bit FETCH_YIELD  = `QV_PIPE_FETCH_YIELD,    // fetch gives way to the memory port's masters (shared bus)
     parameter int BTB_ENTRIES  = `QV_PIPE_BTB_ENTRIES,    // branch target buffer entries, 0: none
     parameter int RAS_DEPTH    = `QV_PIPE_RAS_DEPTH,      // return-address stack entries, 0: none (>= 2 otherwise)
@@ -470,6 +476,14 @@ module core
     logic [63:0] fb_pc, fb_data;
     logic [3:0]  fb_cause;
     logic [43:0] fb_pg;
+    // (O8b) the entry behind the head, for the window aligner
+    /* verilator lint_off UNUSEDSIGNAL */
+    logic        fb1_valid, fb1_err, fb1_xl, fb1_hint, fb1_hx;
+    logic [63:0] fb1_pc, fb1_data, fb1_htgt;
+    logic [43:0] fb1_pg;
+    logic [1:0]  fb1_hoff;
+    /* verilator lint_on UNUSEDSIGNAL */
+    logic        fb_pop2;
     logic        fetch_hold, fetch_idle;
     logic        commit_fetch_hold;          // FENCE.I, from commit
     // fetch is held for a FENCE.I and for as long as the hart is halted (including the entry cycle itself)
@@ -508,7 +522,10 @@ module core
         .o_buf_valid(fb_valid), .o_buf_pc(fb_pc), .o_buf_data(fb_data), .o_buf_err(fb_err),
         .o_buf_cause(fb_cause), .o_buf_xl(fb_xl), .o_buf_pg(fb_pg),
         .o_buf_hint(fb_hint), .o_buf_hoff(fb_hoff), .o_buf_hx(fb_hx), .o_buf_htgt(fb_htgt),
-        .i_buf_pop(fb_pop)
+        .i_buf_pop(fb_pop),
+        .o_buf1_valid(fb1_valid), .o_buf1_pc(fb1_pc), .o_buf1_data(fb1_data), .o_buf1_err(fb1_err),
+        .o_buf1_xl(fb1_xl), .o_buf1_pg(fb1_pg), .o_buf1_hint(fb1_hint), .o_buf1_hoff(fb1_hoff), .o_buf1_hx(fb1_hx),
+        .o_buf1_htgt(fb1_htgt), .i_buf_pop2(fb_pop2)
     );
 
     // ---------------- the branch target buffer ----------------
@@ -569,12 +586,17 @@ module core
     logic [63:0] bht_base, bht_ppc;
     logic [3:0]  bht_known, bht_taken;
     logic        bht_pknown, bht_ptaken, bht_upd_valid, bht_upd_taken;
+    logic [63:0] bht_base1;                  // (O8b) the window's second dword
+    /* verilator lint_off UNUSEDSIGNAL */
+    logic [3:0]  bht_known1, bht_taken1;     // (read only with ALIGN_WIN)
+    /* verilator lint_on UNUSEDSIGNAL */
     generate
         if (BHT_ENTRIES > 0) begin : g_bht
             qv_bht #(.ENTRIES(BHT_ENTRIES)) bht0 (
                 .clk(clk), .rst(rst),
                 .i_base_pc(bht_base), .i_pend_pc(bht_ppc),
                 .o_known(bht_known), .o_taken(bht_taken), .o_pend_known(bht_pknown), .o_pend_taken(bht_ptaken),
+                .i_base1_pc(bht_base1), .o_known1(bht_known1), .o_taken1(bht_taken1),
                 .i_upd_valid(bht_upd_valid), .i_upd_pc(btb_upd_pc), .i_upd_taken(bht_upd_taken)
             );
         end else begin : g_nobht
@@ -582,6 +604,8 @@ module core
             assign bht_taken  = 4'b0;
             assign bht_pknown = 1'b0;
             assign bht_ptaken = 1'b0;
+            assign bht_known1 = 4'b0;
+            assign bht_taken1 = 4'b0;
         end
     endgenerate
 
@@ -604,21 +628,47 @@ module core
     /* verilator lint_on UNUSEDSIGNAL */
     assign iq_head1 = iq1_bits;
 
-    qv_align #(.ONE_OK(FETCH_STREAM)) align0 (
-        .clk(clk), .rst(rst), .i_flush(fe_flush),
-        .i_buf_valid(fb_valid), .i_buf_pc(fb_pc), .i_buf_data(fb_data), .i_buf_err(fb_err),
-        .i_buf_cause(fb_cause), .i_buf_xl(fb_xl), .i_buf_pg(fb_pg),
-        .i_buf_hint(fb_hint), .i_buf_hoff(fb_hoff), .i_buf_hx(fb_hx), .i_buf_htgt(fb_htgt),
-        .o_buf_pop(fb_pop),
-        .o_bht_base(bht_base), .o_bht_ppc(bht_ppc),
-        .i_bht_known(bht_known), .i_bht_taken(bht_taken), .i_bht_pknown(bht_pknown), .i_bht_ptaken(bht_ptaken),
-        .i_ras_top(ras_top), .i_ras_has1(ras_has1),
-        .o_ras_op0(ras_op0), .o_ras_addr0(ras_addr0), .o_ras_op1(ras_op1), .o_ras_addr1(ras_addr1),
-        .o_push0_valid(a0_valid), .o_push0_data(a0_data),
-        .o_push1_valid(a1_valid), .o_push1_data(a1_data),
-        .i_push_ready(iq_push_ready), .i_push_ready1(iq_push_ready1),
-        .o_redirect_valid(fe_redirect_valid), .o_redirect_pc(fe_redirect_pc)
-    );
+    generate
+        if (ALIGN_WIN) begin : g_win
+            qv_align2 #(.ONE_OK(FETCH_STREAM)) align0 (
+                .clk(clk), .rst(rst), .i_flush(fe_flush),
+                .i_buf_valid(fb_valid), .i_buf_pc(fb_pc), .i_buf_data(fb_data), .i_buf_err(fb_err),
+                .i_buf_cause(fb_cause), .i_buf_xl(fb_xl), .i_buf_pg(fb_pg),
+                .i_buf_hint(fb_hint), .i_buf_hoff(fb_hoff), .i_buf_hx(fb_hx), .i_buf_htgt(fb_htgt),
+                .o_buf_pop(fb_pop),
+                .i_buf1_valid(fb1_valid), .i_buf1_pc(fb1_pc), .i_buf1_data(fb1_data), .i_buf1_err(fb1_err),
+                .i_buf1_xl(fb1_xl), .i_buf1_pg(fb1_pg), .i_buf1_hint(fb1_hint), .i_buf1_hoff(fb1_hoff),
+                .i_buf1_hx(fb1_hx), .i_buf1_htgt(fb1_htgt), .o_buf_pop2(fb_pop2),
+                .o_bht_base(bht_base), .o_bht_base1(bht_base1), .o_bht_ppc(bht_ppc),
+                .i_bht_known(bht_known), .i_bht_taken(bht_taken), .i_bht_known1(bht_known1),
+                .i_bht_taken1(bht_taken1), .i_bht_pknown(bht_pknown), .i_bht_ptaken(bht_ptaken),
+                .i_ras_top(ras_top), .i_ras_has1(ras_has1),
+                .o_ras_op0(ras_op0), .o_ras_addr0(ras_addr0), .o_ras_op1(ras_op1), .o_ras_addr1(ras_addr1),
+                .o_push0_valid(a0_valid), .o_push0_data(a0_data),
+                .o_push1_valid(a1_valid), .o_push1_data(a1_data),
+                .i_push_ready(iq_push_ready), .i_push_ready1(iq_push_ready1),
+                .o_redirect_valid(fe_redirect_valid), .o_redirect_pc(fe_redirect_pc)
+            );
+        end else begin : g_align
+            qv_align #(.ONE_OK(FETCH_STREAM)) align0 (
+                .clk(clk), .rst(rst), .i_flush(fe_flush),
+                .i_buf_valid(fb_valid), .i_buf_pc(fb_pc), .i_buf_data(fb_data), .i_buf_err(fb_err),
+                .i_buf_cause(fb_cause), .i_buf_xl(fb_xl), .i_buf_pg(fb_pg),
+                .i_buf_hint(fb_hint), .i_buf_hoff(fb_hoff), .i_buf_hx(fb_hx), .i_buf_htgt(fb_htgt),
+                .o_buf_pop(fb_pop),
+                .o_bht_base(bht_base), .o_bht_ppc(bht_ppc),
+                .i_bht_known(bht_known), .i_bht_taken(bht_taken), .i_bht_pknown(bht_pknown), .i_bht_ptaken(bht_ptaken),
+                .i_ras_top(ras_top), .i_ras_has1(ras_has1),
+                .o_ras_op0(ras_op0), .o_ras_addr0(ras_addr0), .o_ras_op1(ras_op1), .o_ras_addr1(ras_addr1),
+                .o_push0_valid(a0_valid), .o_push0_data(a0_data),
+                .o_push1_valid(a1_valid), .o_push1_data(a1_data),
+                .i_push_ready(iq_push_ready), .i_push_ready1(iq_push_ready1),
+                .o_redirect_valid(fe_redirect_valid), .o_redirect_pc(fe_redirect_pc)
+            );
+            assign fb_pop2   = 1'b0;
+            assign bht_base1 = 64'b0;
+        end
+    endgenerate
 
     // While halted the instruction queue is fed by the Program Buffer injector (nothing comes from fetch then):
     // a 32-bit word at the architectural pc, no fault, no prediction.

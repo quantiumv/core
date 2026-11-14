@@ -27,6 +27,12 @@ module qv_bht #(
     output logic [3:0]  o_taken,        // ... and says taken
     output logic        o_pend_known,
     output logic        o_pend_taken,
+    // (O8b) the dword behind it too, for qv_align2's window
+    /* verilator lint_off UNUSEDSIGNAL */
+    input  logic [63:0] i_base1_pc = 64'b0,
+    /* verilator lint_on UNUSEDSIGNAL */
+    output logic [3:0]  o_known1,
+    output logic [3:0]  o_taken1,
 
     // training, at commit
     input  logic        i_upd_valid,
@@ -45,6 +51,12 @@ module qv_bht #(
         wire [IDX_W-1:0]  ix  = {i_base_pc[IDX_W:3], pos};
         assign o_known[pg] = v_q[ix];
         assign o_taken[pg] = v_q[ix] && ctr_q[ix][1];
+    end
+    for (genvar pg = 0; pg < 4; pg++) begin : g_pos1
+        wire [1:0]        pos = 2'(pg);
+        wire [IDX_W-1:0]  ix  = {i_base1_pc[IDX_W:3], pos};
+        assign o_known1[pg] = v_q[ix];
+        assign o_taken1[pg] = v_q[ix] && ctr_q[ix][1];
     end
     wire [IDX_W-1:0] pix = i_pend_pc[IDX_W:1];
     assign o_pend_known = v_q[pix];

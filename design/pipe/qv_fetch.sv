@@ -135,7 +135,19 @@ module qv_fetch #(
     output logic [1:0]  o_buf_hoff,
     output logic        o_buf_hx,                  // ... it is the second half of a crossing branch (the dword's halfword 0)
     output logic [63:0] o_buf_htgt,
-    input  logic        i_buf_pop
+    input  logic        i_buf_pop,
+    // (O8b) the entry behind the head, for qv_align2's window, and a pop of both in one cycle
+    output logic        o_buf1_valid,
+    output logic [63:0] o_buf1_pc,
+    output logic [63:0] o_buf1_data,
+    output logic        o_buf1_err,
+    output logic        o_buf1_xl,
+    output logic [43:0] o_buf1_pg,
+    output logic        o_buf1_hint,
+    output logic [1:0]  o_buf1_hoff,
+    output logic        o_buf1_hx,
+    output logic [63:0] o_buf1_htgt,
+    input  logic        i_buf_pop2 = 1'b0
 );
     localparam int PTR_W = (FB_DEPTH > 1) ? $clog2(FB_DEPTH) : 1;
     localparam int CNT_W = $clog2(FB_DEPTH + 1);
@@ -184,11 +196,12 @@ module qv_fetch #(
 
     wire fb_push = resp_ok;
     wire fb_pop  = i_buf_pop && (fb_count_q != '0) && !i_redirect_valid;
+    wire fb_pop2 = i_buf_pop2 && fb_pop && (fb_count_q >= CNT_W'(2));   // (O8b) the entry behind the head too
 
     logic [CNT_W-1:0] fb_count_next;
     always_comb begin
         if (i_redirect_valid) fb_count_next = '0;
-        else                  fb_count_next = fb_count_q + CNT_W'(fb_push) - CNT_W'(fb_pop);
+        else                  fb_count_next = fb_count_q + CNT_W'(fb_push) - CNT_W'(fb_pop) - CNT_W'(fb_pop2);
     end
 
     // Room for exactly one more response after this cycle settles, and no
@@ -310,7 +323,7 @@ module qv_fetch #(
                     fb_htgt[fb_wr_q]  <= req_htgt_q;
                     fb_wr_q           <= ptr_inc(fb_wr_q);
                 end
-                if (fb_pop) fb_rd_q <= ptr_inc(fb_rd_q);
+                if (fb_pop) fb_rd_q <= fb_pop2 ? ptr_inc(ptr_inc(fb_rd_q)) : ptr_inc(fb_rd_q);
             end
             fb_count_q <= fb_count_next;
         end
@@ -327,4 +340,16 @@ module qv_fetch #(
     assign o_buf_hoff  = fb_hoff[fb_rd_q];
     assign o_buf_hx    = fb_hx[fb_rd_q];
     assign o_buf_htgt  = fb_htgt[fb_rd_q];
+
+    wire [PTR_W-1:0] fb_rd1 = ptr_inc(fb_rd_q);
+    assign o_buf1_valid = (fb_count_q >= CNT_W'(2));
+    assign o_buf1_pc    = fb_pc[fb_rd1];
+    assign o_buf1_data  = fb_data[fb_rd1];
+    assign o_buf1_err   = fb_err[fb_rd1];
+    assign o_buf1_xl    = fb_xl[fb_rd1];
+    assign o_buf1_pg    = fb_pg[fb_rd1];
+    assign o_buf1_hint  = fb_hint[fb_rd1];
+    assign o_buf1_hoff  = fb_hoff[fb_rd1];
+    assign o_buf1_hx    = fb_hx[fb_rd1];
+    assign o_buf1_htgt  = fb_htgt[fb_rd1];
 endmodule
