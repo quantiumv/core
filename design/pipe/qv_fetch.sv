@@ -82,7 +82,8 @@ module qv_fetch #(
     parameter int          FB_DEPTH   = 2,
     parameter bit          STREAM     = 1'b0,
     parameter bit          BTB_EN     = 1'b0,
-    parameter bit          PAGE_REUSE = 1'b0
+    parameter bit          PAGE_REUSE = 1'b0,
+    parameter bit          IDLE_GO    = 1'b0    // (O8b) a request from an idle bus goes out in its issue cycle too
 ) (
     input  logic        clk,
     input  logic        rst,
@@ -225,11 +226,18 @@ module qv_fetch #(
     // for its answer.
     wire stream_reuse = PAGE_REUSE && i_xl_on && lp_valid_q && (fpc_q[63:12] == lp_vpn_q);
     wire stream_go = STREAM && can_issue && bus_resp && !i_redirect_valid && (!i_xl_on || stream_reuse) && !i_yield;
+    // (O8b, IDLE_GO) the same from an idle bus: nothing outstanding and no redirect this cycle (a redirect's target is
+    // in fpc_q from the cycle after it), so fetch_pc goes out at once instead of through the request register first.
+    // Without it a redirect that finds the bus idle starts its fetch a cycle later than one that finds a stale request
+    // answering (that one streams), and the window aligner leaves the bus idle more often.
+    wire idle_go   = IDLE_GO && STREAM && can_issue && !req_valid_q && !i_redirect_valid && (!i_xl_on || stream_reuse)
+                     && !i_yield;
+    wire fpc_go    = stream_go || idle_go;
 
-    assign wb_fetch_cyc_o  = bus && (!(wb_fetch_ack_i || wb_fetch_err_i) || stream_go);
+    assign wb_fetch_cyc_o  = (bus && (!(wb_fetch_ack_i || wb_fetch_err_i) || stream_go)) || idle_go;
     assign wb_fetch_stb_o  = wb_fetch_cyc_o;
     // the bus carries PA[31:0]: the physical page's low 20 bits, then the offset within the page
-    assign wb_fetch_addr_o = stream_go  ? (stream_reuse ? {lp_ppn_q[19:0], fpc_q[11:3], 3'b000} : {fpc_q[31:3], 3'b000})
+    assign wb_fetch_addr_o = fpc_go     ? (stream_reuse ? {lp_ppn_q[19:0], fpc_q[11:3], 3'b000} : {fpc_q[31:3], 3'b000})
                            : req_isxl_q ? {req_pa_q[19:0], req_pc_q[11:3], 3'b000}
                                         : {req_pc_q[31:3], 3'b000};
 

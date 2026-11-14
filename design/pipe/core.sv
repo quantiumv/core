@@ -508,7 +508,7 @@ module core
     logic [63:0] btb_tgt;
 
     qv_fetch #(.RESET_PC(RESET_PC), .FB_DEPTH(FB_DEPTH), .STREAM(FETCH_STREAM), .BTB_EN(BTB_ENTRIES > 0),
-               .PAGE_REUSE(SV39_EN && FETCH_PAGE_REUSE)) fetch0 (
+               .PAGE_REUSE(SV39_EN && FETCH_PAGE_REUSE), .IDLE_GO(ALIGN_WIN)) fetch0 (
         .clk(clk), .rst(rst),
         .wb_fetch_addr_o(wb_fetch_addr_o), .wb_fetch_cyc_o(wb_fetch_cyc_o), .wb_fetch_stb_o(wb_fetch_stb_o),
         .wb_fetch_dat_i(wb_fetch_dat_i), .wb_fetch_ack_i(wb_fetch_ack_i), .wb_fetch_err_i(wb_fetch_err_i),
