@@ -104,6 +104,19 @@
 `ifndef QV_PIPE_BTB_CTR
 `define QV_PIPE_BTB_CTR 1'b0
 `endif
+// (O8a) A global-history direction predictor (qv_gshare) in front of the branch history table: a conditional branch
+// takes its direction where its counter is trained, the table's where not. QV_PIPE_GSHARE_H history bits (0: none;
+// needs the window aligner and the table), 2^QV_PIPE_GSHARE_BITS counters.
+`ifndef QV_PIPE_GSHARE_H
+`define QV_PIPE_GSHARE_H 0
+`endif
+`ifndef QV_PIPE_GSHARE_BITS
+`ifdef QV_FORMAL_SMALL
+`define QV_PIPE_GSHARE_BITS 3
+`else
+`define QV_PIPE_GSHARE_BITS 12
+`endif
+`endif
 // Where the fetch port shares a bus with the memory port through an arbiter (the SRAM harnesses), the stream
 // must pause for a cycle now and then so the other master is granted: FETCH_YIELD, set by the instantiating
 // harness (the SoC's fetch has the instruction cache to itself).
@@ -285,6 +298,8 @@ module core
     parameter bit FETCH_YIELD  = `QV_PIPE_FETCH_YIELD,    // fetch gives way to the memory port's masters (shared bus)
     parameter int BTB_ENTRIES  = `QV_PIPE_BTB_ENTRIES,    // branch target buffer entries, 0: none
     parameter bit BTB_CTR      = `QV_PIPE_BTB_CTR,        // (O8c) a direction counter per BTB entry
+    parameter int GSHARE_H     = `QV_PIPE_GSHARE_H,       // (O8a) global history bits, 0: no gshare
+    parameter int GSHARE_BITS  = `QV_PIPE_GSHARE_BITS,    // (O8a) log2 of its counters
     parameter int RAS_DEPTH    = `QV_PIPE_RAS_DEPTH,      // return-address stack entries, 0: none (>= 2 otherwise)
     parameter int RAS_REPAIR   = `QV_PIPE_RAS_REPAIR,     // (O3) 0 none, 1 index and count, 2 also the top entry
     parameter bit EXEC_REDIRECT = `QV_PIPE_EXEC_REDIRECT, // (O3) a mispredict recovers at execute
@@ -617,6 +632,14 @@ module core
         end
     endgenerate
 
+    // (O8a) the direction the aligner gets: gshare's where its counter is trained, the history table's where not
+    localparam bit GS_ON = (GSHARE_H > 0) && (BHT_ENTRIES > 0) && ALIGN_WIN;
+    logic [3:0]  dir_known, dir_taken;
+    /* verilator lint_off UNUSEDSIGNAL */
+    logic [3:0]  dir_known1, dir_taken1;     // (read only with ALIGN_WIN)
+    /* verilator lint_on UNUSEDSIGNAL */
+    logic        dir_pknown, dir_ptaken;
+
     // ---------------- A: align -> instruction queue ----------------
     localparam int FE_W = $bits(fe_instr_t);
 
@@ -638,7 +661,7 @@ module core
 
     generate
         if (ALIGN_WIN) begin : g_win
-            qv_align2 #(.ONE_OK(FETCH_STREAM)) align0 (
+            qv_align2 #(.ONE_OK(FETCH_STREAM), .ONE_COND(GS_ON)) align0 (
                 .clk(clk), .rst(rst), .i_flush(fe_flush),
                 .i_buf_valid(fb_valid), .i_buf_pc(fb_pc), .i_buf_data(fb_data), .i_buf_err(fb_err),
                 .i_buf_cause(fb_cause), .i_buf_xl(fb_xl), .i_buf_pg(fb_pg),
@@ -648,8 +671,8 @@ module core
                 .i_buf1_xl(fb1_xl), .i_buf1_pg(fb1_pg), .i_buf1_hint(fb1_hint), .i_buf1_hoff(fb1_hoff),
                 .i_buf1_hx(fb1_hx), .i_buf1_htgt(fb1_htgt), .o_buf_pop2(fb_pop2),
                 .o_bht_base(bht_base), .o_bht_base1(bht_base1), .o_bht_ppc(bht_ppc),
-                .i_bht_known(bht_known), .i_bht_taken(bht_taken), .i_bht_known1(bht_known1),
-                .i_bht_taken1(bht_taken1), .i_bht_pknown(bht_pknown), .i_bht_ptaken(bht_ptaken),
+                .i_bht_known(dir_known), .i_bht_taken(dir_taken), .i_bht_known1(dir_known1),
+                .i_bht_taken1(dir_taken1), .i_bht_pknown(dir_pknown), .i_bht_ptaken(dir_ptaken),
                 .i_ras_top(ras_top), .i_ras_has1(ras_has1),
                 .o_ras_op0(ras_op0), .o_ras_addr0(ras_addr0), .o_ras_op1(ras_op1), .o_ras_addr1(ras_addr1),
                 .o_push0_valid(a0_valid), .o_push0_data(a0_data),
@@ -665,7 +688,7 @@ module core
                 .i_buf_hint(fb_hint), .i_buf_hoff(fb_hoff), .i_buf_hx(fb_hx), .i_buf_htgt(fb_htgt),
                 .o_buf_pop(fb_pop),
                 .o_bht_base(bht_base), .o_bht_ppc(bht_ppc),
-                .i_bht_known(bht_known), .i_bht_taken(bht_taken), .i_bht_pknown(bht_pknown), .i_bht_ptaken(bht_ptaken),
+                .i_bht_known(dir_known), .i_bht_taken(dir_taken), .i_bht_pknown(dir_pknown), .i_bht_ptaken(dir_ptaken),
                 .i_ras_top(ras_top), .i_ras_has1(ras_has1),
                 .o_ras_op0(ras_op0), .o_ras_addr0(ras_addr0), .o_ras_op1(ras_op1), .o_ras_addr1(ras_addr1),
                 .o_push0_valid(a0_valid), .o_push0_data(a0_data),
@@ -685,13 +708,74 @@ module core
         inj_data.pc   = arch_pc;
         inj_data.raw  = i_progbuf_data;
     end
-    // (O3) each instruction the aligner emits carries the return-address stack as it left it
+    // (O8a) the global history: the conditional branch the aligner sends out this cycle (one at most, ONE_COND)
+    // shifts in its predicted direction; each instruction carries the history from before it. A branch predicted
+    // taken to its own fall-through address counts as not taken: it lands at pc + its length either way, so it never
+    // mispredicts (nothing would put the history back), and commit trains it as not taken (by its next pc).
+    /* verilator lint_off UNUSEDSIGNAL */
+    function automatic logic gs_dir(input fe_instr_t i);
+        return i.pred_taken && (i.pred_tgt != i.pc + (i.rvc ? 64'd2 : 64'd4));
+    endfunction
+    /* verilator lint_on UNUSEDSIGNAL */
+    wire         gs_cond0 = GS_ON && a0_valid && qv_is_cond(a0_data.raw);
+    wire         gs_cond1 = GS_ON && a1_valid && qv_is_cond(a1_data.raw);
+    wire         gs_pred0 = gs_dir(a0_data);
+    wire         gs_pred1 = gs_dir(a1_data);
+    logic [11:0] gs_hist0, gs_hist1;           // the history before slot 0's instruction, before slot 1's
+    generate
+        if (GS_ON) begin : g_gs
+            logic [3:0]          gs_known, gs_taken, gs_known1, gs_taken1;
+            logic                gs_pknown, gs_ptaken;
+            logic [GSHARE_H-1:0] gs_h, gs_hc;
+            qv_gshare #(.H(GSHARE_H), .BITS(GSHARE_BITS)) gs0 (
+                .clk(clk), .rst(rst),
+                .i_base_pc(bht_base), .i_base1_pc(bht_base1), .i_pend_pc(bht_ppc),
+                .o_known(gs_known), .o_taken(gs_taken), .o_known1(gs_known1), .o_taken1(gs_taken1),
+                .o_pend_known(gs_pknown), .o_pend_taken(gs_ptaken), .o_hist(gs_h),
+                .i_cond(gs_cond0 || gs_cond1), .i_pred(gs_cond0 ? gs_pred0 : gs_pred1),
+                .i_flush(flush), .i_restore(xr_kill), .i_restore_h(kill_snap.gh[GSHARE_H-1:0]),
+                .i_restore_cond(kill_snap.gc), .i_restore_pred(kill_snap.gp),
+                .i_upd_valid(bht_upd_valid), .i_upd_pc(btb_upd_pc), .i_upd_taken(bht_upd_taken), .o_hist_c(gs_hc)
+            );
+            /* verilator lint_off UNUSEDSIGNAL */
+            wire [GSHARE_H:0] gs_sh0 = {gs_h, gs_pred0};               // (its top bit shifts out)
+            /* verilator lint_on UNUSEDSIGNAL */
+            assign gs_hist0   = 12'(gs_h);
+            assign gs_hist1   = gs_cond0 ? 12'(gs_sh0[GSHARE_H-1:0]) : 12'(gs_h);
+            assign dir_known  = gs_known | bht_known;
+            assign dir_taken  = (gs_known & gs_taken) | (~gs_known & bht_taken);
+            assign dir_known1 = gs_known1 | bht_known1;
+            assign dir_taken1 = (gs_known1 & gs_taken1) | (~gs_known1 & bht_taken1);
+            assign dir_pknown = gs_pknown | bht_pknown;
+            assign dir_ptaken = gs_pknown ? gs_ptaken : bht_ptaken;
+        end else begin : g_nogs
+            assign gs_hist0   = '0;
+            assign gs_hist1   = '0;
+            assign dir_known  = bht_known;
+            assign dir_taken  = bht_taken;
+            assign dir_known1 = bht_known1;
+            assign dir_taken1 = bht_taken1;
+            assign dir_pknown = bht_pknown;
+            assign dir_ptaken = bht_ptaken;
+        end
+    endgenerate
+`ifndef SYNTHESIS
+    initial if (GSHARE_H > 0 && !GS_ON) $fatal(1, "core: qv_gshare (GSHARE_H) needs the window aligner and the history table");
+`endif
+
+    // (O3) each instruction the aligner emits carries the return-address stack as it left it, (O8a) and the history
     fe_instr_t    a0_snapd, a1_snapd;
     always_comb begin
-        a0_snapd          = a0_data;
-        a0_snapd.ras_snap = ras_snap0;
-        a1_snapd          = a1_data;
-        a1_snapd.ras_snap = ras_snap1;
+        a0_snapd             = a0_data;
+        a0_snapd.ras_snap    = ras_snap0;
+        a0_snapd.ras_snap.gh = gs_hist0;
+        a0_snapd.ras_snap.gc = gs_cond0;
+        a0_snapd.ras_snap.gp = gs_cond0 && gs_pred0;
+        a1_snapd             = a1_data;
+        a1_snapd.ras_snap    = ras_snap1;
+        a1_snapd.ras_snap.gh = gs_hist1;
+        a1_snapd.ras_snap.gc = gs_cond1;
+        a1_snapd.ras_snap.gp = gs_cond1 && gs_pred1;
     end
     assign p0_valid = dbg_in_debug ? inj_valid : a0_valid;
     assign p0_data  = dbg_in_debug ? inj_data  : a0_snapd;
@@ -1522,6 +1606,21 @@ module core
     assign o_progbuf_abort = pb_abort;
 
 `ifndef SYNTHESIS
+    // (O8a) every conditional branch that retires was predicted with the committed history (the speculative history of
+    // its fetch on the right path): a mismatch is a lost or doubled shift, or a wrong restore
+    generate
+        if (GS_ON) begin : g_gs_chk
+            /* verilator lint_off UNUSEDSIGNAL */
+            ras_snap_t gs_tsnap;                                           // (its history field only)
+            /* verilator lint_on UNUSEDSIGNAL */
+            assign gs_tsnap = rob0.snap_q[(qv_ctl_kind(head_entry.raw) == 2'd0) ? int'(head1_tag) % ROB_DEPTH
+                                                                                : int'(head_tag) % ROB_DEPTH];
+            always @(posedge clk)
+                if (!rst && bht_upd_valid && gs_tsnap.gh[GSHARE_H-1:0] != g_gs.gs_hc)
+                    $fatal(1, "core: a conditional branch at %h retires with history %h, the committed one is %h",
+                           btb_upd_pc, gs_tsnap.gh[GSHARE_H-1:0], g_gs.gs_hc);
+        end
+    endgenerate
     // O4: the width knobs whose paths exist so far
     initial if (COMMIT_W < 1 || COMMIT_W > 2 || DISPATCH_W < 1 || DISPATCH_W > 2 || ALU_PORTS < 1 || ALU_PORTS > 2)
         $fatal(1, "core: COMMIT_W, DISPATCH_W and ALU_PORTS must be 1 or 2");

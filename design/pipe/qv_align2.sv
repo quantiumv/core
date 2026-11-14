@@ -23,12 +23,15 @@
  *     starts in (a crossing one: the hint of the entry it ends in, with hx); a confirmed hint drops the rest of its
  *     entry, an unconfirmed one sends fetch back to the entry's sequential successor once the entry is used up;
  *   - a predicted-taken instruction is the last of its cycle;
- *   - instructions go out when the IQ has room for two, or one with ONE_OK.
+ *   - instructions go out when the IQ has room for two, or one with ONE_OK;
+ *   - with ONE_COND (qv_gshare, O8a) at most one conditional branch goes out a cycle, so one global history serves
+ *     every lookup of the cycle and shifts once.
  * The branch history table is looked up for the head's four halfwords (o_bht_base), the next entry's
  * (o_bht_base1) and a pending instruction (o_bht_ppc).
  */
 module qv_align2 #(
-    parameter bit ONE_OK = 1'b0
+    parameter bit ONE_OK   = 1'b0,
+    parameter bit ONE_COND = 1'b0       // (O8a) at most one conditional branch a cycle (one global history)
 ) (
     input  logic              clk,
     input  logic              rst,
@@ -345,6 +348,10 @@ module qv_align2 #(
                 s1 = slot_at(cur[2:0], wend, i_buf_data, i_buf1_data, base, i_buf_xl, i_buf_pg, i_buf1_xl, i_buf1_pg,
                              i_buf_hint, i_buf_hoff, i_buf_hx, i_buf_htgt, i_buf1_hint, i_buf1_hoff, i_buf1_hx,
                              i_buf1_htgt, i_bht_known, i_bht_taken, i_bht_known1, i_bht_taken1, ras_ok1, ras_tgt1);
+                if (ONE_COND && s1.emit && qv_is_cond(s1.ins.raw) && qv_is_cond(o_push0_data.raw)) begin
+                    s1      = '0;          // (O8a) a second conditional waits for the next cycle's history
+                    s1.next = cur;
+                end
                 o_push1_valid = s1.emit;
                 o_push1_data  = s1.ins;
                 conf1         = s1.conf && !s1.in1;

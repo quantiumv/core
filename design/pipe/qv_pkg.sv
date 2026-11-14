@@ -97,10 +97,16 @@ package qv_pkg;
     // (O3) the speculative return-address stack as an instruction left it (qv_ras with REPAIR > 0; every field 0
     // otherwise): its top entry's index, how many entries it holds and that top entry. A recovery at execute puts
     // the stack back as the mispredicted branch left it. Sized for qv_ras DEPTH up to 8.
+    // (O8a) and the global history (qv_gshare) as it was before the instruction, whether the instruction is a
+    // conditional branch and which way it was predicted: a recovery at execute puts the history back as the branch
+    // left it (every field 0 without qv_gshare). Up to 12 history bits.
     typedef struct packed {
         logic [2:0]  ptr;
         logic [3:0]  cnt;
         logic [63:0] top;
+        logic [11:0] gh;
+        logic        gc;
+        logic        gp;
     } ras_snap_t;
 
     // Frontend -> instruction queue.

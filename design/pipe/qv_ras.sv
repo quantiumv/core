@@ -55,7 +55,9 @@ module qv_ras #(
     output qv_pkg::ras_snap_t o_snap0,
     output qv_pkg::ras_snap_t o_snap1,
     input  logic              i_restore = 1'b0,
+    /* verilator lint_off UNUSEDSIGNAL */   // (its global-history fields are qv_gshare's)
     input  qv_pkg::ras_snap_t i_restore_snap = '0
+    /* verilator lint_on UNUSEDSIGNAL */
 );
     localparam int CNT_W = $clog2(DEPTH + 1);
     localparam int W = DEPTH * 64;
