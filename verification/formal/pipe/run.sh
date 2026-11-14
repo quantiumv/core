@@ -37,11 +37,14 @@
 #   entry selected or kept, a pipeline stage or a divide that ignores its kill, a killed op written back, a killed op
 #   offered to the engine, a queue that does not roll back.
 #   (O8b) fetch.sby's *_w tasks (the window aligner's fetch: the entry behind the head, popping two, a request from an
-#   idle bus in its issue cycle) and align2.sby (qv_align2 against a model fetch buffer: bmc and cover, on bitwuzla);
+#   idle bus in its issue cycle) and align2.sby (qv_align2 against a model fetch buffer, on bitwuzla); (O8a) gh.sby
+#   (qv_gshare's global history against a ghost of the instructions in flight);
 #   --mutants: an idle-bus request that ignores the buffer's room, a redirect or the reset, two
 #   pops counted or moved as one, two pops with one entry, the entry behind the head read at the head; and for the
 #   aligner a window that joins a faulted entry, a crossing instruction's second half taken from its first, both
-#   entries popped early, the position in the second entry lost.
+#   entries popped early, the position in the second entry lost; for the global history a restore with the predicted
+#   direction, a jump's restore that shifts, a flush without this cycle's retirement, a lost shift, a committed history
+#   that never moves.
 set -u
 cd "$(dirname "$0")" || exit 1
 HERE=$(pwd)
@@ -51,22 +54,17 @@ fail=0
 
 status() { grep -o 'DONE ([A-Z]*' | head -1 | sed 's/DONE (//'; }
 
-for unit in fetch lsu dbg ptw sb fpu rs rs2 kill ras; do
+for unit in fetch lsu dbg ptw sb fpu rs rs2 kill ras align2 gh; do
     for task in prove bmc cover; do
         r=$(sby -f $unit.sby $task 2>&1 | status)
         printf '%-12s %s\n' "$unit $task" "$r"
         [ "$r" == "PASS" ] || fail=1
     done
 done
-# (O8b) the window aligner's fetch, and the aligner itself against a model fetch buffer (bounded)
+# (O8b) the window aligner's fetch
 for task in prove_w bmc_w cover_w prove_w2; do
     r=$(sby -f fetch.sby $task 2>&1 | status)
     printf '%-12s %s\n' "fetch $task" "$r"
-    [ "$r" == "PASS" ] || fail=1
-done
-for task in bmc cover; do
-    r=$(sby -f align2.sby $task 2>&1 | status)
-    printf '%-12s %s\n' "align2 $task" "$r"
     [ "$r" == "PASS" ] || fail=1
 done
 # the load/store queue with the engine (lsq.sby): bounded only, no k-induction (see lsq_props.sv)
@@ -333,6 +331,12 @@ EOF
     multi_mutant align2_cross_half      align2.sby qv_align2 "s/raw = {hw8(d0, d1, p + 3'd1), h};/raw = {hw8(d0, d1, p), h};/"
     multi_mutant align2_pop2_early      align2.sby qv_align2 "s/assign o_buf_pop2 = go \&\& (cur == 4'd8) \&\& !o_redirect_valid;/assign o_buf_pop2 = go \&\& (cur >= 4'd4) \&\& !o_redirect_valid;/"
     multi_mutant align2_mid_lost        align2.sby qv_align2 "s/mid_q  <= (cur < 4'd4) || (cur > 4'd4 \&\& cur < 4'd8);/mid_q  <= (cur < 4'd4);/"
+    # (O8a) the global history
+    multi_mutant gh_restore_pred        gh.sby     qv_gshare "s/h_q <= i_restore_cond ? shift(i_restore_h, !i_restore_pred) : i_restore_h;/h_q <= i_restore_cond ? shift(i_restore_h, i_restore_pred) : i_restore_h;/"
+    multi_mutant gh_restore_jump        gh.sby     qv_gshare "s/h_q <= i_restore_cond ? shift(i_restore_h, !i_restore_pred) : i_restore_h;/h_q <= shift(i_restore_h, !i_restore_pred);/"
+    multi_mutant gh_flush_stale         gh.sby     qv_gshare "s/if (i_flush)        h_q <= hc_next;/if (i_flush)        h_q <= hc_q;/"
+    multi_mutant gh_shift_lost          gh.sby     qv_gshare "s/else if (i_cond)    h_q <= shift(h_q, i_pred);/else if (1'b0)      h_q <= shift(h_q, i_pred);/"
+    multi_mutant gh_commit_stuck        gh.sby     qv_gshare "s/wire \[H-1:0\]    hc_next = i_upd_valid ? shift(hc_q, i_upd_taken) : hc_q;/wire [H-1:0]    hc_next = hc_q;/"
     rm -rf "$T"
 fi
 

@@ -1,0 +1,26 @@
+# qv_gshare's global history (O8a) against a ghost of the instructions in flight (gh_props.sv): k-induction proof,
+# BMC and covers. Run with run.sh, or: sby -f gh.sby
+[tasks]
+prove
+bmc
+cover
+
+[options]
+prove: mode prove
+prove: depth 6
+bmc: mode bmc
+bmc: depth 16
+cover: mode cover
+cover: depth 16
+
+[engines]
+smtbmc boolector
+
+[script]
+plugin -i /home/potato/yosys-slang-src/build/slang.so
+read_slang --single-unit qv_gshare.sv gh_props.sv --top gh_props
+prep -top gh_props
+
+[files]
+../../../design/pipe/qv_gshare.sv
+gh_props.sv
