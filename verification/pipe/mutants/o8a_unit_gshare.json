@@ -1,0 +1,85 @@
+{
+ "dut": "design/pipe/qv_gshare.sv",
+ "tb": "design/pipe/qv_gshare_tb.sv",
+ "files": [
+  "design/pipe/qv_gshare.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench"
+ ],
+ "cwd": "design",
+ "timeout": 900,
+ "mutants": [
+  {
+   "name": "an untrained counter is known",
+   "old": "assign o_known[pg]  = v_q[ix];",
+   "new": "assign o_known[pg]  = 1'b1;"
+  },
+  {
+   "name": "taken from 1 up",
+   "old": "assign o_taken[pg]  = v_q[ix] && ctr_q[ix][1];",
+   "new": "assign o_taken[pg]  = v_q[ix] && ctr_q[ix][0];"
+  },
+  {
+   "name": "the dword behind the head is looked up at the head's",
+   "old": "wire [BITS-1:0] ix1 = idx({i_base1_pc[BITS:3], 2'(pg)}, h_q);",
+   "new": "wire [BITS-1:0] ix1 = idx({i_base_pc[BITS:3], 2'(pg)}, h_q);"
+  },
+  {
+   "name": "the pending instruction is looked up without the history",
+   "old": "wire [BITS-1:0] pix = idx(i_pend_pc[BITS:1], h_q);",
+   "new": "wire [BITS-1:0] pix = i_pend_pc[BITS:1];"
+  },
+  {
+   "name": "training at the speculative history",
+   "old": "wire [BITS-1:0] uix     = idx(i_upd_pc[BITS:1], hc_q);",
+   "new": "wire [BITS-1:0] uix     = idx(i_upd_pc[BITS:1], h_q);"
+  },
+  {
+   "name": "a counter starts strong",
+   "old": "if (!v_q[uix])        ctr_q[uix] <= i_upd_taken ? 2'b10 : 2'b01;",
+   "new": "if (!v_q[uix])        ctr_q[uix] <= i_upd_taken ? 2'b11 : 2'b00;"
+  },
+  {
+   "name": "a counter wraps past 3",
+   "old": "else if (i_upd_taken) ctr_q[uix] <= (ctr_q[uix] == 2'b11) ? 2'b11 : ctr_q[uix] + 2'b01;",
+   "new": "else if (i_upd_taken) ctr_q[uix] <= ctr_q[uix] + 2'b01;"
+  },
+  {
+   "name": "a counter wraps below 0",
+   "old": "else                  ctr_q[uix] <= (ctr_q[uix] == 2'b00) ? 2'b00 : ctr_q[uix] - 2'b01;",
+   "new": "else                  ctr_q[uix] <= ctr_q[uix] - 2'b01;"
+  },
+  {
+   "name": "the index ignores the history",
+   "old": "return pc_hw ^ BITS'(h);",
+   "new": "return pc_hw;"
+  },
+  {
+   "name": "the history shifts the other way",
+   "old": "return (H == 1) ? H'(b) : {h[H-2:0], b};",
+   "new": "return (H == 1) ? H'(b) : {b, h[H-1:1]};"
+  },
+  {
+   "name": "a restore shifts in the predicted direction",
+   "old": "h_q <= i_restore_cond ? shift(i_restore_h, !i_restore_pred) : i_restore_h;",
+   "new": "h_q <= i_restore_cond ? shift(i_restore_h, i_restore_pred) : i_restore_h;"
+  },
+  {
+   "name": "a flush takes the committed history without this cycle's retirement",
+   "old": "if (i_flush)        h_q <= hc_next;",
+   "new": "if (i_flush)        h_q <= hc_q;"
+  },
+  {
+   "name": "the aligner's shift beats a restore",
+   "old": "else if (i_restore) h_q <= i_restore_cond ? shift(i_restore_h, !i_restore_pred) : i_restore_h;\n            else if (i_cond)    h_q <= shift(h_q, i_pred);",
+   "new": "else if (i_cond)    h_q <= shift(h_q, i_pred);\n            else if (i_restore) h_q <= i_restore_cond ? shift(i_restore_h, !i_restore_pred) : i_restore_h;"
+  }
+ ]
+}
