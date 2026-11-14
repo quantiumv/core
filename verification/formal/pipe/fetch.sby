@@ -2,6 +2,7 @@
 # BMC as a cross-check. Run with run.sh, or: sby -f fetch.sby
 # prove/bmc/cover: the shipping configuration (FB_DEPTH 4, streaming). *_fb2: the formal small
 # configuration's FB_DEPTH 2. prove_ns: FB_DEPTH 2 without streaming (the old rate).
+# *_w: the window aligner's (O8b) fetch, IDLE_GO, at FB_DEPTH 4 (prove_w2: 2).
 [tasks]
 prove
 bmc
@@ -9,6 +10,10 @@ cover
 prove_fb2
 bmc_fb2
 prove_ns
+prove_w
+bmc_w
+cover_w
+prove_w2
 
 [options]
 prove: mode prove
@@ -17,6 +22,14 @@ prove_fb2: mode prove
 prove_fb2: depth 10
 prove_ns: mode prove
 prove_ns: depth 10
+prove_w: mode prove
+prove_w: depth 10
+prove_w2: mode prove
+prove_w2: depth 10
+bmc_w: mode bmc
+bmc_w: depth 16
+cover_w: mode cover
+cover_w: depth 24
 bmc: mode bmc
 bmc: depth 16
 bmc_fb2: mode bmc
@@ -35,6 +48,10 @@ cover: read_slang --single-unit qv_pkg.sv qv_fetch.sv fetch_props.sv --top fetch
 prove_fb2: read_slang --single-unit -D FBD=2 qv_pkg.sv qv_fetch.sv fetch_props.sv --top fetch_props
 bmc_fb2: read_slang --single-unit -D FBD=2 qv_pkg.sv qv_fetch.sv fetch_props.sv --top fetch_props
 prove_ns: read_slang --single-unit -D FBD=2 -D NOSTREAM qv_pkg.sv qv_fetch.sv fetch_props.sv --top fetch_props
+prove_w: read_slang --single-unit -D IDLEGO qv_pkg.sv qv_fetch.sv fetch_props.sv --top fetch_props
+bmc_w: read_slang --single-unit -D IDLEGO qv_pkg.sv qv_fetch.sv fetch_props.sv --top fetch_props
+cover_w: read_slang --single-unit -D IDLEGO qv_pkg.sv qv_fetch.sv fetch_props.sv --top fetch_props
+prove_w2: read_slang --single-unit -D FBD=2 -D IDLEGO qv_pkg.sv qv_fetch.sv fetch_props.sv --top fetch_props
 prep -top fetch_props
 
 [files]

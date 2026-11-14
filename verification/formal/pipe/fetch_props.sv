@@ -15,16 +15,20 @@
  *     response (one issued before a redirect) or a dropped/duplicated
  *     one breaks this. Its data is the data of its own address;
  *   - while held (FENCE.I), no new request starts; held and idle means
- *     nothing on the bus;
+ *     nothing on the bus; nothing is on the bus in reset (from its second cycle);
  *   - a hint from the branch target buffer (free here, at a halfword at or after the request's first, as the BTB
  *     promises) redirects the stream: the dword after a hinted one is the hint's target, and the hint travels with
  *     its dword unchanged;
  *   - streaming (STREAM): a request presented in the cycle another is answered
  *     needs no redirect, hold or yield in that cycle and a free slot in the
- *     buffer for its own answer; the buffer never overflows.
+ *     buffer for its own answer; the buffer never overflows;
+ *   - (O8b) the entry behind the head (o_buf1_*) is where the head leads, with the data of its own address, and
+ *     popping both (i_buf_pop2, free here) moves the head two entries on; with IDLE_GO a request may go out from an
+ *     idle bus in the cycle it is issued (no hold, redirect or yield in that cycle, a slot for its answer), so the
+ *     hold properties allow a request in the first cycle without a hold.
  *
  * Built for FB_DEPTH = FBD (default 4; -DFBD=2 for the formal small
- * configuration) and STREAM (default on; -DNOSTREAM for the old rate).
+ * configuration), STREAM (default on; -DNOSTREAM for the old rate) and IDLE_GO (-DIDLEGO: the window aligner's).
  */
 `ifndef FBD
 `define FBD 4
@@ -38,6 +42,7 @@ module fetch_props (
     input logic        hold,
     input logic        yield,
     input logic        pop,
+    input logic        pop2,
     input logic        btb_hit,
     input logic [1:0]  btb_off,
     input logic        btb_x,
@@ -51,6 +56,11 @@ module fetch_props (
     localparam bit STREAM = 1'b1;
 `endif
     localparam int CW = $clog2(FBD + 1);
+`ifdef IDLEGO
+    localparam bit IDLE_GO = 1'b1;
+`else
+    localparam bit IDLE_GO = 1'b0;
+`endif
 
     logic [31:0] addr;
     logic        cyc, stb, idle, buf_valid, buf_err;
@@ -58,6 +68,9 @@ module fetch_props (
     logic [63:0] btb_pc, buf_htgt;
     logic        buf_hint, buf_hx;
     logic [1:0]  buf_hoff;
+    logic        buf1_valid, buf1_err, buf1_hint, buf1_hx;
+    logic [63:0] buf1_pc, buf1_data, buf1_htgt;
+    logic [1:0]  buf1_hoff;
     // the slave's memory: data = f(address), registered like wb4_sram's (the data of the request seen the cycle before)
     reg  [63:0]  dat = 64'b0;
     always @(posedge clk) dat <= {addr, ~addr};
@@ -65,7 +78,7 @@ module fetch_props (
 `ifdef FETCH_OLD
     qv_fetch #(.RESET_PC(RESET_PC)) dut (
 `else
-    qv_fetch #(.RESET_PC(RESET_PC), .FB_DEPTH(FBD), .STREAM(STREAM), .BTB_EN(1'b1)) dut (
+    qv_fetch #(.RESET_PC(RESET_PC), .FB_DEPTH(FBD), .STREAM(STREAM), .BTB_EN(1'b1), .IDLE_GO(IDLE_GO)) dut (
 `endif
         .clk(clk), .rst(rst),
         .wb_fetch_addr_o(addr), .wb_fetch_cyc_o(cyc), .wb_fetch_stb_o(stb),
@@ -75,6 +88,9 @@ module fetch_props (
         .i_hold(hold), .o_idle(idle), .i_yield(yield),
         .o_btb_pc(btb_pc), .i_btb_hit(btb_hit), .i_btb_off(btb_off), .i_btb_x(btb_x), .i_btb_tgt(btb_tgt),
         .o_buf_hint(buf_hint), .o_buf_hoff(buf_hoff), .o_buf_hx(buf_hx), .o_buf_htgt(buf_htgt),
+        .o_buf1_valid(buf1_valid), .o_buf1_pc(buf1_pc), .o_buf1_data(buf1_data), .o_buf1_err(buf1_err),
+        .o_buf1_hint(buf1_hint), .o_buf1_hoff(buf1_hoff), .o_buf1_hx(buf1_hx), .o_buf1_htgt(buf1_htgt),
+        .i_buf_pop2(pop2),
 `endif
         .o_buf_valid(buf_valid), .o_buf_pc(buf_pc), .o_buf_data(buf_data),
         .o_buf_err(buf_err), .i_buf_pop(pop)
@@ -104,7 +120,8 @@ module fetch_props (
 `ifdef FETCH_OLD
             exp_pc <= {exp_pc[63:3], 3'b000} + 64'd8;
 `else
-            exp_pc <= buf_hint ? buf_htgt : {exp_pc[63:3], 3'b000} + 64'd8;
+            if (pop2 && buf1_valid) exp_pc <= buf1_hint ? buf1_htgt : {buf1_pc[63:3], 3'b000} + 64'd8;
+            else                    exp_pc <= buf_hint ? buf_htgt : {exp_pc[63:3], 3'b000} + 64'd8;
 `endif
         end
     end
@@ -130,10 +147,11 @@ module fetch_props (
                 assert (cyc && stb);
                 assert (addr == p_addr);
             end
-            // held: nothing new starts; held and idle: nothing on the bus
+            // held: nothing new starts; held and idle: nothing on the bus (IDLE_GO: a request may go out in the
+            // first cycle without a hold, from an idle bus)
 `ifndef FETCH_OLD
-            if (p_hold && cyc) assert (p_out);
-            if (p_idle_hold) assert (!cyc);
+            if (p_hold && cyc) assert (p_out || (IDLE_GO && !hold));
+            if (p_idle_hold) assert (!cyc || (IDLE_GO && !hold));
 `endif
         end
         if (!rst && buf_valid && !redirect_valid) begin
@@ -141,7 +159,26 @@ module fetch_props (
             if (!buf_err) assert (buf_data == {exp_pc[31:3], 3'b000, ~{exp_pc[31:3], 3'b000}});
         end
 `ifndef FETCH_OLD
-        if (idle) assert (!cyc);
+        // the entry behind the head: where the head leads, its own data
+        if (!rst && buf1_valid && !redirect_valid) begin
+            assert (buf_valid);
+            assert (buf1_pc == (buf_hint ? buf_htgt : {exp_pc[63:3], 3'b000} + 64'd8));
+            if (!buf1_err) assert (buf1_data == {buf1_pc[31:3], 3'b000, ~{buf1_pc[31:3], 3'b000}});
+        end
+        // a request from an idle bus in its issue cycle: nothing holds, redirects or yields, and its answer has a slot
+        if (!rst && !init && cyc && !dut.req_valid_q) begin
+            assert (IDLE_GO);
+            assert (!redirect_valid && !hold && !yield);
+            assert (dut.fb_count_next < CW'(FBD));
+            assert (addr == {dut.fpc_q[31:3], 3'b000});
+        end
+`endif
+`ifndef FETCH_OLD
+        // idle: nothing on the bus (IDLE_GO: unless a request goes out from the idle bus, which a hold stops; o_idle
+        // is read only while held, by the FENCE.I commit)
+        if (idle && (hold || !IDLE_GO)) assert (!cyc);
+        // a reset cycle after a reset cycle: nothing on the bus (the slaves and arbiters are in reset too)
+        if (rst && !init && !p_valid) assert (!cyc);
         // a request presented in an answer's cycle: only when streaming, and only when nothing redirects, holds or
         // yields in it and the buffer will have a slot for that request's own answer
         if (!rst && !init && cyc && (ack || err)) begin
@@ -164,6 +201,10 @@ module fetch_props (
             cover (p_idle_hold && redirected);                           // held to idle
             cover (STREAM && cyc && (ack || err) && p_cyc && !p_hold);   // a request presented in an answer's cycle
             cover (STREAM && yield && ack && p_cyc && !cyc);             // a stream paused by a yield
+            cover (buf1_valid && pop && pop2 && !redirect_valid);        // two entries popped
+`ifdef IDLEGO
+            cover (cyc && !dut.req_valid_q && redirected);              // a request from an idle bus
+`endif
         end
     end
 

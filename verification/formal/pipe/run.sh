@@ -36,6 +36,12 @@
 #   lost, a pop that wraps an empty count; and the kills the other proofs now take (rs, rs2, fpu, lsu, lsq): a killed
 #   entry selected or kept, a pipeline stage or a divide that ignores its kill, a killed op written back, a killed op
 #   offered to the engine, a queue that does not roll back.
+#   (O8b) fetch.sby's *_w tasks (the window aligner's fetch: the entry behind the head, popping two, a request from an
+#   idle bus in its issue cycle) and align2.sby (qv_align2 against a model fetch buffer: bmc and cover, on bitwuzla);
+#   --mutants: an idle-bus request that ignores the buffer's room, a redirect or the reset, two
+#   pops counted or moved as one, two pops with one entry, the entry behind the head read at the head; and for the
+#   aligner a window that joins a faulted entry, a crossing instruction's second half taken from its first, both
+#   entries popped early, the position in the second entry lost.
 set -u
 cd "$(dirname "$0")" || exit 1
 HERE=$(pwd)
@@ -51,6 +57,19 @@ for unit in fetch lsu dbg ptw sb fpu rs rs2 kill ras; do
         printf '%-12s %s\n' "$unit $task" "$r"
         [ "$r" == "PASS" ] || fail=1
     done
+done
+# (O8b) the window aligner's fetch, and the aligner itself against a model fetch buffer (bounded)
+for task in prove_w bmc_w cover_w prove_w2; do
+    r=$(sby -f fetch.sby $task 2>&1 | status)
+    printf '%-12s %s
+' "fetch $task" "$r"
+    [ "$r" == "PASS" ] || fail=1
+done
+for task in bmc cover; do
+    r=$(sby -f align2.sby $task 2>&1 | status)
+    printf '%-12s %s
+' "align2 $task" "$r"
+    [ "$r" == "PASS" ] || fail=1
 done
 # the load/store queue with the engine (lsq.sby): bounded only, no k-induction (see lsq_props.sv)
 for task in bmc cover opw opw_cover; do
@@ -104,7 +123,7 @@ EOF
     mutant fetch_epoch_aba     fetch "$T/qv_fetch_epoch.sv" "-D FETCH_OLD"
     mutant fetch_no_stale      fetch 's/wire resp_ok  = resp \&\& !req_stale_q \&\& !i_redirect_valid;/wire resp_ok  = resp \&\& !i_redirect_valid;/'
     mutant fetch_ignores_hold  fetch 's/ \&\& !i_hold$//'
-    mutant fetch_abandons      fetch 's/assign wb_fetch_cyc_o  = bus \&\& (!(wb_fetch_ack_i || wb_fetch_err_i) || stream_go);/assign wb_fetch_cyc_o  = bus \&\& (!(wb_fetch_ack_i || wb_fetch_err_i) || stream_go) \&\& !i_redirect_valid;/'
+    mutant fetch_abandons      fetch 's/assign wb_fetch_cyc_o  = (bus \&\& (!(wb_fetch_ack_i || wb_fetch_err_i) || stream_go)) || idle_go;/assign wb_fetch_cyc_o  = (bus \&\& (!(wb_fetch_ack_i || wb_fetch_err_i) || stream_go) \&\& !i_redirect_valid) || idle_go;/'
     mutant fetch_stream_redirect fetch 's/ \&\& !i_redirect_valid \&\& (!i_xl_on || stream_reuse)/ \&\& (!i_xl_on || stream_reuse)/'
     mutant fetch_stream_yield  fetch 's/ \&\& (!i_xl_on || stream_reuse) \&\& !i_yield;/ \&\& (!i_xl_on || stream_reuse);/'
     mutant fetch_stream_room   fetch 's/wire stream_go = STREAM \&\& can_issue \&\& bus_resp/wire stream_go = STREAM \&\& bus_resp/'
@@ -113,6 +132,13 @@ EOF
     mutant fetch_hint_ignored  fetch 's/fpc_q       <= hint ? i_btb_tgt : {issue_pc\[63:3\], 3.b000} + 64.d8;/fpc_q       <= {issue_pc[63:3], 3'"'"'b000} + 64'"'"'d8;/'
     mutant fetch_hint_lost     fetch 's/fb_hint\[fb_wr_q\]  <= req_hint_q;/fb_hint[fb_wr_q]  <= 1'"'"'b0;/'
     mutant fetch_hint_tgt      fetch 's/fb_htgt\[fb_wr_q\]  <= req_htgt_q;/fb_htgt[fb_wr_q]  <= req_htgt_q + 64'"'"'d2;/'
+    mutant fetch_idle_room     fetch 's/wire idle_go   = IDLE_GO \&\& !rst \&\& STREAM \&\& can_issue \&\& !req_valid_q/wire idle_go   = IDLE_GO \&\& !rst \&\& STREAM \&\& !i_hold \&\& !req_valid_q/' "-D IDLEGO"
+    mutant fetch_idle_redirect fetch 's/ \&\& can_issue \&\& !req_valid_q \&\& !i_redirect_valid$/ \&\& can_issue \&\& !req_valid_q/' "-D IDLEGO"
+    mutant fetch_idle_reset    fetch 's/wire idle_go   = IDLE_GO \&\& !rst \&\& STREAM/wire idle_go   = IDLE_GO \&\& STREAM/' "-D IDLEGO"
+    mutant fetch_pop2_count    fetch 's/ - CNT_W.(fb_pop) - CNT_W.(fb_pop2);/ - CNT_W'"'"'(fb_pop);/' "-D IDLEGO"
+    mutant fetch_pop2_ptr      fetch 's/if (fb_pop) fb_rd_q <= fb_pop2 ? ptr_inc(ptr_inc(fb_rd_q)) : ptr_inc(fb_rd_q);/if (fb_pop) fb_rd_q <= ptr_inc(fb_rd_q);/' "-D IDLEGO"
+    mutant fetch_pop2_one      fetch 's/wire fb_pop2 = i_buf_pop2 \&\& fb_pop \&\& (fb_count_q >= CNT_W.(2));/wire fb_pop2 = i_buf_pop2 \&\& fb_pop;/' "-D IDLEGO"
+    mutant fetch_buf1_head     fetch 's/assign o_buf1_pc    = fb_pc\[fb_rd1\];/assign o_buf1_pc    = fb_pc[fb_rd_q];/' "-D IDLEGO"
     mutant lsu_ignores_head    lsu 's/wire at_head  = (state_q == S_WAIT_HEAD) \&\& i_head_valid \&\& (i_head_tag == tag_q) \&\& !i_flush;/wire at_head  = (state_q == S_WAIT_HEAD) \&\& !i_flush;/'
     mutant lsu_misaligned_bus  lsu 's/wire start_raw = go \&\& !misaligned_q \&\& !pmp_deny/wire start_raw = go \&\& !pmp_deny/'
     mutant lsu_pmp_bus         lsu 's/wire start_raw = go \&\& !misaligned_q \&\& !pmp_deny \&\& !sc_fail/wire start_raw = go \&\& !misaligned_q \&\& !sc_fail/'
@@ -304,6 +330,11 @@ EOF
     multi_mutant lsu_killed_writes_back lsq.sby  qv_lsu   "s/        if (killed) o_wb.valid = 1'b0;//"
     multi_mutant lsq_killed_offered     lsq.sby  qv_lsq   "s/        if (i_kill_vec\[o_eng_req.tag\]) o_eng_req.valid = 1'b0;.*//"
     multi_mutant lsq_no_rollback        lsq.sby  qv_lsq   "s/                tail_q <= keep_tail;//"
+    # (O8b) the window aligner against its model fetch buffer
+    multi_mutant align2_joins_faulted   align2.sby qv_align2 's/wire        nseq  = i_buf1_valid \&\& !i_buf_hint \&\& !i_buf_err \&\& !i_buf1_err;/wire        nseq  = i_buf1_valid \&\& !i_buf_hint \&\& !i_buf_err;/'
+    multi_mutant align2_cross_half      align2.sby qv_align2 "s/raw = {hw8(d0, d1, p + 3'd1), h};/raw = {hw8(d0, d1, p), h};/"
+    multi_mutant align2_pop2_early      align2.sby qv_align2 "s/assign o_buf_pop2 = go \&\& (cur == 4'd8) \&\& !o_redirect_valid;/assign o_buf_pop2 = go \&\& (cur >= 4'd4) \&\& !o_redirect_valid;/"
+    multi_mutant align2_mid_lost        align2.sby qv_align2 "s/mid_q  <= (cur < 4'd4) || (cur > 4'd4 \&\& cur < 4'd8);/mid_q  <= (cur < 4'd4);/"
     rm -rf "$T"
 fi
 
