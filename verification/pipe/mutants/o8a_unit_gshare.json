@@ -17,9 +17,9 @@
  "timeout": 900,
  "mutants": [
   {
-   "name": "an untrained counter is known",
-   "old": "assign o_known[pg]  = v_q[ix];",
-   "new": "assign o_known[pg]  = 1'b1;"
+   "name": "a weak counter is known",
+   "old": "assign o_known[pg]  = v_q[ix] && (ctr_q[ix] == 2'b00 || ctr_q[ix] == 2'b11);",
+   "new": "assign o_known[pg]  = v_q[ix];"
   },
   {
    "name": "taken from 1 up",
@@ -80,6 +80,16 @@
    "name": "the aligner's shift beats a restore",
    "old": "else if (i_restore) h_q <= i_restore_cond ? shift(i_restore_h, !i_restore_pred) : i_restore_h;\n            else if (i_cond)    h_q <= shift(h_q, i_pred);",
    "new": "else if (i_cond)    h_q <= shift(h_q, i_pred);\n            else if (i_restore) h_q <= i_restore_cond ? shift(i_restore_h, !i_restore_pred) : i_restore_h;"
+  },
+  {
+   "name": "a weak counter of the dword behind the head is known",
+   "old": "assign o_known1[pg] = v_q[ix1] && (ctr_q[ix1] == 2'b00 || ctr_q[ix1] == 2'b11);",
+   "new": "assign o_known1[pg] = v_q[ix1];"
+  },
+  {
+   "name": "a pending instruction's weak counter is known",
+   "old": "assign o_pend_known = v_q[pix] && (ctr_q[pix] == 2'b00 || ctr_q[pix] == 2'b11);",
+   "new": "assign o_pend_known = v_q[pix];"
   }
  ]
 }
