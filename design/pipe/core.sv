@@ -99,6 +99,11 @@
 `ifndef QV_PIPE_ALIGN_WIN
 `define QV_PIPE_ALIGN_WIN 1'b0
 `endif
+// (O8c) The branch target buffer keeps a direction counter per conditional branch: a branch that falls through counts
+// it down instead of losing its entry, and steers fetch only while the counter says taken. 0: the entry goes.
+`ifndef QV_PIPE_BTB_CTR
+`define QV_PIPE_BTB_CTR 1'b0
+`endif
 // Where the fetch port shares a bus with the memory port through an arbiter (the SRAM harnesses), the stream
 // must pause for a cycle now and then so the other master is granted: FETCH_YIELD, set by the instantiating
 // harness (the SoC's fetch has the instruction cache to itself).
@@ -279,6 +284,7 @@ module core
     parameter bit ALIGN_WIN    = `QV_PIPE_ALIGN_WIN,      // (O8b) the aligner's two-entry window
     parameter bit FETCH_YIELD  = `QV_PIPE_FETCH_YIELD,    // fetch gives way to the memory port's masters (shared bus)
     parameter int BTB_ENTRIES  = `QV_PIPE_BTB_ENTRIES,    // branch target buffer entries, 0: none
+    parameter bit BTB_CTR      = `QV_PIPE_BTB_CTR,        // (O8c) a direction counter per BTB entry
     parameter int RAS_DEPTH    = `QV_PIPE_RAS_DEPTH,      // return-address stack entries, 0: none (>= 2 otherwise)
     parameter int RAS_REPAIR   = `QV_PIPE_RAS_REPAIR,     // (O3) 0 none, 1 index and count, 2 also the top entry
     parameter bit EXEC_REDIRECT = `QV_PIPE_EXEC_REDIRECT, // (O3) a mispredict recovers at execute
@@ -530,14 +536,16 @@ module core
 
     // ---------------- the branch target buffer ----------------
     logic        btb_upd_valid, btb_upd_taken, btb_upd_cross;
+    logic        bht_upd_valid;              // (declared here: the BTB's counter reads it, O8c)
     logic [63:0] btb_upd_pc, btb_upd_tgt;
     generate
         if (BTB_ENTRIES > 0) begin : g_btb
-            qv_btb #(.ENTRIES(BTB_ENTRIES)) btb0 (
+            qv_btb #(.ENTRIES(BTB_ENTRIES), .CTR(BTB_CTR)) btb0 (
                 .clk(clk), .rst(rst),
                 .i_lk_pc(btb_lk_pc), .o_hit(btb_hit), .o_off(btb_off), .o_x(btb_x), .o_tgt(btb_tgt),
                 .i_upd_valid(btb_upd_valid), .i_upd_pc(btb_upd_pc), .i_upd_taken(btb_upd_taken), .i_upd_cross(btb_upd_cross),
-                .i_upd_tgt(btb_upd_tgt)
+                .i_upd_tgt(btb_upd_tgt),
+                .i_upd_cond(bht_upd_valid)       // commit's history-table strobe: the same retirement, a conditional
             );
         end else begin : g_nobtb
             assign btb_hit = 1'b0;
@@ -585,7 +593,7 @@ module core
     // ---------------- the branch history table ----------------
     logic [63:0] bht_base, bht_ppc;
     logic [3:0]  bht_known, bht_taken;
-    logic        bht_pknown, bht_ptaken, bht_upd_valid, bht_upd_taken;
+    logic        bht_pknown, bht_ptaken, bht_upd_taken;
     logic [63:0] bht_base1;                  // (O8b) the window's second dword
     /* verilator lint_off UNUSEDSIGNAL */
     logic [3:0]  bht_known1, bht_taken1;     // (read only with ALIGN_WIN)
