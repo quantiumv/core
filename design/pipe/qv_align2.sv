@@ -368,14 +368,13 @@ module qv_align2 #(
                 o_ras_addr1 = o_push1_data.pc + (o_push1_data.rvc ? 64'd2 : 64'd4);
             end
             // a hint no instruction confirmed, with its entry used up: fetch followed it for nothing, back to the
-            // entry's successor (the head's hint: the window is the head alone; the next entry's: both used up)
+            // entry's successor (the window is the head alone when the head has a hint). The next entry's hint needs
+            // nothing here: two instructions that start at halfword 3 or before end by halfword 7, so both entries
+            // are used up in one cycle only by a confirmed hint in the second (align2_props proves it); an
+            // unconfirmed one is dealt with once its entry is the head.
             if (!o_redirect_valid && !conf0 && !conf1 && i_buf_hint && cur == 4'd4) begin
                 o_redirect_valid = 1'b1;
                 o_redirect_pc    = base + 64'd8;
-                hint_redir       = 1'b1;
-            end else if (!o_redirect_valid && !conf0_1 && !conf1_1 && nseq && i_buf1_hint && cur == 4'd8) begin
-                o_redirect_valid = 1'b1;
-                o_redirect_pc    = base + 64'd16;
                 hint_redir       = 1'b1;
             end
         end
