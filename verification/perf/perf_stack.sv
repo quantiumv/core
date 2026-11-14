@@ -65,6 +65,7 @@ module perf_stack #(
     input logic [TAG_W-1:0] head_tag,
 
     input logic             flush,              // a commit redirect (trap, xRET, serialize, mispredict, interrupt, debug)
+    input logic             fe_flush = 1'b0,    // (O3) the frontend's flush: a commit redirect or a recovery at execute
     input logic             fe_redirect,        // an align redirect (static prediction)
     input logic             rob_empty,
 
@@ -329,8 +330,10 @@ module perf_stack #(
         if (wb4_valid && cycle_q > t_disp[wb4_tag]) t_cmpl[wb4_tag] = cycle_q;
         if (wb5_valid && cycle_q > t_disp[wb5_tag]) t_cmpl[wb5_tag] = cycle_q;
         // the instruction queue: decode pops its head (and at two-wide the entry behind it); pushes go to the tail,
-        // each remembering when the fetch buffer got the dword it came from
-        if (flush) begin
+        // each remembering when the fetch buffer got the dword it came from. Both are emptied by whatever flushes the
+        // frontend: a recovery at execute too (left out, the entries a recovery dropped stayed in the mirror and every
+        // later instruction took an older one's push and pop)
+        if (flush || fe_flush) begin
             iqm_n = 0;
             dq_n = 0;
         end else begin

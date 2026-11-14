@@ -35,7 +35,7 @@
         .head_mispredict(CORE.head_entry.mispredict), \
         .head_serialize(CORE.head_ctrl.serialize), .head_csr_wsup(CORE.head_ctrl.csr_wsup), .head_csr_addr(CORE.head_ctrl.csr_addr), \
         .head_tag(CORE.head_tag), \
-        .flush(CORE.flush), .fe_redirect(CORE.fe_redirect_valid), .rob_empty(CORE.rob_empty), \
+        .flush(CORE.flush), .fe_flush(CORE.fe_flush), .fe_redirect(CORE.fe_redirect_valid), .rob_empty(CORE.rob_empty), \
         .fb_valid(CORE.fb_valid), .iq_valid(CORE.iq_valid), .uop_valid(CORE.uop_valid), .uop_fu(CORE.uop.fu), \
         .issue_fire(CORE.issue_fire), .a_ready(CORE.issue0.a_ready), .b_ready(CORE.issue0.b_ready), .c_ready(CORE.issue0.c_ready), \
         .alloc_ready(CORE.alloc_ready), .lsu_free(CORE.lsu_free), .div_free(CORE.div_free), \
