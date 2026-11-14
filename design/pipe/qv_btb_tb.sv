@@ -11,8 +11,16 @@
  * update removes that entry only.
  *
  * Random: updates and lookups at random against a model that keeps one record per index.
+ *
+ * CTR (O8c; tests.list runs both): the entry's direction counter. Directed: a conditional branch allocated by a taken
+ * update steers at 2, a fall-through counts it down and keeps the entry (it stops steering below 2), a taken update
+ * of the same branch counts it up to 3 and the counter saturates both ways; a jump's entry steers whatever its counter
+ * says; a different branch that is taken replaces the entry with the counter back at 2; another branch's fall-through
+ * leaves the counter. Random: conditionals and jumps (jumps always taken), against the model with its counters.
  */
-module qv_btb_tb;
+module qv_btb_tb #(
+    parameter bit CTR = 1'b0
+);
     int   pass_count = 0;
     int   fail_count = 0;
     logic quiet_on_pass = 1'b1;
@@ -28,13 +36,14 @@ module qv_btb_tb;
     logic        hit, x;
     logic [1:0]  off;
     logic [63:0] tgt;
-    logic        upd_valid = 1'b0, upd_taken = 1'b0, upd_cross = 1'b0;
+    logic        upd_valid = 1'b0, upd_taken = 1'b0, upd_cross = 1'b0, upd_cond = 1'b1;
     logic [63:0] upd_pc = '0, upd_tgt = '0;
 
-    qv_btb #(.ENTRIES(ENTRIES)) dut (
+    qv_btb #(.ENTRIES(ENTRIES), .CTR(CTR)) dut (
         .clk(clk), .rst(rst),
         .i_lk_pc(lk_pc), .o_hit(hit), .o_off(off), .o_x(x), .o_tgt(tgt),
-        .i_upd_valid(upd_valid), .i_upd_pc(upd_pc), .i_upd_taken(upd_taken), .i_upd_cross(upd_cross), .i_upd_tgt(upd_tgt)
+        .i_upd_valid(upd_valid), .i_upd_pc(upd_pc), .i_upd_taken(upd_taken), .i_upd_cross(upd_cross), .i_upd_tgt(upd_tgt),
+        .i_upd_cond(upd_cond)
     );
 
     // ---------------- model ----------------
@@ -43,27 +52,36 @@ module qv_btb_tb;
     logic [1:0]  m_off [0:ENTRIES-1];
     logic        m_x   [0:ENTRIES-1];
     logic [63:0] m_tgt [0:ENTRIES-1];
+    logic        m_c   [0:ENTRIES-1];
+    logic [1:0]  m_ctr [0:ENTRIES-1];
 
     task automatic m_reset();
         for (int i = 0; i < ENTRIES; i++) m_v[i] = 1'b0;
     endtask
 
-    task automatic m_update(input logic [63:0] pc, input logic taken, input logic xing, input logic [63:0] t);
+    task automatic m_update(input logic [63:0] pc, input logic taken, input logic xing, input logic [63:0] t,
+                            input logic cond);
         logic [63:0] key;
+        logic        own;
         int idx;
         key = xing ? pc + 64'd2 : pc;
         idx = int'(key[3 +: $clog2(ENTRIES)]);
+        own = m_v[idx] && m_tag[idx] == {key[63:3], 3'b000} && m_off[idx] == key[2:1] && m_x[idx] == xing;
         if (taken) begin
+            m_ctr[idx] = !own ? 2'd2 : (m_ctr[idx] == 2'd3) ? 2'd3 : m_ctr[idx] + 2'd1;
             m_v[idx] = 1'b1; m_tag[idx] = {key[63:3], 3'b000}; m_off[idx] = key[2:1]; m_x[idx] = xing; m_tgt[idx] = t;
-        end else if (m_v[idx] && m_tag[idx] == {key[63:3], 3'b000} && m_off[idx] == key[2:1] && m_x[idx] == xing) begin
-            m_v[idx] = 1'b0;
+            m_c[idx] = cond;
+        end else if (own) begin
+            if (!CTR)                     m_v[idx]   = 1'b0;
+            else if (m_ctr[idx] != 2'd0)  m_ctr[idx] = m_ctr[idx] - 2'd1;
         end
     endtask
 
     function automatic logic m_hit(input logic [63:0] pc);
         int idx;
         idx = int'(pc[3 +: $clog2(ENTRIES)]);
-        return m_v[idx] && m_tag[idx] == {pc[63:3], 3'b000} && m_off[idx] >= pc[2:1];
+        return m_v[idx] && m_tag[idx] == {pc[63:3], 3'b000} && m_off[idx] >= pc[2:1]
+            && (!CTR || !m_c[idx] || m_ctr[idx][1]);
     endfunction
 
     task automatic check_lookup(input string name, input logic [63:0] pc);
@@ -79,12 +97,13 @@ module qv_btb_tb;
         end
     endtask
 
-    task automatic update(input logic [63:0] pc, input logic taken, input logic xing, input logic [63:0] t);
+    task automatic update(input logic [63:0] pc, input logic taken, input logic xing, input logic [63:0] t,
+                          input logic cond = 1'b1);
         @(negedge clk);
-        upd_valid = 1'b1; upd_pc = pc; upd_taken = taken; upd_cross = xing; upd_tgt = t;
+        upd_valid = 1'b1; upd_pc = pc; upd_taken = taken; upd_cross = xing; upd_tgt = t; upd_cond = cond;
         @(posedge clk); #1;
         upd_valid = 1'b0;
-        m_update(pc, taken, xing, t);
+        m_update(pc, taken, xing, t, cond);
     endtask
 
     int errs0;
@@ -116,9 +135,48 @@ module qv_btb_tb;
         // a not-taken update of another branch of the dword leaves the entry
         update(64'h106, 1'b0, 1'b0, 64'h0);
         check_lookup("other branch not taken: entry stays", 64'h100);
-        // its own removes it
+        // its own removes it (CTR: counts it down, 2 to 1: it stops steering, the entry stays)
         update(64'h102, 1'b0, 1'b0, 64'h0);
-        check_lookup("own branch not taken: entry gone", 64'h100);
+        check_lookup("own branch not taken: entry gone (CTR: not steering)", 64'h100);
+        if (CTR) begin
+            check("CTR: the entry stays", {63'b0, dut.v_q[int'(64'h100 >> 3) % ENTRIES]}, 64'd1);
+            update(64'h102, 1'b1, 1'b0, 64'h300);                        // 1 -> 2: steers again
+            check_lookup("CTR: taken again, steering", 64'h100);
+            check("CTR: steering at 2", {63'b0, hit}, 64'd1);
+            update(64'h102, 1'b1, 1'b0, 64'h300);                        // 2 -> 3
+            update(64'h102, 1'b1, 1'b0, 64'h300);                        // 3 stays 3
+            update(64'h102, 1'b0, 1'b0, 64'h0);                          // 3 -> 2: still steering
+            check_lookup("CTR: one fall-through from 3 still steers", 64'h100);
+            check("CTR: steering at 2 (from 3)", {63'b0, hit}, 64'd1);
+            update(64'h102, 1'b0, 1'b0, 64'h0);                          // 2 -> 1
+            update(64'h102, 1'b0, 1'b0, 64'h0);                          // 1 -> 0
+            update(64'h102, 1'b0, 1'b0, 64'h0);                          // 0 stays 0
+            update(64'h102, 1'b1, 1'b0, 64'h300);                        // 0 -> 1: not yet
+            check_lookup("CTR: from 0, one taken is not enough", 64'h100);
+            check("CTR: not steering at 1", {63'b0, hit}, 64'd0);
+            // another branch of the dword, taken: replaces the entry, its counter back at 2
+            update(64'h106, 1'b1, 1'b0, 64'h340);
+            check_lookup("CTR: replaced by another branch, steering at 2", 64'h100);
+            check("CTR: the new branch's halfword", {62'b0, off}, 64'd3);
+            // a jump's entry steers whatever its counter
+            update(64'h106, 1'b1, 1'b0, 64'h340, 1'b0);
+            check_lookup("CTR: a jump steers", 64'h100);
+            // code rewritten in place: the branch at 0x106 counted down to 0, then retired as a jump (its counter at
+            // 1): the entry is a jump's now and steers at once
+            update(64'h106, 1'b1, 1'b0, 64'h340, 1'b1);
+            update(64'h106, 1'b0, 1'b0, 64'h0);
+            update(64'h106, 1'b0, 1'b0, 64'h0);
+            update(64'h106, 1'b0, 1'b0, 64'h0);
+            check_lookup("CTR: the branch counted down to 0", 64'h100);
+            update(64'h106, 1'b1, 1'b0, 64'h340, 1'b0);
+            check_lookup("CTR: the same pc retired as a jump steers at counter 1", 64'h100);
+            check("CTR: ... it steers", {63'b0, hit}, 64'd1);
+            // leave the dword empty for the next section (CTR: an entry nothing matches)
+            update(64'h104, 1'b1, 1'b0, 64'h360);
+            update(64'h104, 1'b0, 1'b0, 64'h0);
+            update(64'h104, 1'b0, 1'b0, 64'h0);
+            check_lookup("CTR: counted down, not steering", 64'h100);
+        end
 
         // aliasing: 0x100 and 0x100 + 8 * ENTRIES share an entry, the tag tells them apart
         update(64'h100, 1'b1, 1'b0, 64'h400);
@@ -127,9 +185,10 @@ module qv_btb_tb;
         update(64'h100 + 64'(8 * ENTRIES), 1'b1, 1'b0, 64'h500);
         check_lookup("the alias replaced it", 64'h100 + 64'(8 * ENTRIES));
         check_lookup("the first one is gone", 64'h100);
-        // not taken at the old address does not remove the new owner
+        // not taken at the old address does not remove the new owner (nor count it down)
         update(64'h100, 1'b0, 1'b0, 64'h0);
         check_lookup("a different dword's not-taken update leaves the owner", 64'h100 + 64'(8 * ENTRIES));
+        check("the owner still steers", {63'b0, hit}, 64'd1);
 
         // a crossing branch: starts at halfword 3 of 0x218, filed under 0x220 at halfword 0
         update(64'h21E, 1'b1, 1'b1, 64'h900);
@@ -144,7 +203,7 @@ module qv_btb_tb;
         update(64'h220, 1'b0, 1'b0, 64'h0);
         check_lookup("crossing: a plain branch's not-taken update leaves it", 64'h220);
         update(64'h21E, 1'b0, 1'b1, 64'h0);
-        check_lookup("crossing: its own not-taken update removes it", 64'h220);
+        check_lookup("crossing: its own not-taken update removes it (CTR: stops it steering)", 64'h220);
 
         // random against the model
         m_reset();
@@ -156,9 +215,10 @@ module qv_btb_tb;
             pc = 64'h1000 + 64'((($urandom % 4) * 64) + (($urandom % 8) * 8) + (($urandom % 4) * 2));
             r = 2'($urandom);
             if (($urandom % 3) != 0) begin
-                logic cr;
+                logic cr, cd;
                 cr = (pc[2:1] == 2'b11) && (($urandom % 2) == 0);
-                update(pc, r != 2'd0, cr, 64'(($urandom % 512) * 2));
+                cd = ($urandom % 4) != 0;                                   // a conditional; a jump is always taken
+                update(pc, (r != 2'd0) || !cd, cr, 64'(($urandom % 512) * 2), cd);
             end
             check_lookup("random", 64'h1000 + 64'((($urandom % 4) * 64) + (($urandom % 8) * 8) + (($urandom % 4) * 2)));
         end

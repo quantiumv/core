@@ -151,6 +151,7 @@ pipe_align_hint_one_tb|design/pipe/qv_align_hint_tb.sv||design|pipe|pass|600|-Pq
 pipe_align_hint_win_tb|design/pipe/qv_align_hint_tb.sv||design|pipe|pass|600|-Pqv_align_hint_tb.WIN=1
 pipe_align_hint_win_one_tb|design/pipe/qv_align_hint_tb.sv||design|pipe|pass|600|-Pqv_align_hint_tb.ONE_OK=1 -Pqv_align_hint_tb.WIN=1
 pipe_btb_tb|design/pipe/qv_btb_tb.sv||design|pipe|pass|
+pipe_btb_ctr_tb|design/pipe/qv_btb_tb.sv||design|pipe|pass||-Pqv_btb_tb.CTR=1
 pipe_ras_tb|design/pipe/qv_ras_tb.sv||design|pipe|pass|
 pipe_ras_tb_r1|design/pipe/qv_ras_tb.sv||design|pipe|pass||-Pqv_ras_tb.REPAIR=1
 pipe_ras_tb_r2|design/pipe/qv_ras_tb.sv||design|pipe|pass||-Pqv_ras_tb.REPAIR=2
