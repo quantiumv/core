@@ -694,7 +694,7 @@ def emit_xr(p: Program, recent: list[int]):
             p.e(f"    lbu     x{t}, 0(x{a})")                                         # its own encoding's low byte: not 0
         side = p.rng.random()
         if side < 0.25:
-            alu()                                                                     # an ALU op, then the branch
+            alu(fresh(t))                                 # an ALU op (never the branch's register), then the branch
         if own is not None:
             p.e(f"{own}:")
         p.e(f"    bnez    x{t}, {join}")
