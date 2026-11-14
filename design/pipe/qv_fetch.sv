@@ -101,6 +101,8 @@ module qv_fetch #(
 
     // FENCE.I: no new request while held, so once o_idle (nothing
     // outstanding) the icache can be flushed with no fill in flight
+    // (IDLE_GO: a request can go out in a cycle o_idle is high, but never
+    // while held, and o_idle is read only while held)
     input  logic        i_hold,
     output logic        o_idle,
     // another master wants the bus this cycle: do not stream into the answer's cycle
@@ -229,9 +231,10 @@ module qv_fetch #(
     // (O8b, IDLE_GO) the same from an idle bus: nothing outstanding and no redirect this cycle (a redirect's target is
     // in fpc_q from the cycle after it), so fetch_pc goes out at once instead of through the request register first.
     // Without it a redirect that finds the bus idle starts its fetch a cycle later than one that finds a stale request
-    // answering (that one streams), and the window aligner leaves the bus idle more often.
-    wire idle_go   = IDLE_GO && STREAM && can_issue && !req_valid_q && !i_redirect_valid && (!i_xl_on || stream_reuse)
-                     && !i_yield;
+    // answering (that one streams), and the window aligner leaves the bus idle more often. Never in reset (can_issue
+    // holds there: a master must not raise cyc while the slaves and arbiters are reset).
+    wire idle_go   = IDLE_GO && !rst && STREAM && can_issue && !req_valid_q && !i_redirect_valid
+                     && (!i_xl_on || stream_reuse) && !i_yield;
     wire fpc_go    = stream_go || idle_go;
 
     assign wb_fetch_cyc_o  = (bus && (!(wb_fetch_ack_i || wb_fetch_err_i) || stream_go)) || idle_go;
