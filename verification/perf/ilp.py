@@ -40,6 +40,8 @@ import math
 import os
 import sys
 
+import brpred
+
 # ---------------------------------------------------------------------------------------------------------------
 # decode: class, destination, sources (('x', n) / ('f', n)), memory kind
 
@@ -141,7 +143,7 @@ def decode(raw):
 class Ins:
     __slots__ = ('pc', 'raw', 'push', 'pop', 'disp', 'acc', 'go', 'cmpl', 'commit', 'early', 'ared', 'trap', 'redir',
                  'addr', 'cls', 'dst', 'srcs', 'mem', 'posted', 'prod', 'dword', 'rvc', 'fpw', 'fp', 'alone', 'mul',
-                 'iss', 'ds', 'cs', 'fr', 'dcm')
+                 'iss', 'ds', 'cs', 'fr', 'dcm', 'cond')
 
 
 def read_trace(path):
@@ -166,6 +168,7 @@ def read_trace(path):
                 i.iss = i.acc if i.acc else i.disp
             i.rvc = (i.raw & 3) != 3
             i.cls, i.dst, i.srcs, i.mem = decode(i.raw)
+            i.cond = brpred.decode(i.raw, i.pc, 0)[0] == 'cond'
             if i.dst is not None and i.dst == ('x', 0):
                 i.dst = None
             i.srcs = [s for s in i.srcs if s != ('x', 0)]
@@ -212,7 +215,13 @@ BASE = dict(w=1, rs=0, rob=8, iq=8, lsq=4, sb=4, handoff=True, early=True, lsu_b
             # ends in (a crossing instruction pairs with the next one), and a crossing instruction's first half is
             # stashed in one of the cycle's two slots before it goes (after a pair: a cycle later); fe_btb, the bubble after a taken branch that
             # crosses into the next block and that the aligner did not redirect on (the frontend as built: a cycle)
-            fb=4, iq_room2=False, al1dw=False, fe_btb=0)
+            fb=4, iq_room2=False, al1dw=False, fe_btb=0,
+            # (O8.0) bp: a brpred.FE_CONFIGS name; each branch's class (steer, ared, phantom, mis, ok) replaces the
+            # traced one: a mispredict recovers (with the refill measured in the fit when the trace has none there),
+            # an aligner redirect or a phantom costs the traced bubble (its mean where the trace has none); al_ntk: the
+            # aligner pairs nothing across a taken branch (the window aligner without pair_taken); al_cond1: at most one
+            # conditional branch per aligner cycle (one history per cycle)
+            bp=None, al_ntk=False, al_cond1=False)
 
 
 class DPort:
@@ -331,10 +340,27 @@ def sim(tr, p, res=None, fit=False, t0=None):
     waitbit = set()                 # (mdp waitbit) the loads that violated
     replay_at = None                # a load violated: what follows it restarts from here
     shift = max(3, (p['fe_blk'] - 1).bit_length())
+    bpc = bp_classes(tr, p['bp']) if p['bp'] else None
+    st = res.setdefault('stats', {}) if res is not None else {}
+    refill_s = []; ared_s = []      # (fit) the traced refill after a recovery, and the bubble after an aligner redirect
 
     def redir_of(q):
-        """the commit redirect an instruction causes in this configuration (nomp: never a mispredict)"""
+        """the commit redirect an instruction causes in this configuration (nomp: never a mispredict; bp: as its
+        class says)"""
+        if bpc is not None and id(q) in bpc:
+            if bpc[id(q)] == 'mis':
+                return q.redir if q.redir in (1, 4) else 4
+            return 0 if q.redir in (1, 4) else q.redir
         return 0 if (p['nomp'] and q.redir in (1, 4)) else q.redir
+
+    def cls_of(q):
+        return bpc.get(id(q)) if bpc is not None else None
+
+    def bubble(q, k):
+        """the aligner-redirect bubble after tr[k - 1]: fe_taken, else as traced, else the traced mean"""
+        if p['fe_taken'] is not None:
+            return p['fe_taken']
+        return (q.push - tr[k - 1].push) if tr[k - 1].ared else st.get('ared', 2)
 
     def avail(k):
         """when a consumer may take producer k's value (the cycle it issues in)"""
@@ -392,7 +418,7 @@ def sim(tr, p, res=None, fit=False, t0=None):
         # ---- frontend: push into the IQ ----
         if prev_redir:
             seg_start = com[k - 1]
-            if p['xr'] and prev.redir in (1, 4) and not prev.trap:
+            if p['xr'] and redir_of(prev) in (1, 4) and not prev.trap:
                 seg_start = min(seg_start, cmpl[k - 1] + p['xr_lat'])     # recovered at execute (O3)
             c = seg_start
             fe_blks = []
@@ -408,6 +434,10 @@ def sim(tr, p, res=None, fit=False, t0=None):
             if (p['fe'] == 'ideal' and p['al1dw'] and k > 0 and push[k - 1] >= c
                     and bhi != ((prev.pc + (2 if prev.rvc else 4) - 1) >> shift)):
                 c = max(c, push[k - 1] + 1)                   # a pair only from one block
+            if p['al_ntk'] and k > 0 and push[k - 1] >= c and q.pc != prev.pc + (2 if prev.rvc else 4):
+                c = max(c, push[k - 1] + 1)                   # no pair across a taken branch
+            if p['al_cond1'] and k > 0 and push[k - 1] >= c and q.cond and prev.cond:
+                c = max(c, push[k - 1] + 1)                   # one conditional branch per aligner cycle
             if (p['fe'] == 'ideal' and p['al1dw'] and k > fe_k0 and bhi != blk
                     and q.pc == prev.pc + (2 if prev.rvc else 4)):
                 pair = k - 2 >= fe_k0 and push[k - 2] == push[k - 1]
@@ -422,20 +452,28 @@ def sim(tr, p, res=None, fit=False, t0=None):
                         t += p['fe_btb']                      # a taken crossing branch the aligner did not redirect on
                     if len(fe_blks) >= p['fb']:
                         t = max(t, fe_blks[-p['fb']][2] + 1)
-                    if not seq and b == blk and prev.ared:    # the bubble after a taken branch the aligner
-                        t = max(t, push[k - 1] + (p['fe_taken'] if p['fe_taken'] is not None   # redirected on:
-                                                  else q.push - tr[k - 1].push))               # as traced (None)
+                    ared_prev = (cls_of(prev) == 'ared') if cls_of(prev) is not None else prev.ared
+                    if not seq and b == blk and ared_prev:    # the bubble after a taken branch the aligner
+                        t = max(t, push[k - 1] + bubble(q, k))   # redirected on
                     fe_blks.append([b, t, t])
                     b += 1
                 c = max(c, fe_blks[-1][1])
+                if cls_of(prev) == 'phantom' and blk != (prev.pc >> shift):
+                    c = max(c, push[k - 1] + bubble(q, k))    # the aligner turned a steered fetch back
         if replay_at is not None:
             c = max(c, replay_at)                             # a load before it violated: refetched from there
             replay_at = None
-        nomp_skip = p['nomp'] and prev is not None and prev.redir in (1, 4) and not prev.trap
+        nomp_skip = prev is not None and prev.redir in (1, 4) and not prev.trap and redir_of(prev) == 0
         if not fit and (nomp_skip or (p['fe'] == 'ideal' and not prev_redir and k > 0)):
             push[k] = c                                         # no frontend residual within a fetch stream
+        elif not fit and prev_redir and not prev.trap and prev.redir == 0:
+            push[k] = c + st.get('refill', 4)                   # a mispredict the trace does not have
         else:
             push[k] = put('push', k, c, q.push)
+        if fit and prev_redir and not prev.trap and prev.redir in (1, 4):
+            refill_s.append(res['push'][k])
+        if fit and k > 0 and not prev_redir and prev.ared:
+            ared_s.append(q.push - prev.push)
         if p['fe'] == 'ideal' and not fit:
             nb = bhi - blk + 1
             if not fe_blks:                                   # a stream starts: its first blocks arrive with it
@@ -618,9 +656,31 @@ def sim(tr, p, res=None, fit=False, t0=None):
         com[k] = put('com', k, c, q.commit)
         if q.posted:
             dc.push(com[k] + 1, q.addr)
+    if fit:
+        st['refill'] = round(sum(refill_s) / len(refill_s)) if refill_s else 4
+        st['ared'] = round(sum(ared_s) / len(ared_s)) if ared_s else 2
     if p.get('_dbg') is not None:                   # (debugging) the replayed cycles, for a caller to compare
         p['_dbg'].update(push=push, pop=pop, disp=disp, com=com)
     return com[-1] - t_open, neg
+
+
+_BPC = {}
+
+
+def bp_classes(tr, name):
+    """(O8.0) {id(instruction): class} of the trace's control-flow instructions under brpred.FE_CONFIGS[name]"""
+    key = (id(tr), name)
+    if key not in _BPC:
+        brl, ks = [], []
+        for k in range(len(tr) - 1):
+            q = tr[k]
+            if not q.trap and brpred.decode(q.raw, q.pc, 0)[0] is not None:
+                # fetched about a cycle before its dword reached the fetch buffer; trains at its commit
+                brl.append((q.pc, q.raw, tr[k + 1].pc, (q.fr or q.push) - 1, q.commit))
+                ks.append(k)
+        cl = brpred.FePred(**brpred.FE_CONFIGS[name]).classify(brl)
+        _BPC[key] = {id(tr[k]): c for k, c in zip(ks, cl)}
+    return _BPC[key]
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -668,6 +728,8 @@ W2 = dict(w=2, alu_ports=2)
 # (OX.0) the core as built after O4: two-wide with its pair rules, the 4-entry station, ROB 8, fitted on traces of the
 # core itself (its issue cycles traced)
 BASE_O4 = dict(BASE, rs=4, iss_res=True, **W2, **RULES)
+# (O8.0) the core after O3: recovery at execute, fetch restarting in the mispredict's writeback cycle (XR_EARLY)
+BASE_O3 = dict(BASE_O4, xr=True, xr_lat=0)
 
 VALID_O4 = [  # label, model knobs against BASE_O4: runs of the core with one thing changed (run_perf.sh --label ...)
     ('v_w1', dict(w=1, alu_ports=1)),
@@ -710,6 +772,27 @@ CONFIGS_OX = [  # name, knobs against BASE_O4: what each milestone of the comple
     ('L20 xr mem mshr4', cfg(XR, MEM, mshr=4, miss_add=20)),
 ]
 
+WIN = dict(fe='ideal', al_ntk=True)                       # O8b: the window aligner (no pair across a taken branch)
+CONFIGS_O8 = [  # name, knobs against BASE_O3 (--fit o3): the frontend steps of O8, and D1's other milestones
+    ('base', cfg()),                                                    # the fit replayed: +0.0 %
+    ('fe-core', cfg(fe='ideal', al1dw=True, fe_btb=1)),                 # the core's own frontend: near 0
+    ('fe-core bp', cfg(fe='ideal', al1dw=True, fe_btb=1, bp='rtl')),    # ... with its predictor modelled: near 0
+    ('O8b', cfg(WIN, bp='rtl')),                                        # the window aligner
+    ('O8b c1', cfg(WIN, bp='rtl', al_cond1=True)),
+    ('O8b ptk', cfg(fe='ideal', bp='rtl')),                             # ... pairing across a taken branch too
+    ('O8c', cfg(WIN, bp='ctr')),                                        # + the BTB's direction counter
+    ('O8c ret', cfg(WIN, bp='ctr ret')),                                # + return entries
+    ('O8a', cfg(WIN, bp='gshare', al_cond1=True)),                      # + gshare
+    ('O8a nofb', cfg(WIN, bp='gshare nofb', al_cond1=True)),
+    ('O8a h8', cfg(WIN, bp='gshare h8', al_cond1=True)),
+    ('O8d', cfg(WIN, fe_blk=16, bp='gshare 16B', al_cond1=True)),       # + 16-byte blocks
+    ('O8d w2', cfg(WIN, fe_blk=16, bp='gshare 16B w2', al_cond1=True)),
+    ('O8 bound', cfg(fe='ideal', fe_blk=16, fe_taken=0, nomp=True)),    # no bubble, no mispredict
+    ('O5/6', cfg(MEM, mshr=4)),
+    ('O7', cfg(rob=16, rs=8)),
+    ('O8a + O5/6', cfg(WIN, MEM, mshr=4, bp='gshare', al_cond1=True)),
+]
+
 CONFIGS_O4 = [  # name, knobs: two-wide with the pair rules (O4.0)
     ('ooo rs4', dict(rs=4)),
     ('commit2 rob8 rs4', dict(w=2, rs=4, dispatch1=True, slot2=True, fpw1=True)),
@@ -739,18 +822,20 @@ def main():
     ap.add_argument('--mode', default='m')
     ap.add_argument('--kernels', default=' '.join(KERNELS))
     ap.add_argument('--db', type=int, default=2, help='cycles from a drain beat to its response (2: the D$ passes a store through)')
-    ap.add_argument('--set', default='o1', choices=('o1', 'o4', 'ox'),
-                    help='o1: the O1.0 configurations; o4: two-wide with the pair rules; ox: the complete-OOO milestones')
-    ap.add_argument('--fit', default='o1', choices=('o1', 'o4'),
+    ap.add_argument('--set', default='o1', choices=('o1', 'o4', 'ox', 'o8'),
+                    help='o1: the O1.0 configurations; o4: two-wide with the pair rules; ox: the complete-OOO milestones; '
+                         'o8: the frontend steps (with --fit o3)')
+    ap.add_argument('--fit', default='o1', choices=('o1', 'o4', 'o3'),
                     help='o1: fit one-wide traces with the station off (O1.0, O4.0); o4: fit traces of the core as built '
-                         'after O4 (two-wide, the station on, issue cycles traced: OX.0)')
+                         'after O4 (two-wide, the station on, issue cycles traced: OX.0); o3: ... after O3 (recovery at '
+                         'execute, XR_EARLY)')
     a = ap.parse_args()
-    configs = {'o1': CONFIGS, 'o4': CONFIGS_O4, 'ox': CONFIGS_OX}[a.set]
+    configs = {'o1': CONFIGS, 'o4': CONFIGS_O4, 'ox': CONFIGS_OX, 'o8': CONFIGS_O8}[a.set]
     sfx = '_s' if a.mode == 's' else ''
     base = load_csv(a.base or os.path.join(os.path.dirname(os.path.abspath(__file__)), 'baseline_pipe%s.csv' % sfx))
-    fitp = dict(BASE_O4) if a.fit == 'o4' else dict(BASE)
+    fitp = dict({'o4': BASE_O4, 'o3': BASE_O3}.get(a.fit, BASE))
     fitp['db'] = a.db
-    valid = VALID_O4 if a.fit == 'o4' else VALID
+    valid = {'o4': VALID_O4, 'o3': []}.get(a.fit, VALID)
     vals = {}
     if a.validate:
         for lab, _ in valid:

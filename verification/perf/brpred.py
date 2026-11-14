@@ -22,6 +22,7 @@ branch the BTB knows costs ZERO. The estimate is the sum over the trace.
 
   brpred.py /tmp/br_qsort.txt ...        per-kernel table
 """
+import heapq
 import sys
 from collections import OrderedDict
 
@@ -214,6 +215,169 @@ class Pred:
         return r
 
 
+class FePred:
+    """(O8.0) The frontend as the RTL builds it, per dynamic control-flow instruction: a BTB that steers fetch (one
+    branch per block of `blk` bytes, `entries` sets of `ways`, a crossing 32-bit branch filed under the block it ends
+    in; on not taken either invalidated, ctr=False as today, or counted down, ctr=True: a conditional hit needs its
+    2-bit counter at 2 or more), and the aligner's final call (direction: static, the BHT of 512 counters, or gshare
+    with h history bits and 2^bits counters falling back to the BHT or to static; returns from a RAS of `ras`; a JALR
+    that is no return only through a BTB entry when ind=True). Each instruction gets one class:
+      ok       not taken, nothing steered: no cost
+      steer    taken, the BTB steered fetch to its target: no bubble
+      ared     taken and predicted so by the aligner only: an aligner-redirect bubble
+      phantom  the BTB steered, the aligner's call is not taken (or another target) and right: a bubble
+      mis      the final prediction is wrong: a recovery at execute
+    Tables train at once (a trace study: no latency); the history holds every conditional outcome."""
+
+    def __init__(self, blk=8, entries=32, ways=1, ctr=False, ret=False, ind=False, dirp='bht', h=12, bits=12,
+                 fallback='bht', ras=8):
+        self.blk, self.sets, self.ways, self.ctr, self.ret, self.ind = blk, entries // ways, ways, ctr, ret, ind
+        self.dirp, self.h, self.bits, self.fallback, self.ras_n = dirp, h, bits, fallback, ras
+        self.btb = {}           # set -> list of [block, pc, tgt, ctr] (most recent last)
+        self.bht = {}
+        self.gs = {}
+        self.ghr = 0
+        self.ras = []
+
+    def _key(self, pc, ln):
+        b = pc // self.blk
+        if ln == 4 and (pc + 2) // self.blk != b:
+            b += 1              # a crossing branch: filed under the block it ends in
+        return b
+
+    def _lookup(self, pc, ln):
+        b = self._key(pc, ln)
+        for e in self.btb.get(b % self.sets, []):
+            if e[0] == b and e[1] == pc:
+                return e
+        return None
+
+    def _train_btb(self, pc, ln, taken, nxt, kind):
+        b = self._key(pc, ln)
+        s = self.btb.setdefault(b % self.sets, [])
+        e = self._lookup(pc, ln)
+        if taken:
+            if e is None:
+                for o in [o for o in s if o[0] == b]:
+                    s.remove(o)                  # one branch per block
+                if len(s) >= self.ways:
+                    s.pop(0)
+                s.append([b, pc, nxt, 2])
+            else:
+                e[2] = nxt
+                e[3] = min(3, e[3] + 1)
+                s.remove(e)
+                s.append(e)
+        elif e is not None:
+            if self.ctr and kind == 'cond':
+                e[3] = max(0, e[3] - 1)
+            else:
+                s.remove(e)
+
+    def _dir(self, pc, st):
+        """the aligner's direction for a conditional branch, and whether a table knew it"""
+        bk = self.bht.get((pc >> 1) & 511)
+        if self.dirp == 'gshare':
+            g = self.gs.get(((pc >> 1) ^ (self.ghr & ((1 << self.h) - 1))) & ((1 << self.bits) - 1))
+            if g is not None:
+                return g >= 2, True
+            if self.fallback == 'bht' and bk is not None:
+                return bk >= 2, True
+            return st, False
+        if self.dirp == 'bht' and bk is not None:
+            return bk >= 2, True
+        return st, False
+
+    def classify(self, trace):
+        """trace: (pc, raw, next pc) per control-flow instruction, or (pc, raw, next pc, fetched, committed): then each
+        one's tables train at its commit, seen only by those fetched after it (as the RTL does; the history is
+        speculative and shifts at once)"""
+        out = []
+        pend = []               # (commit cycle, order, training) not applied yet
+        for n_, it in enumerate(trace):
+            pc, raw, nxt = it[:3]
+            if len(it) > 3:
+                while pend and pend[0][0] < it[3]:
+                    heapq.heappop(pend)[2]()
+            kind, rvc, rd, rs1, st_taken, st_tgt = decode(raw, pc, nxt)
+            if kind is None:
+                out.append(None)
+                continue
+            ln = 2 if rvc else 4
+            taken = nxt != pc + ln
+            e = self._lookup(pc, ln)
+            steer = e is not None and (kind != 'cond' or not self.ctr or e[3] >= 2)
+            stgt = e[2] if steer else None
+            is_ret = kind == 'jalr' and rd == 0 and rs1 in (1, 5)
+            is_call = kind != 'cond' and rd in (1, 5)
+            if kind == 'jalr' and not is_ret and not is_call and not self.ind:
+                steer, stgt = False, None        # today's BTB keeps no plain indirect jumps
+            if kind == 'cond':
+                d, known = self._dir(pc, st_taken)
+                if not known and steer:
+                    d = True                     # an untrained direction follows the BTB (hint_holds)
+                ptk, ptgt = d, (st_tgt if d else pc + ln)
+            elif kind == 'jal':
+                ptk, ptgt = True, st_tgt
+            elif is_ret and self.ras_n and self.ras:
+                ptk, ptgt = True, self.ras[-1]
+                if self.ret:
+                    steer, stgt = True, self.ras[-1]   # a return entry: fetch takes the stack's top
+            elif steer:
+                ptk, ptgt = True, stgt
+            else:
+                ptk, ptgt = False, pc + ln
+            if ptgt != nxt:
+                c = 'mis'
+            elif ptk:
+                c = 'steer' if (steer and stgt == nxt) else 'ared'
+            else:
+                c = 'phantom' if steer else 'ok'
+            out.append(c)
+            # train: at once, or at the instruction's commit
+            gi = ((pc >> 1) ^ (self.ghr & ((1 << self.h) - 1))) & ((1 << self.bits) - 1)
+
+            def train(pc=pc, ln=ln, taken=taken, nxt=nxt, kind=kind, st_taken=st_taken, gi=gi, is_ret=is_ret):
+                if kind == 'cond':
+                    k = (pc >> 1) & 511
+                    v = self.bht.get(k, 2 if st_taken else 1)
+                    self.bht[k] = min(3, v + 1) if taken else max(0, v - 1)
+                    if self.dirp == 'gshare':
+                        v = self.gs.get(gi, 2 if st_taken else 1)
+                        self.gs[gi] = min(3, v + 1) if taken else max(0, v - 1)
+                if not is_ret:
+                    self._train_btb(pc, ln, taken, nxt, kind)
+            if len(it) > 3:
+                heapq.heappush(pend, (it[4], n_, train))
+            else:
+                train()
+            if kind == 'cond':
+                self.ghr = ((self.ghr << 1) | int(taken)) & ((1 << 64) - 1)
+            if self.ras_n:
+                if is_ret and self.ras:
+                    self.ras.pop()
+                if is_call:
+                    self.ras.append(pc + ln)
+                    self.ras = self.ras[-self.ras_n:]
+        return out
+
+
+FE_CONFIGS = OrderedDict([  # (O8.0) the frontend options, for ilp.py --bp and brpred.py --fe
+    ('rtl', dict()),                                                    # today: BHT, BTB 32 invalidated on not taken
+    ('ctr', dict(ctr=True)),                                            # O8c: the BTB counts down instead
+    ('ctr ret', dict(ctr=True, ret=True)),
+    ('ctr ret w2', dict(ctr=True, ret=True, ways=2)),
+    ('ctr ret 64', dict(ctr=True, ret=True, entries=64)),
+    ('gshare', dict(ctr=True, ret=True, dirp='gshare')),                # O8a: gshare h12, 4K, BHT fallback
+    ('gshare nofb', dict(ctr=True, ret=True, dirp='gshare', fallback='static')),
+    ('gshare h8', dict(ctr=True, ret=True, dirp='gshare', h=8)),
+    ('gshare h8 1k', dict(ctr=True, ret=True, dirp='gshare', h=8, bits=10)),
+    ('gshare 16B', dict(ctr=True, ret=True, dirp='gshare', blk=16)),     # O8d
+    ('gshare 16B w2', dict(ctr=True, ret=True, dirp='gshare', blk=16, ways=2)),
+    ('gshare 16B w2 ras16', dict(ctr=True, ret=True, dirp='gshare', blk=16, ways=2, ras=16)),
+])
+
+
 def load(path):
     """BR lines (+BRTRACE), or ILP lines (+ILPTRACE, OX.0): every retirement in program order, both commit
     channels (BRTRACE prints the first channel's only), so a control-flow instruction's next pc is the next line's
@@ -240,6 +404,15 @@ def main():
             ("gshare h8 1k+btb32+ras8", dict(gshare=(8, 10), btb=32, ras=8)),
             ("gshare h12 4k+btb32+ras8", dict(gshare=(12, 12), btb=32, ras=8)),
             ("tage-lite+btb32+ras8", dict(tage=True, btb=32, ras=8))]
+    if sys.argv[1:2] == ["--fe"]:          # (O8.0) the classes of the frontend options, per trace
+        for path in sys.argv[2:]:
+            tr = load(path)
+            print(f"== {path}: {len(tr)} control-flow instructions")
+            for name, kw in FE_CONFIGS.items():
+                cl = FePred(**kw).classify(tr)
+                n = {c: cl.count(c) for c in ("ok", "steer", "ared", "phantom", "mis")}
+                print(f"  {name:22s} " + "  ".join(f"{c} {v:5d}" for c, v in n.items()))
+        return
     for path in sys.argv[1:]:
         tr = load(path)
         print(f"== {path}: {len(tr)} control-flow instructions")
