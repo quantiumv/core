@@ -23,7 +23,8 @@
 `include "riscv_encode.sv"
 
 module qv_align_fifo_tb #(
-    parameter bit ONE_OK = 1'b0     // the aligner emits one instruction when the queue has room for one
+    parameter bit ONE_OK = 1'b0,    // the aligner emits one instruction when the queue has room for one
+    parameter bit WIN    = 1'b0     // (O8b) qv_align2, with the dword behind the head in its window
 );
     import qv_pkg::*;
 
@@ -59,16 +60,42 @@ module qv_align_fifo_tb #(
 
     assign head = fe_instr_t'(head_bits);
 
-    qv_align #(.ONE_OK(ONE_OK)) align0 (
-        .clk(clk), .rst(rst), .i_flush(flush),
-        .i_buf_valid(buf_valid), .i_buf_pc(buf_pc), .i_buf_data(buf_data), .i_buf_err(buf_err),
-        .i_buf_cause(buf_cause), .i_buf_xl(buf_xl), .i_buf_pg(buf_pg),
-        .o_buf_pop(buf_pop),
-        .o_push0_valid(p0_valid), .o_push0_data(p0_data),
-        .o_push1_valid(p1_valid), .o_push1_data(p1_data),
-        .i_push_ready(push_ready), .i_push_ready1(push_ready1),
-        .o_redirect_valid(fe_redir), .o_redirect_pc(fe_redir_pc)
-    );
+    // (WIN) the dword behind the head, and the aligner's pop of both
+    logic        buf1_valid, buf1_err, buf_pop2;
+    logic [63:0] buf1_pc, buf1_data;
+    logic [43:0] buf1_pg;
+    /* verilator lint_off UNUSEDSIGNAL */
+    logic [63:0] bht_base_u, bht_base1_u, bht_ppc_u;
+    /* verilator lint_on UNUSEDSIGNAL */
+    generate
+        if (WIN) begin : g_win
+            qv_align2 #(.ONE_OK(ONE_OK)) align0 (
+                .clk(clk), .rst(rst), .i_flush(flush),
+                .i_buf_valid(buf_valid), .i_buf_pc(buf_pc), .i_buf_data(buf_data), .i_buf_err(buf_err),
+                .i_buf_cause(buf_cause), .i_buf_xl(buf_xl), .i_buf_pg(buf_pg),
+                .o_buf_pop(buf_pop),
+                .i_buf1_valid(buf1_valid), .i_buf1_pc(buf1_pc), .i_buf1_data(buf1_data), .i_buf1_err(buf1_err),
+                .i_buf1_xl(buf_xl), .i_buf1_pg(buf1_pg), .o_buf_pop2(buf_pop2),
+                .o_bht_base(bht_base_u), .o_bht_base1(bht_base1_u), .o_bht_ppc(bht_ppc_u),
+                .o_push0_valid(p0_valid), .o_push0_data(p0_data),
+                .o_push1_valid(p1_valid), .o_push1_data(p1_data),
+                .i_push_ready(push_ready), .i_push_ready1(push_ready1),
+                .o_redirect_valid(fe_redir), .o_redirect_pc(fe_redir_pc)
+            );
+        end else begin : g_align
+            qv_align #(.ONE_OK(ONE_OK)) align0 (
+                .clk(clk), .rst(rst), .i_flush(flush),
+                .i_buf_valid(buf_valid), .i_buf_pc(buf_pc), .i_buf_data(buf_data), .i_buf_err(buf_err),
+                .i_buf_cause(buf_cause), .i_buf_xl(buf_xl), .i_buf_pg(buf_pg),
+                .o_buf_pop(buf_pop),
+                .o_push0_valid(p0_valid), .o_push0_data(p0_data),
+                .o_push1_valid(p1_valid), .o_push1_data(p1_data),
+                .i_push_ready(push_ready), .i_push_ready1(push_ready1),
+                .o_redirect_valid(fe_redir), .o_redirect_pc(fe_redir_pc)
+            );
+            assign buf_pop2 = 1'b0;
+        end
+    endgenerate
 
     qv_fifo #(.WIDTH(W), .DEPTH(4)) iq0 (
         .clk(clk), .rst(rst), .i_flush(flush),
@@ -129,7 +156,7 @@ module qv_align_fifo_tb #(
     always @(posedge clk) begin
         if (rst || flush)              fpc <= restart_pc;
         else if (src_en && fe_redir)   fpc <= fe_redir_pc;
-        else if (src_en && buf_pop)    fpc <= {fpc[63:3], 3'b000} + 64'd8;
+        else if (src_en && buf_pop)    fpc <= {fpc[63:3], 3'b000} + (buf_pop2 ? 64'd16 : 64'd8);
     end
     // Translated fetch (xl_en): every dword comes with its physical page (any value, per dword) and a fault marker with
     // its cause
@@ -144,6 +171,13 @@ module qv_align_fifo_tb #(
         buf_cause = cause_d[fpc[11:3]];
         buf_xl    = xl_en;
         buf_pg    = xl_en ? pg_d[fpc[11:3]] : 44'b0;
+        // (WIN) the dword behind it, as the fetch buffer holds it
+        buf1_pc    = {fpc[63:3], 3'b000} + 64'd8;
+        buf1_valid = src_en && (buf1_pc < flimit);
+        buf1_data  = {mem[{buf1_pc[11:3], 2'd3}], mem[{buf1_pc[11:3], 2'd2}], mem[{buf1_pc[11:3], 2'd1}],
+                      mem[{buf1_pc[11:3], 2'd0}]};
+        buf1_err   = buf1_valid && err_d[buf1_pc[11:3]];
+        buf1_pg    = xl_en ? pg_d[buf1_pc[11:3]] : 44'b0;
     end
 
     // ---------------- program layout ----------------
@@ -633,7 +667,8 @@ module qv_align_fifo_tb #(
         pop_en = 1'b0;
         repeat (8) @(posedge clk);
         #1;
-        check("F4: entries held with the queue not popped", 64'(iq0.count_q), ONE_OK ? 64'd4 : 64'd3);
+        // (with WIN the window pairs dword 0's last C with dword 1's first instruction: room for two is enough)
+        check("F4: entries held with the queue not popped", 64'(iq0.count_q), (ONE_OK || WIN) ? 64'd4 : 64'd3);
         check("F4: the source is at the second dword either way", fpc, ONE_OK ? 64'h8 : 64'h8);
         pop_en = 1'b1;
         repeat (12) @(posedge clk);

@@ -29,7 +29,8 @@
 `include "riscv_encode.sv"
 
 module qv_align_hint_tb #(
-    parameter bit ONE_OK = 1'b0
+    parameter bit ONE_OK = 1'b0,
+    parameter bit WIN    = 1'b0         // (O8b) qv_align2, with the entry behind the head in its window
 );
     import qv_pkg::*;
 
@@ -82,27 +83,59 @@ module qv_align_hint_tb #(
     logic [63:0] bht_base, bht_ppc, bht_upd_pc;
     logic [3:0]  bht_known, bht_taken;
     logic        bht_pknown, bht_ptaken, bht_upd_valid = 1'b0, bht_upd_taken = 1'b0;
+    logic [63:0] bht_base1;                         // (WIN) the window's second dword
+    logic [3:0]  bht_known1, bht_taken1;
     qv_bht #(.ENTRIES(BHT_ENTRIES)) bht0 (
         .clk(clk), .rst(rst),
         .i_base_pc(bht_base), .i_pend_pc(bht_ppc),
         .o_known(bht_known), .o_taken(bht_taken), .o_pend_known(bht_pknown), .o_pend_taken(bht_ptaken),
+        .i_base1_pc(bht_base1), .o_known1(bht_known1), .o_taken1(bht_taken1),
         .i_upd_valid(bht_upd_valid), .i_upd_pc(bht_upd_pc), .i_upd_taken(bht_upd_taken)
     );
 
-    qv_align #(.ONE_OK(ONE_OK)) align0 (
-        .clk(clk), .rst(rst), .i_flush(flush),
-        .i_buf_valid(buf_valid), .i_buf_pc(buf_pc), .i_buf_data(buf_data), .i_buf_err(buf_err),
-        .i_buf_hint(buf_hint), .i_buf_hoff(buf_hoff), .i_buf_hx(buf_hx), .i_buf_htgt(buf_htgt),
-        .o_buf_pop(buf_pop),
-        .o_bht_base(bht_base), .o_bht_ppc(bht_ppc),
-        .i_bht_known(bht_known), .i_bht_taken(bht_taken), .i_bht_pknown(bht_pknown), .i_bht_ptaken(bht_ptaken),
-        .i_ras_top(ras_top), .i_ras_has1(ras_has1),
-        .o_ras_op0(ras_op0), .o_ras_addr0(ras_a0), .o_ras_op1(ras_op1), .o_ras_addr1(ras_a1),
-        .o_push0_valid(p0_valid), .o_push0_data(p0_data),
-        .o_push1_valid(p1_valid), .o_push1_data(p1_data),
-        .i_push_ready(push_ready), .i_push_ready1(push_ready1),
-        .o_redirect_valid(fe_redir), .o_redirect_pc(fe_redir_pc)
-    );
+    // (WIN) the entry behind the head, and the aligner's pop of both
+    logic        buf1_valid, buf1_hint, buf1_hx, buf_pop2;
+    logic [63:0] buf1_pc, buf1_data, buf1_htgt;
+    logic [1:0]  buf1_hoff;
+    generate
+        if (WIN) begin : g_win
+            qv_align2 #(.ONE_OK(ONE_OK)) align0 (
+                .clk(clk), .rst(rst), .i_flush(flush),
+                .i_buf_valid(buf_valid), .i_buf_pc(buf_pc), .i_buf_data(buf_data), .i_buf_err(buf_err),
+                .i_buf_hint(buf_hint), .i_buf_hoff(buf_hoff), .i_buf_hx(buf_hx), .i_buf_htgt(buf_htgt),
+                .o_buf_pop(buf_pop),
+                .i_buf1_valid(buf1_valid), .i_buf1_pc(buf1_pc), .i_buf1_data(buf1_data),
+                .i_buf1_hint(buf1_hint), .i_buf1_hoff(buf1_hoff), .i_buf1_hx(buf1_hx), .i_buf1_htgt(buf1_htgt),
+                .o_buf_pop2(buf_pop2),
+                .o_bht_base(bht_base), .o_bht_base1(bht_base1), .o_bht_ppc(bht_ppc),
+                .i_bht_known(bht_known), .i_bht_taken(bht_taken), .i_bht_known1(bht_known1),
+                .i_bht_taken1(bht_taken1), .i_bht_pknown(bht_pknown), .i_bht_ptaken(bht_ptaken),
+                .i_ras_top(ras_top), .i_ras_has1(ras_has1),
+                .o_ras_op0(ras_op0), .o_ras_addr0(ras_a0), .o_ras_op1(ras_op1), .o_ras_addr1(ras_a1),
+                .o_push0_valid(p0_valid), .o_push0_data(p0_data),
+                .o_push1_valid(p1_valid), .o_push1_data(p1_data),
+                .i_push_ready(push_ready), .i_push_ready1(push_ready1),
+                .o_redirect_valid(fe_redir), .o_redirect_pc(fe_redir_pc)
+            );
+        end else begin : g_align
+            qv_align #(.ONE_OK(ONE_OK)) align0 (
+                .clk(clk), .rst(rst), .i_flush(flush),
+                .i_buf_valid(buf_valid), .i_buf_pc(buf_pc), .i_buf_data(buf_data), .i_buf_err(buf_err),
+                .i_buf_hint(buf_hint), .i_buf_hoff(buf_hoff), .i_buf_hx(buf_hx), .i_buf_htgt(buf_htgt),
+                .o_buf_pop(buf_pop),
+                .o_bht_base(bht_base), .o_bht_ppc(bht_ppc),
+                .i_bht_known(bht_known), .i_bht_taken(bht_taken), .i_bht_pknown(bht_pknown), .i_bht_ptaken(bht_ptaken),
+                .i_ras_top(ras_top), .i_ras_has1(ras_has1),
+                .o_ras_op0(ras_op0), .o_ras_addr0(ras_a0), .o_ras_op1(ras_op1), .o_ras_addr1(ras_a1),
+                .o_push0_valid(p0_valid), .o_push0_data(p0_data),
+                .o_push1_valid(p1_valid), .o_push1_data(p1_data),
+                .i_push_ready(push_ready), .i_push_ready1(push_ready1),
+                .o_redirect_valid(fe_redir), .o_redirect_pc(fe_redir_pc)
+            );
+            assign buf_pop2  = 1'b0;
+            assign bht_base1 = 64'b0;
+        end
+    endgenerate
 
     qv_fifo #(.WIDTH(W), .DEPTH(8)) iq0 (
         .clk(clk), .rst(rst), .i_flush(flush),
@@ -265,6 +298,13 @@ module qv_align_hint_tb #(
     assign buf_hoff  = fb_ho[fb_rd];
     assign buf_hx    = fb_hxx[fb_rd];
     assign buf_htgt  = fb_ht[fb_rd];
+    assign buf1_valid = (fb_n >= 2);
+    assign buf1_pc    = fb_pc[(fb_rd + 1) % FBD];
+    assign buf1_data  = fb_dat[(fb_rd + 1) % FBD];
+    assign buf1_hint  = fb_h[(fb_rd + 1) % FBD];
+    assign buf1_hoff  = fb_ho[(fb_rd + 1) % FBD];
+    assign buf1_hx    = fb_hxx[(fb_rd + 1) % FBD];
+    assign buf1_htgt  = fb_ht[(fb_rd + 1) % FBD];
 
     // restart / reset of the source
     logic [63:0] restart_pc = '0;
@@ -333,6 +373,7 @@ module qv_align_hint_tb #(
             int n_next, rd_next;
             n_next = fb_n; rd_next = fb_rd;
             if (buf_pop && fb_n != 0) begin n_next--; rd_next = (fb_rd + 1) % FBD; end
+            if (buf_pop2 && fb_n >= 2) begin n_next--; rd_next = (fb_rd + 2) % FBD; end
             if (src_en && n_next < FBD && fpc < MEM_HW * 2 - 32) begin
                 pick_hint(fpc, nh, nho, nhx, nht);
                 wr = (rd_next + n_next) % FBD;
@@ -349,17 +390,23 @@ module qv_align_hint_tb #(
     int bht_errs = 0, n_bht_known = 0, n_bht_veto = 0, n_bht_s1 = 0, n_bht_pend = 0, n_bht_diff = 0;
     task automatic check_bht(input fe_instr_t i, input string slot);
         int hwi;
-        logic k, t, st_taken;
+        logic k, t, st_taken, in_next;
         hwi = int'(i.pc[11:1]);
-        // the lookups are of the right addresses: the head dword for what starts in it, the pending pc for a crossing instruction
-        if (i.pc[63:3] != buf_pc[63:3] && bht_ppc !== i.pc) begin
+        // the lookups are of the right addresses: the head dword for what starts in it (with WIN, the dword behind it for
+        // what starts there), the pending pc for a crossing instruction
+        in_next = WIN && buf1_valid && (i.pc[63:3] == buf1_pc[63:3]) && (i.pc[63:3] != buf_pc[63:3]);
+        if (i.pc[63:3] != buf_pc[63:3] && !in_next && bht_ppc !== i.pc) begin
             bht_errs++; $display("HINT_TB: %s: the pending lookup is of %h, the instruction is at %h", slot, bht_ppc, i.pc);
         end
         if (bht_base[63:3] !== buf_pc[63:3]) begin
             bht_errs++; $display("HINT_TB: %s: the dword lookup is of %h, the dword is %h", slot, bht_base, buf_pc);
         end
+        if (in_next && bht_base1[63:3] !== buf1_pc[63:3]) begin
+            bht_errs++; $display("HINT_TB: %s: the second dword lookup is of %h, the dword is %h", slot, bht_base1, buf1_pc);
+        end
         if (!cond_at[hwi]) return;
         if (i.pc[63:3] == buf_pc[63:3]) begin k = bht_known[i.pc[2:1]]; t = bht_taken[i.pc[2:1]]; end
+        else if (in_next)               begin k = bht_known1[i.pc[2:1]]; t = bht_taken1[i.pc[2:1]]; end
         else                            begin k = bht_pknown;            t = bht_ptaken;            end
         st_taken = tgt_at[hwi] < i.pc;
         if (k) begin
@@ -379,8 +426,19 @@ module qv_align_hint_tb #(
     endtask
     // was a (right) hint on this branch in the head dword's entry?
     function automatic logic hint_was_here(input logic [63:0] pc);
-        return buf_hint && !buf_hx && (buf_hoff == pc[2:1]) && (pc[63:3] == buf_pc[63:3]);
+        return (buf_hint && !buf_hx && (buf_hoff == pc[2:1]) && (pc[63:3] == buf_pc[63:3]))
+            || (WIN && buf1_valid && !buf_hint && buf1_hint && !buf1_hx && (buf1_hoff == pc[2:1])
+                && (pc[63:3] == buf1_pc[63:3]));
     endfunction
+    // (WIN) the window at work: pairs whose second instruction starts in the next dword, and crossing instructions
+    // that go out in the same cycle as the instruction before them
+    int n_pair_next = 0, n_pair_cross = 0;
+    always @(posedge clk) begin
+        if (!rst && !flush && !restart && p0_valid && p1_valid) begin
+            if (p0_data.pc[63:3] == buf_pc[63:3] && p1_data.pc[63:3] == buf_pc[63:3] + 61'd1) n_pair_next++;
+            if (!p1_data.rvc && p1_data.pc[2:1] == 2'b11) n_pair_cross++;
+        end
+    end
     always @(posedge clk) begin
         if (!rst && !flush && !restart) begin
             if (p0_valid) check_bht(p0_data, "slot 0");
@@ -392,7 +450,8 @@ module qv_align_hint_tb #(
     task automatic count_hint_taken(input fe_instr_t i);
         int hwi;
         hwi = int'(i.pc[11:1]);
-        if (i.pred_taken && kind_at[hwi] == 3'd2 && hint_was_here(i.pc) && i.pred_tgt === buf_htgt && !fe_redir) n_hint_taken++;
+        if (i.pred_taken && kind_at[hwi] == 3'd2 && hint_was_here(i.pc) && !fe_redir
+            && i.pred_tgt === ((i.pc[63:3] == buf_pc[63:3]) ? buf_htgt : buf1_htgt)) n_hint_taken++;
     endtask
     always @(posedge clk) begin
         if (!rst && !flush && !restart) begin
@@ -547,6 +606,14 @@ module qv_align_hint_tb #(
                  n_bht_known, n_bht_veto, n_bht_s1, n_bht_diff, n_bht_pend);
         $display("qv_align_hint_tb (ONE_OK=%0d): %0d instructions, hints: %0d right, %0d wrong target, %0d phantom",
                  ONE_OK, popped, hints_true, hints_wrong, hints_phantom);
+        if (WIN) begin
+            check("the window paired across a dword boundary", 64'(n_pair_next > 500), 64'd1);
+            check("the window sent crossing instructions out beside the one before", 64'(n_pair_cross > 50), 64'd1);
+            $display("qv_align_hint_tb (WIN): %0d pairs into the next dword, %0d of them a crossing instruction",
+                     n_pair_next, n_pair_cross);
+        end else begin
+            check("one dword at a time: no pair across a dword boundary", 64'(n_pair_next), 64'd0);
+        end
         $display("");
         $display("qv_align_hint_tb: %0d passed, %0d failed", pass_count, fail_count);
         if (fail_count > 0) $display("qv_align_hint_tb: FAILURES PRESENT");
