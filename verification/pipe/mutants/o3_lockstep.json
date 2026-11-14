@@ -43,7 +43,9 @@
    "name": "core: a uop is dispatched in the kill cycle",
    "file": "core.sv",
    "old": "        .i_uop_valid(uop_valid && !xr_kill), .i_uop(uop), .o_issue(issue_fire),",
-   "new": "        .i_uop_valid(uop_valid), .i_uop(uop), .o_issue(issue_fire),"
+   "new": "        .i_uop_valid(uop_valid), .i_uop(uop), .o_issue(issue_fire),",
+   "equivalent": true,
+   "why": "with the early restart (XR_EARLY) the frontend, decode included, is flushed in the writeback cycle, one before the kill, so nothing is in decode to dispatch in the kill cycle (it matters with the registered restart, whose frontend flush is the kill cycle's)"
   },
   {
    "name": "core: the aligner's redirect beats the execute redirect",
@@ -111,12 +113,10 @@
    "new": "    assign xr_fe_pc = XR_EARLY ? x_q_pc : xr_pc;"
   },
   {
-   "name": "core: the kill cycle restarts fetch again (to the same target: time only)",
+   "name": "core: the kill cycle restarts fetch again (at the writeback bus's target)",
    "file": "core.sv",
    "old": "    assign xr_fe    = XR_EARLY ? x_cap : xr_kill;",
-   "new": "    assign xr_fe    = XR_EARLY ? (x_cap || xr_kill) : xr_kill;",
-   "equivalent": true,
-   "why": "the second restart goes to the target fetch already restarted at, and nothing of the new path is in the frontend yet: the same instructions retire, later"
+   "new": "    assign xr_fe    = XR_EARLY ? (x_cap || xr_kill) : xr_kill;"
   }
  ]
 }
