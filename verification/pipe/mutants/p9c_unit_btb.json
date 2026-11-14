@@ -18,23 +18,23 @@
  "mutants": [
   {
    "name": "hit ignores the tag",
-   "old": "assign o_hit = v_q[lk_idx] && (tag_q[lk_idx] == {i_lk_pc[63:3], 3'b000}) && (off_q[lk_idx] >= i_lk_pc[2:1]);",
-   "new": "assign o_hit = v_q[lk_idx] && (off_q[lk_idx] >= i_lk_pc[2:1]);"
+   "old": "assign o_hit = v_q[lk_idx] && (tag_q[lk_idx] == {i_lk_pc[63:3], 3'b000}) && (off_q[lk_idx] >= i_lk_pc[2:1])",
+   "new": "assign o_hit = v_q[lk_idx] && (off_q[lk_idx] >= i_lk_pc[2:1])"
   },
   {
    "name": "hit ignores valid",
-   "old": "assign o_hit = v_q[lk_idx] && (tag_q[lk_idx] == {i_lk_pc[63:3], 3'b000}) && (off_q[lk_idx] >= i_lk_pc[2:1]);",
-   "new": "assign o_hit = (tag_q[lk_idx] == {i_lk_pc[63:3], 3'b000}) && (off_q[lk_idx] >= i_lk_pc[2:1]);"
+   "old": "assign o_hit = v_q[lk_idx] && (tag_q[lk_idx] == {i_lk_pc[63:3], 3'b000}) && (off_q[lk_idx] >= i_lk_pc[2:1])",
+   "new": "assign o_hit = (tag_q[lk_idx] == {i_lk_pc[63:3], 3'b000}) && (off_q[lk_idx] >= i_lk_pc[2:1])"
   },
   {
    "name": "hit ignores the start halfword",
-   "old": "assign o_hit = v_q[lk_idx] && (tag_q[lk_idx] == {i_lk_pc[63:3], 3'b000}) && (off_q[lk_idx] >= i_lk_pc[2:1]);",
-   "new": "assign o_hit = v_q[lk_idx] && (tag_q[lk_idx] == {i_lk_pc[63:3], 3'b000});"
+   "old": "assign o_hit = v_q[lk_idx] && (tag_q[lk_idx] == {i_lk_pc[63:3], 3'b000}) && (off_q[lk_idx] >= i_lk_pc[2:1])",
+   "new": "assign o_hit = v_q[lk_idx] && (tag_q[lk_idx] == {i_lk_pc[63:3], 3'b000})"
   },
   {
    "name": "the start halfword compare is strict",
-   "old": "assign o_hit = v_q[lk_idx] && (tag_q[lk_idx] == {i_lk_pc[63:3], 3'b000}) && (off_q[lk_idx] >= i_lk_pc[2:1]);",
-   "new": "assign o_hit = v_q[lk_idx] && (tag_q[lk_idx] == {i_lk_pc[63:3], 3'b000}) && (off_q[lk_idx] > i_lk_pc[2:1]);"
+   "old": "assign o_hit = v_q[lk_idx] && (tag_q[lk_idx] == {i_lk_pc[63:3], 3'b000}) && (off_q[lk_idx] >= i_lk_pc[2:1])",
+   "new": "assign o_hit = v_q[lk_idx] && (tag_q[lk_idx] == {i_lk_pc[63:3], 3'b000}) && (off_q[lk_idx] > i_lk_pc[2:1])"
   },
   {
    "name": "the crossing flag is not stored",

@@ -1,0 +1,71 @@
+{
+ "dut": "design/pipe/qv_btb.sv",
+ "tb": "design/pipe/qv_btb_tb.sv",
+ "files": [
+  "design/pipe/qv_btb.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench",
+  "-Pqv_btb_tb.CTR=1"
+ ],
+ "cwd": "design",
+ "timeout": 600,
+ "mutants": [
+  {
+   "name": "a conditional entry steers whatever its counter",
+   "old": "&& (!CTR || !c_q[lk_idx] || ctr_q[lk_idx][1]);",
+   "new": "&& (!CTR || !c_q[lk_idx] || 1'b1);"
+  },
+  {
+   "name": "a jump's entry steers only by its counter",
+   "old": "&& (!CTR || !c_q[lk_idx] || ctr_q[lk_idx][1]);",
+   "new": "&& (!CTR || ctr_q[lk_idx][1]);"
+  },
+  {
+   "name": "a conditional entry steers at 1",
+   "old": "&& (!CTR || !c_q[lk_idx] || ctr_q[lk_idx][1]);",
+   "new": "&& (!CTR || !c_q[lk_idx] || ctr_q[lk_idx] != 2'd0);"
+  },
+  {
+   "name": "a taken branch with its own entry starts its counter again",
+   "old": "ctr_q[up_idx] <= !own ? 2'd2 : (ctr_q[up_idx] == 2'd3) ? 2'd3 : ctr_q[up_idx] + 2'd1;",
+   "new": "ctr_q[up_idx] <= 2'd2;"
+  },
+  {
+   "name": "a new entry starts strongly taken",
+   "old": "ctr_q[up_idx] <= !own ? 2'd2 : (ctr_q[up_idx] == 2'd3) ? 2'd3 : ctr_q[up_idx] + 2'd1;",
+   "new": "ctr_q[up_idx] <= !own ? 2'd3 : (ctr_q[up_idx] == 2'd3) ? 2'd3 : ctr_q[up_idx] + 2'd1;"
+  },
+  {
+   "name": "the counter wraps past 3",
+   "old": "ctr_q[up_idx] <= !own ? 2'd2 : (ctr_q[up_idx] == 2'd3) ? 2'd3 : ctr_q[up_idx] + 2'd1;",
+   "new": "ctr_q[up_idx] <= !own ? 2'd2 : ctr_q[up_idx] + 2'd1;"
+  },
+  {
+   "name": "a fall-through still removes the entry",
+   "old": "if (!CTR)                           v_q[up_idx]   <= 1'b0;",
+   "new": "if (1'b1)                           v_q[up_idx]   <= 1'b0;"
+  },
+  {
+   "name": "the counter wraps below 0",
+   "old": "else if (ctr_q[up_idx] != 2'd0)     ctr_q[up_idx] <= ctr_q[up_idx] - 2'd1;",
+   "new": "else                                ctr_q[up_idx] <= ctr_q[up_idx] - 2'd1;"
+  },
+  {
+   "name": "every entry is taken for a conditional's",
+   "old": "c_q[up_idx]   <= i_upd_cond;",
+   "new": "c_q[up_idx]   <= 1'b1;"
+  },
+  {
+   "name": "a fall-through counts down another branch's entry",
+   "old": "end else if (own) begin\n                if (!CTR)",
+   "new": "end else begin\n                if (!CTR)"
+  }
+ ]
+}
