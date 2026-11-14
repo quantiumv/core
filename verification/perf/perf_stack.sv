@@ -176,6 +176,7 @@ module perf_stack #(
     input logic [TAG_W-1:0] req_fpu_tag = '0,
     input logic             fb_push = 1'b0,         // a fetched dword enters the fetch buffer
     input logic             fb_pop = 1'b0,          // the aligner is done with the buffer's head
+    input logic             fb_pop2 = 1'b0,         // (O8b) ... and with the entry behind it
     input logic             fb_flush = 1'b0,        // a redirect empties it
     input logic             lsu_in_bus = 1'b0,      // the LSU's op is on the bus
     input logic             dc_refill = 1'b0,       // the D$ refills a line
@@ -350,6 +351,7 @@ module perf_stack #(
             fbm_n = 0;
         end else begin
             if (fb_pop && fbm_n > 0) begin fbm_rd = (fbm_rd + 1) % FB_MIRROR; fbm_n = fbm_n - 1; end
+            if (fb_pop2 && fbm_n > 0) begin fbm_rd = (fbm_rd + 1) % FB_MIRROR; fbm_n = fbm_n - 1; end
             if (fb_push) begin fbm_push[(fbm_rd + fbm_n) % FB_MIRROR] = cycle_q; fbm_n = fbm_n + 1; end
         end
     end
