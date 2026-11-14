@@ -61,14 +61,12 @@ done
 # (O8b) the window aligner's fetch, and the aligner itself against a model fetch buffer (bounded)
 for task in prove_w bmc_w cover_w prove_w2; do
     r=$(sby -f fetch.sby $task 2>&1 | status)
-    printf '%-12s %s
-' "fetch $task" "$r"
+    printf '%-12s %s\n' "fetch $task" "$r"
     [ "$r" == "PASS" ] || fail=1
 done
 for task in bmc cover; do
     r=$(sby -f align2.sby $task 2>&1 | status)
-    printf '%-12s %s
-' "align2 $task" "$r"
+    printf '%-12s %s\n' "align2 $task" "$r"
     [ "$r" == "PASS" ] || fail=1
 done
 # the load/store queue with the engine (lsq.sby): bounded only, no k-induction (see lsq_props.sv)
