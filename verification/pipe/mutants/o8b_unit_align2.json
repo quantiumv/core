@@ -1,0 +1,119 @@
+{
+ "dut": "design/pipe/qv_align2.sv",
+ "files": [
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_align.sv",
+  "design/pipe/qv_align2.sv",
+  "design/pipe/qv_fifo.sv",
+  "design/pipe/qv_ras.sv",
+  "design/pipe/qv_bht.sv"
+ ],
+ "cwd": "design",
+ "timeout": 900,
+ "tb": "design/pipe/qv_align_hint_tb.sv",
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench",
+  "-Pqv_align_hint_tb.WIN=1",
+  "-Pqv_align_hint_tb.ONE_OK=1"
+ ],
+ "mutants": [
+  {
+   "name": "the window joins the entry behind a hinted head",
+   "old": "wire        nseq  = i_buf1_valid && !i_buf_hint && !i_buf_err && !i_buf1_err;",
+   "new": "wire        nseq  = i_buf1_valid && !i_buf_err && !i_buf1_err;"
+  },
+  {
+   "name": "the window joins a faulted entry behind the head",
+   "old": "wire        nseq  = i_buf1_valid && !i_buf_hint && !i_buf_err && !i_buf1_err;",
+   "new": "wire        nseq  = i_buf1_valid && !i_buf_hint && !i_buf_err;",
+   "equivalent": true,
+   "note": "no faulted entries in this testbench: killed by align2.sby (run.sh align2_joins_faulted)"
+  },
+  {
+   "name": "the window is always two entries",
+   "old": "wire [3:0]  wend  = nseq ? 4'd8 : 4'd4;",
+   "new": "wire [3:0]  wend  = 4'd8;"
+  },
+  {
+   "name": "a crossing instruction goes out without its second half",
+   "old": "end else if ({1'b0, p} + 4'd1 < we) begin",
+   "new": "end else if (1'b1) begin"
+  },
+  {
+   "name": "a crossing instruction's second half is its first",
+   "old": "raw = {hw8(d0, d1, p + 3'd1), h};",
+   "new": "raw = {hw8(d0, d1, p), h};"
+  },
+  {
+   "name": "a crossing instruction answers to the head's hint",
+   "old": "hh = h1 && hx1;",
+   "new": "hh = h0 && hx0;"
+  },
+  {
+   "name": "the next entry's hint ignores its crossing flag",
+   "old": "hh = h1 && !hx1 && (p[1:0] == ho1);",
+   "new": "hh = h1 && (p[1:0] == ho1);"
+  },
+  {
+   "name": "the next entry's hint is matched at the head's offset",
+   "old": "hh = h1 && !hx1 && (p[1:0] == ho1);",
+   "new": "hh = h1 && !hx1 && (p[1:0] == ho0);"
+  },
+  {
+   "name": "a confirmed hint in the next entry drops only the head",
+   "old": "cur = conf0_1 ? 4'd8 : 4'd4;     // fetch is already at the target: drop the rest of the entry",
+   "new": "cur = 4'd4;     // fetch is already at the target: drop the rest of the entry"
+  },
+  {
+   "name": "slot 1 goes past the window's end",
+   "old": "if (o_push0_valid && !o_redirect_valid && cur < wend && i_push_ready) begin",
+   "new": "if (o_push0_valid && !o_redirect_valid && i_push_ready) begin"
+  },
+  {
+   "name": "a hint confirmed by slot 1 still sends fetch back",
+   "old": "if (!o_redirect_valid && !conf0 && !conf1 && i_buf_hint && cur == 4'd4) begin",
+   "new": "if (!o_redirect_valid && !conf0 && i_buf_hint && cur == 4'd4) begin"
+  },
+  {
+   "name": "both entries popped when the head is used up",
+   "old": "assign o_buf_pop2 = go && (cur == 4'd8) && !o_redirect_valid;",
+   "new": "assign o_buf_pop2 = go && (cur >= 4'd4) && !o_redirect_valid;"
+  },
+  {
+   "name": "the next entry is never popped with the head",
+   "old": "assign o_buf_pop2 = go && (cur == 4'd8) && !o_redirect_valid;",
+   "new": "assign o_buf_pop2 = 1'b0;"
+  },
+  {
+   "name": "the position in the next entry is lost when only the head is popped",
+   "old": "mid_q  <= (cur < 4'd4) || (cur > 4'd4 && cur < 4'd8);",
+   "new": "mid_q  <= (cur < 4'd4);"
+  },
+  {
+   "name": "the next entry's instructions read the head's history",
+   "old": "bk      = in1 ? k1[p[1:0]] : k0[p[1:0]];",
+   "new": "bk      = k0[p[1:0]];"
+  },
+  {
+   "name": "slot 1 does not see slot 0's call on the RAS",
+   "old": "ras_tgt1    = (o_ras_op0 == 2'b01) ? o_ras_addr0 : i_ras_top;",
+   "new": "ras_tgt1    = i_ras_top;"
+  },
+  {
+   "name": "a crossing instruction's pc is the next entry's",
+   "old": "pc      = b + {60'b0, p, 1'b0};",
+   "new": "pc      = b + {60'b0, p + 3'd1, 1'b0};"
+  },
+  {
+   "name": "slot 1's stash keeps the wrong halfword",
+   "old": "stash_hw = hw8(i_buf_data, i_buf1_data, cur[2:0]);",
+   "new": "stash_hw = hw8(i_buf_data, i_buf1_data, 3'd2);"
+  }
+ ]
+}
