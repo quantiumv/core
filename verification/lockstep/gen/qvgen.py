@@ -712,6 +712,86 @@ def emit_xr(p: Program, recent: list[int]):
     del recent[:-8]
 
 
+def emit_win(p: Program, recent: list[int]):
+    """--win: what an aligner over two fetch-buffer entries (O8b) has to get right. Code placed at a chosen halfword
+    of a dword (`.balign 8`, then 0-3 c.nops): a mix of 16- and 32-bit instructions, so a 32-bit one starts at every
+    halfword and crosses into the next dword from halfword 3; a jump or branch to a target at each halfword (what it
+    skips runs only on the wrong path when it is taken); a taken 32-bit branch or jump crossing a dword (the BTB never
+    holds one, the aligner predicts it); two 16-bit branches in one dword; a short loop whose top and whose backward
+    branch land at each offset (the BTB steers it, the hint can sit in the second entry of the window)."""
+    if "c" not in p.args.isa:
+        emit_alu(p, recent)
+        return
+
+    def pad(k=None):
+        p.e("    .balign 8")
+        for _ in range(p.rng.randint(0, 3) if k is None else k):
+            p.e("    .half   0x0001")                             # c.nop
+
+    def w32(line):
+        p.e("    .option push")
+        p.e("    .option norvc")
+        p.e(line)
+        p.e("    .option pop")
+
+    def op():
+        rd = p.reg()
+        if p.rng.random() < 0.5:
+            w32(f"    {p.rng.choice(['add', 'sub', 'xor', 'or', 'and', 'addw']):<7} x{rd}, x{p.reg_biased(recent)}, "
+                f"x{p.reg_biased(recent)}")
+        else:
+            p.e(f"    addi    x{rd}, x{rd}, {p.rng.choice([i for i in range(-32, 32) if i])}")   # c.addi
+        recent.append(rd)
+
+    def mix(lo, hi):
+        for _ in range(p.rng.randint(lo, hi)):
+            op()
+
+    k = p.rng.random()
+    if k < 0.30:                                                   # a mix from each start offset
+        pad()
+        mix(2, 7)
+    elif k < 0.50:                                                 # a jump or a branch to each halfword
+        lbl = Label("win")
+        r = p.reg_biased(recent)
+        br = p.rng.choice([f"    j       {lbl}", f"    beqz    x{r}, {lbl}", f"    bnez    x{r}, {lbl}"])
+        pad()
+        if p.rng.random() < 0.4:
+            w32(br)
+        else:
+            p.e(br)
+        mix(0, 3)
+        pad()
+        p.e(f"{lbl}:")
+        mix(1, 3)
+    elif k < 0.65:                                                 # a taken 32-bit branch or jump crossing a dword
+        lbl = Label("win")
+        pad(3)
+        w32(p.rng.choice([f"    beq     x0, x0, {lbl}", f"    bgeu    x0, x0, {lbl}", f"    jal     x0, {lbl}"]))
+        mix(0, 3)
+        pad()
+        p.e(f"{lbl}:")
+        mix(1, 2)
+    elif k < 0.80:                                                 # two 16-bit branches in one dword
+        l1, l2 = Label("win"), Label("win")
+        pad(p.rng.randint(0, 2))
+        p.e(f"    beqz    x{p.rng.choice([13, 14, 15])}, {l1}")   # c.beqz / c.bnez: x8-x15 only
+        p.e(f"    bnez    x{p.rng.choice([13, 14, 15])}, {l2}")
+        mix(0, 2)
+        p.e(f"{l1}:")
+        mix(0, 2)
+        p.e(f"{l2}:")
+        mix(1, 2)
+    else:                                                          # a short loop, its top and its branch at each offset
+        def body():
+            mix(1, 4)
+            if p.rng.random() < 0.5:
+                pad()
+        pad()
+        p.counted_loop(body, max_nesting=p.args.max_loop_nesting)
+    del recent[:-8]
+
+
 def emit_pair(p: Program, recent: list[int]):
     """--pair: what a core that dispatches, executes and retires two a cycle (O4) has to get right. Runs of independent
     ALU ops (both slots, both ALU ports, commit pairs); a pair whose second reads the first's destination (it waits
@@ -2625,6 +2705,9 @@ def emit_main_body(p: Program):
         if getattr(a, "xr", False) and p.rng.random() < 0.15:
             emit_xr(p, recent)
             return
+        if getattr(a, "win", False) and p.rng.random() < 0.20:
+            emit_win(p, recent)
+            return
         if getattr(a, "mem_dense", False) and p.rng.random() < 0.30:
             emit_mem_pair(p, recent)
             return
@@ -2833,6 +2916,10 @@ def main():
     ap.add_argument("--xr", action="store_true",
                     help="some instructions are late, always-taken branches with a wrong path of everything that "
                          "must never take effect (see emit_xr): for recovery at execute (O3)")
+    ap.add_argument("--win", action="store_true",
+                    help="a fifth of the instructions are placed at chosen halfwords: 32-bit ones crossing dwords, "
+                         "branch targets at every offset, two branches in a dword (see emit_win): for the window "
+                         "aligner (O8b)")
     ap.add_argument("--no-div", action="store_true", dest="no_div",
                     help="keep M to the multiplies (for cores without a divider yet)")
     ap.add_argument("--len", type=int, default=200)
