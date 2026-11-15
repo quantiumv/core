@@ -148,7 +148,9 @@
 `endif
 // QV_FORMAL_SMALL: a smaller ROB, IQ and TLBs, to keep riscv-formal's models small
 `ifdef QV_FORMAL_SMALL
+`ifndef QV_PIPE_ROB_DEPTH
 `define QV_PIPE_ROB_DEPTH 4
+`endif
 `define QV_PIPE_IQ_DEPTH  2
 `define QV_PIPE_FB_DEPTH  2
 `define QV_PIPE_TLB_ENTRIES 1
@@ -156,7 +158,9 @@
 `define QV_PIPE_RAS_DEPTH ((`QV_PIPE_BP) ? 2 : 0)
 `define QV_PIPE_BHT_ENTRIES ((`QV_PIPE_BP) ? 8 : 0)
 `else
-`define QV_PIPE_ROB_DEPTH qv_pkg::QV_ROB_DEPTH
+`ifndef QV_PIPE_ROB_DEPTH
+`define QV_PIPE_ROB_DEPTH qv_pkg::QV_ROB_DEPTH                // (O7) a larger ROB needs QV_ROB_MAX as well
+`endif
 `define QV_PIPE_IQ_DEPTH  ((`QV_PIPE_FETCH_STREAM) ? 8 : 4)
 `define QV_PIPE_FB_DEPTH  ((`QV_PIPE_FETCH_STREAM) ? 4 : 2)
 `define QV_PIPE_TLB_ENTRIES 4
@@ -311,7 +315,7 @@ module core
 #(
     parameter bit SERIALIZE = `QV_PIPE_SERIALIZE,
     parameter bit BYPASS_EN = `QV_PIPE_BYPASS_EN,
-    parameter int ROB_DEPTH = `QV_PIPE_ROB_DEPTH,   // power of 2, <= qv_pkg::QV_ROB_DEPTH
+    parameter int ROB_DEPTH = `QV_PIPE_ROB_DEPTH,   // power of 2, 2 .. qv_pkg::QV_ROB_DEPTH (QV_ROB_MAX)
     parameter int IQ_DEPTH  = `QV_PIPE_IQ_DEPTH,    // power of 2, >= 2
     parameter int FB_DEPTH  = `QV_PIPE_FB_DEPTH,    // fetch buffer entries
     parameter bit FETCH_STREAM = `QV_PIPE_FETCH_STREAM,   // back-to-back fetch requests
@@ -1691,6 +1695,10 @@ module core
     // O4: the width knobs whose paths exist so far
     initial if (COMMIT_W < 1 || COMMIT_W > 2 || DISPATCH_W < 1 || DISPATCH_W > 2 || ALU_PORTS < 1 || ALU_PORTS > 2)
         $fatal(1, "core: COMMIT_W, DISPATCH_W and ALU_PORTS must be 1 or 2");
+    // O7: tags are sized by the package, so the ROB may be no larger than its depth (QV_ROB_MAX)
+    initial if (ROB_DEPTH < 2 || ROB_DEPTH > qv_pkg::QV_ROB_DEPTH || (ROB_DEPTH & (ROB_DEPTH - 1)) != 0)
+        $fatal(1, "core: ROB_DEPTH %0d must be a power of 2 from 2 to qv_pkg::QV_ROB_DEPTH (%0d, set by QV_ROB_MAX)",
+               ROB_DEPTH, qv_pkg::QV_ROB_DEPTH);
 `endif
 
     // ---------------- RVFI ----------------

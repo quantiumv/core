@@ -421,6 +421,9 @@ module qv_issue #(
     // (read by the CPI stack) the uop waits for room in a full station
     /* verilator lint_off UNUSEDSIGNAL */
     wire rs_full = i_uop_valid && to_rs && !rs_room;
+    /* verilator lint_off UNUSEDSIGNAL */
+    logic [7:0] rs_used;                // (O7) the station's entries held, for the perf monitor (0 without a station)
+    /* verilator lint_on UNUSEDSIGNAL */
     /* verilator lint_on UNUSEDSIGNAL */
 
     // (LSQ_WAIT) the memory op's operands for the queue: ready with the value, or waiting for the producer's tag
@@ -654,6 +657,7 @@ module qv_issue #(
                 .i_push(o_issue && to_rs), .i_push_e(pe), .o_room(rs_room),
                 .i_push2(o_issue2 && to_rs1), .i_push2_e(pe1), .o_room2(rs_room2),
                 .o_has_div(rs_has_div), .o_has_fds(rs_has_fds),
+                .o_used(rs_used),
                 .i_wb(i_wb), .i_wbp(i_wbp), .i_wbl(i_wbl), .i_wbd(i_wbd), .i_wbf(i_wbf), .i_wbc(i_wbc),
                 .i_div_free(i_div_free), .i_fpu_ds_free(i_fpu_ds_free),
                 .o_sel_ab(rs_sel_ab), .o_sel_div(rs_sel_div), .o_sel_fpu(rs_sel_fpu),
@@ -665,6 +669,7 @@ module qv_issue #(
             assign rs_room2   = 1'b0;
             assign rs_has_div = 1'b0;
             assign rs_has_fds = 1'b0;
+            assign rs_used    = '0;
             assign rs_sel_ab  = 1'b0;
             assign rs_sel_div = 1'b0;
             assign rs_sel_fpu = 1'b0;

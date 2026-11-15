@@ -124,7 +124,9 @@ module qv_rob #(
 
     // (O3) kill everything younger than i_kill_tag; which tags that is
     input  logic                             i_kill = 1'b0,
-    input  logic [qv_pkg::QV_ROB_TAG_W-1:0]  i_kill_tag = '0,
+    /* verilator lint_off UNUSEDSIGNAL */
+    input  logic [qv_pkg::QV_ROB_TAG_W-1:0]  i_kill_tag = '0,     // (O7) a ROB smaller than the package reads its low bits
+    /* verilator lint_on UNUSEDSIGNAL */
     output logic [(1<<qv_pkg::QV_ROB_TAG_W)-1:0] o_kill_vec,
     input  logic                             i_wb_recover = 1'b0,    // i_wb's mispredict is recovered at execute
     output logic [qv_pkg::QV_ROB_DEPTH-1:0]  o_surv_live,

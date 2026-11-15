@@ -56,6 +56,7 @@ module qv_rs #(
     output logic                             o_room2,
     output logic                             o_has_div,        // an entry is a divide: a dispatching one may not pass it
     output logic                             o_has_fds,        // an entry is an FP divide/square root: likewise
+    output logic [7:0]                       o_used,           // (O7) entries held (for the perf monitor)
 
     // wakeup (only valid, tag and value are read)
     /* verilator lint_off UNUSEDSIGNAL */
@@ -85,6 +86,12 @@ module qv_rs #(
 
     rs_entry_t e_q [0:DEPTH-1];
     logic      v_q [0:DEPTH-1];               // valid; the valid entries are always 0 .. n-1
+
+    always_comb begin
+        o_used = '0;
+        for (int i = 0; i < DEPTH; i++)
+            o_used = o_used + 8'(v_q[i]);
+    end
 
     // (Elements of e_q are copied into a temporary before their fields are read or written: Icarus crashes
     // elaborating `array[i].field` on an array of structs.)
