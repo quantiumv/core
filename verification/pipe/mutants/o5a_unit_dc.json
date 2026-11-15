@@ -1,0 +1,110 @@
+{
+ "dut": "design/pipe/qv_dc.sv",
+ "tb": "design/pipe/qv_dc_tb.sv",
+ "files": [
+  "design/pipe/qv_dc.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench"
+ ],
+ "cwd": "design",
+ "timeout": 900,
+ "mutants": [
+  {
+   "name": "valid ignored",
+   "old": "assign o_hit = valid_q[l_idx] && (tag_q[l_idx] == l_tag);",
+   "new": "assign o_hit = (tag_q[l_idx] == l_tag);"
+  },
+  {
+   "name": "the tag compare loses its low bit",
+   "old": "assign o_hit = valid_q[l_idx] && (tag_q[l_idx] == l_tag);",
+   "new": "assign o_hit = valid_q[l_idx] && (tag_q[l_idx][TW-1:1] == l_tag[TW-1:1]);"
+  },
+  {
+   "name": "installed despite a snoop",
+   "old": "valid_q[f_idx] <= !i_err && !kill_q && !inv_f && !snoop_f;",
+   "new": "valid_q[f_idx] <= !i_err && !inv_f;"
+  },
+  {
+   "name": "installed despite an error",
+   "old": "valid_q[f_idx] <= !i_err && !kill_q && !inv_f && !snoop_f;",
+   "new": "valid_q[f_idx] <= !kill_q && !inv_f && !snoop_f;"
+  },
+  {
+   "name": "an update to a missing line writes the line at its index",
+   "old": "if (i_wr && holds(i_wr_addr[31:OB]))",
+   "new": "if (i_wr)"
+  },
+  {
+   "name": "an update ignores its byte select",
+   "old": "data_q[w_idx][w_word] <= merge(data_q[w_idx][w_word], i_wr_sel, i_wr_dat);",
+   "new": "data_q[w_idx][w_word] <= i_wr_dat;"
+  },
+  {
+   "name": "a snoop of a held line is ignored",
+   "old": "if (i_snoop && holds(i_snoop_addr[31:OB])) valid_q[i_snoop_addr[OB+IW-1:OB]] <= 1'b0;",
+   "new": "if (1'b0) valid_q[i_snoop_addr[OB+IW-1:OB]] <= 1'b0;"
+  },
+  {
+   "name": "a snoop removes the line the lookup is at",
+   "old": "if (i_snoop && holds(i_snoop_addr[31:OB])) valid_q[i_snoop_addr[OB+IW-1:OB]] <= 1'b0;",
+   "new": "if (i_snoop && holds(i_snoop_addr[31:OB])) valid_q[l_idx] <= 1'b0;"
+  },
+  {
+   "name": "a snoop during a refill is ignored",
+   "old": "wire snoop_f = i_snoop && busy_q && (i_snoop_addr[31:OB] == f_line_q);",
+   "new": "wire snoop_f = 1'b0;"
+  },
+  {
+   "name": "an invalidation is ignored",
+   "old": "if (i_inv && holds(i_inv_addr[31:OB]))     valid_q[i_inv_addr[OB+IW-1:OB]]   <= 1'b0;",
+   "new": "if (1'b0)     valid_q[i_inv_addr[OB+IW-1:OB]]   <= 1'b0;"
+  },
+  {
+   "name": "the beats skip a dword",
+   "old": "f_beat_q <= f_beat_q + 1'b1;",
+   "new": "f_beat_q <= f_beat_q + WW'(2);"
+  },
+  {
+   "name": "the refill starts at the requested dword",
+   "old": "                    f_beat_q           <= '0;",
+   "new": "                    f_beat_q           <= i_addr[OB-1:3];"
+  },
+  {
+   "name": "cyc held in the response cycle",
+   "old": "assign o_beat     = beat_q && !(i_ack || i_err);",
+   "new": "assign o_beat     = beat_q;"
+  },
+  {
+   "name": "the answer is the last beat's data",
+   "old": "assign o_fill_dat = (f_beat_q == f_word_q) ? i_dat : f_dat_q;",
+   "new": "assign o_fill_dat = i_dat;"
+  },
+  {
+   "name": "the requested dword captured from the first beat",
+   "old": "if (f_beat_q == f_word_q) f_dat_q <= i_dat;",
+   "new": "if (f_beat_q == '0) f_dat_q <= i_dat;"
+  },
+  {
+   "name": "the line looks valid while it is refilled",
+   "old": "valid_q[i_addr[OB+IW-1:OB]] <= 1'b0;      // whatever the index held is rewritten",
+   "new": "valid_q[i_addr[OB+IW-1:OB]] <= 1'b1;      // whatever the index held is rewritten"
+  },
+  {
+   "name": "busy never set",
+   "old": "assign o_busy     = busy_q;",
+   "new": "assign o_busy     = 1'b0;"
+  },
+  {
+   "name": "an error does not end the refill",
+   "old": "wire               f_end  = resp && (last || i_err);",
+   "new": "wire               f_end  = resp && last;"
+  }
+ ]
+}
