@@ -47,6 +47,7 @@ design/pipe/qv_fprf.sv
 design/pipe/qv_lsu.sv
 design/pipe/qv_lsq.sv
 design/pipe/qv_sb.sv
+design/pipe/qv_dc.sv
 design/pipe/qv_commit.sv
 design/pipe/qv_dbg.sv
 design/pipe/core.sv

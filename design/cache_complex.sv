@@ -122,7 +122,10 @@
  */
 module cache_complex #(
     parameter num_lines  = 64,
-    parameter line_words = 4
+    parameter line_words = 4,
+    // DC_EN 0 (O5a, the pipelined core with its own D$ inside): data_* passes straight to the downstream arbiter, as
+    // the D$ would forward a miss, and dcache0 is held idle (kept, so its hierarchical name stays); 1: as always
+    parameter bit DC_EN  = 1'b1
 ) (
     input logic clk,
     input logic rst,
@@ -221,7 +224,7 @@ module cache_complex #(
     dcache #(.num_lines(num_lines), .line_words(line_words)) dcache0 (
         .clk(clk), .rst(rst),
         .addr_i(data_addr_i), .dat_i(data_dat_i), .dat_o(dc_dat_o), .sel_i(data_sel_i),
-        .we_i(data_we_i), .cyc_i(data_cyc_i), .stb_i(data_stb_i),
+        .we_i(data_we_i), .cyc_i(DC_EN && data_cyc_i), .stb_i(DC_EN && data_stb_i),
         .ack_o(dc_ack), .err_o(dc_err),
         .mem_addr_o(dc_mem_addr), .mem_dat_o(dc_mem_dat_o), .mem_dat_i(dc_mem_dat_i),
         .mem_sel_o(dc_mem_sel), .mem_we_o(dc_mem_we), .mem_cyc_o(dc_mem_cyc), .mem_stb_o(dc_mem_stb),
@@ -235,9 +238,10 @@ module cache_complex #(
     assign fetch_err_o = ic_err;
     assign fetch_dat_o = ic_dat_o;
 
-    assign data_ack_o = dc_ack;
-    assign data_err_o = dc_err;
-    assign data_dat_o = dc_dat_o;
+    // (DC_EN 0) the data port's request goes downstream itself, and its response comes straight back
+    assign data_ack_o = DC_EN ? dc_ack   : dc_mem_ack;
+    assign data_err_o = DC_EN ? dc_err   : dc_mem_err;
+    assign data_dat_o = DC_EN ? dc_dat_o : dc_mem_dat_i;
 
     /*
      * Downstream arbiter -- see this module's own header for the full
@@ -253,7 +257,11 @@ module cache_complex #(
      * needed here.
      */
     wire want_ic = ic_mem_cyc;
-    wire want_dc = dc_mem_cyc;
+    wire want_dc = DC_EN ? dc_mem_cyc : (data_cyc_i && data_stb_i);
+    wire [31:0] dn_addr = DC_EN ? dc_mem_addr  : data_addr_i;
+    wire [63:0] dn_dat  = DC_EN ? dc_mem_dat_o : data_dat_i;
+    wire [7:0]  dn_sel  = DC_EN ? dc_mem_sel   : data_sel_i;
+    wire        dn_we   = DC_EN ? dc_mem_we    : data_we_i;
 
     /*
      * A beat forwarded downstream keeps the grant until its own ack/err
@@ -282,10 +290,10 @@ module cache_complex #(
         else     in_flight_q <= grant_dc || grant_ic;
     end
 
-    assign mem_addr_o = grant_dc ? dc_mem_addr : (grant_ic ? ic_mem_addr : 32'b0);
-    assign mem_dat_o  = grant_dc ? dc_mem_dat_o : 64'b0; // icache0 never writes
-    assign mem_sel_o  = grant_dc ? dc_mem_sel  : (grant_ic ? ic_mem_sel  : 8'b0);
-    assign mem_we_o   = grant_dc ? dc_mem_we   : 1'b0;   // icache0 never writes
+    assign mem_addr_o = grant_dc ? dn_addr : (grant_ic ? ic_mem_addr : 32'b0);
+    assign mem_dat_o  = grant_dc ? dn_dat : 64'b0;       // icache0 never writes
+    assign mem_sel_o  = grant_dc ? dn_sel  : (grant_ic ? ic_mem_sel  : 8'b0);
+    assign mem_we_o   = grant_dc ? dn_we   : 1'b0;       // icache0 never writes
     assign mem_cyc_o  = grant_dc || grant_ic;
     assign mem_stb_o  = grant_dc || grant_ic;
 
