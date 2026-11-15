@@ -287,7 +287,7 @@ The gate (2026-10-31), the core against the reference, Verilator, four memory co
 
 What the head waited for in memory ops was 20-47 % of the kernels' cycles, and reservation stations alone (O1) would
 have recovered only a few per cent of it, so O2 came first. An oracle LSU that started plain RAM loads before the head
-(`run_perf.sh --oracle early`, `oracle_lsu.sv`) bounded the gain at 9-31 % on six kernels; then, each slice behind its
+(`run_perf.sh --oracle early`, `oracle_lsu.sv`, both since removed) bounded the gain at 9-31 % on six kernels; then, each slice behind its
 own knob (every one off reproduces the core before it, cycle for cycle; all four perf CSVs are byte-identical with
 `QV_PIPE_LSQ_DEPTH=0`):
 - O2.1 (`d0b7ed0`): a FENCE ordering writes before reads drains the store buffer at commit.

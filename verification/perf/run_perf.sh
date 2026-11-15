@@ -41,8 +41,6 @@ Usage: run_perf.sh [options]
   --force             rebuild kernels/testbenches even if cached
   --oracle store      the cache configuration only, with the ideal-store D$ (oracle_dcache.sv): an upper bound for a store buffer;
                       writes oracle_store_<core>.csv, never the baselines
-  --oracle early      both configurations, with the early-load LSU (oracle_lsu.sv): an upper bound for early loads (O2.0);
-                      writes oracle_early_<core>[_s].csv and its _stack.csv, never the baselines
   --oracle dc         the cache configuration only, with an ideal D$ inside the core (mk_oracle_dc.py makes it from
                       qv_lsu.sv: a plain RAM load completes in the cycle it could start, read from the RAM array): an
                       upper bound for O5a (O5.0); writes oracle_dc_<core>[_s].csv, never the baselines
@@ -83,8 +81,8 @@ KERNELS="memcpy crc32 qsort matmul sieve listchase mixedint trap fmatmul fpmix"
 case "$MODE" in
     m) SFX=""; MAKE_TARGET=all; SMODE=0 ;;
     s) SFX="_s"; MAKE_TARGET=all_s; SMODE=1
-       if [ "$CORE" != "pipe" ] || { [ -n "$ORACLE" ] && [ "$ORACLE" != "early" ] && [ "$ORACLE" != "dc" ]; }; then
-           echo "--mode s needs --core pipe and no --oracle but early or dc (its result is the pipelined core's CPI monitor)" >&2; exit 1
+       if [ "$CORE" != "pipe" ] || { [ -n "$ORACLE" ] && [ "$ORACLE" != "dc" ]; }; then
+           echo "--mode s needs --core pipe and no --oracle but dc (its result is the pipelined core's CPI monitor)" >&2; exit 1
        fi ;;
     *) echo "Unknown --mode: $MODE (expected m or s)" >&2; exit 1 ;;
 esac
@@ -114,11 +112,6 @@ if [ "$ORACLE" == "store" ]; then
     ORACLE_DCACHE=verification/perf/oracle_dcache.sv
     DESIGN_FILES="${DESIGN_FILES/design\/dcache.sv/$ORACLE_DCACHE}"
     TAG="${CORE}_oracle_store"
-elif [ "$ORACLE" == "early" ]; then
-    if [ "$CORE" != "pipe" ]; then echo "--oracle early needs --core pipe" >&2; exit 1; fi
-    ORACLE_LSU=verification/perf/oracle_lsu.sv
-    DESIGN_FILES="${DESIGN_FILES/design\/pipe\/qv_lsu.sv/$ORACLE_LSU}"
-    TAG="${CORE}${SFX}_oracle_early"
 elif [ "$ORACLE" == "dc" ]; then
     if [ "$CORE" != "pipe" ]; then echo "--oracle dc needs --core pipe" >&2; exit 1; fi
     mkdir -p "$OUTDIR"
@@ -128,7 +121,7 @@ elif [ "$ORACLE" == "dc" ]; then
     DEFINES="$DEFINES QV_ORACLE_DC_MEM=perf_tb.g_cache.dut.sram0.memory"
     TAG="${CORE}${SFX}_oracle_dc"
 elif [ -n "$ORACLE" ]; then
-    echo "Unknown --oracle: $ORACLE (expected store, early or dc)" >&2; exit 1
+    echo "Unknown --oracle: $ORACLE (expected store or dc)" >&2; exit 1
 fi
 MEMLAT_PLUS=""
 if [ -n "$MEMLAT" ]; then
@@ -139,6 +132,8 @@ if [ -n "$MEMLAT" ]; then
     LABEL="lat${ML_L}_${ML_B}_${ML_W}${LABEL:+_$LABEL}"
 fi
 [ -n "$LABEL" ] && TAG="${TAG}_${LABEL}"
+# the defines are part of the build: a run that changes only --defines must not reuse another point's build
+[ -n "$DEFINES" ] && TAG="${TAG}_d$(echo "$DEFINES" | sha1sum | cut -c1-6)"
 DEF_FLAGS=""
 for d in $DEFINES; do DEF_FLAGS="$DEF_FLAGS -D$d"; done
 HARNESS_FILES="testbench/core_wb4_sram_harness.sv"

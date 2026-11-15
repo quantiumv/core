@@ -578,12 +578,14 @@ for the loads behind it.
 
 ### Early-load oracle (before the load/store queue, O2.0)
 
-`run_perf.sh --oracle early` (both configurations; `--mode s` too) builds the core with `oracle_lsu.sv` in place of
+`run_perf.sh --oracle early` (both configurations; `--mode s` too) built the core with `oracle_lsu.sv` in place of
 `qv_lsu.sv`: a plain load from RAM starts before it is the ROB head, as soon as it is translated, aligned, allowed and
 has no store-buffer match, and its result waits for its commit in a per-tag copy of the LSU's result. It is still one
 op at a time with a lost cycle between ops, and it checks no barriers, so it is a timing model, not a core. The bound
 column is the window minus the cycles the head waited for the LSU in the baseline's stack (everything memory costs
-at the head). `oracle_early_pipe.csv`, `oracle_early_pipe_s.csv`; instret is unchanged on every kernel.
+at the head). `oracle_early_pipe.csv`, `oracle_early_pipe_s.csv`; instret is unchanged on every kernel. (The option
+and `oracle_lsu.sv` were removed in O7a: the engine they bounded shipped as O2a, and the copy no longer matched its
+ports. The two CSVs are kept as data.)
 
 | kernel | M SoC | early loads | change | M SRAM change | bound (SoC) | S SoC change |
 |---|---|---|---|---|---|---|
