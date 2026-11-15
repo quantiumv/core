@@ -81,6 +81,9 @@ module perf_stack #(
     input logic             lsu_free,
     input logic             div_free,
     input logic             rs_full = 1'b0,    // O1: the uop is for the reservation station, cannot go straight to its unit, and the station is full
+    input logic [7:0]       rob_used = 8'd0,    // (O7) ROB entries held
+    input logic [7:0]       rs_used = 8'd0,     // (O7) station entries held
+    input logic             alloc_ready2 = 1'b1, // (O7) the ROB has room for two
 
     input logic             wb_valid,           // the fast writeback bus
     input logic             wb_mispredict,
@@ -221,6 +224,10 @@ module perf_stack #(
     // (no gain), the cycles they redirected ahead of the branch's commit, the mispredicts commit still redirected on,
     // and the refill-shadow cycles after them (also in ear_mispred)
     longint unsigned c_xr_n, c_xr_killed, c_xr_head, c_xr_save, c_mp_commit, c_ear_mp_x;
+    // (O7) the window's fill: ROB and station occupancy (summed over the window, and the largest), cycles with room
+    // for one entry but not two, and a memory op held by a full queue whatever its operands (is_lsu counts it only
+    // when its operands are ready); side counters, in no class
+    longint unsigned c_rob_occ, c_rob_max, c_rs_occ, c_rs_max, c_rob_one, c_is_lsq;
     longint unsigned xr_cycle [0:(1<<TAG_W)-1];
     logic            dc_refill_q, ic_refill_q;
     src_e   shadow_q;                // the source of the redirect whose refill shadow is running
@@ -387,6 +394,7 @@ module perf_stack #(
             c_s1_wait_fpu <= 0; c_s1_wait_alu <= 0; c_s1_rule_head <= 0; c_s1_rule_pair <= 0;
             c_dc_miss <= 0; c_dc_cyc <= 0; c_ic_miss <= 0; c_ic_cyc <= 0;
             c_xr_n <= 0; c_xr_killed <= 0; c_xr_head <= 0; c_xr_save <= 0; c_mp_commit <= 0; c_ear_mp_x <= 0;
+            c_rob_occ <= 0; c_rob_max <= 0; c_rs_occ <= 0; c_rs_max <= 0; c_rob_one <= 0; c_is_lsq <= 0;
             dc_refill_q <= 1'b0; ic_refill_q <= 1'b0;
             shadow_q <= SRC_NONE;
             shadow_kind_q <= 0;
@@ -472,6 +480,12 @@ module perf_stack #(
                     else if (uop_fu == FU_LSU && !lsu_free)       c_is_lsu  <= c_is_lsu + 1;
                     else if (uop_fu == FU_DIV && !div_free)       c_is_div  <= c_is_div + 1;
                 end
+                c_rob_occ <= c_rob_occ + rob_used;
+                c_rs_occ  <= c_rs_occ + rs_used;
+                if (rob_used > c_rob_max) c_rob_max <= rob_used;
+                if (rs_used > c_rs_max)   c_rs_max  <= rs_used;
+                if (alloc_ready && !alloc_ready2) c_rob_one <= c_rob_one + 1;
+                if (uop_valid && !issue_fire && uop_fu == FU_LSU && !lsu_free) c_is_lsq <= c_is_lsq + 1;
                 // (OX.0) the second commit slot: it retired, the first did not either (slot 0's class says why), or
                 // the first did and the second could not: no entry behind it, it is not done, the head may not be
                 // the first of a pair (qv_commit's plain1), or the pair rule refused the second
@@ -596,10 +610,11 @@ module perf_stack #(
                  c_is_rs);
         $display("PERF_LSQ: early_ld=%0d early_st=%0d bar_wait=%0d match_wait=%0d qmatch_wait=%0d handoff=%0d drain=%0d",
                  c_lq_ld, c_lq_st, c_lq_bar, c_lq_match, c_lq_qmatch, c_lq_hand, c_lq_drain);
-        $display("PERF_OX: s1_retire=%0d s1_idle=%0d s1_none=%0d s1_wait_lsu=%0d s1_wait_div=%0d s1_wait_fpu=%0d s1_wait_alu=%0d s1_rule_head=%0d s1_rule_pair=%0d dc_miss=%0d dc_cyc=%0d ic_miss=%0d ic_cyc=%0d xr_n=%0d xr_killed=%0d xr_head=%0d xr_save=%0d mp_commit=%0d ear_mp_x=%0d",
+        $display("PERF_OX: s1_retire=%0d s1_idle=%0d s1_none=%0d s1_wait_lsu=%0d s1_wait_div=%0d s1_wait_fpu=%0d s1_wait_alu=%0d s1_rule_head=%0d s1_rule_pair=%0d dc_miss=%0d dc_cyc=%0d ic_miss=%0d ic_cyc=%0d xr_n=%0d xr_killed=%0d xr_head=%0d xr_save=%0d mp_commit=%0d ear_mp_x=%0d rob_occ=%0d rob_max=%0d rs_occ=%0d rs_max=%0d rob_one=%0d is_lsq=%0d",
                  c_s1_retire, c_s1_idle, c_s1_none, c_s1_wait_lsu, c_s1_wait_div, c_s1_wait_fpu, c_s1_wait_alu,
                  c_s1_rule_head, c_s1_rule_pair, c_dc_miss, c_dc_cyc, c_ic_miss, c_ic_cyc,
-                 c_xr_n, c_xr_killed, c_xr_head, c_xr_save, c_mp_commit, c_ear_mp_x);
+                 c_xr_n, c_xr_killed, c_xr_head, c_xr_save, c_mp_commit, c_ear_mp_x,
+                 c_rob_occ, c_rob_max, c_rs_occ, c_rs_max, c_rob_one, c_is_lsq);
         if (c_s1_retire + c_s1_idle + c_s1_none + c_s1_wait_lsu + c_s1_wait_div + c_s1_wait_fpu + c_s1_wait_alu
                 + c_s1_rule_head + c_s1_rule_pair != c_window)
             $display("PERF_STACK_WARN: the second slot's classes do not add up to the window");
