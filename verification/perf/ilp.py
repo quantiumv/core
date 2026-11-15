@@ -143,7 +143,7 @@ def decode(raw):
 class Ins:
     __slots__ = ('pc', 'raw', 'push', 'pop', 'disp', 'acc', 'go', 'cmpl', 'commit', 'early', 'ared', 'trap', 'redir',
                  'addr', 'cls', 'dst', 'srcs', 'mem', 'posted', 'prod', 'dword', 'rvc', 'fpw', 'fp', 'alone', 'mul',
-                 'iss', 'ds', 'cs', 'fr', 'dcm', 'cond')
+                 'iss', 'ds', 'cs', 'fr', 'dcm', 'cond', 'src_a', 'prod_a')
 
 
 def read_trace(path):
@@ -169,6 +169,8 @@ def read_trace(path):
             i.rvc = (i.raw & 3) != 3
             i.cls, i.dst, i.srcs, i.mem = decode(i.raw)
             i.cond = brpred.decode(i.raw, i.pc, 0)[0] == 'cond'
+            # (O5.0) a memory op's address base (rs1), for sta
+            i.src_a = i.srcs[0] if (i.mem and i.srcs and i.srcs[0] != ('x', 0)) else None
             if i.dst is not None and i.dst == ('x', 0):
                 i.dst = None
             i.srcs = [s for s in i.srcs if s != ('x', 0)]
@@ -182,6 +184,7 @@ def read_trace(path):
     last = {}
     for k, i in enumerate(out):
         i.prod = [last[s] for s in i.srcs if s in last]
+        i.prod_a = last.get(i.src_a) if i.src_a is not None else None
         if i.dst is not None:
             last[i.dst] = k
     return out
@@ -205,7 +208,22 @@ BASE = dict(w=1, rs=0, rob=8, iq=8, lsq=4, sb=4, handoff=True, early=True, lsu_b
             # flight at once (0: the D$ blocks), hit_lat: how long a hit holds the D$ when it does not; miss_add: more
             # cycles on every access that met a refill (a slower memory than the traced one)
             lq=0, sq=0, mem_ooo=False, engines=1, fwd=False, spec_ld=False, mdp='none', replay=8,
-            mshr=0, hit_lat=2, miss_add=0,
+            mshr=0, hit_lat=1, miss_add=0,
+            # (O5.0) dports: loads the D$ port takes at once (two engines on one blocking D$ queue for it); dc_in: the D$
+            # inside the core (a hit is read in the engine's first cycle, takes no port, holds no drain off, and the
+            # engine takes the next op in that cycle; a miss refills over the port); nomiss: every load hits; cwf: a
+            # refill answers its load with the first beat (the requested word), a later load to that line takes its
+            # word as its beat arrives, other lines wait for the refill; nb: (dc_in) a miss parks in one of `mshr`
+            # handlers and frees the engine, hits to other lines go on, refills one at a time; eng_pipe: one bus
+            # request a cycle (a pipelined engine on a pipelined bus); sta: a store's address is known once its
+            # address operand is (O6a's address/data split); ld_order: (mem_ooo) 'po' loads in program order among
+            # themselves, 'any' not; replay_at: a violation replays at execute ('x': `replay` cycles after the
+            # store's address) or at commit ('c': the load is refetched when it reaches the head); dc_kib: a
+            # direct-mapped write-through no-allocate D$ of that size replayed on the traced addresses replaces the
+            # traced hits and misses (dc_warm: warmed by one pass over the trace first); early_st: plain stores post
+            # before the head
+            dports=1, dc_in=False, nomiss=False, cwf=False, nb=False, eng_pipe=False, sta=False, ld_order='any',
+            replay_at='x', dc_kib=0, dc_warm=False, early_st=True,
             # (OX.0) frontend: fe_blk, the bytes fetched a cycle with fe='ideal'; fe_taken, the bubble after a taken
             # branch the aligner redirected on (None: as traced); nomp: no mispredicts (what one costs)
             fe_blk=8, fe_taken=None, nomp=False,
@@ -231,16 +249,17 @@ class DPort:
     starts while a load is in flight or ready to start, unless the buffer is full or has waited YIELD cycles.
     Beats are scheduled lazily, in time order, as the loads that might go before them are placed."""
 
-    def __init__(self, depth, db, yield_max=16):
-        self.depth, self.db, self.ymax = depth, db, yield_max
-        self.sb = []            # [ready, go, resp, addr] of each posted store, in order
+    def __init__(self, depth, db, yield_max=16, dports=1):
+        self.depth, self.db, self.ymax, self.dports = depth, db, yield_max, dports
+        self.sb = []            # [ready, go, resp, addr, idx] of each posted store, in order (idx: its instruction)
+        self.liv = []           # (O5.0) (go, end) of the loads on the port: dports of them at once
         self.nd = 0             # the first one whose beat is not scheduled
         self.drain_avail = 0    # the next beat may be decided from here (the last one's response)
         self.load_end = -1      # the last load's writeback
         self.beats = []         # (s, resp) of the scheduled beats
 
-    def push(self, ready, addr):
-        self.sb.append([ready, None, None, addr])
+    def push(self, ready, addr, idx=None):
+        self.sb.append([ready, None, None, addr, idx])
 
     def _start(self, e):
         return max(e[0], self.drain_avail, self.load_end + 1)
@@ -266,6 +285,9 @@ class DPort:
             for (s, r) in self.beats:
                 if s <= t <= r:
                     t, moved = r + 1, True
+            busy = [e for (g, e) in self.liv if g <= t <= e]
+            if len(busy) >= self.dports:                    # (O5.0) every port holds a load
+                t, moved = min(busy) + 1, True
         return t
 
     def place_load(self, t_ready, t_hold=None):
@@ -291,6 +313,9 @@ class DPort:
 
     def load_done(self, go, cmpl):
         self.load_end = max(self.load_end, cmpl)
+        self.liv.append((go, cmpl))
+        if len(self.liv) > 64:
+            self.liv.pop(0)
 
     def resp_of(self, i):
         while self.sb[i][2] is None:
@@ -328,14 +353,19 @@ def sim(tr, p, res=None, fit=False, t0=None):
     rs_occ = []                     # (disp, issue) of uops that waited in the RS
     last_div = None; last_fds = None
     mem_idx = []                    # indices of memory ops, in order
-    dc = DPort(p['sb'], p['db'])
+    dc = DPort(p['sb'], p['db'], dports=p['dports'])
     t_open = t0 if t0 is not None else (tr[0].commit - 1 if tr else 0)
     seg_start = t_open
     fe_blks = []                    # (fe ideal) the current stream's blocks: [block, arrival, last use]
     fe_k0 = 0                       # (fe ideal) the stream's first instruction
     neg = 0
     ld_idx = []; st_idx = []        # (lq/sq) the loads and the stores, in order
-    eng_end = []                    # (mem_ooo) when each busy engine's op completes
+    eng_iv = []                     # (mem_ooo) (take, free) of the ops in the engines
+    eng_free = [0] * n              # when the engine may take the next op after op k
+    rdy = [0] * n                   # a memory op's operands are ready
+    refills = []                    # (O5.0) (go, end, line, word, lat) of the refills
+    dcsim = dc_replay(tr, p['dc_kib'], p['dc_warm']) if p['dc_kib'] else None
+    miss_lat_s = []                 # (fit) the traced refills' latency
     miss_iv = []                    # (mshr) the misses in flight: (go, cmpl)
     waitbit = set()                 # (mdp waitbit) the loads that violated
     replay_at = None                # a load violated: what follows it restarts from here
@@ -361,6 +391,42 @@ def sim(tr, p, res=None, fit=False, t0=None):
         if p['fe_taken'] is not None:
             return p['fe_taken']
         return (q.push - tr[k - 1].push) if tr[k - 1].ared else st.get('ared', 2)
+
+    def dmiss(k, q):
+        """(O5.0) the load misses the D$ in this configuration"""
+        if p['nomiss']:
+            return False
+        if dcsim is not None:
+            return dcsim.get(k, False)
+        return bool(q.dcm)
+
+    def eng_place(c):
+        """(mem_ooo) the first cycle from c at which one of `engines` is free"""
+        while True:
+            busy = [e for (a, e) in eng_iv if a <= c < e]
+            if len(busy) < p['engines']:
+                return c
+            c = min(busy)
+
+    def refill_wait(addr, c):
+        """(O5.0) an in-core D$ hit at c during a refill: its own line's words as their beats arrive (cwf), else
+        after the refill; other lines go on only with handlers (nb), else after it"""
+        for (g, e, line, w0, lt) in reversed(refills[-4:]):
+            if not (g <= c <= e):
+                continue
+            if (addr >> 5) == line:
+                if p['cwf']:
+                    j = (((addr >> 3) & 3) - w0) % 4
+                    return max(c, g + 1 + max(1, (lt - 1) // 4) * (j + 1))
+                return e + 1
+            if not p['nb']:
+                return e + 1
+        return c
+
+    def sta_known(s):
+        """(sta) when store s's address is known: its address operand's producer, else its dispatch"""
+        j = tr[s].prod_a
+        return max(disp[s], avail(j) if j is not None else 0) + 1
 
     def avail(k):
         """when a consumer may take producer k's value (the cycle it issues in)"""
@@ -564,34 +630,53 @@ def sim(tr, p, res=None, fit=False, t0=None):
             c = disp[k]
             if p['rs'] > 0 and p['lsq'] > 0:
                 c = max(c, ready)
-            eligible = p['early'] and p['lsq'] > 0 and q.mem in ('ld', 'st') and not q.trap
+            rdy[k] = c
+            eligible = (p['early'] and p['lsq'] > 0 and q.mem in ('ld', 'st') and not q.trap
+                        and (q.mem == 'ld' or p['early_st']))
             ooo = p['mem_ooo'] and eligible
+            is_ld = q.mem == 'ld' and not q.trap
+            miss = is_ld and dmiss(k, q)
+            dc_hit = p['dc_in'] and is_ld and not miss
+            pm = mem_idx[-1] if mem_idx else None
             if ooo:
-                # (OX.0) out-of-order memory: one of `engines` free, not after the older ops
-                eng_end[:] = [e for e in eng_end if e > c]
-                if len(eng_end) >= p['engines']:
-                    c = max(c, sorted(eng_end)[len(eng_end) - p['engines']])
-            elif mem_idx:
-                pm = mem_idx[-1]
-                hand = p['handoff'] and p['lsq'] > 0 and (tr[pm].posted or (tr[pm].go and tr[pm].cmpl > tr[pm].go))
-                c = max(c, cmpl[pm] if hand else cmpl[pm] + 1)
+                # (OX.0) out-of-order memory: one of `engines` free, not after the older ops ...
+                if p['ld_order'] == 'po' and q.mem == 'ld' and ld_idx:
+                    c = max(c, acc[ld_idx[-1]])               # (O5.0) ... but after an older load
+                c = eng_place(c)
+            elif pm is not None:
+                c = max(c, eng_free[pm])
             acc[k] = put('acc', k, c, q.acc if q.acc else q.disp)
+            if fit and is_ld and pm is not None and acc[k] > rdy[k] and acc[k] == eng_free[pm]:
+                # (O5.0) a load with its operands waiting for the engine: what held the op before it
+                pe = tr[pm]
+                why = ('head' if not (p['early'] and pe.mem in ('ld', 'st') and not pe.trap)
+                       else ('ld' if pe.mem == 'ld' else 'st') if acc[pm] == rdy[pm] and rdy[pm] > disp[pm]
+                       else 'busy')
+                st['ldb_' + why] = st.get('ldb_' + why, 0) + acc[k] - rdy[k]
             c = acc[k] + 1
             if not eligible:
                 c = max(c, (com[k - 1] + 1) if k else c)      # at the head
             if fit:
                 res['bus'][k] = q.cmpl - (q.go if q.go else q.cmpl)
-            lat = res['bus'][k] + (p['miss_add'] if q.dcm else 0)
-            if q.mem == 'ld' and not q.trap:
+                if is_ld and q.dcm:
+                    miss_lat_s.append(res['bus'][k])
+            lat = res['bus'][k]
+            if is_ld and miss != bool(q.dcm):
+                lat = st.get('miss_lat', 9) if miss else 1    # (O5.0) the D$ outcome changed (dc_kib, nomiss)
+            if miss:
+                lat += p['miss_add']
+            efree = None                                      # (O5.0) when the engine may take the next op
+            if is_ld:
                 hold = c
                 fwd_from = None
+                viol = None
                 if ooo:
                     # the older stores still in flight: an unknown address holds the load (unless it speculates),
                     # a known one to its dword forwards (fwd) or makes it wait for the drain
                     for s in reversed(st_idx):
                         if com[s] < c:
                             break
-                        known = acc[s] + 1
+                        known = sta_known(s) if p['sta'] else acc[s] + 1
                         same = tr[s].addr == q.addr
                         if known > c:
                             wait = (not p['spec_ld'] or (p['mdp'] == 'ideal' and same)
@@ -599,7 +684,7 @@ def sim(tr, p, res=None, fit=False, t0=None):
                             if wait:
                                 c = max(c, known)
                             elif same:
-                                replay_at = max(replay_at or 0, known + p['replay'])   # a violation
+                                viol = max(viol or 0, known)  # a violation
                                 if p['mdp'] == 'waitbit':
                                     waitbit.add(q.pc)
                         if same and p['fwd'] and fwd_from is None:
@@ -608,32 +693,76 @@ def sim(tr, p, res=None, fit=False, t0=None):
                 if fwd_from is not None:
                     c = max(c, go[fwd_from])                  # its bytes merged when the store has its data
                 else:
-                    # a load waits for an older store to its dword to leave the store buffer, then for the D$
+                    # a load waits for an older store to its dword to leave the store buffer, then for the D$;
+                    # (O5.0) with fwd it takes the buffer's bytes instead
                     m = dc.last_store_to(q.addr)
-                    if m is not None and dc.resp_of(m) + 1 > c:
+                    if m is not None and p['fwd'] and (dc.sb[m][2] is None or dc.sb[m][2] + 1 > c):
+                        if dc.sb[m][4] is not None:
+                            c = max(c, go[dc.sb[m][4]])
+                    elif m is not None and not p['fwd'] and dc.resp_of(m) + 1 > c:
                         c = hold = dc.resp_of(m) + 1
                     elif not eligible:
                         # a load waiting for the head holds the drain off once it is among the three oldest
                         hold = max(acc[k] + 1, (com[k - 3] + 1) if k >= 3 else acc[k] + 1)
-                if q.dcm and p['mshr'] > 0:
+                if miss and p['mshr'] > 0:
                     while sum(1 for (a, b) in miss_iv if a <= c < b) >= p['mshr']:
                         c += 1                                # every miss handler is busy
-                gcons = dc.place_load(c, hold)
-                go[k] = put('go', k, gcons, q.go if q.go else q.cmpl)
-                cmpl[k] = go[k] + lat
+                if dc_hit:
+                    # (O5.0) the D$ in the core: read in the engine's first cycle, no port, no drain held off
+                    c = refill_wait(q.addr, c)
+                    go[k] = put('go', k, c, q.go if q.go else q.cmpl)
+                    cmpl[k] = go[k] + max(0, lat - 1)
+                    efree = cmpl[k] if (p['handoff'] and p['lsq'] > 0) else cmpl[k] + 1
+                else:
+                    if miss and (p['dc_in'] or p['mshr'] > 0) and refills:
+                        c = max(c, refills[-1][1] + 1)        # refills one at a time
+                    gcons = dc.place_load(c, hold)
+                    if fit and gcons > c:
+                        st['ld_drain'] = st.get('ld_drain', 0) + gcons - c
+                    go[k] = put('go', k, gcons, q.go if q.go else q.cmpl)
+                    end = go[k] + lat                         # its access's end (a refill's last beat)
+                    cmpl[k] = end
+                    if miss:
+                        if p['cwf']:
+                            cmpl[k] = go[k] + 1 + max(1, (lat - 1) // 4)    # the requested word comes first
+                        refills.append((go[k], end, q.addr >> 5, (q.addr >> 3) & 3, lat))
+                        if len(refills) > 16:
+                            refills.pop(0)
+                        if p['nb'] and p['dc_in']:
+                            efree = go[k]                     # parked in a handler: the engine goes on
+                    if p['dc_in'] and miss:
+                        dc.load_done(go[k], end)              # the refill holds the port to its last beat
+                    elif p['eng_pipe'] and not miss:
+                        dc.load_done(go[k], go[k])            # a pipelined bus: one request a cycle
+                        efree = go[k]
+                    else:
+                        # a blocking D$ is busy until the load's data; a non-blocking one only for a hit's time
+                        dc.load_done(go[k], cmpl[k] if p['mshr'] == 0 else go[k] + p['hit_lat'])
+                if viol is not None:
+                    if p['replay_at'] == 'c':
+                        # (O5.0) replayed at commit: refetched when it reaches the head
+                        t = max(com[k - 1] if k else 0, cmpl[k]) + 1 + st.get('refill', 4)
+                        replay_at = max(replay_at or 0, t)
+                        cmpl[k] = max(cmpl[k], t + 3)
+                    else:
+                        replay_at = max(replay_at or 0, viol + p['replay'])
                 if replay_at is not None and replay_at > cmpl[k]:
                     cmpl[k] = replay_at                       # it ran again after the violation
-                if q.dcm and p['mshr'] > 0:
-                    miss_iv.append((go[k], cmpl[k]))
+                if miss and p['mshr'] > 0:
+                    miss_iv.append((go[k], end))
                     if len(miss_iv) > trim:
                         miss_iv.pop(0)
-                # a blocking D$ is busy until the load's data; a non-blocking one only for a hit's time
-                dc.load_done(go[k], cmpl[k] if p['mshr'] == 0 else go[k] + p['hit_lat'])
             else:
                 go[k] = put('go', k, c, q.go if q.go else q.cmpl)
                 cmpl[k] = go[k] + lat
-            if ooo:
-                eng_end.append(cmpl[k])
+            if efree is None:
+                hand = p['handoff'] and p['lsq'] > 0 and (q.posted or (q.go and q.cmpl > q.go))
+                efree = cmpl[k] if hand else cmpl[k] + 1
+            eng_free[k] = efree
+            if p['mem_ooo']:
+                eng_iv.append((acc[k], efree))
+                if len(eng_iv) > trim:
+                    eng_iv.pop(0)
             mem_idx.append(k)
             if q.mem == 'st':
                 st_idx.append(k)
@@ -655,13 +784,38 @@ def sim(tr, p, res=None, fit=False, t0=None):
             c = max(c, dc.room_at(c))                         # the store buffer has room for it
         com[k] = put('com', k, c, q.commit)
         if q.posted:
-            dc.push(com[k] + 1, q.addr)
+            dc.push(com[k] + 1, q.addr, k)
     if fit:
         st['refill'] = round(sum(refill_s) / len(refill_s)) if refill_s else 4
         st['ared'] = round(sum(ared_s) / len(ared_s)) if ared_s else 2
+        st['miss_lat'] = round(sum(miss_lat_s) / len(miss_lat_s)) if miss_lat_s else 9
+        st['dcm_n'] = len(miss_lat_s)
     if p.get('_dbg') is not None:                   # (debugging) the replayed cycles, for a caller to compare
         p['_dbg'].update(push=push, pop=pop, disp=disp, com=com)
     return com[-1] - t_open, neg
+
+
+def dc_replay(tr, kib, warm):
+    """(O5.0) a direct-mapped, write-through, no-allocate D$ of kib KiB (32-byte lines) replayed on the traced loads:
+    {index: missed}; warm: one pass over the trace first"""
+    nl = kib * 1024 // 32
+    tags = [None] * nl
+
+    def walk(record):
+        out = {}
+        for k, q in enumerate(tr):
+            if q.mem in ('ld', 'amo') and not q.trap:
+                line = q.addr >> 5
+                i = line % nl
+                hit = tags[i] == line
+                if not hit:
+                    tags[i] = line
+                if record and q.mem == 'ld':
+                    out[k] = not hit
+        return out
+    if warm:
+        walk(False)
+    return walk(True)
 
 
 _BPC = {}
@@ -793,6 +947,62 @@ CONFIGS_O8 = [  # name, knobs against BASE_O3 (--fit o3): the frontend steps of 
     ('O8a + O5/6', cfg(WIN, MEM, mshr=4, bp='gshare', al_cond1=True)),
 ]
 
+# (O5.0) the core as it ships after O8 (O3 + the window aligner, the BTB counter and gshare): fitted on its own traces, so
+# its frontend is in the residuals; the memory configurations of O5/6 against it
+BASE_O8 = dict(BASE_O3)
+VALID_O8 = [  # label, model knobs against BASE_O8: runs of the shipping core with one memory knob changed
+    ('v_hand0', dict(handoff=False)),
+    ('v_lsq2', dict(lsq=2)),
+    ('v_est0', dict(early_st=False)),
+    ('v_sb8', dict(sb=8)),
+    ('v_dc_oracle', dict(dc_in=True, nomiss=True)),     # oracle_dc.sv (run_perf.sh --oracle dc), renamed
+]
+DC = dict(dc_in=True)                                     # O5a: the D$ in the core
+OOO = dict(mem_ooo=True, engines=1, lsq=8)               # O6a: memory ops taken out of order by the one engine
+SPEC = dict(spec_ld=True, mdp='none', replay_at='c')     # O6b: loads pass stores of unknown address
+CONFIGS_O5 = [  # name, knobs against BASE_O8 (--fit o8)
+    ('base', cfg()),                                                    # the fit replayed: +0.0 %
+    ('dc', cfg(DC)),                                                    # D4
+    ('dc nomiss', cfg(DC, nomiss=True)),                                # = the oracle (M0)
+    ('eng_pipe', cfg(eng_pipe=True)),                                   # a pipelined engine on the bus (recorded)
+    ('dc fwd', cfg(DC, fwd=True)),                                      # M2
+    ('dc cwf', cfg(DC, cwf=True)),                                      # M4
+    ('dc nb1', cfg(DC, nb=True, mshr=1)),                               # M5
+    ('dc nb2', cfg(DC, nb=True, mshr=2)),
+    ('dc nb4', cfg(DC, nb=True, mshr=4)),
+    ('dc cwf nb2', cfg(DC, cwf=True, nb=True, mshr=2)),
+    ('dc ooo po', cfg(DC, OOO, ld_order='po')),                         # M1
+    ('dc ooo any', cfg(DC, OOO, ld_order='any')),                       # M1b
+    ('dc ooo po fwd', cfg(DC, OOO, ld_order='po', fwd=True)),
+    ('dc ooo sta', cfg(DC, OOO, ld_order='po', fwd=True, sta=True)),    # M3a
+    ('dc ooo spec', cfg(DC, OOO, SPEC, ld_order='po', fwd=True)),       # M3 (replay at commit)
+    ('dc ooo spec x4', cfg(DC, OOO, SPEC, ld_order='po', fwd=True, replay_at='x', replay=4)),   # M3b
+    ('dc ooo spec x8', cfg(DC, OOO, SPEC, ld_order='po', fwd=True, replay_at='x', replay=8)),
+    ('dc ooo spec x16', cfg(DC, OOO, SPEC, ld_order='po', fwd=True, replay_at='x', replay=16)),
+    ('dc ooo spec x32', cfg(DC, OOO, SPEC, ld_order='po', fwd=True, replay_at='x', replay=32)),
+    ('dc ooo spec wb', cfg(DC, OOO, SPEC, ld_order='po', fwd=True, mdp='waitbit')),           # D6
+    ('dc ooo spec ideal', cfg(DC, OOO, SPEC, ld_order='po', fwd=True, mdp='ideal')),
+    ('dc ooo 2ports', cfg(DC, OOO, ld_order='po', fwd=True, engines=2, dports=2)),            # M6
+    ('dc all', cfg(DC, OOO, SPEC, ld_order='po', fwd=True, cwf=True, nb=True, mshr=2)),
+    ('bus fwd', cfg(fwd=True)),                                         # the fallback if D4 fails
+    ('bus ooo', cfg(OOO, ld_order='po', fwd=True)),
+    ('MEM', cfg(MEM, mshr=4)),                                          # the OX.0 configuration, on the fixed port
+    ('dc lsq2', cfg(DC, lsq=2)),                                        # D2 sizes
+    ('dc lsq8', cfg(DC, lsq=8)),
+    ('dc ooo lsq4', cfg(DC, OOO, ld_order='po', fwd=True, lsq=4)),
+    ('dc ooo lsq16 rob16', cfg(DC, OOO, ld_order='po', fwd=True, lsq=16, rob=16)),
+    ('dc sb8', cfg(DC, sb=8)),
+    ('dc 1k', cfg(DC, dc_kib=1)),
+    ('dc 2k', cfg(DC, dc_kib=2)),                                       # the replayed D$ (cold) at its own size: ~ dc
+    ('dc 4k', cfg(DC, dc_kib=4)),
+    ('dc 8k', cfg(DC, dc_kib=8)),
+    ('L20', cfg(miss_add=20)),                                          # (on L=1 traces) a slower memory
+    ('L20 dc', cfg(DC, miss_add=20)),
+    ('L20 dc cwf', cfg(DC, cwf=True, miss_add=20)),
+    ('L20 dc nb4', cfg(DC, nb=True, mshr=4, miss_add=20)),
+    ('L20 dc all', cfg(DC, OOO, SPEC, ld_order='po', fwd=True, cwf=True, nb=True, mshr=2, miss_add=20)),
+]
+
 CONFIGS_O4 = [  # name, knobs: two-wide with the pair rules (O4.0)
     ('ooo rs4', dict(rs=4)),
     ('commit2 rob8 rs4', dict(w=2, rs=4, dispatch1=True, slot2=True, fpw1=True)),
@@ -822,20 +1032,21 @@ def main():
     ap.add_argument('--mode', default='m')
     ap.add_argument('--kernels', default=' '.join(KERNELS))
     ap.add_argument('--db', type=int, default=2, help='cycles from a drain beat to its response (2: the D$ passes a store through)')
-    ap.add_argument('--set', default='o1', choices=('o1', 'o4', 'ox', 'o8'),
+    ap.add_argument('--stats', action='store_true', help='(O5.0) also print the fit\'s memory statistics per kernel')
+    ap.add_argument('--set', default='o1', choices=('o1', 'o4', 'ox', 'o8', 'o5'),
                     help='o1: the O1.0 configurations; o4: two-wide with the pair rules; ox: the complete-OOO milestones; '
                          'o8: the frontend steps (with --fit o3)')
-    ap.add_argument('--fit', default='o1', choices=('o1', 'o4', 'o3'),
+    ap.add_argument('--fit', default='o1', choices=('o1', 'o4', 'o3', 'o8'),
                     help='o1: fit one-wide traces with the station off (O1.0, O4.0); o4: fit traces of the core as built '
                          'after O4 (two-wide, the station on, issue cycles traced: OX.0); o3: ... after O3 (recovery at '
                          'execute, XR_EARLY)')
     a = ap.parse_args()
-    configs = {'o1': CONFIGS, 'o4': CONFIGS_O4, 'ox': CONFIGS_OX, 'o8': CONFIGS_O8}[a.set]
+    configs = {'o1': CONFIGS, 'o4': CONFIGS_O4, 'ox': CONFIGS_OX, 'o8': CONFIGS_O8, 'o5': CONFIGS_O5}[a.set]
     sfx = '_s' if a.mode == 's' else ''
     base = load_csv(a.base or os.path.join(os.path.dirname(os.path.abspath(__file__)), 'baseline_pipe%s.csv' % sfx))
-    fitp = dict({'o4': BASE_O4, 'o3': BASE_O3}.get(a.fit, BASE))
+    fitp = dict({'o4': BASE_O4, 'o3': BASE_O3, 'o8': BASE_O8}.get(a.fit, BASE))
     fitp['db'] = a.db
-    valid = {'o4': VALID_O4, 'o3': []}.get(a.fit, VALID)
+    valid = {'o4': VALID_O4, 'o3': [], 'o8': VALID_O8}.get(a.fit, VALID)
     vals = {}
     if a.validate:
         for lab, _ in valid:
@@ -848,6 +1059,7 @@ def main():
     print('| ' + ' | '.join(hdr) + ' |')
     print('|' + '---|' * len(hdr))
     logs = {}
+    stats = []
     for kern in a.kernels.split():
         path = os.path.join(a.traces, '%s%s_%s.ilp' % (kern, sfx, a.config))
         if not os.path.exists(path):
@@ -859,6 +1071,15 @@ def main():
         t0 = tr[-1].commit - meas if meas else None
         res = {}
         fitc, neg = sim(tr, dict(fitp), res, fit=True, t0=t0)
+        if a.stats:
+            stt = dict(res.get('stats', {}))
+            nld = sum(1 for q in tr if q.mem == 'ld' and not q.trap)
+            for kib in (2, 4, 8):
+                for w in (False, True):
+                    d = dc_replay(tr, kib, w)
+                    stt['dc%dk%s' % (kib, 'w' if w else 'c')] = sum(1 for v in d.values() if v)
+            stt['loads'] = nld
+            stats.append((kern, stt))
         row = [kern, str(meas), str(fitc), str(neg)]
         for lab, kn in valid:
             if lab not in vals:
@@ -877,6 +1098,14 @@ def main():
         row = ['geomean', '', '', ''] + [''] * len([l for l, _ in valid if l in vals])
         row += ['%+.1f%%' % (100.0 * (math.exp(sum(v) / len(v)) - 1)) for ci, v in sorted(logs.items())]
         print('| ' + ' | '.join(row) + ' |')
+    if stats:
+        keys = ['loads', 'dcm_n', 'dc2kc', 'dc2kw', 'dc4kw', 'dc8kw', 'miss_lat', 'ld_drain',
+                'ldb_ld', 'ldb_st', 'ldb_head', 'ldb_busy']
+        print()
+        print('| kernel | ' + ' | '.join(keys) + ' |')
+        print('|' + '---|' * (len(keys) + 1))
+        for kern, stt in stats:
+            print('| %s | ' % kern + ' | '.join(str(stt.get(x, 0)) for x in keys) + ' |')
 
 
 if __name__ == '__main__':
