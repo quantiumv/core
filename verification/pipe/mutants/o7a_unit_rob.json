@@ -1,0 +1,39 @@
+{
+ "dut": "design/pipe/qv_rob.sv",
+ "tb": "design/pipe/qv_rebuild_tb.sv",
+ "files": [
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_rs.sv",
+  "design/pipe/qv_issue.sv",
+  "design/pipe/qv_rob.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench",
+  "-DQV_ROB_MAX=32",
+  "-Pqv_rebuild_tb.ROB_DEPTH=32",
+  "-Pqv_rebuild_tb.KILL_1IN=64",
+  "-Pqv_rebuild_tb.DEEP=1",
+  "-Pqv_rebuild_tb.CYCLES=40000",
+  "-Pqv_rebuild_tb.SEED=11"
+ ],
+ "cwd": "design",
+ "timeout": 1800,
+ "mutants": [
+  {
+   "name": "(O7) the survivor view covers only 8 entries",
+   "old": "for (int j = 0; j < QV_ROB_DEPTH; j++) begin : surv",
+   "new": "for (int j = 0; j < 8; j++) begin : surv"
+  },
+  {
+   "name": "(O7) the survivor count is 4 bits wide",
+   "old": "wire [QV_ROB_TAG_W-1:0] n_surv = ",
+   "new": "wire [3:0] n_surv = "
+  }
+ ]
+}

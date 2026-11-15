@@ -1,0 +1,28 @@
+{
+ "dut": "design/pipe/qv_rob.sv",
+ "tb": "design/pipe/qv_rob_tb.sv",
+ "files": [
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_rob.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench",
+  "-DQV_ROB_MAX=32",
+  "-Pqv_rob_tb.ROB_DEPTH=32"
+ ],
+ "cwd": "design",
+ "timeout": 900,
+ "mutants": [
+  {
+   "name": "(O7) the kill vector covers only 16 tags",
+   "old": "for (int k = 0; k < (1 << QV_ROB_TAG_W); k++)",
+   "new": "for (int k = 0; k < 16; k++)"
+  }
+ ]
+}

@@ -1,0 +1,28 @@
+{
+ "dut": "design/pipe/qv_lsu.sv",
+ "tb": "design/pipe/qv_lsu_sb_tb.sv",
+ "files": [
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_pmp.sv",
+  "design/pipe/qv_lsu.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench",
+  "-DQV_ROB_MAX=32"
+ ],
+ "cwd": "design",
+ "timeout": 900,
+ "mutants": [
+  {
+   "name": "(O7) the distance to the head is taken over 4-bit pointers",
+   "old": "qv_rob_dist(tag_q, i_head_tag, $clog2(ROB_DEPTH) + 1)",
+   "new": "qv_rob_dist(tag_q, i_head_tag, 4)"
+  }
+ ]
+}
