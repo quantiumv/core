@@ -59,7 +59,8 @@
         .iq_push0(CORE.p0_valid), .iq_push1(CORE.p1_valid), .iq_pop(CORE.iq_pop && CORE.iq_valid), \
         .alloc_valid(CORE.alloc_valid), .alloc_tag(CORE.alloc_tag), \
         .lsu_acc(CORE.lsu0.accept), .lsu_acc_tag(CORE.lsu0.i_req.tag), \
-        .lsu_go(CORE.lsu0.start || CORE.lsu0.post_done || CORE.lsu0.done_nobus), .lsu_go_early(!CORE.lsu0.at_head), \
+        .lsu_go(CORE.lsu0.start || CORE.lsu0.post_done || CORE.lsu0.done_nobus || CORE.lsu0.done_dc || CORE.lsu0.dc_miss), \
+        .lsu_go_early(!CORE.lsu0.at_head), \
         .lsu_go_tag(CORE.lsu0.tag_q), \
         .wb2_valid(CORE.lsu_wb.valid), .wb2_tag(CORE.lsu_wb.tag), .wb3_valid(CORE.div_wb.valid), .wb3_tag(CORE.div_wb.tag), \
         .wb4_valid(CORE.fpu_wb.valid), .wb4_tag(CORE.fpu_wb.tag), \

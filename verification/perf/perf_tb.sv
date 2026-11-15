@@ -83,7 +83,7 @@ module perf_tb #(
             soc dut (.clk(clk), .rst(rst));
 
 `ifndef QV_REF_AS_CORE
-            `PERF_STACK_INST(dut.core0, 1'b0, (dut.cache0.dcache0.state_q == 1), (dut.cache0.icache0.state_q == 1))
+            `PERF_STACK_INST(dut.core0, 1'b0, (dut.cache0.dcache0.state_q == 1 || dut.core0.dc_busy), (dut.cache0.icache0.state_q == 1))
 `endif
 
             always @(posedge clk)

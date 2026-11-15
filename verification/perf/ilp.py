@@ -1002,6 +1002,13 @@ CONFIGS_O5 = [  # name, knobs against BASE_O8 (--fit o8)
     ('L20 dc nb4', cfg(DC, nb=True, mshr=4, miss_add=20)),
     ('L20 dc all', cfg(DC, OOO, SPEC, ld_order='po', fwd=True, cwf=True, nb=True, mshr=2, miss_add=20)),
 ]
+# The frontend as it ships (the window aligner, one conditional branch a cycle) modelled, not kept as a residual: with
+# memory faster, loops that were memory-bound become fetch-bound, and a residual frontend would hide that (it was
+# measured with a full instruction queue). 'fe8' alone must replay the traces (near +0.0 %); every memory configuration
+# and every validation row runs on top of it.
+FE8 = dict(fe='ideal', al_ntk=True, al_cond1=True)
+CONFIGS_O5 = [CONFIGS_O5[0], ('fe8', cfg(FE8))] + [(n, cfg(FE8, c)) for n, c in CONFIGS_O5[1:]]
+VALID_O8 = [(n, cfg(FE8, c)) for n, c in VALID_O8]
 
 CONFIGS_O4 = [  # name, knobs: two-wide with the pair rules (O4.0)
     ('ooo rs4', dict(rs=4)),

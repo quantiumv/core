@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """mk_oracle_dc.py SRC DST -- make the ideal in-core D$ oracle (run_perf.sh --oracle dc, O5.0) from design/pipe/qv_lsu.sv.
 
-The copy completes a plain load from RAM in the cycle it could start its bus access (start_raw: at the head, or early;
-translated, aligned, allowed by the PMP, no store-buffer match), with the dword read from the memory array named by the
-define QV_ORACLE_DC_MEM, and never takes the bus: a D$ inside the core that never misses. It bounds what O5a can gain
-and checks the model's 'dc nomiss' (rule M0). It is generated at build time, so it follows qv_lsu.sv; every edit below
-must match exactly once, or this script fails and the anchors need updating.
+The copy is the LSU's own D$ arm (DC_EN, O5a) with a D$ that always hits: every plain load from RAM that could start
+(at the head, or early; translated, aligned, allowed by the PMP, no store-buffer match) completes in that cycle with
+the dword read from the memory array named by the define QV_ORACLE_DC_MEM, never refills and never takes the bus. So
+it has the timing of the real D$ arm (the handoff, the store buffer not yielding to a hit) without its misses: an upper
+bound for O5a, and the check of the model's 'dc nomiss' (rule M0). It is generated at build time, so it follows
+qv_lsu.sv; every edit below must match exactly once, or this script fails and the anchors need updating.
 """
 import sys
 
@@ -24,26 +25,12 @@ def sub(old, new):
 sub("// SPDX-License-Identifier: MIT\n",
     "// SPDX-License-Identifier: MIT\n"
     "// ORACLE, TESTBENCH ONLY (run_perf.sh --oracle dc), generated from design/pipe/qv_lsu.sv by\n"
-    "// verification/perf/mk_oracle_dc.py: a plain RAM load completes in the cycle it could start, from\n"
-    "// `QV_ORACLE_DC_MEM, without the bus (an ideal in-core D$). A timing model, not a correct core.\n")
-sub("    wire start     = start_raw && ",
-    "    wire done_dc   = start_raw && ram_ld;                              // ORACLE: the ideal D$ answers now\n"
-    "    wire [63:0] dc_word = `QV_ORACLE_DC_MEM[pa[25:3]];\n"
-    "    wire start     = start_raw && !done_dc && ")
-sub("    assign o_bus_busy     = start_raw || in_bus;",
-    "    assign o_bus_busy     = (start_raw && !done_dc) || in_bus;")
-sub("    assign handoff    = HANDOFF && (done_bus || post_done);",
-    "    assign handoff    = HANDOFF && (done_bus || post_done || done_dc);")
-sub("    wire [63:0] shifted = wb_mem_dat_i >> {addr_q[2:0], 3'b000};",
-    "    wire [63:0] shifted = (done_dc ? dc_word : wb_mem_dat_i) >> {addr_q[2:0], 3'b000};")
-sub("        o_wb.valid = done_bus || done_nobus || post_done;",
-    "        o_wb.valid = done_bus || done_nobus || post_done || done_dc;")
-sub("        else if (done_bus && !wb_mem_err_i && kind_rd && !sc_q) o_wb.value = load_value;",
-    "        else if ((done_dc || (done_bus && !wb_mem_err_i)) && kind_rd && !sc_q) o_wb.value = load_value;")
-sub("                    else if (done_nobus || post_done) state_q <= S_IDLE;",
-    "                    else if (done_nobus || post_done || done_dc) state_q <= S_IDLE;")
-sub("            if (done_bus || done_nobus || post_done) begin",
-    "            if (done_bus || done_nobus || post_done || done_dc) begin")
-sub("                                     : done_bus ? wb_mem_dat_i : 64'b0;",
-    "                                     : done_bus ? wb_mem_dat_i : done_dc ? dc_word : 64'b0;")
+    "// verification/perf/mk_oracle_dc.py: its D$ arm with a D$ that always hits, read from `QV_ORACLE_DC_MEM.\n"
+    "// A timing model, not a correct core.\n")
+sub("    wire dc_ld     = DC_EN && ram_ld;", "    wire dc_ld     = ram_ld;                                  // ORACLE: every RAM load")
+sub("    wire done_dc   = dc_go && i_dc_hit && !i_dc_busy;", "    wire done_dc   = dc_go;                                   // ORACLE: always a hit")
+sub("    wire dc_miss   = dc_go && !i_dc_hit && ", "    wire dc_miss   = 1'b0 && ")
+sub("    wire [63:0] rsp_dat = fill_q ? i_dc_fill_dat : done_dc ? i_dc_dat : wb_mem_dat_i;",
+    "    wire [63:0] rsp_dat = fill_q ? i_dc_fill_dat : done_dc ? `QV_ORACLE_DC_MEM[pa[25:3]] : wb_mem_dat_i;")
+sub("                         && !(dc_ld && i_dc_hit);", "                         && !dc_ld;")
 open(dst, 'w').write(s)
