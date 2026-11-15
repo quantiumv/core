@@ -77,7 +77,7 @@ module qv_rob_tb #(
     function automatic logic [63:0] val_of(input int n); return 64'hA000_0000_0000_0000 + 64'(n * 17); endfunction
 
     int seq = 0;   // allocation sequence number
-    logic [QV_ROB_TAG_W-1:0] tag_of [0:255];
+    logic [QV_ROB_TAG_W-1:0] tag_of [0:8*ROB_DEPTH+255];    // (O7) enough for every phase at any depth
 
     task automatic do_alloc();
         @(negedge clk);
@@ -137,7 +137,7 @@ module qv_rob_tb #(
         check($sformatf("%s: head %0d value", tag, n), head.value, val_of(n));
         check($sformatf("%s: head %0d ctrl rvfi_rs1", tag, n), {59'b0, head_ctrl.rvfi_rs1}, 64'(n % 7));
         check($sformatf("%s: head %0d ctrl rvfi_rs2", tag, n), {59'b0, head_ctrl.rvfi_rs2}, 64'(n % 11));
-        check($sformatf("%s: head %0d ctrl csr_addr", tag, n), {52'b0, head_ctrl.csr_addr}, 64'(12'(n * 37)));
+        check($sformatf("%s: head %0d ctrl csr_addr", tag, n), {52'b0, head_ctrl.csr_addr}, {52'b0, 12'(n * 37)});
         check($sformatf("%s: head %0d ctrl serialize", tag, n), {63'b0, head_ctrl.serialize}, 64'((n >> 1) & 1));
         check($sformatf("%s: head %0d ctrl cause", tag, n), {60'b0, head_ctrl.cause}, 64'(n % 16));
         @(negedge clk);

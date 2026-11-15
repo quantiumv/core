@@ -9,9 +9,9 @@
 # "cores" names the builds a test is meaningful for (run_regress.sh --core):
 #   pipe  the main build, the pipelined core in design/pipe/ -- every row
 #   ref   the frozen multi-cycle reference, verification/reference/ref_core.sv
-#         (named `core` by -DQV_REF_AS_CORE) -- 79 rows
+#         (named `core` by -DQV_REF_AS_CORE) -- 81 rows
 # run_regress.sh --core X SKIPS any row not listing X, silently, so a row that
-# names neither core would just never run: there must be 182 rows listing pipe.
+# names neither core would just never run: there must be 238 rows listing pipe.
 #
 # The rows that omit ref are the design/*_tb.sv unit tests of a leaf module
 # (alu, c_expand, csr_file, divider, register_file) and of the divider's
@@ -251,3 +251,38 @@ pipe_dispatch2_tb_rs8_c2_csr|design/pipe/qv_dispatch2_tb.sv||design|pipe|pass||-
 pipe_dispatch2_tb_a2_c2_csr|design/pipe/qv_dispatch2_tb.sv||design|pipe|pass||-Pqv_dispatch2_tb.ALU_PORTS=2 -Pqv_dispatch2_tb.COMMIT_W=2 -Pqv_dispatch2_tb.CSR_LATE=1 -Pqv_dispatch2_tb.SEED=8
 pipe_dispatch2_tb_a2_rs0_c2|design/pipe/qv_dispatch2_tb.sv||design|pipe|pass||-Pqv_dispatch2_tb.ALU_PORTS=2 -Pqv_dispatch2_tb.RS_DEPTH=0 -Pqv_dispatch2_tb.COMMIT_W=2 -Pqv_dispatch2_tb.SEED=9
 pipe_dispatch2_tb_a2_b0r4rs2|design/pipe/qv_dispatch2_tb.sv||design|pipe|pass||-Pqv_dispatch2_tb.ALU_PORTS=2 -Pqv_dispatch2_tb.BYPASS_EN=0 -Pqv_dispatch2_tb.ROB_DEPTH=4 -Pqv_dispatch2_tb.RS_DEPTH=2 -Pqv_dispatch2_tb.SEED=10
+
+# (O7) the window at a larger package (QV_ROB_MAX: 6- and 7-bit tags): the ROB and its rebuild at 32 and 64 entries
+# (DEEP: kills of a full ROB, with many survivors, of many entries must occur), a ROB smaller than the package, the
+# station at 8, the queue at 16 and 32, the units' kills, and the core rows at a 32-entry ROB
+pipe_rob_tb_p32_d32|design/pipe/qv_rob_tb.sv||design|pipe|pass||-DQV_ROB_MAX=32 -Pqv_rob_tb.ROB_DEPTH=32
+pipe_rob_tb_p32_d16|design/pipe/qv_rob_tb.sv||design|pipe|pass||-DQV_ROB_MAX=32 -Pqv_rob_tb.ROB_DEPTH=16
+pipe_rob_tb_p32_d8|design/pipe/qv_rob_tb.sv||design|pipe|pass||-DQV_ROB_MAX=32 -Pqv_rob_tb.ROB_DEPTH=8
+pipe_rob_tb_p64_d64|design/pipe/qv_rob_tb.sv||design|pipe|pass||-DQV_ROB_MAX=64 -Pqv_rob_tb.ROB_DEPTH=64
+pipe_rebuild_tb_p32_d32|design/pipe/qv_rebuild_tb.sv||design|pipe|pass||-DQV_ROB_MAX=32 -Pqv_rebuild_tb.ROB_DEPTH=32 -Pqv_rebuild_tb.KILL_1IN=64 -Pqv_rebuild_tb.DEEP=1 -Pqv_rebuild_tb.CYCLES=40000 -Pqv_rebuild_tb.SEED=11
+pipe_rebuild_tb_p32_d16|design/pipe/qv_rebuild_tb.sv||design|pipe|pass||-DQV_ROB_MAX=32 -Pqv_rebuild_tb.ROB_DEPTH=16 -Pqv_rebuild_tb.KILL_1IN=32 -Pqv_rebuild_tb.DEEP=1 -Pqv_rebuild_tb.CYCLES=40000 -Pqv_rebuild_tb.SEED=12
+pipe_rebuild_tb_p32_d8|design/pipe/qv_rebuild_tb.sv||design|pipe|pass||-DQV_ROB_MAX=32 -Pqv_rebuild_tb.ROB_DEPTH=8 -Pqv_rebuild_tb.SEED=13
+pipe_rebuild_tb_p64_d64|design/pipe/qv_rebuild_tb.sv||design|pipe|pass||-DQV_ROB_MAX=64 -Pqv_rebuild_tb.ROB_DEPTH=64 -Pqv_rebuild_tb.KILL_1IN=128 -Pqv_rebuild_tb.DEEP=1 -Pqv_rebuild_tb.CYCLES=60000 -Pqv_rebuild_tb.SEED=14
+pipe_backend_tb_p32_r32_rs8|design/pipe/qv_backend_tb.sv||design|pipe|pass||-DQV_ROB_MAX=32 -Pqv_backend_tb.BYPASS_EN=1 -Pqv_backend_tb.SERIALIZE=0 -Pqv_backend_tb.ROB_DEPTH=32 -Pqv_backend_tb.RS_DEPTH=8
+pipe_backend_tb_p32_r32_csr|design/pipe/qv_backend_tb.sv||design|pipe|pass||-DQV_ROB_MAX=32 -Pqv_backend_tb.BYPASS_EN=0 -Pqv_backend_tb.SERIALIZE=0 -Pqv_backend_tb.ROB_DEPTH=32 -Pqv_backend_tb.CSR_LATE=1 -Pqv_backend_tb.RS_DEPTH=8
+pipe_backend_tb_p64_r64_rs8|design/pipe/qv_backend_tb.sv||design|pipe|pass||-DQV_ROB_MAX=64 -Pqv_backend_tb.BYPASS_EN=1 -Pqv_backend_tb.SERIALIZE=0 -Pqv_backend_tb.ROB_DEPTH=64 -Pqv_backend_tb.RS_DEPTH=8
+pipe_dispatch2_tb_p32_r32rs8|design/pipe/qv_dispatch2_tb.sv||design|pipe|pass||-DQV_ROB_MAX=32 -Pqv_dispatch2_tb.ROB_DEPTH=32 -Pqv_dispatch2_tb.RS_DEPTH=8 -Pqv_dispatch2_tb.ALU_PORTS=2 -Pqv_dispatch2_tb.COMMIT_W=2 -Pqv_dispatch2_tb.CSR_LATE=1 -Pqv_dispatch2_tb.SEED=21
+pipe_dispatch2_tb_p32_r16rs8|design/pipe/qv_dispatch2_tb.sv||design|pipe|pass||-DQV_ROB_MAX=32 -Pqv_dispatch2_tb.ROB_DEPTH=16 -Pqv_dispatch2_tb.RS_DEPTH=8 -Pqv_dispatch2_tb.COMMIT_W=2 -Pqv_dispatch2_tb.CSR_LATE=1 -Pqv_dispatch2_tb.SEED=22
+pipe_rs_tb_p32_d8_a2|design/pipe/qv_rs_tb.sv||design|pipe|pass|900|-DQV_ROB_MAX=32 -Pqv_rs_tb.DEPTH=8 -Pqv_rs_tb.PUSH2=1 -Pqv_rs_tb.ALU_PORTS=2 -Pqv_rs_tb.SEED=23
+pipe_lsq_tb_p32_d16|design/pipe/qv_lsq_tb.sv||design|pipe|pass||-DQV_ROB_MAX=32 -Pqv_lsq_tb.DEPTH=16
+pipe_lsq_tb_p32_d16_xl|design/pipe/qv_lsq_tb.sv||design|pipe|pass||-DQV_ROB_MAX=32 -Pqv_lsq_tb.DEPTH=16 -Pqv_lsq_tb.PRE_XL=1 -Pqv_lsq_tb.XL_FWD=1
+pipe_lsq_tb_p64_d32|design/pipe/qv_lsq_tb.sv||design|pipe|pass||-DQV_ROB_MAX=64 -Pqv_lsq_tb.DEPTH=32
+pipe_exu_bru_tb_p32|design/pipe/qv_exu_bru_tb.sv||design|pipe|pass||-DQV_ROB_MAX=32
+pipe_exu_div_tb_p32|design/pipe/qv_exu_div_tb.sv||design|pipe|pass||-DQV_ROB_MAX=32
+pipe_exu_fpu_tb_p32|design/pipe/qv_exu_fpu_tb.sv||design|pipe|pass||-DQV_ROB_MAX=32
+pipe_commit_pair_tb_p32|design/pipe/qv_commit_pair_tb.sv||design|pipe|pass||-DQV_ROB_MAX=32
+pipe_lsu_tb_p32|design/pipe/qv_lsu_tb.sv||design|pipe|pass||-DQV_ROB_MAX=32
+pipe_lsu_sb_tb_p32|design/pipe/qv_lsu_sb_tb.sv||design|pipe|pass||-DQV_ROB_MAX=32
+pipe_lsu_sb_rob8_tb_p32|design/pipe/qv_lsu_sb_tb.sv||design|pipe|pass||-DQV_ROB_MAX=32 -Pqv_lsu_sb_tb.ROB=8
+pipe_lsu_early_tb_p32|design/pipe/qv_lsu_early_tb.sv||design|pipe|pass||-DQV_ROB_MAX=32 -Pqv_lsu_early_tb.HANDOFF=1
+pipe_lsu_dc_tb_p32|design/pipe/qv_lsu_dc_tb.sv||design|pipe|pass||-DQV_ROB_MAX=32
+tb_core_lsq_tb_r32|testbench/core_lsq_tb.sv||design|pipe|pass||-DQV_PIPE_COMMIT_W=1 -DQV_ROB_MAX=32 -DQV_PIPE_RS_DEPTH=8 -DQV_PIPE_LSQ_DEPTH=16
+tb_core_lsq_dc_tb_r32|testbench/core_lsq_tb.sv||design|pipe|pass||-DQV_PIPE_COMMIT_W=1 -DQV_PIPE_DCACHE=1 -DQV_ROB_MAX=32 -DQV_PIPE_RS_DEPTH=8 -DQV_PIPE_LSQ_DEPTH=16
+tb_core_dc_tb_r32|testbench/core_dc_tb.sv||design|pipe|pass||-DQV_PIPE_DCACHE=1 -DQV_ROB_MAX=32 -DQV_PIPE_RS_DEPTH=8 -DQV_PIPE_LSQ_DEPTH=16
+tb_core_m_ext_tb_r32|testbench/core_m_ext_tb.sv|testbench/core_wb4_sram_harness.sv|design|pipe|pass||-DQV_ROB_MAX=32 -DQV_PIPE_RS_DEPTH=8
+tb_core_m_ext_cache_tb_r32|testbench/core_m_ext_cache_tb.sv|testbench/core_cache_harness.sv|design|pipe|pass||-DQV_ROB_MAX=32 -DQV_PIPE_RS_DEPTH=8

@@ -65,11 +65,12 @@ module qv_exu_fpu_tb;
     int          didx [0:MAXV-1];
     int          np = 0, nd = 0, nv = 0;
 
-    // the scoreboard, by tag
-    logic        alive [0:15];
-    logic [63:0] e_res [0:15];
-    logic [4:0]  e_fl  [0:15];
-    int          e_vec [0:15];
+    // the scoreboard, by tag (every tag value of the package)
+    localparam int NT = 1 << QV_ROB_TAG_W;
+    logic        alive [0:NT-1];
+    logic [63:0] e_res [0:NT-1];
+    logic [4:0]  e_fl  [0:NT-1];
+    int          e_vec [0:NT-1];
     int pass_count = 0, fail_count = 0, n_flush = 0, n_ds = 0, n_pipe = 0, n_killed = 0, n_kill = 0, n_tkilled = 0;
 
     task automatic fail(string msg);
@@ -80,13 +81,13 @@ module qv_exu_fpu_tb;
     // an op in flight longer than this was lost (a divide takes about 60 cycles and then waits for a free port cycle;
     // the stream leaves one at least every few cycles)
     localparam int MAX_AGE = 400;
-    int age [0:15];
+    int age [0:NT-1];
 
     always @(posedge clk) begin
         if (!rst && wb.valid && flush) fail($sformatf("a writeback in a flush cycle (tag %0d, t=%0t)", wb.tag, $time));
         if (!rst && wb.valid && kill_vec[wb.tag])
             fail($sformatf("a writeback for tag %0d in the cycle it is killed (t=%0t)", wb.tag, $time));
-        for (int t = 0; t < 16; t++)
+        for (int t = 0; t < NT; t++)
             if (alive[t]) begin
                 age[t] = age[t] + 1;
                 if (age[t] == MAX_AGE) fail($sformatf("tag %0d in flight for %0d cycles: lost", t, MAX_AGE));
@@ -102,9 +103,9 @@ module qv_exu_fpu_tb;
             end
         end
         if (!rst && flush) begin                          // everything in flight is dead
-            for (int t = 0; t < 16; t++) if (alive[t]) begin alive[t] = 1'b0; n_killed++; end
+            for (int t = 0; t < NT; t++) if (alive[t]) begin alive[t] = 1'b0; n_killed++; end
         end
-        if (!rst) for (int t = 0; t < 16; t++)            // (O3) the killed tags are dead from here on
+        if (!rst) for (int t = 0; t < NT; t++)            // (O3) the killed tags are dead from here on
             if (kill_vec[t] && alive[t]) begin alive[t] = 1'b0; n_tkilled++; end
     end
 
@@ -139,7 +140,7 @@ module qv_exu_fpu_tb;
             else begin pidx[np] = nv; np++; end
             nv++;
         end
-        for (int t = 0; t < 16; t++) begin alive[t] = 1'b0; age[t] = 0; end
+        for (int t = 0; t < NT; t++) begin alive[t] = 1'b0; age[t] = 0; end
         req = '0;
         repeat (3) @(posedge clk);
         @(negedge clk) rst = 1'b0;
@@ -151,7 +152,7 @@ module qv_exu_fpu_tb;
             kill_vec = '0;
             r = $urandom % 1000;
             if (r < kpm && cyc < cycles / 2) begin        // (O3) a kill of some of what is in flight
-                for (int t = 0; t < 16; t++) if (alive[t] && ($urandom % 2)) kill_vec[t] = 1'b1;
+                for (int t = 0; t < NT; t++) if (alive[t] && ($urandom % 2)) kill_vec[t] = 1'b1;
                 n_kill++;
                 continue;
             end
@@ -166,7 +167,7 @@ module qv_exu_fpu_tb;
             if (r < 20) continue;                         // idle
             // a free tag, lowest first (after a flush the same tags come back at once)
             found = 1'b0;
-            for (int t = 0; t < 16 && !found; t++) if (!alive[t]) begin tag = t; found = 1'b1; end
+            for (int t = 0; t < NT && !found; t++) if (!alive[t]) begin tag = t; found = 1'b1; end
             if (!found) continue;
             if (r >= 85 && nd > 0) begin                  // a divide or square root, if the side unit is free
                 if (!ds_free) continue;
@@ -183,7 +184,7 @@ module qv_exu_fpu_tb;
         end
         @(negedge clk) begin req = '0; flush = 1'b0; kill_vec = '0; end
         repeat (200) @(negedge clk);
-        for (int t = 0; t < 16; t++) if (alive[t]) fail($sformatf("tag %0d never written back", t));
+        for (int t = 0; t < NT; t++) if (alive[t]) fail($sformatf("tag %0d never written back", t));
         $display("");
         $display("qv_exu_fpu_tb: %0d pipeline and %0d divide/sqrt ops, %0d flushes killing %0d, %0d kills of %0d", n_pipe,
                  n_ds, n_flush, n_killed, n_kill, n_tkilled);

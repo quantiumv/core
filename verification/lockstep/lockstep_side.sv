@@ -295,6 +295,22 @@ module lockstep_side #(
                     $finish;
                 end
             end
+            // (O7) how far the window filled: the largest ROB occupancy, recoveries at execute that kept or removed
+            // more than half the ROB, and cycles with the memory queue full (the engine busy, without a queue);
+            // printed at the end, where the gate script sums it per size and requires each to be reached
+            int unsigned w_rob_max = 0, w_kills = 0, w_kill_keep = 0, w_kill_drop = 0, w_lsq_full = 0;
+            always @(posedge clk)
+                if (!rst) begin
+                    if (32'(core0.rob0.count) > w_rob_max) w_rob_max <= 32'(core0.rob0.count);
+                    if (core0.xr_kill) begin
+                        w_kills <= w_kills + 1;
+                        if (32'(core0.rob0.n_surv) > core0.ROB_DEPTH / 2) w_kill_keep <= w_kill_keep + 1;
+                        if ($countones(core0.kill_vec) > core0.ROB_DEPTH / 2) w_kill_drop <= w_kill_drop + 1;
+                    end
+                    if (!core0.lsu_free) w_lsq_full <= w_lsq_full + 1;
+                end
+            final $display("LS_WIN: rob=%0d rob_max=%0d kills=%0d kill_keep=%0d kill_drop=%0d lsq_full=%0d",
+                           core0.ROB_DEPTH, w_rob_max, w_kills, w_kill_keep, w_kill_drop, w_lsq_full);
 `endif
 `ifdef LS_HAVE_DC
             // (O5a) the D$ inside the core, audited whenever the core shows halted (the end of a test, every halt of the

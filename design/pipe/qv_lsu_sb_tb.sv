@@ -369,6 +369,13 @@ module qv_lsu_sb_tb #(
             @(negedge clk); head_valid = 1'b1; head_tag = last_tag - QV_ROB_TAG_W'(d); #1;
             check($sformatf("load_near: %0d behind the head", d), {63'b0, load_near}, {63'b0, d <= 2});
         end
+        // (O7) with a ROB over 16 entries a load 16 or 17 behind the head is not near (a distance taken over
+        // narrower pointers would wrap it onto the head)
+        if (ROB > 16)
+            for (int d = 16; d < 18; d++) begin
+                @(negedge clk); head_valid = 1'b1; head_tag = last_tag - QV_ROB_TAG_W'(d); #1;
+                check($sformatf("load_near: %0d behind the head", d), {63'b0, load_near}, 64'd0);
+            end
         // a matching load is not near (the drain must not yield to it)
         @(negedge clk); head_tag = last_tag - QV_ROB_TAG_W'(1); sb_match = 1'b1; #1;
         check("load_near: not when it waits for the buffer", {63'b0, load_near}, 64'd0);

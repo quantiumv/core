@@ -645,6 +645,86 @@ def emit_ooo(p: Program, recent: list[int]):
     del recent[:-8]
 
 
+def emit_deep(p: Program, recent: list[int]):
+    """--deep: what a big window (O7) has to get right. A long producer (a chain of divides, an FP divide or square
+    root moved to an integer register, a chain of loads, a CSR read made at its commit), then a run of independent
+    work behind it long enough to fill a 32-entry ROB and its station (one shape is mostly memory ops, to fill a
+    16-entry queue behind a store of the long result that cannot retire), with one register written again and again
+    across it (WAW over the whole window); then a branch on the long result over a second run, so a mispredict there
+    kills a long suffix and the rebuild keeps many survivors; then the late consumers."""
+    have_m = "m" in p.args.isa and not p.args.no_div
+    have_f = "f" in p.args.isa
+
+    def fresh(*excl):
+        r = p.reg()
+        while r in excl:
+            r = p.reg()
+        return r
+
+    long_rd = p.reg()
+    k = p.rng.random()
+    if have_m and k < 0.35:
+        p.e(f"    {p.rng.choice(['div', 'divu', 'rem']):<7} x{long_rd}, x{fresh(long_rd)}, x{fresh(long_rd)}")
+        for _ in range(p.rng.randint(0, 2)):
+            p.e(f"    {p.rng.choice(['div', 'remu', 'divw']):<7} x{long_rd}, x{long_rd}, x{fresh(long_rd)}")
+    elif have_f and k < 0.55:
+        fd = p.rng.randrange(32)
+        if p.rng.random() < 0.5:
+            p.e(f"    fdiv.d  f{fd}, f{p.rng.randrange(32)}, f{p.rng.randrange(32)}")
+        else:
+            p.e(f"    fsqrt.d f{fd}, f{p.rng.randrange(32)}")
+        p.e(f"    fmv.x.d x{long_rd}, f{fd}")
+    elif k < 0.85:
+        addr = fresh(long_rd)
+        _sandbox_addr(p, addr, width=8)
+        p.e(f"    ld      x{long_rd}, 0(x{addr})")
+        for _ in range(p.rng.randint(0, 2)):
+            mreg = fresh(long_rd, addr)
+            p.li(mreg, (SANDBOX_SIZE - 1) & ~7)
+            p.e(f"    and     x{addr}, x{long_rd}, x{mreg}")
+            p.e(f"    add     x{addr}, x{addr}, x27")
+            p.e(f"    ld      x{long_rd}, 0(x{addr})")
+    else:
+        csr = "sscratch" if p.args.priv == "msu" else "mscratch"
+        if p.irq:
+            csr = "stval" if p.args.priv == "msu" else "mtval"
+        p.e(f"    csrr    x{long_rd}, {csr}")
+    if p.rng.random() < 0.5:
+        p.e(f"    sd      x{long_rd}, {p.rng.randrange(0, 0x400, 8)}(x27)")      # a store that cannot retire early
+    waw = fresh(long_rd)
+    mem_frac = p.rng.choice([0.2, 0.7])
+
+    def run(n):
+        for _ in range(n):
+            r = p.rng.random()
+            if r < 0.12:
+                p.e(f"    addi    x{waw}, x{fresh(long_rd)}, {p.rng.randint(-2047, 2047)}")
+            elif r < 0.12 + mem_frac:
+                if p.rng.random() < 0.5:
+                    rd = fresh(long_rd, waw)
+                    p.e(f"    {p.rng.choice(['ld', 'lw', 'lbu']):<7} x{rd}, {p.rng.randrange(0, 0x400, 8)}(x27)")
+                    recent.append(rd)
+                else:
+                    p.e(f"    {p.rng.choice(['sd', 'sw', 'sb']):<7} x{fresh(long_rd)}, {p.rng.randrange(0, 0x400, 8)}(x27)")
+            else:
+                rd = fresh(long_rd, waw)
+                p.e(f"    {p.rng.choice(['add', 'xor', 'sub', 'or', 'and', 'sll']):<7} x{rd}, x{fresh(long_rd)}, x{fresh(long_rd)}")
+                recent.append(rd)
+
+    run(p.rng.randint(10, 30))
+    if not p.loop_nesting:
+        over = Label("dp")
+        p.e(f"    {p.rng.choice(['beqz', 'bnez', 'bltz', 'bgez'])}    x{long_rd}, {over}")
+        run(p.rng.randint(10, 30))
+        p.e(f"{over}:")
+    else:
+        run(p.rng.randint(10, 30))
+    rd = fresh(long_rd)
+    p.e(f"    add     x{rd}, x{long_rd}, x{waw}")
+    recent.append(rd)
+    del recent[:-8]
+
+
 def emit_xr(p: Program, recent: list[int]):
     """--xr: what recovery at execute (O3) has to get right. A forward branch that is always taken but resolves late
     (on a divide by x0, all ones, or on a load of the branch's own encoding) is predicted not taken the first times,
@@ -2767,6 +2847,9 @@ def emit_main_body(p: Program):
         if getattr(a, "ooo", False) and p.rng.random() < 0.25:
             emit_ooo(p, recent)
             return
+        if getattr(a, "deep", False) and p.rng.random() < 0.06:
+            emit_deep(p, recent)
+            return
         if getattr(a, "pair", False) and p.rng.random() < 0.30:
             emit_pair(p, recent)
             return
@@ -2984,6 +3067,9 @@ def main():
     ap.add_argument("--ooo", action="store_true",
                     help="a quarter of the instructions are long-latency producers with independent work and their "
                          "consumers behind them (see emit_ooo): for out-of-order issue")
+    ap.add_argument("--deep", action="store_true",
+                    help="some instructions are long producers with 20-60 independent ops behind them and a branch "
+                         "on the long result over part of them (see emit_deep): for the big window (O7)")
     ap.add_argument("--pair", action="store_true",
                     help="a third of the instructions are shaped to pair at dispatch and commit, with the hazards of "
                          "a pair (see emit_pair): for the two-wide core (O4)")

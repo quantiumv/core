@@ -150,6 +150,13 @@ module qv_lsq_tb #(
 
     // ---------------- helpers ----------------
     logic [QV_ROB_TAG_W-1:0] next_tag = '0;
+    // (O7) a tag no queued op or barrier holds: half the tag space ahead of the next one (8 and 9 at 4-bit tags), so
+    // the live tags (the queue's ops and the barriers between them) must span less than half the tag space
+    function automatic logic [QV_ROB_TAG_W-1:0] not_queued(input int k);
+        return next_tag + QV_ROB_TAG_W'((1 << (QV_ROB_TAG_W - 1)) + k - 1);
+    endfunction
+    initial if (DEPTH + 2 > QV_ROB_DEPTH)
+        $fatal(1, "qv_lsq_tb: DEPTH %0d needs a larger QV_ROB_MAX (the live tags would reach the made-up ones)", DEPTH);
     logic [63:0]             next_a   = 64'h100;
 
     task automatic present(output logic [QV_ROB_TAG_W-1:0] t, output logic [63:0] a);
@@ -259,7 +266,7 @@ module qv_lsq_tb #(
         // an op dispatched now is behind the second barrier
         present(t0, a0); tick(); idle();
         check("behind the second barrier: may not", b(early), 64'd0);
-        pop = 1'b1; pop_tag = next_tag + 4'd8; tick(); pop = 1'b0;      // another ROB entry retires (not a barrier)
+        pop = 1'b1; pop_tag = not_queued(1); tick(); pop = 1'b0;        // another ROB entry retires (not a barrier)
         check("an unrelated retirement: still may not", b(early), 64'd0);
         pop = 1'b1; pop_tag = next_tag - 4'd2; tick(); pop = 1'b0;      // the second barrier's tag
         check("the second barrier retired: may go", b(early), 64'd1);
@@ -549,13 +556,13 @@ module qv_lsq_tb #(
                         pop2 = 1'b1; pop2_tag = q_tag[1];
                     end
                 end else if ($urandom_range(0, 9) == 0) begin
-                    pop = 1'b1; pop_tag = next_tag + 4'd8;        // a ROB entry that is not a memory op
+                    pop = 1'b1; pop_tag = not_queued(1);          // a ROB entry that is not a memory op
                     if (q_tag.size() > 0 && q_done[0] >= 0 && cyc > q_done[0] && $urandom_range(0, 1) != 0) begin
                         pop2 = 1'b1; pop2_tag = q_tag[0];
                     end
                 end else if ($urandom_range(0, 19) == 0) begin
-                    pop = 1'b1; pop_tag = next_tag + 4'd8;        // two retirements, neither a memory op
-                    pop2 = 1'b1; pop2_tag = next_tag + 4'd9;
+                    pop = 1'b1; pop_tag = not_queued(2);          // two retirements, neither a memory op
+                    pop2 = 1'b1; pop2_tag = not_queued(1);
                 end
                 if (!kill && $urandom_range(0, 199) == 0) flush = 1'b1;
                 // (a killed op never retires: the ROB retires only what is older than the branch)

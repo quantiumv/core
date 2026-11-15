@@ -219,7 +219,7 @@ module core_dc_tb;
     end
     // a hit that completes in the cycle right after the LSU took it (the done check first: a handoff takes the next
     // op in that same cycle)
-    int   acc_cyc_t [0:15];
+    int   acc_cyc_t [0:(1 << qv_pkg::QV_ROB_TAG_W) - 1];       // by tag
     logic lat1_seen = 1'b0;
     always @(posedge clk) if (!rst) begin
         if (core0.lsu0.done_dc && acc_cyc_t[core0.lsu0.tag_q] == cyc_n - 1) lat1_seen = 1'b1;

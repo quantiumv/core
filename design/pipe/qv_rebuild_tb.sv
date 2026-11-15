@@ -24,7 +24,10 @@ module qv_rebuild_tb #(
     parameter int ROB_DEPTH = 8,
     parameter bit CSR_LATE  = 1'b1,
     parameter int SEED      = 1,
-    parameter int CYCLES    = 20000
+    parameter int CYCLES    = 20000,
+    parameter int KILL_1IN  = 8,        // (O7) a kill in one cycle of KILL_1IN, in every other 2000-cycle phase (one in 8
+                                        // in the others): the rare-kill phases let a big ROB fill
+    parameter bit DEEP      = 1'b0      // (O7) also require kills of a full ROB, with many survivors, of many entries
 );
     import qv_pkg::*;
 
@@ -159,6 +162,7 @@ module qv_rebuild_tb #(
 
     int n_kill = 0, n_kill_drop = 0, n_kill_restore = 0, n_kill_pop1 = 0, n_kill_pop2 = 0, n_kill_head = 0;
     int n_kill_none = 0, n_pair = 0, n_mism = 0, n_csr_late = 0;
+    int n_kill_full = 0, n_kill_many_surv = 0, n_kill_many_drop = 0;      // (O7) DEEP coverage
     int n_uop = 0;
     int seed_v = SEED;
 
@@ -180,7 +184,7 @@ module qv_rebuild_tb #(
             // a kill, some of the time: the branch from this cycle's last retirement up to the youngest entry
             kill = 1'b0;
             b_off = -1;
-            if (count >= 1 && $urandom_range(0, 7) == 0) begin
+            if (count >= 1 && $urandom_range(0, (((cy / 2000) % 2) == 1 ? KILL_1IN : 8) - 1) == 0) begin
                 lo_off = (npop == 2) ? 1 : 0;
                 b_off  = $urandom_range(lo_off, count - 1);
                 if (b_off == 0 && npop == 2) npop = 1;      // a mispredicted head retires alone
@@ -213,6 +217,9 @@ module qv_rebuild_tb #(
                 if (npop == 2) n_kill_pop2++;
                 if (b_off < npop) n_kill_head++;
                 if (b_off == count - 1) n_kill_none++;
+                if (count == ROB_DEPTH) n_kill_full++;
+                if (b_off + 1 - npop > ROB_DEPTH / 2) n_kill_many_surv++;
+                if (count - 1 - b_off > ROB_DEPTH / 2) n_kill_many_drop++;
                 dropped = 1'b0; restored = 1'b0;
                 for (int f = 0; f < 2; f++)
                     for (int r = 0; r < 6; r++) begin
@@ -251,6 +258,13 @@ module qv_rebuild_tb #(
         check("coverage: kills that drop nothing", 64'(n_kill_none > CYCLES / 1000), 64'd1);
         check("coverage: pairs", 64'(n_pair > CYCLES / 20), 64'd1);
         if (CSR_LATE) check("coverage: late claims", 64'(n_csr_late > CYCLES / 200), 64'd1);
+        if (DEEP) begin
+            $display("deep: %0d kills of a full ROB, %0d with more than %0d survivors, %0d dropping more than %0d",
+                     n_kill_full, n_kill_many_surv, ROB_DEPTH / 2, n_kill_many_drop, ROB_DEPTH / 2);
+            check("coverage: kills of a full ROB", 64'(n_kill_full > 10), 64'd1);
+            check("coverage: kills with many survivors", 64'(n_kill_many_surv > 10), 64'd1);
+            check("coverage: kills of many entries", 64'(n_kill_many_drop > 10), 64'd1);
+        end
         $display("");
         $display("qv_rebuild_tb: %0d passed, %0d failed", pass_count, fail_count);
         if (fail_count > 0) $display("qv_rebuild_tb: FAILURES PRESENT");
