@@ -18,7 +18,7 @@ smtbmc boolector
 
 [script]
 plugin -i /home/potato/yosys-slang-src/build/slang.so
-read_slang --single-unit qv_pkg.sv qv_rs.sv qv_issue.sv qv_rob.sv kill_props.sv --top kill_props
+read_slang --single-unit -D QV_ROB_MAX=8 qv_pkg.sv qv_rs.sv qv_issue.sv qv_rob.sv kill_props.sv --top kill_props
 prep -top kill_props
 
 [files]

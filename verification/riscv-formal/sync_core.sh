@@ -81,6 +81,13 @@ cp "$REPO/verification/riscv-formal/$NAME/checks.cfg" "$DST/"
 [ "$1" != "pipe-fpu" ] || sed -i 's/ -D QV_FORMAL_NO_FPU/ -D QV_FORMAL_FPU_ABSTRACT/' "$DST/checks.cfg"
 [ "$1" != "pipe-sb" ] || sed -i 's/ -D QV_FORMAL_SMALL/ -D QV_FORMAL_SMALL -D QV_PIPE_PMA_RAM_SIZE=2147483648/' "$DST/checks.cfg"
 [ "$1" != "pipe-dc" ] || sed -i 's/ -D QV_FORMAL_SMALL/ -D QV_FORMAL_SMALL -D QV_PIPE_PMA_RAM_SIZE=2147483648 -D QV_PIPE_DCACHE=1/' "$DST/checks.cfg"
+# (O7) every pipelined model keeps the 8-entry package and its 4-bit tags (the wrapper checks it), and pipe-full
+# keeps the station and queue it was proven at, whatever the core's defaults become
+if [ -z "$REF" ]; then
+    sed -i 's/ -D RISCV_FORMAL / -D RISCV_FORMAL -D QV_ROB_MAX=8 /' "$DST/checks.cfg"
+    grep -q -- "-D QV_ROB_MAX=8" "$DST/checks.cfg" || { echo "no read_slang line took the QV_ROB_MAX pin" >&2; exit 1; }
+fi
+[ "$1" != "pipe-full" ] || sed -i 's/ -D QV_ROB_MAX=8 / -D QV_ROB_MAX=8 -D QV_PIPE_RS_DEPTH=4 -D QV_PIPE_LSQ_DEPTH=4 /' "$DST/checks.cfg"
 # QV_FORMAL_DEFS="A=1 B=2": extra defines for a pipe model (a knob that is off by default, say)
 if [ -z "$REF" ] && [ -n "${QV_FORMAL_DEFS:-}" ]; then
     XD=""

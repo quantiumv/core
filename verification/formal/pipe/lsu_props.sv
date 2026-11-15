@@ -50,6 +50,10 @@ module lsu_props (
     input logic [63:0]                      pmpcfg0, pmpaddr0, pmpaddr1, pmpaddr2, pmpaddr3,
     input logic [(1<<qv_pkg::QV_ROB_TAG_W)-1:0] kv
 );
+    // (O7) this proof is sized for the 4-bit tags of an 8-entry package: every build of it pins QV_ROB_MAX at 8
+    if (qv_pkg::QV_ROB_DEPTH != 8) begin : g_rob_pin
+        $error("%m: built with qv_pkg::QV_ROB_DEPTH %0d: pin -D QV_ROB_MAX=8", qv_pkg::QV_ROB_DEPTH);
+    end
     import qv_pkg::*;
 
     logic        free, head_started, cyc, stb, we, lock;

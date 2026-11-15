@@ -18,7 +18,7 @@ smtbmc boolector
 
 [script]
 plugin -i /home/potato/yosys-slang-src/build/slang.so
-read_slang --single-unit -D QV_FORMAL_FPU_ABSTRACT qv_pkg.sv qv_fpu_round.sv qv_fpu_pipe.sv qv_fpu_divsqrt.sv qv_exu_fpu.sv fpu_props.sv --top fpu_props
+read_slang --single-unit -D QV_ROB_MAX=8 -D QV_FORMAL_FPU_ABSTRACT qv_pkg.sv qv_fpu_round.sv qv_fpu_pipe.sv qv_fpu_divsqrt.sv qv_exu_fpu.sv fpu_props.sv --top fpu_props
 prep -top fpu_props
 
 [files]

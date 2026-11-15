@@ -19,7 +19,7 @@ smtbmc bitwuzla
 
 [script]
 plugin -i /home/potato/yosys-slang-src/build/slang.so
-read_slang --single-unit qv_pkg.sv qv_align2.sv align2_props.sv --top align2_props
+read_slang --single-unit -D QV_ROB_MAX=8 qv_pkg.sv qv_align2.sv align2_props.sv --top align2_props
 prep -top align2_props
 
 [files]

@@ -31,6 +31,10 @@ module kill_props (
     input logic                             kill_in,
     input logic [qv_pkg::QV_ROB_TAG_W-1:0]  kill_tag
 );
+    // (O7) this proof is sized for the 4-bit tags of an 8-entry package: every build of it pins QV_ROB_MAX at 8
+    if (qv_pkg::QV_ROB_DEPTH != 8) begin : g_rob_pin
+        $error("%m: built with qv_pkg::QV_ROB_DEPTH %0d: pin -D QV_ROB_MAX=8", qv_pkg::QV_ROB_DEPTH);
+    end
     import qv_pkg::*;
     localparam int ROB_DEPTH = 4;
     localparam int IDX_W = $clog2(ROB_DEPTH);

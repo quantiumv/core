@@ -24,8 +24,8 @@ opwg: smtbmc bitwuzla
 
 [script]
 plugin -i /home/potato/yosys-slang-src/build/slang.so
-base: read_slang --single-unit qv_pkg.sv qv_pmp.sv qv_lsq.sv qv_lsu.sv lsq_props.sv --top lsq_props
-opwg: read_slang --single-unit -D LSQ_OPW qv_pkg.sv qv_pmp.sv qv_lsq.sv qv_lsu.sv lsq_props.sv --top lsq_props
+base: read_slang --single-unit -D QV_ROB_MAX=8 qv_pkg.sv qv_pmp.sv qv_lsq.sv qv_lsu.sv lsq_props.sv --top lsq_props
+opwg: read_slang --single-unit -D QV_ROB_MAX=8 -D LSQ_OPW qv_pkg.sv qv_pmp.sv qv_lsq.sv qv_lsu.sv lsq_props.sv --top lsq_props
 prep -top lsq_props
 
 [files]

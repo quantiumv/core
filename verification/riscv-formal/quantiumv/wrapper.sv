@@ -126,6 +126,12 @@ module rvfi_wrapper (
         assume (!i_debug_halt_req);
         assume (!i_debug_resume_req);
     end
+`ifndef QV_REF_AS_CORE
+    // (O7) the pipelined models keep the 8-entry package and its 4-bit tags: sync_core.sh pins QV_ROB_MAX=8
+    if (qv_pkg::QV_ROB_DEPTH != 8) begin : g_rob_pin
+        $error("rvfi_wrapper: qv_pkg::QV_ROB_DEPTH is %0d: the model must pin -D QV_ROB_MAX=8", qv_pkg::QV_ROB_DEPTH);
+    end
+`endif
 `ifdef QV_FORMAL_NO_DIV
     // the pipelined core's liveness and hang configs, and the FSM's hang config: no
     // divide reaches the divider. It takes ~66 cycles, longer than these

@@ -106,7 +106,7 @@ depth 24
 smtbmc boolector
 [script]
 plugin -i /home/potato/yosys-slang-src/build/slang.so
-read_slang --single-unit $defs qv_pkg.sv qv_pmp.sv qv_pte.sv qv_$unit.sv ${unit}_props.sv --top ${unit}_props
+read_slang --single-unit -D QV_ROB_MAX=8 $defs qv_pkg.sv qv_pmp.sv qv_pte.sv qv_$unit.sv ${unit}_props.sv --top ${unit}_props
 prep -top ${unit}_props
 [files]
 qv_pkg.sv
