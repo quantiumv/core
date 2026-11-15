@@ -62,13 +62,13 @@
   },
   {
    "name": "an early access counts as the head's",
-   "old": "    assign o_head_started = (start && !early) || (in_bus && !early_q);",
-   "new": "    assign o_head_started = start || in_bus;"
+   "old": "    assign o_head_started = (start && !early) || (in_bus && !early_q && !fill_q);",
+   "new": "    assign o_head_started = start || (in_bus && !fill_q);"
   },
   {
    "name": "an early access in flight counts as the head's",
-   "old": "    assign o_head_started = (start && !early) || (in_bus && !early_q);",
-   "new": "    assign o_head_started = (start && !early) || in_bus;"
+   "old": "    assign o_head_started = (start && !early) || (in_bus && !early_q && !fill_q);",
+   "new": "    assign o_head_started = (start && !early) || (in_bus && !fill_q);"
   },
   {
    "name": "early_q never set",
@@ -77,28 +77,28 @@
   },
   {
    "name": "the drain yields to a load that may not start",
-   "old": "                         && (!EARLY || i_early || head_dist == '0);       // (EARLY) one that may start now",
-   "new": "                         ;"
+   "old": "                         && (!EARLY || i_early || head_dist == '0)        // (EARLY) one that may start now",
+   "new": "                         && 1'b1"
   },
   {
    "name": "the drain never yields to a load at the head behind a barrier",
-   "old": "                         && (!EARLY || i_early || head_dist == '0);       // (EARLY) one that may start now",
-   "new": "                         && (!EARLY || i_early);"
+   "old": "                         && (!EARLY || i_early || head_dist == '0)        // (EARLY) one that may start now",
+   "new": "                         && (!EARLY || i_early)"
   },
   {
    "name": "an early load does not wait for a matching store",
-   "old": "    wire start_raw = go && !misaligned_q && !pmp_deny && !sc_fail && pa_valid && !postable && !sb_wait;",
-   "new": "    wire start_raw = go && !misaligned_q && !pmp_deny && !sc_fail && pa_valid && !postable && (at_head ? !sb_wait : 1'b1);"
+   "old": "    wire start_raw = go && !misaligned_q && !pmp_deny && !sc_fail && pa_valid && !postable && !sb_wait && !dc_ld;",
+   "new": "    wire start_raw = go && !misaligned_q && !pmp_deny && !sc_fail && pa_valid && !postable && (at_head ? !sb_wait : 1'b1) && !dc_ld;"
   },
   {
    "name": "an early misaligned load",
-   "old": "    wire start_raw = go && !misaligned_q && !pmp_deny && !sc_fail && pa_valid && !postable && !sb_wait;",
-   "new": "    wire start_raw = go && (!misaligned_q || !at_head) && !pmp_deny && !sc_fail && pa_valid && !postable && !sb_wait;"
+   "old": "    wire start_raw = go && !misaligned_q && !pmp_deny && !sc_fail && pa_valid && !postable && !sb_wait && !dc_ld;",
+   "new": "    wire start_raw = go && (!misaligned_q || !at_head) && !pmp_deny && !sc_fail && pa_valid && !postable && !sb_wait && !dc_ld;"
   },
   {
    "name": "an early PMP-denied load",
-   "old": "    wire start_raw = go && !misaligned_q && !pmp_deny && !sc_fail && pa_valid && !postable && !sb_wait;",
-   "new": "    wire start_raw = go && !misaligned_q && (!pmp_deny || !at_head) && !sc_fail && pa_valid && !postable && !sb_wait;"
+   "old": "    wire start_raw = go && !misaligned_q && !pmp_deny && !sc_fail && pa_valid && !postable && !sb_wait && !dc_ld;",
+   "new": "    wire start_raw = go && !misaligned_q && (!pmp_deny || !at_head) && !sc_fail && pa_valid && !postable && !sb_wait && !dc_ld;"
   },
   {
    "name": "an early misaligned store is posted",

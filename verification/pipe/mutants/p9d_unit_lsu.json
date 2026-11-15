@@ -50,13 +50,13 @@
   },
   {
    "name": "start ignores a drain beat in flight",
-   "old": "wire start     = start_raw && !i_ptw_beat && !i_sb_beat && !i_sb_go && !i_fetch_start;",
-   "new": "wire start     = start_raw && !i_ptw_beat && !i_sb_go && !i_fetch_start;"
+   "old": "wire start     = start_raw && !i_ptw_beat && !i_sb_beat && !i_sb_go && !i_fetch_start && !i_dc_busy;",
+   "new": "wire start     = start_raw && !i_ptw_beat && !i_sb_go && !i_fetch_start && !i_dc_busy;"
   },
   {
    "name": "start ignores a drain beat decided this cycle",
-   "old": "wire start     = start_raw && !i_ptw_beat && !i_sb_beat && !i_sb_go && !i_fetch_start;",
-   "new": "wire start     = start_raw && !i_ptw_beat && !i_sb_beat && !i_fetch_start;"
+   "old": "wire start     = start_raw && !i_ptw_beat && !i_sb_beat && !i_sb_go && !i_fetch_start && !i_dc_busy;",
+   "new": "wire start     = start_raw && !i_ptw_beat && !i_sb_beat && !i_fetch_start && !i_dc_busy;"
   },
   {
    "name": "a misaligned store is posted",
@@ -81,7 +81,7 @@
   },
   {
    "name": "a foreign error makes a posted store fault",
-   "old": "o_res.xcpt      <= done_nobus || (done_bus && wb_mem_err_i);",
+   "old": "o_res.xcpt      <= done_nobus || (done_bus && rsp_err);",
    "new": "o_res.xcpt      <= done_nobus || wb_mem_err_i;"
   },
   {
@@ -106,23 +106,23 @@
   },
   {
    "name": "a posted store keeps the slot",
-   "old": "else if (done_nobus || post_done) state_q <= S_IDLE;",
-   "new": "else if (done_nobus) state_q <= S_IDLE;"
+   "old": "else if (done_nobus || post_done || done_dc) state_q <= S_IDLE;",
+   "new": "else if (done_nobus || done_dc) state_q <= S_IDLE;"
   },
   {
    "name": "a posted store does not complete",
-   "old": "o_wb.valid = done_bus || done_nobus || post_done;",
-   "new": "o_wb.valid = done_bus || done_nobus;"
+   "old": "o_wb.valid = done_bus || done_nobus || post_done || done_dc;",
+   "new": "o_wb.valid = done_bus || done_nobus || done_dc;"
   },
   {
    "name": "start ignores fetch's bus beat starting",
-   "old": "wire start     = start_raw && !i_ptw_beat && !i_sb_beat && !i_sb_go && !i_fetch_start;",
-   "new": "wire start     = start_raw && !i_ptw_beat && !i_sb_beat && !i_sb_go;"
+   "old": "wire start     = start_raw && !i_ptw_beat && !i_sb_beat && !i_sb_go && !i_fetch_start && !i_dc_busy;",
+   "new": "wire start     = start_raw && !i_ptw_beat && !i_sb_beat && !i_sb_go && !i_dc_busy;"
   },
   {
    "name": "giving way to fetch hides the ready access from the walker and the drain",
-   "old": "assign o_bus_busy     = start_raw || in_bus;",
-   "new": "assign o_bus_busy     = (start_raw && !i_fetch_start) || in_bus;"
+   "old": "assign o_bus_busy     = start_raw || dc_miss || in_bus;",
+   "new": "assign o_bus_busy     = (start_raw && !i_fetch_start) || dc_miss || in_bus;"
   }
  ]
 }

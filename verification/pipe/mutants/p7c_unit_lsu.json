@@ -181,14 +181,14 @@
   },
   {
    "name": "the walker is not told the access is ready to start (unobservable: start and start_raw differ only while a walker beat is in flight, and the walker looks at the flag only in W_GO)",
-   "old": "assign o_bus_busy     = start_raw || in_bus;",
-   "new": "assign o_bus_busy     = start || in_bus;",
+   "old": "assign o_bus_busy     = start_raw || dc_miss || in_bus;",
+   "new": "assign o_bus_busy     = start || dc_miss || in_bus;",
    "equivalent": true
   },
   {
    "name": "the walker is not told an access is in flight",
-   "old": "assign o_bus_busy     = start_raw || in_bus;",
-   "new": "assign o_bus_busy     = start_raw;"
+   "old": "assign o_bus_busy     = start_raw || dc_miss || in_bus;",
+   "new": "assign o_bus_busy     = start_raw || dc_miss;"
   },
   {
    "name": "the reservation is compared with the physical address",

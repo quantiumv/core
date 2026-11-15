@@ -55,13 +55,13 @@
   },
   {
    "name": "a dispatch straight to the engine counts as translated",
-   "old": "    assign o_eng_xl  = PRE_XL && has_q && xl_q[send_i];",
-   "new": "    assign o_eng_xl  = PRE_XL && xl_q[send_i];"
+   "old": "    assign o_eng_xl  = PRE_XL && has_q && (xl_q[send_i] || (XL_FWD && pre_hit));",
+   "new": "    assign o_eng_xl  = PRE_XL && (xl_q[send_i] || (XL_FWD && pre_hit));"
   },
   {
    "name": "the page of the wrong entry",
-   "old": "    assign o_eng_ppn = ppn_q[send_i];",
-   "new": "    assign o_eng_ppn = ppn_q[send_i + 1'b1];"
+   "old": "    assign o_eng_ppn = (XL_FWD && !xl_q[send_i]) ? i_xl_ppn : ppn_q[send_i];",
+   "new": "    assign o_eng_ppn = (XL_FWD && !xl_q[send_i]) ? i_xl_ppn : ppn_q[send_i + 1'b1];"
   },
   {
    "name": "a load looked up as a write",

@@ -1,0 +1,100 @@
+{
+ "dut": "design/pipe/qv_lsu.sv",
+ "tb": "design/pipe/qv_lsu_dc_tb.sv",
+ "files": [
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_pmp.sv",
+  "design/pipe/qv_lsu.sv",
+  "design/pipe/qv_dc.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench"
+ ],
+ "cwd": "design",
+ "timeout": 900,
+ "mutants": [
+  {
+   "name": "a D$ completion outside the window",
+   "old": "wire dc_ld     = DC_EN && ram_ld;",
+   "new": "wire dc_ld     = DC_EN && !store_q && !atomic_q && !i_pmp_bypass;"
+  },
+  {
+   "name": "an atomic answered by the D$",
+   "old": "wire dc_ld     = DC_EN && ram_ld;",
+   "new": "wire dc_ld     = DC_EN && pa_in_window && !store_q && !i_pmp_bypass;"
+  },
+  {
+   "name": "a Program Buffer load answered by the D$",
+   "old": "wire dc_ld     = DC_EN && ram_ld;",
+   "new": "wire dc_ld     = DC_EN && pa_in_window && !store_q && !atomic_q;"
+  },
+  {
+   "name": "the buffer's match ignored",
+   "old": "wire dc_go     = go && dc_ld && !misaligned_q && !pmp_deny && pa_valid && !sb_wait;",
+   "new": "wire dc_go     = go && dc_ld && !misaligned_q && !pmp_deny && pa_valid;"
+  },
+  {
+   "name": "a misaligned load answered by the D$",
+   "old": "wire dc_go     = go && dc_ld && !misaligned_q && !pmp_deny && pa_valid && !sb_wait;",
+   "new": "wire dc_go     = go && dc_ld && !pmp_deny && pa_valid && !sb_wait;"
+  },
+  {
+   "name": "a refill counted as an access the head started",
+   "old": "assign o_head_started = (start && !early) || (in_bus && !early_q && !fill_q);",
+   "new": "assign o_head_started = (start && !early) || (in_bus && !early_q);"
+  },
+  {
+   "name": "a drain does not wait for the refill",
+   "old": "S_DRAIN: if (resp) begin state_q <= S_IDLE; fill_q <= 1'b0; end",
+   "new": "S_DRAIN: begin state_q <= S_IDLE; fill_q <= 1'b0; end",
+   "equivalent": true,
+   "note": "the LSU only gives up an op it no longer wants; the next op waits for the D$ anyway (done_dc, dc_miss and start all need !i_dc_busy), and the buffer, the walker and the debug view wait on dc_busy in core.sv, so nothing can use the port or see the refill's answer"
+  },
+  {
+   "name": "a bus ack taken while filling",
+   "old": "wire resp     = fill_q ? i_dc_fill : bus_resp;",
+   "new": "wire resp     = fill_q ? (i_dc_fill || bus_resp) : bus_resp;"
+  },
+  {
+   "name": "a refill's answer taken from the bus",
+   "old": "wire [63:0] rsp_dat = fill_q ? i_dc_fill_dat : done_dc ? i_dc_dat : wb_mem_dat_i;",
+   "new": "wire [63:0] rsp_dat = fill_q ? wb_mem_dat_i : done_dc ? i_dc_dat : wb_mem_dat_i;"
+  },
+  {
+   "name": "no handoff after a hit",
+   "old": "assign handoff    = HANDOFF && (done_bus || post_done || done_dc);",
+   "new": "assign handoff    = HANDOFF && (done_bus || post_done);"
+  },
+  {
+   "name": "the LSU's own write keeps its line",
+   "old": "assign o_dc_inv   = DC_EN && done_bus && !fill_q && kind_wr && pa_in_window && !wb_mem_err_i;",
+   "new": "assign o_dc_inv   = 1'b0;"
+  },
+  {
+   "name": "a miss asks during a drain beat",
+   "old": "wire dc_miss   = dc_go && !i_dc_hit && !i_dc_busy && !i_ptw_beat && !i_sb_beat && !i_sb_go && !i_fetch_start;",
+   "new": "wire dc_miss   = dc_go && !i_dc_hit && !i_dc_busy && !i_ptw_beat && !i_sb_go && !i_fetch_start;"
+  },
+  {
+   "name": "a hit completes nothing",
+   "old": "o_wb.valid = done_bus || done_nobus || post_done || done_dc;",
+   "new": "o_wb.valid = done_bus || done_nobus || post_done;"
+  },
+  {
+   "name": "a hit's RVFI word is zero",
+   "old": "                                     : (done_bus || done_dc) ? rsp_dat : 64'b0;",
+   "new": "                                     : done_bus ? rsp_dat : 64'b0;"
+  },
+  {
+   "name": "a miss never refills",
+   "old": "    else if (dc_miss)    begin state_q <= S_BUS; early_q <= early; fill_q <= 1'b1; end",
+   "new": "    else if (1'b0)    begin state_q <= S_BUS; early_q <= early; fill_q <= 1'b1; end"
+  }
+ ]
+}

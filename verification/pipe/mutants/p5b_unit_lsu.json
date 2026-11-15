@@ -135,8 +135,8 @@
   },
   {
    "name": "rd gets the new value",
-   "old": "else if (done_bus && !wb_mem_err_i && amo_q)  o_wb.value = old_q;",
-   "new": "else if (done_bus && !wb_mem_err_i && amo_q)  o_wb.value = amo_wdata >> {addr_q[2:0], 3'b000};"
+   "old": "else if (done_bus && !rsp_err && amo_q)  o_wb.value = old_q;",
+   "new": "else if (done_bus && !rsp_err && amo_q)  o_wb.value = amo_wdata >> {addr_q[2:0], 3'b000};"
   },
   {
    "name": "RVFI rdata is the raw word for an AMO",

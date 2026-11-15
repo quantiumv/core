@@ -21,23 +21,23 @@
  "mutants": [
   {
    "name": "no handoff",
-   "old": "    assign handoff    = HANDOFF && (done_bus || post_done);",
+   "old": "    assign handoff    = HANDOFF && (done_bus || post_done || done_dc);",
    "new": "    assign handoff    = 1'b0;"
   },
   {
    "name": "a handoff after a completion without the bus",
-   "old": "    assign handoff    = HANDOFF && (done_bus || post_done);",
-   "new": "    assign handoff    = HANDOFF && (done_bus || post_done || done_nobus);"
+   "old": "    assign handoff    = HANDOFF && (done_bus || post_done || done_dc);",
+   "new": "    assign handoff    = HANDOFF && (done_bus || post_done || done_dc || done_nobus);"
   },
   {
    "name": "a handoff after a post only",
-   "old": "    assign handoff    = HANDOFF && (done_bus || post_done);",
-   "new": "    assign handoff    = HANDOFF && post_done;"
+   "old": "    assign handoff    = HANDOFF && (done_bus || post_done || done_dc);",
+   "new": "    assign handoff    = HANDOFF && (post_done || done_dc);"
   },
   {
    "name": "a handoff after a bus completion only",
-   "old": "    assign handoff    = HANDOFF && (done_bus || post_done);",
-   "new": "    assign handoff    = HANDOFF && done_bus;"
+   "old": "    assign handoff    = HANDOFF && (done_bus || post_done || done_dc);",
+   "new": "    assign handoff    = HANDOFF && (done_bus || done_dc);"
   },
   {
    "name": "a handoff in a flush cycle",

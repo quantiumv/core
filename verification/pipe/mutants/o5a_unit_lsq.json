@@ -1,0 +1,38 @@
+{
+ "dut": "design/pipe/qv_lsq.sv",
+ "tb": "design/pipe/qv_lsq_tb.sv",
+ "files": [
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_lsq.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench",
+  "-Pqv_lsq_tb.PRE_XL=1",
+  "-Pqv_lsq_tb.XL_FWD=1"
+ ],
+ "cwd": "design",
+ "timeout": 900,
+ "mutants": [
+  {
+   "name": "a hit in the take cycle does not go with the op",
+   "old": "    assign o_eng_xl  = PRE_XL && has_q && (xl_q[send_i] || (XL_FWD && pre_hit));",
+   "new": "    assign o_eng_xl  = PRE_XL && has_q && xl_q[send_i];"
+  },
+  {
+   "name": "the page of the slot, not of the lookup",
+   "old": "    assign o_eng_ppn = (XL_FWD && !xl_q[send_i]) ? i_xl_ppn : ppn_q[send_i];",
+   "new": "    assign o_eng_ppn = ppn_q[send_i];"
+  },
+  {
+   "name": "a lookup that misses goes with the op",
+   "old": "    assign o_eng_xl  = PRE_XL && has_q && (xl_q[send_i] || (XL_FWD && pre_hit));",
+   "new": "    assign o_eng_xl  = PRE_XL && has_q && (xl_q[send_i] || (XL_FWD && o_xl_req));"
+  }
+ ]
+}
