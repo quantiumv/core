@@ -645,6 +645,9 @@ def emit_ooo(p: Program, recent: list[int]):
     del recent[:-8]
 
 
+DEEP_MAX = 8          # --deep shapes per program: the code region (32 KiB below the handlers) is nearly full already
+
+
 def emit_deep(p: Program, recent: list[int]):
     """--deep: what a big window (O7) has to get right. A long producer (a chain of divides, an FP divide or square
     root moved to an integer register, a chain of loads, a CSR read made at its commit), then a run of independent
@@ -654,6 +657,7 @@ def emit_deep(p: Program, recent: list[int]):
     kills a long suffix and the rebuild keeps many survivors; then the late consumers."""
     have_m = "m" in p.args.isa and not p.args.no_div
     have_f = "f" in p.args.isa
+    p.deep_n = getattr(p, "deep_n", 0) + 1
 
     def fresh(*excl):
         r = p.reg()
@@ -2847,7 +2851,7 @@ def emit_main_body(p: Program):
         if getattr(a, "ooo", False) and p.rng.random() < 0.25:
             emit_ooo(p, recent)
             return
-        if getattr(a, "deep", False) and p.rng.random() < 0.06:
+        if getattr(a, "deep", False) and p.rng.random() < 0.06 and getattr(p, "deep_n", 0) < DEEP_MAX:
             emit_deep(p, recent)
             return
         if getattr(a, "pair", False) and p.rng.random() < 0.30:
@@ -3002,6 +3006,10 @@ def render(p: Program) -> str:
     return "\n".join(lines) + "\n"
 
 
+class CodeTooLong(Exception):
+    """The body ran into the trap handlers at 0x8000 (the link reports the overlap)."""
+
+
 def toolchain_build(asm_path: Path, out_base: Path, isa: str, has_pagetables: bool, has_pocket: bool = False,
                     has_probe: bool = False, has_ptpmp: bool = False):
     # -j (only-section) with a section name absent from the ELF is a
@@ -3015,8 +3023,13 @@ def toolchain_build(asm_path: Path, out_base: Path, isa: str, has_pagetables: bo
     hexf = out_base.with_suffix(".hex")
     subprocess.run(["riscv64-unknown-elf-as", "-g", f"-march={march}", "-mabi=lp64",
                      "-o", str(obj), str(asm_path)], check=True)
-    subprocess.run(["riscv64-unknown-elf-ld", "-T", str(GEN_DIR / "link.ld"),
-                     "-o", str(elf), str(obj)], check=True)
+    r = subprocess.run(["riscv64-unknown-elf-ld", "-T", str(GEN_DIR / "link.ld"),
+                        "-o", str(elf), str(obj)], capture_output=True, text=True)
+    sys.stdout.write(r.stdout); sys.stderr.write(r.stderr)
+    if r.returncode != 0:
+        if "overlaps section .text.entry" in r.stderr:
+            raise CodeTooLong()
+        raise subprocess.CalledProcessError(r.returncode, r.args)
     sections = ["-j", ".text.entry", "-j", ".text.handlers",
                 "-j", ".data.sandbox", "-j", ".data.misc"]
     if has_pagetables:
@@ -3119,16 +3132,26 @@ def main():
         args.output = GEN_DIR / f"gen_{args.seed}"
     args.output.parent.mkdir(parents=True, exist_ok=True)
 
-    p = build_program(args)
-    text = render(p)
-    asm_path = args.output.with_suffix(".s")
-    asm_path.write_text(text)
-    print(f"wrote {asm_path}")
-
-    if args.build:
-        elf, hexf = toolchain_build(asm_path, args.output, args.isa, bool(p.pagetable_data), bool(p.pocket_code),
-                                    bool(p.probe_code), bool(p.ptpmp_data))
-        print(f"built {elf}, {hexf}")
+    # A body that runs into the handlers at 0x8000 is made again from the same seed with a fifth fewer instructions
+    # (a dense profile at --len 500 sits close to the limit); every other program is exactly what it was.
+    for attempt in range(5):
+        p = build_program(args)
+        text = render(p)
+        asm_path = args.output.with_suffix(".s")
+        asm_path.write_text(text)
+        print(f"wrote {asm_path}")
+        if not args.build:
+            break
+        try:
+            elf, hexf = toolchain_build(asm_path, args.output, args.isa, bool(p.pagetable_data), bool(p.pocket_code),
+                                        bool(p.probe_code), bool(p.ptpmp_data))
+            print(f"built {elf}, {hexf}")
+            break
+        except CodeTooLong:
+            if attempt == 4:
+                raise
+            args.len = max(50, args.len * 4 // 5)
+            print(f"the body runs into the handlers: again from seed {args.seed} with --len {args.len}")
 
 
 if __name__ == "__main__":
