@@ -118,6 +118,15 @@
  * is part of i_sb_match. o_head_started stays "an access the head started": an early load that is in flight when
  * an interrupt or a halt is taken is drained and done again later (it reads RAM, which has no side effects).
  *
+ * The D$ inside the core (O5a, DC_EN, qv_dc beside this unit): a plain load from RAM that could start its access (at
+ * the head or early, translated, aligned, allowed, no store-buffer match) does not use the bus. When the D$ holds its
+ * dword it completes in that very cycle with the D$'s dword (done_dc); otherwise it asks the D$ for a refill
+ * (o_dc_fill_req) and waits in BUS (fill_q) for the D$'s answer (i_dc_fill), driving nothing on the bus itself. A flush
+ * or a kill during a refill drains it (the D$ finishes the line either way). A refill is a read of RAM, so it is not
+ * "an access the head started" (o_head_started). The unit's own writes to RAM that do not go through the store
+ * buffer (an SC, an AMO's write, a Program Buffer store, any store without the buffer) invalidate their line in the
+ * D$ in their response cycle (o_dc_inv); the buffer's writes update it (the core wires that).
+ *
  * Handoff (O2b, HANDOFF): the next op is taken (o_take) in the cycle the last one completes on the bus or is posted,
  * not a cycle later from IDLE, so a stream of loads keeps the bus busy. The completing op's result is written in that
  * same cycle as always, from its own registers. A completion without the bus (a fault, a failed SC) does not hand
@@ -131,6 +140,7 @@ module qv_lsu #(
     parameter bit          EARLY        = 1'b0,      // a plain RAM load or store goes before the head (O2)
     parameter bit          EARLY_ST     = 1'b1,      // ... the stores too (EARLY 1, this 0: only the loads)
     parameter bit          HANDOFF      = 1'b0,      // the next op is taken in the cycle the last one completes (O2b)
+    parameter bit          DC_EN        = 1'b0,      // a plain RAM load is answered by the D$ in the core (O5a)
     parameter int          ROB_DEPTH    = qv_pkg::QV_ROB_DEPTH     // the ROB's size (its tags' wrap bit)
 ) (
     input  logic [(1<<qv_pkg::QV_ROB_TAG_W)-1:0] i_kill_vec = '0,   // (O3) tags killed by a recovery at execute
@@ -210,7 +220,16 @@ module qv_lsu #(
     output logic [31:3]                      o_sb_addr,
     output logic                             o_load_near,
     output logic                             o_in_bus,     // an access is on the bus (registered state: no path to start)
-    output logic                             o_take        // i_req is taken in this cycle
+    output logic                             o_take,       // i_req is taken in this cycle
+    // (DC_EN) the D$ in the core: its lookup of o_sb_addr, its refill, and the unit's own writes past the buffer
+    input  logic                             i_dc_hit = 1'b0,
+    input  logic [63:0]                      i_dc_dat = 64'b0,
+    input  logic                             i_dc_busy = 1'b0,      // a refill holds the memory port
+    output logic                             o_dc_fill_req,
+    input  logic                             i_dc_fill = 1'b0,
+    input  logic [63:0]                      i_dc_fill_dat = 64'b0,
+    input  logic                             i_dc_fill_err = 1'b0,
+    output logic                             o_dc_inv
 );
     import qv_pkg::*;
 
@@ -323,19 +342,29 @@ module qv_lsu #(
     logic early_q;                         // the access on the bus was started early
 
     wire post_done = go && !misaligned_q && !pmp_deny && pa_valid && postable;
-    wire start_raw = go && !misaligned_q && !pmp_deny && !sc_fail && pa_valid && !postable && !sb_wait;
-    wire start     = start_raw && !i_ptw_beat && !i_sb_beat && !i_sb_go && !i_fetch_start;
+    // (DC_EN) a plain RAM load the D$ answers: a hit completes now, a miss asks for a refill (when the port is free)
+    wire dc_ld     = DC_EN && ram_ld;
+    wire dc_go     = go && dc_ld && !misaligned_q && !pmp_deny && pa_valid && !sb_wait;
+    wire done_dc   = dc_go && i_dc_hit && !i_dc_busy;
+    wire dc_miss   = dc_go && !i_dc_hit && !i_dc_busy && !i_ptw_beat && !i_sb_beat && !i_sb_go && !i_fetch_start;
+    logic fill_q;                          // (DC_EN) the op in BUS waits for the D$'s refill, not for the bus
+    wire start_raw = go && !misaligned_q && !pmp_deny && !sc_fail && pa_valid && !postable && !sb_wait && !dc_ld;
+    wire start     = start_raw && !i_ptw_beat && !i_sb_beat && !i_sb_go && !i_fetch_start && !i_dc_busy;
+    assign o_dc_fill_req = dc_miss;
 
     // a load that does not wait for the buffer, among the three oldest ROB entries (the tags carry a wrap bit,
     // so the difference modulo the ROB's pointer width is the distance): the drain yields to it
     wire [QV_ROB_TAG_W-1:0] head_dist = qv_rob_dist(tag_q, i_head_tag, $clog2(ROB_DEPTH) + 1);
     assign o_load_near = (state_q == S_WAIT_HEAD) && i_head_valid && match_case && pa_valid && !i_sb_match
                          && !misaligned_q && !pmp_deny && (head_dist <= QV_ROB_TAG_W'(2))
-                         && (!EARLY || i_early || head_dist == '0);       // (EARLY) one that may start now
-    wire resp     = wb_mem_ack_i || wb_mem_err_i;
+                         && (!EARLY || i_early || head_dist == '0)        // (EARLY) one that may start now
+                         && !(dc_ld && i_dc_hit);                          // (DC_EN) a hit needs no port
+    wire bus_resp = wb_mem_ack_i || wb_mem_err_i;
+    wire resp     = fill_q ? i_dc_fill : bus_resp;               // (DC_EN) a refill's answer, else the bus's
+    wire rsp_err  = fill_q ? i_dc_fill_err : wb_mem_err_i;
     wire in_bus   = (state_q == S_BUS) || (state_q == S_DRAIN);
 
-    assign wb_mem_cyc_o  = (start || in_bus) && !resp;
+    assign wb_mem_cyc_o  = (start || (in_bus && !fill_q)) && !bus_resp;
     assign wb_mem_stb_o  = wb_mem_cyc_o;
     assign wb_mem_addr_o = {pa[31:3], 3'b000};
     assign wb_mem_sel_o  = sel_q;
@@ -349,20 +378,23 @@ module qv_lsu #(
 
     assign o_free         = (state_q == S_IDLE);
     assign o_take         = accept;
-    assign o_head_started = (start && !early) || (in_bus && !early_q);
+    assign o_head_started = (start && !early) || (in_bus && !early_q && !fill_q);   // a refill reads RAM: not one
     assign o_in_bus       = in_bus;
-    assign o_bus_busy     = start_raw || in_bus;           // the walker waits while this is high
+    assign o_bus_busy     = start_raw || dc_miss || in_bus;    // the walker waits while this is high
 
     // A response in the start cycle can't happen (every slave answers a
     // cycle later at the earliest), so bus completion is only from BUS.
     // An AMO's first (read) response doesn't complete it: the write follows.
     wire amo_read_ack = (state_q == S_BUS) && amo_q && !phase_wr_q && wb_mem_ack_i && !wb_mem_err_i && !i_flush;
     wire done_bus     = (state_q == S_BUS) && resp && !amo_read_ack;
+    // (DC_EN) the unit's own write to RAM in its response cycle: the line goes from the D$
+    assign o_dc_inv   = DC_EN && done_bus && !fill_q && kind_wr && pa_in_window && !wb_mem_err_i;
     wire done_nobus   = at_head && (misaligned_q || pmp_deny || sc_fail || x_fault);   // trapped before the bus, or SC without its reservation
-    assign handoff    = HANDOFF && (done_bus || post_done);
+    assign handoff    = HANDOFF && (done_bus || post_done || done_dc);
 
     // load data: shift the addressed bytes down, then extend
-    wire [63:0] shifted = wb_mem_dat_i >> {addr_q[2:0], 3'b000};
+    wire [63:0] rsp_dat = fill_q ? i_dc_fill_dat : done_dc ? i_dc_dat : wb_mem_dat_i;   // (DC_EN) the D$'s dword
+    wire [63:0] shifted = rsp_dat >> {addr_q[2:0], 3'b000};
     logic [63:0] load_value;
     always_comb begin
         case (size_q)
@@ -398,12 +430,12 @@ module qv_lsu #(
     wire sc_fail_done = at_head && sc_fail && !misaligned_q && !pmp_deny; // SC without its reservation: rd = 1
     always_comb begin
         o_wb       = '0;
-        o_wb.valid = done_bus || done_nobus || post_done;
+        o_wb.valid = done_bus || done_nobus || post_done || done_dc;
         if (killed) o_wb.valid = 1'b0;
         o_wb.tag   = tag_q;
         if (sc_fail_done)                             o_wb.value = 64'd1;
-        else if (done_bus && !wb_mem_err_i && amo_q)  o_wb.value = old_q;
-        else if (done_bus && !wb_mem_err_i && kind_rd && !sc_q) o_wb.value = load_value;
+        else if (done_bus && !rsp_err && amo_q)  o_wb.value = old_q;
+        else if ((done_dc || (done_bus && !rsp_err)) && kind_rd && !sc_q) o_wb.value = load_value;
         else                                          o_wb.value = 64'b0;
     end
 
@@ -413,6 +445,7 @@ module qv_lsu #(
             phase_wr_q <= 1'b0;
             xlated_q   <= 1'b0;
             early_q    <= 1'b0;
+            fill_q     <= 1'b0;
             o_res      <= '0;
         end else begin
             // a handoff takes the IDLE arm (the new op), in place of the arm that would end the old one in IDLE
@@ -434,11 +467,13 @@ module qv_lsu #(
                     xlated_q     <= i_req_xl;
                     if (i_req_xl) pa_q <= {8'b0, i_req_ppn, req_addr[11:0]};
                     early_q      <= 1'b0;
+                    fill_q       <= 1'b0;
                 end
                 S_WAIT_HEAD: begin
                     if (i_flush)         state_q <= S_IDLE;
                     else if (start)      begin state_q <= S_BUS; early_q <= early; end
-                    else if (done_nobus || post_done) state_q <= S_IDLE;
+                    else if (dc_miss)    begin state_q <= S_BUS; early_q <= early; fill_q <= 1'b1; end
+                    else if (done_nobus || post_done || done_dc) state_q <= S_IDLE;
                     else if (x_ok) begin                      // translated: the physical address, checked and used from the next cycle
                         pa_q     <= {8'b0, i_xl_ppn, addr_q[11:0]};
                         xlated_q <= 1'b1;
@@ -450,11 +485,12 @@ module qv_lsu #(
                         old_q      <= load_value;
                     end else if (resp) begin
                         state_q <= S_IDLE;
+                        fill_q  <= 1'b0;
                     end else if (i_flush) begin
                         state_q <= S_DRAIN;
                     end
                 end
-                S_DRAIN: if (resp) state_q <= S_IDLE;
+                S_DRAIN: if (resp) begin state_q <= S_IDLE; fill_q <= 1'b0; end
                 default: state_q <= S_IDLE;
             endcase
             if (killed && !(handoff && accept)) begin
@@ -462,11 +498,11 @@ module qv_lsu #(
                 else if (!resp)              state_q <= S_DRAIN;
             end
 
-            if (done_bus || done_nobus || post_done) begin
+            if (done_bus || done_nobus || post_done || done_dc) begin
                 o_res        <= '0;
                 // an SC without its reservation did nothing: no fields at all
                 if (!sc_fail_done) begin
-                    o_res.xcpt      <= done_nobus || (done_bus && wb_mem_err_i);
+                    o_res.xcpt      <= done_nobus || (done_bus && rsp_err);
                     o_res.posted    <= post_done;
                     // misaligned: 4/6; a page fault from the translation: 13 (load, LR) or 15 (store, SC, AMO); a PMP
                     // denial, a failed PTE read or a bus error: 5/7 (stores, SC, LR, AMOs: the odd ones)
@@ -479,7 +515,7 @@ module qv_lsu #(
                     o_res.mem_rmask <= kind_rd ? sel_q : 8'b0;
                     o_res.mem_wmask <= kind_wr ? sel_q : 8'b0;
                     o_res.mem_rdata <= (done_bus && amo_q && phase_wr_q) ? old_q
-                                     : done_bus ? wb_mem_dat_i : 64'b0;
+                                     : (done_bus || done_dc) ? rsp_dat : 64'b0;
                     o_res.mem_wdata <= (amo_q && phase_wr_q) ? amo_wdata : wdata_q;
                 end
             end

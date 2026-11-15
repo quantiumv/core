@@ -232,6 +232,17 @@ module soc (
 `else
 `define QV_SOC_CORE_PARAMS #(.PMA_RAM_SIZE(64'h0400_0000))
 `endif
+    // (O5a) the pipelined core with its own D$ (QV_PIPE_DCACHE, the same default as design/pipe/core.sv): the D$ on
+    // the bus is then left out (cache0's data port goes straight to memory, as the D$ would forward a miss), and the
+    // Debug Module's writes to RAM empty their line from the core's D$
+`ifndef QV_PIPE_DCACHE
+`define QV_PIPE_DCACHE 0
+`endif
+`ifdef QV_REF_AS_CORE
+    localparam bit SOC_BUS_DC = 1'b1;
+`else
+    localparam bit SOC_BUS_DC = (`QV_PIPE_DCACHE == 0);
+`endif
     core `QV_SOC_CORE_PARAMS core0 (
         .clk(clk), .rst(rst),
         .wb_fetch_addr_o(core_wb_fetch_addr), .wb_fetch_cyc_o(core_wb_fetch_cyc),
@@ -243,6 +254,9 @@ module soc (
         .wb_mem_lock_o(wb_mem_lock),
         .icache_flush_o(icache_flush), .i_mtip(clint_mtip), .i_time(clint_mtime),
         .i_meip(plic_meip), .i_seip(plic_seip),
+`ifndef QV_REF_AS_CORE
+        .i_snoop_valid(sba_we && sba_ack && !sba_err && !sba_addr[26]), .i_snoop_addr(sba_addr[31:3]),
+`endif
 
         /*
          * Milestone 4 (core.sv halt/resume FSM) added real
@@ -410,7 +424,7 @@ module soc (
     // traffic AND any System Bus Access targeting a RAM address, both
     // already correctly arbitrated/decoded upstream by arb0/decoder0
     // before either ever reaches here).
-    cache_complex cache0 (
+    cache_complex #(.DC_EN(SOC_BUS_DC)) cache0 (
         .clk(clk), .rst(rst),
         .fetch_addr_i(core_wb_fetch_addr), .fetch_cyc_i(core_wb_fetch_cyc), .fetch_stb_i(core_wb_fetch_stb),
         .fetch_dat_o(core_wb_fetch_dat), .fetch_ack_o(core_wb_fetch_ack), .fetch_err_o(core_wb_fetch_err),

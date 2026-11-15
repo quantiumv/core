@@ -40,6 +40,9 @@
  * up again (and at the head walks). The page stays right until the op is performed for the reason the engine's own
  * early lookup does (qv_lsu, PROBE): every change of the privilege, MPRV, SUM, MXR or satp and every SFENCE.VMA
  * flushes the queue, and a TLB entry, once found, may be used until an SFENCE.VMA.
+ * (O5a, XL_FWD) With the D$ inside the core a load completes in the cycle after the engine took it, and the engine
+ * takes the next op in that completion cycle: the queue's lookup of that op happens in the very cycle it is taken, so a
+ * clean hit goes with it (o_eng_xl, o_eng_ppn straight from the lookup) instead of only from the next cycle on.
  *
  * Waiting operands (O1c, OPW): issue may dispatch a memory op whose address or store data does not exist yet. Its
  * operands come as the reservation station's do (i_opa, i_opb: ready with the value, or the producer's tag, late for
@@ -54,6 +57,7 @@
 module qv_lsq #(
     parameter int DEPTH  = 4,                   // a power of 2, >= 2
     parameter bit PRE_XL = 1'b0,                // the oldest queued op's translation is looked up early (O2c)
+    parameter bit XL_FWD = 1'b0,                // ... and a hit in the cycle the engine takes the op goes with it (O5a)
     parameter bit OPW        = 1'b0,            // operands may wait in the queue (O1c)
     parameter bit BYPASS_EN  = 1'b1,            // (OPW) the same-cycle sources, as issue's bypass
     parameter bit LSU_BYPASS = 1'b0
@@ -235,8 +239,8 @@ module qv_lsq #(
     assign o_xl_va   = p_va;
     assign o_xl_wr   = p_atomic ? !p_lr : p_store;
     wire   pre_hit   = o_xl_req && i_xl_free && i_xl_done && !i_xl_pf && !i_xl_af;
-    assign o_eng_xl  = PRE_XL && has_q && xl_q[send_i];
-    assign o_eng_ppn = ppn_q[send_i];
+    assign o_eng_xl  = PRE_XL && has_q && (xl_q[send_i] || (XL_FWD && pre_hit));
+    assign o_eng_ppn = (XL_FWD && !xl_q[send_i]) ? i_xl_ppn : ppn_q[send_i];
 
     always_ff @(posedge clk) begin
         if (rst || i_flush) begin

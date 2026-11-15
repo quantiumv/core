@@ -265,6 +265,27 @@
 `define QV_PIPE_DTLB_PROBE 1
 `endif
 
+// The D$ inside the core (O5a, qv_dc): plain loads from RAM are read beside the LSU, with no bus handshake; only a miss
+// goes out, as a refill on the memory port. It caches only the PMA window (RAM), so a core with no window has none.
+// 0: every load goes to the bus (and the SoC keeps its D$ on the bus). The SoC turns its own D$ off when this is on.
+`ifndef QV_PIPE_DCACHE
+`define QV_PIPE_DCACHE 0
+`endif
+`ifndef QV_PIPE_DC_LINES
+`ifdef QV_FORMAL_SMALL
+`define QV_PIPE_DC_LINES 2
+`else
+`define QV_PIPE_DC_LINES 64
+`endif
+`endif
+`ifndef QV_PIPE_DC_WORDS
+`ifdef QV_FORMAL_SMALL
+`define QV_PIPE_DC_WORDS 2
+`else
+`define QV_PIPE_DC_WORDS 4
+`endif
+`endif
+
 // QV_FORMAL_NO_SV39: no translation at all (no walker, no TLB): the Bare paths only. The riscv-formal sweep that
 // pins satp to Bare uses it, so its models do not grow by the TLBs and the walker.
 `ifdef QV_FORMAL_NO_SV39
@@ -319,6 +340,9 @@ module core
     parameter bit LSQ_BYPASS   = `QV_PIPE_LSQ_BYPASS,    // (with the queue) the LSU's writeback is a bypass source
     parameter int RS_DEPTH  = `QV_PIPE_RS_DEPTH,     // reservation-station entries, 0: none
     parameter bit LSQ_WAIT  = `QV_PIPE_LSQ_WAIT,     // (with the station and the queue) memory ops wait there for operands
+    parameter bit DCACHE    = `QV_PIPE_DCACHE,       // (O5a) the D$ inside the core (needs a PMA window)
+    parameter int DC_LINES  = `QV_PIPE_DC_LINES,     // ... its lines (a power of 2)
+    parameter int DC_WORDS  = `QV_PIPE_DC_WORDS,     // ... dwords a line (a power of 2)
     parameter int COMMIT_W   = `QV_PIPE_COMMIT_W,    // instructions retired a cycle (1 or 2): the RVFI channels
     parameter int DISPATCH_W = `QV_PIPE_DISPATCH_W,  // instructions dispatched a cycle (1 or 2)
     parameter int ALU_PORTS  = `QV_PIPE_ALU_PORTS,   // ALU issue ports (1 or 2)
@@ -351,6 +375,9 @@ module core
     input  logic         i_meip = 1'b0,
     input  logic         i_seip = 1'b0,
     input  logic [63:0]  i_time = 64'b0,       // Zicntr: the platform's mtime, which the time CSR reads
+    // (O5a) another master (the Debug Module's system bus access) wrote this RAM dword: its line leaves the D$
+    input  logic         i_snoop_valid = 1'b0,
+    input  logic [31:3]  i_snoop_addr = 29'b0,
 
     input  logic        i_debug_halt_req = 1'b0,
     input  logic        i_debug_resume_req = 1'b0,
@@ -1076,7 +1103,13 @@ module core
     logic [31:3] sb_match_addr;
     logic        ptw_wants;                  // a translation request is waiting for the walker (and so for the memory port)
     // fetch pauses its stream for a cycle when another master of the shared bus wants it
-    assign fetch_yield = FETCH_YIELD && (lsu_bus_busy || sb_beat || sb_go_idle || ptw_wants);
+    // (O5a) the D$'s refill is the fourth master: the LSU asks for it only when the port is free, and it holds the
+    // port for the whole line (the others wait while dc_busy)
+    localparam bit DC_ON = DCACHE && (PMA_RAM_SIZE != 64'd0);
+    logic        dc_busy, dc_hit, dc_cyc, dc_fill_req, dc_fill, dc_fill_err, dc_inv;
+    logic [63:0] dc_dat, dc_fill_dat;
+    logic [31:3] dc_addr;
+    assign fetch_yield = FETCH_YIELD && (lsu_bus_busy || sb_beat || sb_go_idle || ptw_wants || dc_busy);
     // On a shared bus a translated fetch uses the port in two of every three cycles: its translation phase is the
     // gap. A store that retires at once lets the load behind it reach the ROB head a cycle earlier, and the load's
     // access can then start in the very cycle fetch's request begins its bus beat; the memory port wins that tie
@@ -1085,13 +1118,13 @@ module core
     // is the one of P8; never with a private fetch path (FETCH_YIELD 0).
     logic fetch_start_q;
     always_ff @(posedge clk) fetch_start_q <= !rst && FETCH_YIELD && (SB_DEPTH > 0) && f_xl_req && f_xl_done && !f_xl_cancel;
-    assign wb_mem_addr_o = sb_beat ? sb_addr : ptw_beat ? ptw_addr : lsu_addr;
+    assign wb_mem_addr_o = dc_busy ? {dc_addr, 3'b000} : sb_beat ? sb_addr : ptw_beat ? ptw_addr : lsu_addr;
     assign wb_mem_dat_o  = sb_beat ? sb_dat : lsu_dat;
-    assign wb_mem_sel_o  = sb_beat ? sb_sel : ptw_beat ? 8'hFF : lsu_sel;
-    assign wb_mem_we_o   = sb_beat ? 1'b1 : ptw_beat ? 1'b0 : lsu_we;
-    assign wb_mem_cyc_o  = sb_beat ? sb_cyc : ptw_beat ? ptw_cyc : lsu_cyc;
+    assign wb_mem_sel_o  = dc_busy ? 8'hFF : sb_beat ? sb_sel : ptw_beat ? 8'hFF : lsu_sel;
+    assign wb_mem_we_o   = dc_busy ? 1'b0 : sb_beat ? 1'b1 : ptw_beat ? 1'b0 : lsu_we;
+    assign wb_mem_cyc_o  = dc_busy ? dc_cyc : sb_beat ? sb_cyc : ptw_beat ? ptw_cyc : lsu_cyc;
     assign wb_mem_stb_o  = wb_mem_cyc_o;
-    assign wb_mem_lock_o = (sb_beat || ptw_beat) ? 1'b0 : lsu_lock;
+    assign wb_mem_lock_o = (dc_busy || sb_beat || ptw_beat) ? 1'b0 : lsu_lock;
     /* verilator lint_off UNUSEDSIGNAL */
     logic        lsu_stb_unused;
     /* verilator lint_on UNUSEDSIGNAL */
@@ -1124,7 +1157,7 @@ module core
     logic     lsq_early, lsq_match;         // (the queue) no barrier is older than lsu0's op; a posted store matches
     qv_lsu #(.SB_EN(SB_DEPTH > 0), .PMA_RAM_BASE(PMA_RAM_BASE), .PMA_RAM_SIZE(PMA_RAM_SIZE),
              .PROBE(SV39_EN && DTLB_PROBE), .EARLY(LSQ_DEPTH > 0 && LSQ_EARLY), .EARLY_ST(LSQ_EARLY_ST),
-             .HANDOFF(LSQ_DEPTH > 0 && LSQ_HANDOFF), .ROB_DEPTH(ROB_DEPTH)) lsu0 (
+             .HANDOFF(LSQ_DEPTH > 0 && LSQ_HANDOFF), .DC_EN(DC_ON), .ROB_DEPTH(ROB_DEPTH)) lsu0 (
         .i_kill_vec(kill_vec),
         .clk(clk), .rst(rst), .i_flush(flush),
         .i_req(eng_req), .o_free(eng_free),
@@ -1145,7 +1178,9 @@ module core
         .i_xl_done(x_done), .i_xl_pf(x_pf), .i_xl_af(x_af), .i_xl_ppn(x_ppn),
         .i_ptw_beat(ptw_beat), .o_bus_busy(lsu_bus_busy),
         .i_sb_empty(sb_empty), .i_sb_match(sb_match || lsq_match), .i_sb_beat(sb_beat), .i_sb_go(sb_go_idle), .i_fetch_start(fetch_start_q),
-        .o_sb_addr(sb_match_addr), .o_load_near(lsu_load_near), .o_in_bus(lsu_in_bus), .o_take(eng_take)
+        .o_sb_addr(sb_match_addr), .o_load_near(lsu_load_near), .o_in_bus(lsu_in_bus), .o_take(eng_take),
+        .i_dc_hit(dc_hit), .i_dc_dat(dc_dat), .i_dc_busy(dc_busy), .o_dc_fill_req(dc_fill_req),
+        .i_dc_fill(dc_fill), .i_dc_fill_dat(dc_fill_dat), .i_dc_fill_err(dc_fill_err), .o_dc_inv(dc_inv)
     );
 
     // ---------------- the load/store queue ----------------
@@ -1156,7 +1191,7 @@ module core
                                      || (alloc_raw[6:0] == 7'b0001111 && alloc_raw[14:12] == 3'b000));
     generate
         if (LSQ_DEPTH > 0) begin : g_lsq
-            qv_lsq #(.DEPTH(LSQ_DEPTH), .PRE_XL(SV39_EN && LSQ_PRE_XL), .OPW(RS_DEPTH > 0 && LSQ_WAIT),
+            qv_lsq #(.DEPTH(LSQ_DEPTH), .PRE_XL(SV39_EN && LSQ_PRE_XL), .XL_FWD(DC_ON), .OPW(RS_DEPTH > 0 && LSQ_WAIT),
                      .BYPASS_EN(BYPASS_EN), .LSU_BYPASS(LSQ_BYPASS)) lsq0 (
                 .clk(clk), .rst(rst), .i_flush(flush), .i_kill_vec(kill_vec),
                 .i_kill(xr_kill), .i_kill_tag(xr_kill_tag),
@@ -1212,7 +1247,7 @@ module core
                 .i_push(c_sb_push), .i_push_addr(sb_push_res.mem_addr[31:3]), .i_push_sel(sb_push_res.mem_wmask),
                 .i_push_data(sb_push_res.mem_wdata), .o_ready(sb_ready), .o_empty(sb_empty),
                 .i_match_addr(sb_match_addr), .o_match(sb_match),
-                .i_lsu_busy(lsu_bus_busy), .i_lsu_inflight(lsu_in_bus), .i_ptw_beat(ptw_beat),
+                .i_lsu_busy(lsu_bus_busy), .i_lsu_inflight(lsu_in_bus || dc_busy), .i_ptw_beat(ptw_beat),
                 .i_load_near(lsu_load_near),
                 .o_start_now(sb_go), .o_start_idle(sb_go_idle), .o_beat(sb_beat), .o_cyc(sb_cyc),
                 .o_addr(sb_addr), .o_dat(sb_dat), .o_sel(sb_sel),
@@ -1229,6 +1264,38 @@ module core
             assign sb_addr  = 32'b0;
             assign sb_dat   = 64'b0;
             assign sb_sel   = 8'b0;
+        end
+    endgenerate
+
+    // ---------------- the D$ (O5a) ----------------
+    // looked up at the LSU's physical dword; updated by the store buffer's beats in their response cycle (the store
+    // reached memory), emptied of a line the LSU wrote past the buffer or another master wrote (i_snoop_*)
+    generate
+        if (DC_ON) begin : g_dc
+            qv_dc #(.LINES(DC_LINES), .WORDS(DC_WORDS)) dc0 (
+                .clk(clk), .rst(rst),
+                .i_addr(sb_match_addr), .o_hit(dc_hit), .o_dat(dc_dat), .o_busy(dc_busy),
+                .i_fill_req(dc_fill_req), .o_fill(dc_fill), .o_fill_dat(dc_fill_dat), .o_fill_err(dc_fill_err),
+                .i_wr(sb_beat && wb_mem_ack_i && !wb_mem_err_i), .i_wr_addr(sb_addr[31:3]), .i_wr_sel(sb_sel),
+                .i_wr_dat(sb_dat),
+                .i_inv(dc_inv), .i_inv_addr(sb_match_addr), .i_snoop(i_snoop_valid), .i_snoop_addr(i_snoop_addr),
+                .o_beat(dc_cyc), .o_addr(dc_addr), .i_ack(wb_mem_ack_i), .i_err(wb_mem_err_i), .i_dat(wb_mem_dat_i)
+            );
+            // refills read whole lines: the window must hold whole lines
+            initial if ((PMA_RAM_BASE % 64'(DC_WORDS * 8)) != 0 || (PMA_RAM_SIZE % 64'(DC_WORDS * 8)) != 0)
+                $fatal(1, "core: the PMA window is not a whole number of D$ lines");
+        end else begin : g_nodc
+            assign dc_busy     = 1'b0;
+            assign dc_hit      = 1'b0;
+            assign dc_dat      = 64'b0;
+            assign dc_cyc      = 1'b0;
+            assign dc_addr     = 29'b0;
+            assign dc_fill     = 1'b0;
+            assign dc_fill_dat = 64'b0;
+            assign dc_fill_err = 1'b0;
+            /* verilator lint_off UNUSEDSIGNAL */
+            wire   dc_unused = dc_fill_req || dc_inv || i_snoop_valid || (|i_snoop_addr);
+            /* verilator lint_on UNUSEDSIGNAL */
         end
     endgenerate
 
@@ -1250,7 +1317,7 @@ module core
                 .clk(clk), .rst(rst),
                 .o_bus_addr(ptw_addr), .o_bus_cyc(ptw_cyc),
                 .i_bus_dat(wb_mem_dat_i), .i_bus_ack(wb_mem_ack_i), .i_bus_err(wb_mem_err_i),
-                .i_lsu_busy(lsu_bus_busy || sb_beat || sb_go || !sb_empty), .o_beat(ptw_beat),
+                .i_lsu_busy(lsu_bus_busy || sb_beat || sb_go || !sb_empty || dc_busy), .o_beat(ptw_beat),
                 .i_pmpcfg0(pmpcfg0_w), .i_pmpaddr0(pmpaddr0_w), .i_pmpaddr1(pmpaddr1_w),
                 .i_pmpaddr2(pmpaddr2_w), .i_pmpaddr3(pmpaddr3_w),
                 .i_d_req(w_d_req), .i_d_va(x_va), .i_d_wr(x_wr), .i_d_priv(x_priv),
@@ -1598,7 +1665,7 @@ module core
     // the Debug Module's system bus access must not read memory behind a retired store: the hart shows as halted
     // to it once the store buffer has drained (internally it is halted at the sample point, as before), and once an
     // early load that was in flight at the halt has drained, so that the port is quiet
-    assign o_debug_mode    = in_debug_mode && sb_empty && !lsu_in_bus;
+    assign o_debug_mode    = in_debug_mode && sb_empty && !lsu_in_bus && !dc_busy;
     assign o_dm_csr_rdata  = csr_rdata;
     assign o_dm_gpr_rdata  = rs2_data;
     assign o_progbuf_pc    = pb_idx;
@@ -1746,6 +1813,9 @@ module core
     // The LSU, the walker and the store buffer's drain never drive the memory port together: each starts a beat
     // only while the others have nothing started or ready to start, and waits out a beat in flight.
     always @* assert (!((lsu_cyc && ptw_cyc) || (lsu_cyc && sb_cyc) || (ptw_cyc && sb_cyc)));
+    // (O5a) nor does the D$'s refill, which the others wait out
+    always @* assert (!(dc_cyc && (lsu_cyc || ptw_cyc || sb_cyc)));
+    always @* if (o_debug_mode) assert (!dc_busy);
     // (O2) An access that goes before the head is a plain load from RAM or a posted plain store to RAM, of an op no
     // barrier is older than, translated, aligned, allowed, and (a load) with no store to its dword that is posted or
     // buffered and not yet in memory; one started early is always such a load.
@@ -1753,6 +1823,10 @@ module core
         assert (lsu0.EARLY && lsq_early && lsu0.pa_in_window && !lsu0.atomic_q && !pb_active && lsu0.pa_valid
                 && !lsu0.misaligned_q && !lsu0.pmp_deny && (lsu0.store_q || !(sb_match || lsq_match)));
     always @* if (!rst && lsu0.in_bus && lsu0.early_q) assert (!lsu0.store_q && !lsu0.atomic_q);
+    // (O5a) a load the D$ answers (or refills for) before the head is such a load too
+    always @* if (!rst && (lsu0.done_dc || lsu0.dc_miss) && !lsu0.at_head)
+        assert (lsu0.EARLY && lsq_early && lsu0.pa_in_window && !lsu0.atomic_q && !pb_active && lsu0.pa_valid
+                && !lsu0.misaligned_q && !lsu0.pmp_deny && !lsu0.store_q && !(sb_match || lsq_match));
 
     // (O1) Every request to a unit and every writeback names an entry the ROB holds (a request sent in its uop's
     // dispatch cycle names the entry being allocated), and a writeback one that is not complete yet: each uop goes to
