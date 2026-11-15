@@ -225,6 +225,8 @@ MEMCFG_B_CACHE=0
 [ "$MEMCFG_B" == "cache" ] && MEMCFG_B_CACHE=1
 DEFINE_FLAGS=""
 for d in $DEFINES; do DEFINE_FLAGS="$DEFINE_FLAGS -D$d"; done
+# (O5a) with the D$ inside the pipelined core, the end of a test also audits it against side B's RAM
+[ "$B_PIPE" == "1" ] && echo " $DEFINES " | grep -q " QV_PIPE_DCACHE=1 " && DEFINE_FLAGS="$DEFINE_FLAGS -DLS_HAVE_DC" || true
 QV_MUTANT_B=0
 [ "$MODE" == "mutant" ] && QV_MUTANT_B=$MUTANT
 RUN_DELAY_MAX=$DELAY_MAX

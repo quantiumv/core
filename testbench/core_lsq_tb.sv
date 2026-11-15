@@ -33,6 +33,10 @@ module core_lsq_tb;
     // the build has early accesses (the queue and QV_PIPE_LSQ_EARLY; core.sv defines both knobs). Without them the
     // runs check only what holds either way: values, order, the window, the wrong path; C and D are skipped.
     localparam bit EARLY_ON = (`QV_PIPE_LSQ_DEPTH != 0) && (`QV_PIPE_LSQ_EARLY != 0);
+    // (O5a) with the D$ inside the core a load may be answered from a line refilled for another load, or after the
+    // store buffer updated it: the bus order checks become relations (the store reached memory; the last read of a
+    // dword behind a write past the buffer comes after that write, since the write empties the line)
+    localparam bit DC_ON = (`QV_PIPE_DCACHE != 0);
 
     logic clk = 0;
     always #5 clk = ~clk;
@@ -111,6 +115,13 @@ module core_lsq_tb;
         for (int i = 0; i < log_cyc.size(); i++)
             if (log_addr[i] == {a[31:3], 3'b000} && log_we[i] == we) return log_cyc[i];
         return -1;
+    endfunction
+    // the cycle of the last access (read or write) to a dword, -1 if none
+    function automatic int last_acc(input logic [31:0] a, input logic we);
+        int r = -1;
+        for (int i = 0; i < log_cyc.size(); i++)
+            if (log_addr[i] == {a[31:3], 3'b000} && log_we[i] == we) r = log_cyc[i];
+        return r;
     endfunction
     function automatic int any_acc(input logic [31:0] a);
         for (int i = 0; i < log_cyc.size(); i++)
@@ -283,8 +294,12 @@ module core_lsq_tb;
                   b(first_acc(32'h1008, 1'b0) >= 0 && first_acc(32'h1008, 1'b0) < t_ret(pc_div)), 64'd1);
             check("A: the store was posted early (before the DIV retired)", b(early_post_cyc >= 0 && early_post_cyc < t_ret(pc_div)), 64'd1);
         end
-        check("A: the same-dword load read only after the store's write",
-              b(first_acc(32'h1000, 1'b1) >= 0 && first_acc(32'h1000, 1'b0) > first_acc(32'h1000, 1'b1)), 64'd1);
+        if (DC_ON)
+            check("A: the store reached memory (the load is answered from the D$ the drain updated)",
+                  b(first_acc(32'h1000, 1'b1) >= 0), 64'd1);
+        else
+            check("A: the same-dword load read only after the store's write",
+                  b(first_acc(32'h1000, 1'b1) >= 0 && first_acc(32'h1000, 1'b0) > first_acc(32'h1000, 1'b1)), 64'd1);
 
         // ===== B: barriers =====
         prologue();
@@ -370,7 +385,12 @@ module core_lsq_tb;
         check("G: the load behind the AMO read only after the AMO's write",
               b(first_acc(32'h1028, 1'b0) > first_acc(32'h1020, 1'b1)), 64'd1);
         check("G: the SC succeeded", x(22), 64'd0);
-        check("G: the load behind the SC read only after its write", b(first_acc(32'h1038, 1'b0) > first_acc(32'h1030, 1'b1)), 64'd1);
+        if (DC_ON)
+            check("G: the load behind the SC read its line again after the SC's write (the SC emptied it)",
+                  b(last_acc(32'h1038, 1'b0) > first_acc(32'h1030, 1'b1)), 64'd1);
+        else
+            check("G: the load behind the SC read only after its write", b(first_acc(32'h1038, 1'b0) > first_acc(32'h1030, 1'b1)), 64'd1);
+        check("G: the load behind the SC: its dword", x(23), init_word((32'h1038) >> 3));
         check("G: the AMO's old value", x(18), init_word((32'h1020) >> 3));
 
         // ===== C: an interrupt while an early load is on the bus =====

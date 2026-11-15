@@ -91,6 +91,9 @@ tb_soc_sb_halt_sba_tb|testbench/soc_sb_halt_sba_tb.sv||design|pipe|pass|600
 tb_core_a_ext_tb|testbench/core_a_ext_tb.sv|testbench/core_wb4_sram_harness.sv|design|ref,pipe|pass|
 tb_core_sb_tb|testbench/core_sb_tb.sv|testbench/core_wb4_sram_harness.sv|design|pipe|pass||-DQV_PIPE_COMMIT_W=1
 tb_core_lsq_tb|testbench/core_lsq_tb.sv||design|pipe|pass||-DQV_PIPE_COMMIT_W=1
+tb_core_lsq_dc_tb|testbench/core_lsq_tb.sv||design|pipe|pass||-DQV_PIPE_COMMIT_W=1 -DQV_PIPE_DCACHE=1
+tb_core_dc_tb|testbench/core_dc_tb.sv||design|pipe|pass||-DQV_PIPE_DCACHE=1
+tb_core_dc_bus_tb|testbench/core_dc_tb.sv||design|pipe|pass|
 tb_core_bus_fault_trap_tb|testbench/core_bus_fault_trap_tb.sv|testbench/core_wb4_sram_harness.sv,testbench/state_reached_monitor.sv|design|ref,pipe|pass|
 tb_core_c_ext_tb|testbench/core_c_ext_tb.sv|testbench/core_wb4_sram_harness.sv|design|ref,pipe|pass|
 tb_core_c_illegal_trap_tb|testbench/core_c_illegal_trap_tb.sv|testbench/core_wb4_sram_harness.sv|design|ref,pipe|pass||-DQV_PIPE_COMMIT_W=1
@@ -197,6 +200,7 @@ pipe_lsq_opw_tb_d2_b0|design/pipe/qv_lsq_opw_tb.sv||design|pipe|pass|900|-Pqv_ls
 pipe_lsq_opw_tb_d8_l0|design/pipe/qv_lsq_opw_tb.sv||design|pipe|pass|900|-Pqv_lsq_opw_tb.DEPTH=8 -Pqv_lsq_opw_tb.LSU_BYPASS=0 -Pqv_lsq_opw_tb.SEED=3
 pipe_lsq_d2_tb|design/pipe/qv_lsq_tb.sv||design|pipe|pass||-Pqv_lsq_tb.DEPTH=2
 pipe_lsq_prexl_tb|design/pipe/qv_lsq_tb.sv||design|pipe|pass||-Pqv_lsq_tb.PRE_XL=1
+pipe_lsq_prexl_fwd_tb|design/pipe/qv_lsq_tb.sv||design|pipe|pass||-Pqv_lsq_tb.PRE_XL=1 -Pqv_lsq_tb.XL_FWD=1
 pipe_issue_wbl_tb|design/pipe/qv_issue_wbl_tb.sv||design|pipe|pass|
 pipe_issue_wbl_off_tb|design/pipe/qv_issue_wbl_tb.sv||design|pipe|pass||-Pqv_issue_wbl_tb.LSU_BYPASS=0
 pipe_issue_wbl_b0_tb|design/pipe/qv_issue_wbl_tb.sv||design|pipe|pass||-Pqv_issue_wbl_tb.BYPASS_EN=0
@@ -206,6 +210,8 @@ pipe_lsu_early_tb|design/pipe/qv_lsu_early_tb.sv||design|pipe|pass|
 pipe_lsu_early_ld_tb|design/pipe/qv_lsu_early_tb.sv||design|pipe|pass||-Pqv_lsu_early_tb.EARLY_ST=0
 pipe_lsu_handoff_tb|design/pipe/qv_lsu_early_tb.sv||design|pipe|pass||-Pqv_lsu_early_tb.HANDOFF=1
 pipe_lsu_early_nosb_tb|design/pipe/qv_lsu_early_tb.sv||design|pipe|pass||-Pqv_lsu_early_tb.SB_EN=0
+pipe_lsu_dc_tb|design/pipe/qv_lsu_dc_tb.sv||design|pipe|pass|
+pipe_lsu_dc_hand0_tb|design/pipe/qv_lsu_dc_tb.sv||design|pipe|pass||-Pqv_lsu_dc_tb.HANDOFF=0
 pipe_rob_tb_d8|design/pipe/qv_rob_tb.sv||design|pipe|pass||-Pqv_rob_tb.ROB_DEPTH=8
 pipe_rob_tb_d4|design/pipe/qv_rob_tb.sv||design|pipe|pass||-Pqv_rob_tb.ROB_DEPTH=4
 pipe_rob_tb_d2|design/pipe/qv_rob_tb.sv||design|pipe|pass||-Pqv_rob_tb.ROB_DEPTH=2

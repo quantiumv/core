@@ -491,6 +491,74 @@ def emit_mem_pair(p: Program, recent: list[int]):
     del recent[:-8]
 
 
+def emit_dc(p: Program, recent: list[int]):
+    """--dc: what a D$ inside the core (O5a) has to get right. Two lines of the sandbox 2 KiB apart (the same index in a
+    2 KiB direct-mapped D$; 4 or 6 KiB apart in a bigger one), and on them: every dword of a line just missed, a load
+    of the other line in between (it evicts the first, which then refills), stores to a held line and to an evicted
+    one (no allocate) with loads of the same dwords after them, sub-dword loads at every offset, and an atomic, an LR
+    and an SC on a held line (they write past the store buffer: their line must leave the D$)."""
+    a = p.reg()
+    b = p.reg()
+    while b == a:
+        b = p.reg()
+
+    def other():
+        r = p.reg()
+        while r in (a, b):
+            r = p.reg()
+        return r
+    p.e(f"    addi    x{a}, x27, {p.rng.randrange(0, 0x800, 32)}")
+    p.e(f"    addi    x{b}, x{a}, 0x400")
+    for _ in range(2 * p.rng.randint(1, 3) - 1):
+        p.e(f"    addi    x{b}, x{b}, 0x400")                   # 2, 4 or 6 KiB on
+
+    def ld(base, off=None):
+        mnem, width = p.rng.choice(_LOADS)
+        if off is None:
+            off = p.rng.randrange(0, 32, width)
+        rd = other()
+        p.e(f"    {mnem:<7} x{rd}, {off}(x{base})")
+        recent.append(rd)
+
+    def st(base, off=None):
+        mnem, width = p.rng.choice(_STORES)
+        if off is None:
+            off = p.rng.randrange(0, 32, width)
+        p.e(f"    {mnem:<7} x{p.reg_biased(recent)}, {off}(x{base})")
+    for _ in range(p.rng.randint(3, 8)):
+        r = p.rng.random()
+        if r < 0.20:
+            for w in range(4):                                # every dword of the line
+                p.e(f"    ld      x{other()}, {8 * w}(x{a})")
+        elif r < 0.35:
+            ld(b)                                             # the other line: evicts, then a refills
+            ld(a)
+        elif r < 0.55:
+            off = p.rng.randrange(0, 32, 8)
+            st(a, off)                                        # a store to a held line, then its dword
+            ld(a, off)
+        elif r < 0.65:
+            off = p.rng.randrange(0, 32, 8)
+            st(b, off)                                        # to the other line: no allocate
+            ld(b, off)
+            ld(a)
+        elif r < 0.80:
+            ld(p.rng.choice((a, b)))
+        elif r < 0.90 and "a" in p.args.isa:
+            ld(a)
+            p.e(f"    amoadd.d x{other()}, x{p.reg_biased(recent)}, (x{a})")
+            ld(a)
+        elif "a" in p.args.isa:
+            ld(a)
+            rd = other()
+            p.e(f"    lr.d    x{rd}, (x{a})")
+            p.e(f"    sc.d    x{other()}, x{p.reg_biased(recent)}, (x{a})")
+            ld(a, 0)
+        else:
+            ld(a)
+    del recent[:-8]
+
+
 def emit_ooo(p: Program, recent: list[int]):
     """--ooo: what out-of-order issue has to get right. A long-latency producer (a divide, a load, a CSR read whose rd
     is made only at its commit), independent work that may go past it, then its consumers -- with, around it, the
@@ -2711,6 +2779,9 @@ def emit_main_body(p: Program):
         if getattr(a, "mem_dense", False) and p.rng.random() < 0.30:
             emit_mem_pair(p, recent)
             return
+        if getattr(a, "dc", False) and p.rng.random() < 0.25:
+            emit_dc(p, recent)
+            return
         if have_f and p.rng.random() < 0.25:
             emit_fp(p, recent)
             return
@@ -2907,6 +2978,9 @@ def main():
     ap.add_argument("--mem-dense", action="store_true", dest="mem_dense",
                     help="a third of the instructions are runs of stores and loads on the same, overlapping and "
                          "neighbouring bytes (see emit_mem_pair): for the store buffer")
+    ap.add_argument("--dc", action="store_true",
+                    help="a quarter of the instructions are runs of loads, stores and atomics on two lines of the "
+                         "sandbox 2-6 KiB apart (see emit_dc): for the D$ inside the core (O5a)")
     ap.add_argument("--ooo", action="store_true",
                     help="a quarter of the instructions are long-latency producers with independent work and their "
                          "consumers behind them (see emit_ooo): for out-of-order issue")

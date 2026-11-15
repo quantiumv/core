@@ -296,6 +296,26 @@ module lockstep_side #(
                 end
             end
 `endif
+`ifdef LS_HAVE_DC
+            // (O5a) the D$ inside the core, audited whenever the core shows halted (the end of a test, every halt of the
+            // debug script): the store buffer is empty and no refill or early load is in flight, so every valid dword
+            // must equal RAM -- a missed update or invalidation that no later load happened to read shows here
+            longint dc_a;
+            always @(posedge clk) begin
+                if (!rst && core0.o_debug_mode)
+                    for (int i = 0; i < core0.DC_LINES; i++)
+                        if (core0.g_dc.dc0.valid_q[i])
+                            for (int w = 0; w < core0.DC_WORDS; w++) begin
+                                dc_a = ((longint'(core0.g_dc.dc0.tag_q[i]) << $clog2(core0.DC_LINES)) + i) * core0.DC_WORDS + w;
+                                if (core0.g_dc.dc0.data_q[i][w] !== mem0.sram0.memory[dc_a]) begin
+                                    $display("LOCKSTEP_DIVERGENCE: D$ line %0d dword %0d (RAM[%0h]) holds %016h, RAM %016h",
+                                             i, w, dc_a * 8, core0.g_dc.dc0.data_q[i][w], mem0.sram0.memory[dc_a]);
+                                    $display("LOCKSTEP_RESULT: FAIL (the D$ differs from RAM at a halt)");
+                                    $finish;
+                                end
+                            end
+            end
+`endif
         end else begin : g_core
             ref_core #(.QV_MUTANT(QV_MUTANT)) core0 (`LS_CORE_PORTS);
             assign fs1     = 2'b0;                   // one channel

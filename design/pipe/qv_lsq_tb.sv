@@ -14,7 +14,8 @@
  * PRE_XL = 1 (O2c): while the port is free, the oldest queued op is looked up (a model TLB answers at once with a page
  * of its own, or misses, or faults), and the engine takes it with that page; not an SC, not a misaligned op, not while
  * the engine holds the port, not a miss or a fault, not a dispatch that goes straight to the engine, not across a
- * slot's reuse.
+ * slot's reuse. XL_FWD = 1 (O5a): a lookup that hits in the very cycle the engine takes the op goes with it (without
+ * XL_FWD the op is then taken untranslated).
  * Random: 4000 cycles of dispatches, completions, retirements and flushes, checking that the engine sees the ops in
  * dispatch order, that every retirement reads its own op's result, and that o_free is "fewer than DEPTH in the queue".
  * (O3) Kills too: a recovery at execute kills the youngest ops (a random suffix of what is dispatched); none is
@@ -24,7 +25,8 @@
  */
 module qv_lsq_tb #(
     parameter int DEPTH  = 4,
-    parameter bit PRE_XL = 1'b0
+    parameter bit PRE_XL = 1'b0,
+    parameter bit XL_FWD = 1'b0
 );
     import qv_pkg::*;
 
@@ -57,6 +59,7 @@ module qv_lsq_tb #(
     // the model TLB for pre-translation: answers the queue's lookup at once (xl_miss: not at all; xl_fault: with a fault);
     // a page with VA bit 32 set is read-only: a lookup that writes faults there
     logic                    xl_req, xl_wr, xl_free = 1'b1, xl_miss = 1'b0, xl_fault = 1'b0, eng_xl;
+    logic                    xl_free_on_take = 1'b0;   // the port frees exactly in the cycle the engine takes an op
     logic [63:0]             xl_va;
     logic [43:0]             eng_ppn;
     function automatic logic [43:0] page_of(input logic [63:0] va); return va[55:12] ^ 44'h0AB_CDEF_0123; endfunction
@@ -65,14 +68,15 @@ module qv_lsq_tb #(
     logic                    kill = 1'b0;        // (O3) a recovery at execute
     logic [QV_ROB_TAG_W-1:0] kill_tag = '0;
     logic [(1<<QV_ROB_TAG_W)-1:0] kill_vec = '0;
-    qv_lsq #(.DEPTH(DEPTH), .PRE_XL(PRE_XL)) dut (
+    qv_lsq #(.DEPTH(DEPTH), .PRE_XL(PRE_XL), .XL_FWD(XL_FWD)) dut (
         .clk(clk), .rst(rst), .i_flush(flush), .i_kill(kill), .i_kill_tag(kill_tag), .i_kill_vec(kill_vec),
         .i_req(req), .o_free(free),
         .o_eng_req(eng_req), .i_eng_take(e_take), .i_eng_wb(eng_wb), .i_eng_res(eng_res),
         .i_pop(pop), .i_pop_tag(pop_tag), .o_head_res(head_res),
         .i_pop2(pop2), .i_pop2_tag(pop2_tag), .o_head1_res(head1_res),
         .i_bar_alloc(bar_alloc), .i_bar_tag(bar_tag), .o_early(early), .i_match_addr(match_addr), .o_match(match),
-        .o_xl_req(xl_req), .o_xl_va(xl_va), .o_xl_wr(xl_wr), .i_xl_free(xl_free), .i_xl_active(1'b1),
+        .o_xl_req(xl_req), .o_xl_va(xl_va), .o_xl_wr(xl_wr), .i_xl_free(xl_free || (xl_free_on_take && e_take)),
+        .i_xl_active(1'b1),
         .i_xl_done(xl_req && !xl_miss), .i_xl_pf(xl_fault || (xl_wr && xl_va[32])), .i_xl_af(1'b0),
         .i_xl_ppn(page_of(xl_va)),
         .o_eng_xl(eng_xl), .o_eng_ppn(eng_ppn)
@@ -366,6 +370,19 @@ module qv_lsq_tb #(
             repeat (8) tick();
             xl_free = 1'b1;
             check("pre-xl: port busy throughout: taken untranslated", b(took_xl), 64'd0);
+            repeat (8) tick();
+            pop = 1'b1; pop_tag = t0; tick(); pop = 1'b0;
+            pop = 1'b1; pop_tag = t1; tick(); pop = 1'b0;
+            // (XL_FWD) the port frees only in the cycle the engine takes the op: translated with XL_FWD, else not
+            present(t0, a0); tick(); idle();
+            xl_free = 1'b0; xl_free_on_take = 1'b1;
+            next_a = 64'h0000_00AA_C000_0100;              // a page no other case uses (bit 32 clear: writable)
+            present(t1, aq); tick(); idle();
+            next_a = a1 + 64'h40;                          // back to the sequence the later cases use
+            repeat (8) tick();
+            xl_free = 1'b1; xl_free_on_take = 1'b0;
+            check("pre-xl: looked up in the cycle it is taken: translated only with XL_FWD", b(took_xl), b(XL_FWD));
+            if (XL_FWD) check("... to its page", {20'b0, took_ppn}, {20'b0, page_of(aq)});
             repeat (8) tick();
             pop = 1'b1; pop_tag = t0; tick(); pop = 1'b0;
             pop = 1'b1; pop_tag = t1; tick(); pop = 1'b0;

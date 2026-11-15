@@ -41,6 +41,11 @@
  *      load/store access fault.
  *   3. SBA byte WRITES to the UART THR -- each must print exactly once.
  *   4. SBA byte READS of the UART RBR -- each must pop exactly one byte.
+ *   5. (O5a) SBA writes of 1..40 to a dword the hart keeps loading: each time the hart sees the new value it stores it
+ *      to a report dword, and the next write waits for that. For the first 20 the hart's line stays in its D$ (the D$
+ *      inside the core, QV_PIPE_DCACHE), so only the SBA write's snoop can make it see the new value: a lost snoop
+ *      hangs the phase. For the last 20 it evicts the line every iteration (a load 2 KiB on), so the SBA writes land
+ *      while the line refills. Values never go backwards. With the D$ on the bus instead, the write updates it.
  */
 module soc_sba_running_tb;
 
@@ -153,6 +158,29 @@ module soc_sba_running_tb;
         for (int i = 0; i < 3; i++) dut.sram0.memory[(RESULT >> 3) + i] = 64'h0;
     endtask
 
+    // phase 5's program (RV64I, from scratchpad sba5/p5.s; two instructions per dword, low word first): the hart
+    // loads 0x30000 until it changes, stores each new value to 0x30100, from the 20th value on also loads 0x30800 (the
+    // same D$ index), and after 40 values writes the count to the result block (or -1 if a value went backwards)
+    localparam logic [31:0] P5_SEEN = 32'h0003_0100;
+    task automatic load_program5();
+        dut.sram0.memory[0]  = {32'h40040493, 32'h00030437};
+        dut.sram0.memory[1]  = {32'h10040a13, 32'h40048493};
+        dut.sram0.memory[2]  = {32'h00000a93, 32'h00000393};
+        dut.sram0.memory[3]  = {32'h01400b93, 32'h02800b13};
+        dut.sram0.memory[4]  = {32'h017ac463, 32'h00043283};
+        dut.sram0.memory[5]  = {32'hfe728ae3, 32'h0004b303};
+        dut.sram0.memory[6]  = {32'h00028393, 32'h0272e063};
+        dut.sram0.memory[7]  = {32'h001a8a93, 32'h005a3023};
+        dut.sram0.memory[8]  = {32'h000209b7, 32'hff6ac0e3};
+        dut.sram0.memory[9]  = {32'h00100073, 32'h0159b023};
+        dut.sram0.memory[10] = {32'hfff00313, 32'h000209b7};
+        dut.sram0.memory[11] = {32'h0059b423, 32'h0069b023};
+        dut.sram0.memory[12] = {32'h00000013, 32'h00100073};
+        dut.sram0.memory[SBA_TARGET >> 3] = 64'h0;
+        dut.sram0.memory[P5_SEEN >> 3]    = 64'h0;
+        for (int i = 0; i < 3; i++) dut.sram0.memory[(RESULT >> 3) + i] = 64'h0;
+    endtask
+
     task automatic wait_halted();
         int n = 0;
         while (!halted && n < PHASE_TIMEOUT) begin
@@ -181,6 +209,7 @@ module soc_sba_running_tb;
 
     int k;
     int sba_ops;
+    int p5_wait, p5_seen;
     logic [31:0] last_sba_data;
 
     initial begin
@@ -228,6 +257,31 @@ module soc_sba_running_tb;
         check("phase 2: the SBA read itself reported a bus error (sberror != 0)",
               64'(dut.dm0.sberror_q != 3'd0), 64'd1);
         check_self_test("phase 2");
+
+        // ---- Phase 5 (O5a): SBA writes to a dword the hart keeps loading ----
+        load_program5();
+        reset_soc();
+        dmi_write(DMI_SBCS, 32'h0006_7000);        // sbaccess=3 (64-bit), W1C sberror
+        dmi_write(DMI_SBADDRESS0, SBA_TARGET);
+        dmi_write(DMI_SBDATA1, 32'h0);
+        p5_seen = 0;
+        for (k = 1; k <= 40; k++) begin
+            dmi_write(DMI_SBDATA0, 32'(k));        // triggers the write
+            wait_sba_done();
+            p5_wait = 0;
+            while (dut.sram0.memory[P5_SEEN >> 3] != 64'(k) && p5_wait < 20000) begin
+                @(posedge clk);
+                p5_wait++;
+            end
+            if (p5_wait >= 20000) break;
+            p5_seen++;
+            repeat (k % 7) @(negedge clk);
+        end
+        if (p5_seen == 40) wait_halted();          // else the hart is still waiting for the value it missed
+        check("phase 5: the hart saw each of the 40 SBA writes", 64'(p5_seen), 64'd40);
+        check("phase 5: hart reached ebreak", {63'b0, halted}, 64'd1);
+        check("phase 5: the hart counted 40 values, none going backwards", dut.sram0.memory[RESULT >> 3], 64'd40);
+        check("phase 5: no spurious core0 traps", 64'(spurious_traps), 64'd0);
 
         // ---- Phase 3: SBA byte writes to UART THR ----
         load_program();
