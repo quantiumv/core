@@ -30,7 +30,8 @@
  * stability monitor below flags the moved request itself.
  */
 module cache_complex_tb #(
-    parameter int DN_WAIT = 0
+    parameter int DN_WAIT = 0,
+    parameter bit DC_EN   = 1'b1      // 0 (O5a): the data port passes straight through; its own section below
 );
 
     localparam NUM_LINES  = 4;
@@ -59,7 +60,7 @@ module cache_complex_tb #(
     logic [7:0]  mem_sel;
     logic        mem_we, mem_cyc, mem_stb, mem_ack, mem_err;
 
-    cache_complex #(.num_lines(NUM_LINES), .line_words(LINE_WORDS)) dut (
+    cache_complex #(.num_lines(NUM_LINES), .line_words(LINE_WORDS), .DC_EN(DC_EN)) dut (
         .clk(clk), .rst(rst),
         .fetch_addr_i(fp_addr), .fetch_cyc_i(fp_cyc), .fetch_stb_i(fp_stb),
         .fetch_dat_o(fp_dat), .fetch_ack_o(fp_ack), .fetch_err_o(fp_err),
@@ -275,12 +276,86 @@ module cache_complex_tb #(
             mem0.memory[(base >> 3) + w] = pat + 64'(w);
     endtask
 
+    // (DC_EN 0) the data port goes downstream itself: every access is one beat, nothing is cached, dcache0 stays idle,
+    // and the data port still wins a tie and still waits out a beat of the I$ already on the bus
+    logic dc_moved = 1'b0;
+    int   nd_ties = 0, nd_tie_bad = 0;
+    always @(posedge clk) if (!rst) begin
+        if (dut.dcache0.state_q != 0 || dut.dcache0.mem_cyc_o) dc_moved = 1'b1;
+        if (dut.icache0.mem_cyc_o && dp_cyc && !dn_hold) begin
+            nd_ties++;
+            if (!(mem_cyc && mem_addr === dp_addr && mem_we === dp_we)) nd_tie_bad++;
+        end
+    end
+    // a data access, then the falling edge that counts its response (the pass-through answers in memory's response
+    // cycle, before that edge)
+    task automatic nd_data(logic [31:0] a, logic [63:0] d, logic [7:0] sl, logic w);
+        data_cycle(a, d, sl, w);
+        @(negedge clk);
+    endtask
+    task automatic run_nodc();
+        mem0.memory[32'h40 >> 3] = 64'h1234_0000_0000_0000;
+        mem0.memory[32'h48 >> 3] = 64'h1234_0000_0000_0001;
+        // N1: a read is one beat, and a second read of it is another (nothing cached)
+        mem_base = mem_resps;
+        nd_data(32'h40, 64'h0, 8'h00, 1'b0);
+        check("N1 read: correct word", dp_rdat, 64'h1234_0000_0000_0000);
+        check("N1 read: one downstream beat", mem_resps - mem_base, 1);
+        mem_base = mem_resps;
+        nd_data(32'h40, 64'h0, 8'h00, 1'b0);
+        check("N1 read again: another beat (no D$)", mem_resps - mem_base, 1);
+        // N2: a write is one beat and reaches SRAM by its byte select
+        mem_base = mem_resps;
+        nd_data(32'h48, 64'h0000_0000_BEEF_0000, 8'h0C, 1'b1);
+        check("N2 write: one downstream beat", mem_resps - mem_base, 1);
+        check("N2 write: sel-merged in SRAM", mem0.memory[32'h48 >> 3], 64'h1234_0000_BEEF_0001);
+        // N3: an error comes straight back (memory's own: err without ack)
+        nd_data(32'h1000, 64'h0, 8'h00, 1'b0);
+        check("N3 read out of range: err", {63'b0, dp_rerr}, 64'd1);
+        // N4: a data read arriving during an I$ refill: correct words on both ports, 4 + 1 beats
+        fill_line(32'h80, 64'h7777_0000_0000_0000);
+        mem_base = mem_resps;
+        fork
+            fetch_cycle(32'h80);
+            begin repeat (2) @(posedge clk); data_cycle(32'h40, 64'h0, 8'h00, 1'b0); end
+        join
+        check("N4 mid-refill: fetch port word", fp_rdat, 64'h7777_0000_0000_0000);
+        check("N4 mid-refill: data port word", dp_rdat, 64'h1234_0000_0000_0000);
+        repeat (2) @(negedge clk);
+        check("N4 mid-refill: 5 downstream beats", mem_resps - mem_base, 5);
+        // N5: the data port asking in the cycle the I$ starts a refill beat (some offset makes a tie): the data first
+        for (int off = 0; off < 4; off++) begin
+            fill_line(32'h100 + 32'(off * 32), 64'h5555_0000_0000_0000);
+            fork
+                fetch_cycle(32'h100 + 32'(off * 32));
+                begin repeat (off) @(posedge clk); data_cycle(32'h48, 64'h0, 8'h00, 1'b0); end
+            join
+            check($sformatf("N5 offset %0d: fetch port word", off), fp_rdat, 64'h5555_0000_0000_0000);
+            check($sformatf("N5 offset %0d: data port word", off), dp_rdat, 64'h1234_0000_BEEF_0001);
+        end
+        check("N5 a tie occurred", {63'b0, nd_ties > 0}, 64'd1);
+        check("N5 every tie granted to the data port", nd_tie_bad, 0);
+        check("dcache0 never left idle", {63'b0, dc_moved}, 64'd0);
+        repeat (3) @(negedge clk);
+        check("DC_EN 0: fetch port acks == fetch requests", fp_acks, fp_reqs);
+        check("DC_EN 0: data port acks == data requests but the one error", dp_acks, dp_reqs - 1);
+        check("DC_EN 0: one data port error", dp_errs, 1);
+        check("DC_EN 0: every outstanding downstream request held stable", dn_violations, 0);
+    endtask
+
     initial begin
         fp_addr = 0; fp_cyc = 0; fp_stb = 0;
         dp_addr = 0; dp_dat_i = 0; dp_sel = 0; dp_we = 0; dp_cyc = 0; dp_stb = 0;
         @(posedge clk); #1;
         rst = 0;
         @(posedge clk); #1;
+        if (!DC_EN) begin
+            run_nodc();
+            $display("");
+            $display("cache_complex_tb: %0d passed, %0d failed", pass_count, fail_count);
+            if (fail_count > 0) $display("cache_complex_tb: FAILURES PRESENT");
+            $finish;
+        end
 
         // Two independent lines (index 0 and index 1 at NUM_LINES=4,
         // LINE_WORDS=4 -- same address scheme as icache_tb.sv/dcache_tb.sv).
