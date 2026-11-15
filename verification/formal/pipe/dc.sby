@@ -1,0 +1,30 @@
+# qv_dc properties (dc_props.sv): k-induction proof and BMC at 2 lines x 2 dwords, BMC at 4 x 4, covers.
+# Run with run.sh, or: sby -f dc.sby
+[tasks]
+prove
+bmc
+bmc4
+cover
+
+[options]
+prove: mode prove
+prove: depth 10
+bmc: mode bmc
+bmc: depth 24
+bmc4: mode bmc
+bmc4: depth 20
+cover: mode cover
+cover: depth 20
+
+[engines]
+smtbmc boolector
+
+[script]
+plugin -i /home/potato/yosys-slang-src/build/slang.so
+bmc4: read_slang --single-unit -D DC_BIG qv_dc.sv dc_props.sv --top dc_props
+~bmc4: read_slang --single-unit qv_dc.sv dc_props.sv --top dc_props
+prep -top dc_props
+
+[files]
+../../../design/pipe/qv_dc.sv
+dc_props.sv

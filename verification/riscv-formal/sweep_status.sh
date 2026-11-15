@@ -1,5 +1,5 @@
 #!/bin/bash
-# sweep_status.sh ref|pipe|pipe-rs0|pipe-full|pipe-amo|pipe-sv39|pipe-sb|pipe-fpu|pipe-w2 [--only REGEX] [--summary] [--detail]
+# sweep_status.sh ref|pipe|pipe-rs0|pipe-full|pipe-amo|pipe-sv39|pipe-sb|pipe-dc|pipe-fpu|pipe-w2 [--only REGEX] [--summary] [--detail]
 #
 # The status table run_sweep.sh prints at its end, without running anything: one line per generated check
 # (PASS, FAIL, TIMEOUT, ERROR, incomplete = still running or never finished, not run) and the PASS count.
@@ -18,9 +18,10 @@ case "${1:-}" in
     pipe-amo) NAME=quantiumv_pipe_amo ;;
     pipe-sv39) NAME=quantiumv_pipe_sv39 ;;
     pipe-sb) NAME=quantiumv_pipe_sb ;;
+    pipe-dc) NAME=quantiumv_pipe_dc ;;
     pipe-fpu) NAME=quantiumv_pipe_fpu ;;
     pipe-w2) NAME=quantiumv_pipe_w2 ;;
-    *) echo "usage: sweep_status.sh ref|pipe|pipe-rs0|pipe-full|pipe-amo|pipe-sv39|pipe-sb|pipe-fpu|pipe-w2 [--only REGEX] [--summary] [--detail]" >&2; exit 2 ;;
+    *) echo "usage: sweep_status.sh ref|pipe|pipe-rs0|pipe-full|pipe-amo|pipe-sv39|pipe-sb|pipe-dc|pipe-fpu|pipe-w2 [--only REGEX] [--summary] [--detail]" >&2; exit 2 ;;
 esac
 shift
 while [ $# -gt 0 ]; do

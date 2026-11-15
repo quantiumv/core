@@ -24,6 +24,9 @@
 #                (the first 2 GiB), so the store buffer really takes stores: in the other models the window is empty and
 #                it never does. The wrapper then assumes a drain beat gets no bus error. Run the checks that see the
 #                drain (liveness, hang, the store instructions, cover, causal; see quantiumv_pipe/README.md)
+#   pipe-dc   -> $RVFORMAL/cores/quantiumv_pipe_dc: pipe-sb with the D$ inside the core too (QV_PIPE_DCACHE, O5a):
+#                plain loads from the window are answered by the D$, refills go out on the memory port. Run the checks
+#                that see it (reg, causal, unique, liveness, hang, cover, the integer load/store insn checks)
 #   pipe-fpu  -> $RVFORMAL/cores/quantiumv_pipe_fpu: the same as pipe with F/D built in, the FPU's datapath and the
 #                FP registers' reads free (QV_FORMAL_FPU_ABSTRACT): no FP check exists; this shows that FP traffic
 #                keeps the integer state consistent (run reg, causal, unique, pc_fwd/pc_bwd, ill, cover, csrc_any_*,
@@ -48,18 +51,19 @@ case "${1:-}" in
         REF=1
         # the reference's own files (ref_design_files.list) and its macros header, flat in design/ (the cfg lists them)
         FILES="$(grep -E '^verification/reference/' verification/regress/ref_design_files.list) verification/reference/ref_macros.svh" ;;
-    pipe|pipe-rs0|pipe-full|pipe-amo|pipe-sv39|pipe-sb|pipe-fpu|pipe-w2)
+    pipe|pipe-rs0|pipe-full|pipe-amo|pipe-sv39|pipe-sb|pipe-dc|pipe-fpu|pipe-w2)
         NAME=quantiumv_pipe
         [ "$1" == "pipe-rs0" ] && SUFFIX=_rs0
         [ "$1" == "pipe-full" ] && SUFFIX=_full
         [ "$1" == "pipe-sb" ] && SUFFIX=_sb
+        [ "$1" == "pipe-dc" ] && SUFFIX=_dc
         [ "$1" == "pipe-sv39" ] && SUFFIX=_sv39
         [ "$1" == "pipe-fpu" ] && SUFFIX=_fpu
         [ "$1" == "pipe-amo" ] && NAME=quantiumv_pipe_amo
         [ "$1" == "pipe-w2" ] && NAME=quantiumv_pipe_w2        # two retirement channels (O4), its own checks.cfg
         FILES=$(grep -E '^design/(pipe/|decoder\.sv|alu\.sv|c_expand\.sv|csr_file\.sv|register_file\.sv|divider\.sv)' \
                     verification/regress/design_files.list) ;;
-    *) echo "usage: sync_core.sh ref|pipe|pipe-rs0|pipe-full|pipe-amo|pipe-sv39|pipe-sb|pipe-fpu|pipe-w2" >&2; exit 2 ;;
+    *) echo "usage: sync_core.sh ref|pipe|pipe-rs0|pipe-full|pipe-amo|pipe-sv39|pipe-sb|pipe-dc|pipe-fpu|pipe-w2" >&2; exit 2 ;;
 esac
 
 DST="$RVFORMAL/cores/$NAME$SUFFIX"
@@ -76,6 +80,7 @@ cp "$REPO/verification/riscv-formal/$NAME/checks.cfg" "$DST/"
 [ "$1" != "pipe-sv39" ] || sed -i 's/ -D QV_FORMAL_NO_SV39//' "$DST/checks.cfg"
 [ "$1" != "pipe-fpu" ] || sed -i 's/ -D QV_FORMAL_NO_FPU/ -D QV_FORMAL_FPU_ABSTRACT/' "$DST/checks.cfg"
 [ "$1" != "pipe-sb" ] || sed -i 's/ -D QV_FORMAL_SMALL/ -D QV_FORMAL_SMALL -D QV_PIPE_PMA_RAM_SIZE=2147483648/' "$DST/checks.cfg"
+[ "$1" != "pipe-dc" ] || sed -i 's/ -D QV_FORMAL_SMALL/ -D QV_FORMAL_SMALL -D QV_PIPE_PMA_RAM_SIZE=2147483648 -D QV_PIPE_DCACHE=1/' "$DST/checks.cfg"
 # QV_FORMAL_DEFS="A=1 B=2": extra defines for a pipe model (a knob that is off by default, say)
 if [ -z "$REF" ] && [ -n "${QV_FORMAL_DEFS:-}" ]; then
     XD=""

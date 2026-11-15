@@ -45,6 +45,10 @@
 #   entries popped early, the position in the second entry lost; for the global history a restore with the predicted
 #   direction, a jump's restore that shifts, a flush without this cycle's retirement, a lost shift, a committed history
 #   that never moves.
+#   (O5a) dc.sby (qv_dc, the D$ inside the core, against a shadow of one symbolic dword): prove, bmc and cover at
+#   2 x 2, bmc4 at 4 x 4; --mutants: a hit on an invalid line, an install after a snoop or an error, an update that
+#   writes a line not holding its address or ignores its byte select, a snoop or an invalidation ignored, cyc held into
+#   the response cycle, the beats out of order, the answer from the wrong beat, an error that does not end the refill.
 set -u
 cd "$(dirname "$0")" || exit 1
 HERE=$(pwd)
@@ -54,7 +58,7 @@ fail=0
 
 status() { grep -o 'DONE ([A-Z]*' | head -1 | sed 's/DONE (//'; }
 
-for unit in fetch lsu dbg ptw sb fpu rs rs2 kill ras align2 gh; do
+for unit in fetch lsu dbg ptw sb fpu rs rs2 kill ras align2 gh dc; do
     for task in prove bmc cover; do
         r=$(sby -f $unit.sby $task 2>&1 | status)
         printf '%-12s %s\n' "$unit $task" "$r"
@@ -67,6 +71,10 @@ for task in prove_w bmc_w cover_w prove_w2; do
     printf '%-12s %s\n' "fetch $task" "$r"
     [ "$r" == "PASS" ] || fail=1
 done
+# (O5a) the D$ at 4 lines x 4 dwords: bounded
+r=$(sby -f dc.sby bmc4 2>&1 | status)
+printf '%-12s %s\n' "dc bmc4" "$r"
+[ "$r" == "PASS" ] || fail=1
 # the load/store queue with the engine (lsq.sby): bounded only, no k-induction (see lsq_props.sv)
 for task in bmc cover opw opw_cover; do
     r=$(sby -f lsq.sby $task 2>&1 | status)
@@ -115,6 +123,18 @@ EOF
             printf '%-30s %s\n' "mutant $name" "NOT CAUGHT ($r)"; fail=1
         fi
     }
+    # (O5a) the D$
+    mutant dc_hit_invalid      dc 's/assign o_hit = valid_q\[l_idx\] \&\& (tag_q\[l_idx\] == l_tag);/assign o_hit = (tag_q[l_idx] == l_tag);/'
+    mutant dc_snoop_no_kill    dc 's/wire snoop_f = i_snoop \&\& busy_q \&\& (i_snoop_addr\[31:OB\] == f_line_q);/wire snoop_f = 1'"'"'b0;/'
+    mutant dc_install_on_err   dc 's/valid_q\[f_idx\] <= !i_err \&\& !kill_q/valid_q[f_idx] <= !kill_q/'
+    mutant dc_update_allocates dc 's/if (i_wr \&\& holds(i_wr_addr\[31:OB\]))/if (i_wr)/'
+    mutant dc_update_no_sel    dc 's/<= merge(data_q\[w_idx\]\[w_word\], i_wr_sel, i_wr_dat);/<= i_wr_dat;/'
+    mutant dc_snoop_ignored    dc 's/if (i_snoop \&\& holds(i_snoop_addr\[31:OB\])) valid_q/if (1'"'"'b0) valid_q/'
+    mutant dc_inv_ignored      dc 's/if (i_inv \&\& holds(i_inv_addr\[31:OB\]))     valid_q/if (1'"'"'b0)     valid_q/'
+    mutant dc_cyc_held         dc 's/assign o_beat     = beat_q \&\& !(i_ack || i_err);/assign o_beat     = beat_q;/'
+    mutant dc_beat_order       dc 's/f_beat_q <= f_beat_q + 1.b1;/f_beat_q <= f_beat_q;/'
+    mutant dc_fill_from_last   dc 's/assign o_fill_dat = (f_beat_q == f_word_q) ? i_dat : f_dat_q;/assign o_fill_dat = i_dat;/'
+    mutant dc_err_no_end       dc 's/wire               f_end  = resp \&\& (last || i_err);/wire               f_end  = resp \&\& last;/'
     git -C "$REPO" show 'ade0d1c^:design/pipe/qv_fetch.sv' > "$T/qv_fetch_epoch.sv"
     mutant fetch_epoch_aba     fetch "$T/qv_fetch_epoch.sv" "-D FETCH_OLD"
     mutant fetch_no_stale      fetch 's/wire resp_ok  = resp \&\& !req_stale_q \&\& !i_redirect_valid;/wire resp_ok  = resp \&\& !i_redirect_valid;/'
@@ -139,7 +159,7 @@ EOF
     mutant lsu_misaligned_bus  lsu 's/wire start_raw = go \&\& !misaligned_q \&\& !pmp_deny/wire start_raw = go \&\& !pmp_deny/'
     mutant lsu_pmp_bus         lsu 's/wire start_raw = go \&\& !misaligned_q \&\& !pmp_deny \&\& !sc_fail/wire start_raw = go \&\& !misaligned_q \&\& !sc_fail/'
     mutant lsu_reissues        lsu 's/^                        state_q <= S_IDLE;/                        state_q <= S_WAIT_HEAD;/'
-    mutant lsu_abandons        lsu 's/assign wb_mem_cyc_o  = (start || in_bus) \&\& !resp;/assign wb_mem_cyc_o  = (start || in_bus) \&\& !resp \&\& !i_flush;/'
+    mutant lsu_abandons        lsu 's/assign wb_mem_cyc_o  = (start || (in_bus \&\& !fill_q)) \&\& !bus_resp;/assign wb_mem_cyc_o  = (start || (in_bus \&\& !fill_q)) \&\& !bus_resp \&\& !i_flush;/'
     mutant lsu_sc_no_reservation lsu 's/wire sc_fail  = sc_q \&\& !(i_res_valid \&\& i_res_addr == addr_q);/wire sc_fail  = 1'"'"'b0;/'
     mutant lsu_lock_gap        lsu 's/assign wb_mem_lock_o = amo_q \&\& (start || in_bus);/assign wb_mem_lock_o = amo_q \&\& (start || in_bus) \&\& !(state_q == S_BUS \&\& wb_mem_ack_i);/'
     mutant lsu_lock_for_all    lsu 's/assign wb_mem_lock_o = amo_q \&\& (start || in_bus);/assign wb_mem_lock_o = (start || in_bus);/'
