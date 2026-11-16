@@ -1010,6 +1010,41 @@ FE8 = dict(fe='ideal', al_ntk=True, al_cond1=True)
 CONFIGS_O5 = [CONFIGS_O5[0], ('fe8', cfg(FE8))] + [(n, cfg(FE8, c)) for n, c in CONFIGS_O5[1:]]
 VALID_O8 = [(n, cfg(FE8, c)) for n, c in VALID_O8]
 
+# (O7b) the core with the D$ inside it (O5a) and the window O7b chose (ROB 32, RS 8, LSQ 8), fitted on its own traces;
+# O5.0's memory rules re-run at the big window (O7 Decision 5: M1, M3 and the others), and the measured O7b size points
+# as validation rows (each a window knob against the fit)
+BASE_O7 = dict(BASE_O8, dc_in=True, rob=32, rs=8, lsq=8)
+VALID_O7 = [(n, cfg(FE8, c)) for n, c in [
+    ('r8s4q8', dict(rob=8, rs=4)),
+    ('r16s8q8', dict(rob=16)),
+    ('r32s8q16', dict(lsq=16)),
+    ('r32s4q16', dict(rs=4, lsq=16)),
+    ('r64s8q16', dict(rob=64, lsq=16)),
+    ('r64s16q32', dict(rob=64, rs=16, lsq=32)),
+]]
+CONFIGS_O7 = [('base', cfg()), ('fe8', cfg(FE8))] + [(n, cfg(FE8, c)) for n, c in [
+    ('ooo po', cfg(OOO, ld_order='po')),                                # M1
+    ('ooo any', cfg(OOO, ld_order='any')),                              # M1b
+    ('fwd', cfg(fwd=True)),                                             # M2
+    ('ooo po fwd', cfg(OOO, ld_order='po', fwd=True)),
+    ('ooo sta', cfg(OOO, ld_order='po', fwd=True, sta=True)),           # M3a
+    ('ooo spec', cfg(OOO, SPEC, ld_order='po', fwd=True)),              # M3 (replay at commit)
+    ('ooo spec x8', cfg(OOO, SPEC, ld_order='po', fwd=True, replay_at='x', replay=8)),    # M3b
+    ('ooo spec wb', cfg(OOO, SPEC, ld_order='po', fwd=True, mdp='waitbit')),              # D6
+    ('ooo spec ideal', cfg(OOO, SPEC, ld_order='po', fwd=True, mdp='ideal')),
+    ('cwf', cfg(cwf=True)),                                             # M4
+    ('nb2', cfg(nb=True, mshr=2)),                                      # M5
+    ('nb4', cfg(nb=True, mshr=4)),
+    ('ooo 2ports', cfg(OOO, ld_order='po', fwd=True, engines=2, dports=2)),               # M6
+    ('ooo lsq16', cfg(OOO, ld_order='po', fwd=True, lsq=16)),
+    ('ooo spec lsq16', cfg(OOO, SPEC, ld_order='po', fwd=True, lsq=16)),
+    ('ooo spec rob64 lsq16', cfg(OOO, SPEC, ld_order='po', fwd=True, rob=64, lsq=16)),
+    ('rs16', cfg(rs=16)),                                               # D2 (not measured alone)
+    ('lsq16', cfg(lsq=16)),
+    ('rob64', cfg(rob=64)),
+    ('sb8', cfg(sb=8)),
+]]
+
 CONFIGS_O4 = [  # name, knobs: two-wide with the pair rules (O4.0)
     ('ooo rs4', dict(rs=4)),
     ('commit2 rob8 rs4', dict(w=2, rs=4, dispatch1=True, slot2=True, fpw1=True)),
@@ -1040,20 +1075,21 @@ def main():
     ap.add_argument('--kernels', default=' '.join(KERNELS))
     ap.add_argument('--db', type=int, default=2, help='cycles from a drain beat to its response (2: the D$ passes a store through)')
     ap.add_argument('--stats', action='store_true', help='(O5.0) also print the fit\'s memory statistics per kernel')
-    ap.add_argument('--set', default='o1', choices=('o1', 'o4', 'ox', 'o8', 'o5'),
+    ap.add_argument('--set', default='o1', choices=('o1', 'o4', 'ox', 'o8', 'o5', 'o7'),
                     help='o1: the O1.0 configurations; o4: two-wide with the pair rules; ox: the complete-OOO milestones; '
                          'o8: the frontend steps (with --fit o3)')
-    ap.add_argument('--fit', default='o1', choices=('o1', 'o4', 'o3', 'o8'),
+    ap.add_argument('--fit', default='o1', choices=('o1', 'o4', 'o3', 'o8', 'o7'),
                     help='o1: fit one-wide traces with the station off (O1.0, O4.0); o4: fit traces of the core as built '
                          'after O4 (two-wide, the station on, issue cycles traced: OX.0); o3: ... after O3 (recovery at '
-                         'execute, XR_EARLY)')
+                         'execute, XR_EARLY); o8: ... after O8 (O5.0); o7: ... with the D$ and the big window (O7b)')
     a = ap.parse_args()
-    configs = {'o1': CONFIGS, 'o4': CONFIGS_O4, 'ox': CONFIGS_OX, 'o8': CONFIGS_O8, 'o5': CONFIGS_O5}[a.set]
+    configs = {'o1': CONFIGS, 'o4': CONFIGS_O4, 'ox': CONFIGS_OX, 'o8': CONFIGS_O8, 'o5': CONFIGS_O5,
+               'o7': CONFIGS_O7}[a.set]
     sfx = '_s' if a.mode == 's' else ''
     base = load_csv(a.base or os.path.join(os.path.dirname(os.path.abspath(__file__)), 'baseline_pipe%s.csv' % sfx))
-    fitp = dict({'o4': BASE_O4, 'o3': BASE_O3, 'o8': BASE_O8}.get(a.fit, BASE))
+    fitp = dict({'o4': BASE_O4, 'o3': BASE_O3, 'o8': BASE_O8, 'o7': BASE_O7}.get(a.fit, BASE))
     fitp['db'] = a.db
-    valid = {'o4': VALID_O4, 'o3': [], 'o8': VALID_O8}.get(a.fit, VALID)
+    valid = {'o4': VALID_O4, 'o3': [], 'o8': VALID_O8, 'o7': VALID_O7}.get(a.fit, VALID)
     vals = {}
     if a.validate:
         for lab, _ in valid:
