@@ -508,6 +508,32 @@ cycles away), each milestone on top of O3:
   8-entry queue measured -14.2 / -16.9 % on top of O8, and the rest of O5/6 was worth 0.0 at ROB 8 (see O5a). O7 measured -2.6 / -3.8 % on top of all
   of it (see "The big window").
 
+## Recovery at execute (O3, branch `OOO`)
+
+A mispredicted branch recovers when it writes back instead of when it retires (`QV_PIPE_EXEC_REDIRECT`), and fetch
+restarts in that very cycle, straight from the branch unit (`QV_PIPE_XR_EARLY`); the kill of everything younger is the
+next cycle. Both default to 0 until O3 closes (O3i); with them at 0 the six CSVs are the committed ones byte for
+byte. Cycles against O4:
+
+| kernel | M SoC | S SoC | M flat SRAM | S flat SRAM |
+|---|---|---|---|---|
+| memcpy | 760 -> 739 (-2.8 %) | 770 -> 749 (-2.7 %) | -0.1 % | -0.6 % |
+| crc32 | 6955 -> 6826 (-1.9 %) | 8100 -> 7971 (-1.6 %) | -1.9 % | -1.6 % |
+| qsort | 6172 -> 5609 (-9.1 %) | 6514 -> 5857 (-10.1 %) | -5.8 % | -6.9 % |
+| matmul | 4293 -> 4199 (-2.2 %) | 4033 -> 3809 (-5.6 %) | -0.2 % | -4.0 % |
+| sieve | 6053 -> 6029 (-0.4 %) | 4696 -> 4672 (-0.5 %) | -0.2 % | -0.2 % |
+| listchase | 2323 -> 2318 (-0.2 %) | 2834 -> 2828 (-0.2 %) | -0.0 % | -0.0 % |
+| mixedint | 4654 -> 4353 (-6.5 %) | 4691 -> 4390 (-6.4 %) | -0.9 % | -0.0 % |
+| trap | 9834 -> 9833 (-0.0 %) | 10446 -> 10445 (-0.0 %) | -0.0 % | -0.0 % |
+| fmatmul | 4134 -> 3799 (-8.1 %) | 4277 -> 3922 (-8.3 %) | -1.4 % | -5.1 % |
+| fpmix | 4122 -> 4113 (-0.2 %) | 4131 -> 4122 (-0.2 %) | -0.3 % | -0.3 % |
+| geomean | -3.2 % | -3.6 % | -1.1 % | -1.9 % |
+
+instret is unchanged on every row. The recovery at execute alone (the restart registered, a cycle later) was -1.8 %
+(M, SoC); the early restart adds 1.4 points (M) and 1.3 (S), what the OX.0 model said (rule D7). What it saves is the
+wait of a mispredicted branch behind older work, so the gain is on the kernels that mispredict (`qsort`, `fmatmul`,
+`mixedint`); `trap`, `listchase` and `fpmix` hardly do.
+
 ## The D$ inside the core and an 8-entry queue (O5a, branch `OOO`)
 
 `QV_PIPE_DCACHE=1` (default 0 until O5/6 closes): a 2 KiB direct-mapped, write-through, no-allocate D$ (`qv_dc`, 64

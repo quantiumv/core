@@ -444,6 +444,62 @@ snapshot of `272882c` (two-wide by default):
 - Module proofs and riscv-formal: run separately; their results go to `../riscv-formal/quantiumv_pipe/README.md`
   ("After O4").
 
+### O3: recovery at execute (branch `OOO`)
+
+A mispredicted branch recovers when it writes back, not when it retires: the next cycle (the kill cycle) everything
+younger is killed and fetch restarts at the resolved target; commit then retires the branch without a redirect. Behind
+`QV_PIPE_EXEC_REDIRECT` (default 0 until O3 closes, O3i); with it at 0 the six perf CSVs are byte-identical to O4's.
+- O3a-c (`e6ad670`, `63b6ce0`): the kill network. The ROB marks every tag younger than the branch (`o_kill_vec`, in the
+  ROB's own pointer width) and rolls its tail back to the entry after it; the ALU and branch units, the divider, the
+  FPU's pipeline and its divide/square-root unit, the station, the load/store queue and the LSU drop what they hold for
+  a killed tag in the kill cycle (an early load on the bus drains, writing nothing back; nothing killed starts). The next
+  allocations reuse the killed tags, so nothing may carry one past the kill cycle. `e6ad670` first fixed the LSU's
+  distance to the head, which was taken in the tag's width and so wrong for a ROB smaller than 8 (the formal models).
+- O3d (`1d00d11`): the producer tables are rebuilt from the surviving ROB entries, not checkpointed: each register's
+  producer is the youngest survivor that writes it (`late` for a CSR op), from this cycle's new head through the
+  branch. Exactly the state the claims and the tag-matched clears keep, with no limit on branches in flight.
+- O3e (`319077d`): the speculative return-address stack is circular (an index, a count and the entries); each
+  instruction carries the stack as it left it (`ras_snap_t`) to the ROB, and a recovery restores the index, the count
+  and the top entry (`QV_PIPE_RAS_REPAIR` 2; 1 in the formal models). With no restore it is the old shift stack.
+- O3f (`405d4f2`): the redirect. `x_q` catches a mispredicting writeback of the branch unit; in the next cycle the
+  ROB, issue (the rebuild), the queue and the RAS recover, align, the IQ and decode are flushed, nothing is dispatched,
+  and fetch takes the target (a redirect from commit wins over it, and it over the aligner's). A commit redirect in
+  either cycle wins: it flushes the branch too. An older branch that writes back in a kill cycle survives it and is
+  caught for the next. Program Buffer runs keep the commit redirect.
+- The early restart (`e16cc89`, `QV_PIPE_XR_EARLY`, default 0 until O3i): fetch and the frontend restart in the mispredict's
+  writeback cycle, straight from the branch unit, while the kill stays in the next cycle; the model put it at 1.4
+  points and it measured -1.4 % (M) and -1.3 % (S) on the SoC.
+- Stimulus: `qvgen --xr` (`128e667`): forward branches that are always taken but resolve late (a divide by x0, or a
+  load of the branch's own encoding), so the static prediction mispredicts and the block they skip runs only
+  speculatively: stores, loads, AMOs and LR/SC to the sandbox, divides, FP divides, FENCE and FENCE.I, CSR reads,
+  ECALL / EBREAK / illegal words, a device read, a nested branch that recovers first; the join reads what the block
+  wrote. Everything in a block is harmless if it ever runs for real.
+- Results: `../perf/README.md` ("Recovery at execute").
+
+Unit tests: `qv_rob_tb` (kills at every pointer position, a kill as the branch retires, flush beats kill, the
+recovered mark), `qv_exu_bru_tb` / `qv_exu_div_tb` / `qv_exu_fpu_tb` (kills in every unit and stage), `qv_rs_tb`
+(random suffix kills), `qv_lsq_tb` (rollback, a reused tag), `qv_lsu_early_tb` (a waiting op dropped, an early load
+drained, a kill in the would-be start cycle and in the response cycle), `qv_lsu_sb_tb` with a ROB of 4 (the distance
+fix), `qv_rebuild_tb` (issue and the ROB through random kills, the tables against their definition after every
+edge, ROB 8/4/2), `qv_ras_tb` at REPAIR 1 and 2 (the old checks unchanged, the snapshots, restores), `qv_commit_tb` /
+`qv_commit_pair_tb` (a recovered mispredict retires without a redirect, and still alone).
+Proofs: `kill_props` (issue's tables and the ROB's kill together, at ROB 2, 4 and 8), `ras_props` (the circular stack against
+the shift stack it replaced, proved), and the kills added to `rs_props`, `rs2_props`, `lsu_props`, `lsq_props` and
+`fpu_props`; their 17 known-bad versions are caught (`ed51c45`). The queue's kill BMC reached depth 13 of 14 (its last
+step takes hours); the others prove. The core's `RISCV_FORMAL` block asserts the kill cycle's rules (nothing killed is requested,
+offered or written back, nothing is dispatched, the branch is a live recovered mispredict whose target fetch takes) and
+that what the LSU and the divider hold is always a live entry.
+Mutation: 18 unit specs `o3*_unit_*.json`, 55 killed and 1 equivalent; `o3_lockstep.json` 14 of 15 killed
+and one equivalent (the early restart flushes decode a cycle before the kill, so nothing can dispatch in it).
+Gate, with both knobs on (on a snapshot of `ff03e52`): perf with the knobs off byte-identical; regression 190/190, and
+190/190 with the O4 knobs at 1; RVFI diff 150/150; lockstep, the FP Sv39 profile with `--pair --ooo --xr`, 2000/2000
+over the four configurations, the late modes 1200/1200, interrupts off and the M-mode body 300 x 4 each, the O4 knobs
+at 1, the registered restart and the knobs off 100 x 4 each, the corpora x 4 (the 426 ACT ELFs, ACT + firmware + 100
+random, smc, irq, dbg), REF vs REF 50 x 4 on the same stimulus. The M-mode stage found a generator bug, not a core bug: an ALU op placed before the always-taken branch could
+write the branch's own register, so the wrong path ran for real and its device read diverged (`e676840`).
+riscv-formal: the models with recovery at execute and the early restart (`pipe`, the RAM-window, two-wide and
+station-off models) run separately; their results go to `../riscv-formal/quantiumv_pipe/README.md` ("O3").
+
 ### O5a: the D$ inside the core (branch `OOO`)
 
 `QV_PIPE_DCACHE=1` (default 0 until O5/6 closes) puts a D$ beside the LSU, and `QV_PIPE_LSQ_DEPTH=8` grows the queue;
