@@ -547,6 +547,105 @@ from the buffer, and a hit held the D$ two cycles. Geometric mean against the sh
   this window, and go on to O7. Out-of-order memory issue and speculative loads are modelled again at the big window
   (see "The big window").
 
+## The big window (O7, branch `OOO`)
+
+The ROB's package depth and tag width come from `QV_ROB_MAX` (8 until O7c), the ROB itself from `QV_PIPE_ROB_DEPTH`
+(default: the package depth), the station from `QV_PIPE_RS_DEPTH` and the queue from `QV_PIPE_LSQ_DEPTH`. Only the
+sizes change: the station is still one collapsing queue, a recovery still rebuilds the producer tables from the
+surviving ROB entries. With the defaults the six CSVs are byte for byte the committed ones. Seven points on the
+shipping core with the D$ (O3 + O8 + O5a: ROB 8, RS 4, LSQ 8), geomean cycles against it:
+
+| window | M SoC | S SoC | M flat SRAM | S flat SRAM |
+|---|---|---|---|---|
+| ROB 16, RS 8, LSQ 8 | -2.2 % | -3.4 % | -1.6 % | -2.6 % |
+| ROB 32, RS 4, LSQ 16 | -2.3 % | -3.3 % | -1.2 % | -2.0 % |
+| **ROB 32, RS 8, LSQ 8** | **-2.6 %** | **-3.8 %** | **-1.7 %** | **-2.8 %** |
+| ROB 32, RS 8, LSQ 16 | -3.0 % | -4.1 % | -1.7 % | -2.8 % |
+| ROB 64, RS 8, LSQ 16 | -3.1 % | -4.3 % | -1.7 % | -2.8 % |
+| ROB 64, RS 16, LSQ 32 | -3.5 % | -4.6 % | -1.8 % | -2.9 % |
+
+Rule D2 (the smallest power of two where doubling gains under 0.5 points on the geomean and under 2 on every kernel,
+SoC, M and S):
+- ROB 32: 16 to 32 gains 0.4 points (M and S) but 2.7 / 2.6 on `fmatmul`; 32 to 64 gains 0.1 / 0.2, at most 1.2
+  (`memcpy`).
+- RS 8: 4 to 8 gains 0.7 / 0.8 (`fpmix` 3.4 and 3.6, `crc32` 2.3 and 4.3). 8 to 16 was measured only together with
+  the queue from 16 to 32, at ROB 64: 0.4 / 0.3, and 2.6 / 2.5 on `memcpy`, which never holds a station entry (the
+  queue's share); the model gives the station's own 0.1 / 0.0 (`crc32` 0.5).
+- LSQ 8: 8 to 16 gains 0.4 / 0.3, at most 1.8 (`memcpy`).
+
+What ships at O7c, against O5a:
+
+| kernel | M SoC | S SoC | M flat SRAM | S flat SRAM |
+|---|---|---|---|---|
+| memcpy | 499 -> 484 (-3.0 %) | 508 -> 486 (-4.3 %) | +0.0 % | +0.0 % |
+| crc32 | 5458 -> 5334 (-2.3 %) | 5589 -> 5348 (-4.3 %) | -2.3 % | -4.4 % |
+| qsort | 4981 -> 4895 (-1.7 %) | 5221 -> 5083 (-2.6 %) | -1.0 % | -1.5 % |
+| matmul | 2699 -> 2657 (-1.6 %) | 2714 -> 2666 (-1.8 %) | +0.0 % | -0.1 % |
+| sieve | 4549 -> 4547 (-0.0 %) | 3176 -> 3173 (-0.1 %) | +0.0 % | +0.0 % |
+| listchase | 1754 -> 1747 (-0.4 %) | 1807 -> 1805 (-0.1 %) | +0.0 % | -0.2 % |
+| mixedint | 2746 -> 2746 (+0.0 %) | 2760 -> 2747 (-0.5 %) | +0.0 % | -0.1 % |
+| trap | 8036 -> 8036 (+0.0 %) | 8644 -> 8644 (+0.0 %) | +0.0 % | +0.0 % |
+| fmatmul | 2767 -> 2419 (-12.6 %) | 3025 -> 2462 (-18.6 %) | -9.8 % | -16.4 % |
+| fpmix | 4103 -> 3937 (-4.0 %) | 4111 -> 3938 (-4.2 %) | -4.0 % | -4.1 % |
+| geomean | -2.6 % | -3.8 % | -1.7 % | -2.8 % |
+
+instret is unchanged on every row, and no kernel is slower in any configuration. The model (`ilp.py` on O5.0's
+traces with the window knobs, on top of the D$) said -3.3 % (M) and -4.0 % (S) for this point (D8 holds). Fitted the
+other way, on traces of this point (`ilp.py --fit o7`), it reproduces the five other points with a ROB of 16 or more
+within about 0.1 points of geomean in both modes, once the error of its own frontend model is set aside (`fe8` replays the
+traces 1.4 / 1.1 % fast, `mixedint` by 6.8 points); at ROB 8 it misses `crc32` (+52 % against +2.3 %).
+
+How full the window gets (`_ox.csv`, SoC, M mode; mean and largest occupancy of the ROB and the station, and the share
+of cycles dispatch is held by a full ROB (`is_rob`), a full station (`is_rs`), room for only one of a pair (`rob_one`)
+or a full queue (`is_lsq`)):
+
+| kernel | ROB 8, RS 4: ROB | RS | is_rob | rob_one | ROB 32, RS 8, LSQ 8: ROB | RS | is_rob | is_lsq |
+|---|---|---|---|---|---|---|---|---|
+| memcpy | 4.2 / 8 | 0.0 / 1 | 14.2 % | 0.0 % | 8.1 / 21 | 0.0 / 1 | 0.0 % | 11.2 % |
+| crc32 | 5.8 / 7 | 2.2 / 4 | 0.0 % | 4.7 % | 11.1 / 13 | 6.4 / 8 | 0.0 % | 0.0 % |
+| qsort | 3.0 / 8 | 0.3 / 3 | 1.6 % | 5.8 % | 3.4 / 23 | 0.4 / 4 | 0.0 % | 0.2 % |
+| matmul | 5.1 / 8 | 0.9 / 2 | 3.3 % | 1.0 % | 6.4 / 32 | 1.1 / 8 | 0.3 % | 0.8 % |
+| sieve | 3.0 / 8 | 0.3 / 2 | 0.1 % | 0.0 % | 3.0 / 15 | 0.3 / 2 | 0.0 % | 0.0 % |
+| listchase | 4.2 / 8 | 0.2 / 1 | 12.8 % | 0.6 % | 6.8 / 20 | 0.7 / 4 | 0.0 % | 12.2 % |
+| mixedint | 4.0 / 8 | 0.2 / 2 | 0.4 % | 2.2 % | 4.0 / 10 | 0.2 / 2 | 0.0 % | 0.0 % |
+| trap | 3.3 / 8 | 0.4 / 4 | 0.2 % | 5.1 % | 3.3 / 25 | 0.4 / 4 | 0.0 % | 0.0 % |
+| fmatmul | 6.2 / 8 | 0.1 / 2 | 9.8 % | 21.3 % | 23.4 / 32 | 2.3 / 5 | 0.7 % | 8.9 % |
+| fpmix | 5.6 / 8 | 3.7 / 4 | 3.0 % | 3.9 % | 14.1 / 32 | 7.9 / 8 | 1.4 % | 0.0 % |
+
+- `fmatmul` is the kernel the window is for: at ROB 8 dispatch waits on a full ROB in 10 % of its cycles and the ROB
+  has room for only one of a pair in 21 % more; at 32 it holds 23 entries on average.
+- `memcpy` and `listchase` trade a full ROB for a full queue: at LSQ 8 dispatch waits on the queue in 11-12 % of their
+  cycles, and a 16-entry queue removes that for 1.8 and 0.4 points (under D2's bar).
+- `fpmix` keeps a full station in 89 % of its cycles at RS 4 and at RS 8: its divides wait for the one FP
+  divide/square-root unit and the entries behind them are what the extra four buy (4 points). That is the only kernel
+  where `is_rs` reaches 2 %, so the station stays one unified queue (O7 Decision 1).
+- `sieve`, `mixedint` and `trap` hold 3 to 4 entries on average at either size: the window is not what limits them.
+
+### O5/6 at the big window (O7 Decision 5)
+
+O5.0 measured the rest of O5/6 at ROB 8, where nothing but the queue's size paid. On the traces of ROB 32, RS 8, LSQ 8
+(`ilp.py --fit o7 --set o7`, each configuration against the replayed frontend, `fe8`), points of geomean, M / S, and
+the kernel that gains most:
+
+| configuration | M | S | most |
+|---|---|---|---|
+| out-of-order memory issue, loads in program order (O6a) | 0.2 | 0.2 | `fmatmul` 2.3 / 2.2 |
+| ... loads passing loads | 0.2 | 0.2 | `fmatmul` 2.3 / 2.2 |
+| forwarding from the queue and the buffer | 0.0 | 0.0 | `qsort` 0.2 / 0.3 |
+| O6a + forwarding + a store's address before its data (O6a's split) | 1.0 | 1.0 | `fmatmul` 9.7 / 9.3 |
+| O6a + forwarding + speculative loads (O6b, any predictor or none) | 1.0 | 1.0 | `fmatmul` 9.7 / 9.3 |
+| ... with the queue at 16 | 1.4 | 1.4 | `fmatmul` 11.2 / 11.3 |
+| critical word first | 0.5 | 0.5 | `memcpy` 2.1 / 2.1 |
+| misses that do not block (2 or 4) | 0.3 | 0.3 | `listchase` 1.3 / 1.3 |
+| O6a + a second D$ port and engine | 0.8 | 1.0 | `fmatmul` 4.9 / 4.5 |
+
+- M1 fails (out-of-order issue 0.2 points, at most 2.3 on a kernel, against 1 and 3), and so does M3 (speculative
+  loads 0.7 / 0.7 over O6a with forwarding, against 1); M2, M4, M5 and M6 fail as at ROB 8. O7 Decision 5 asks again
+  only if one of M1 and M3 passes, so O6 stays unbuilt, as recorded after O5.0.
+- What the big window changes is `fmatmul`: in the model its loads wait behind older stores that wait for their data,
+  and a store's address known before its data (M3a: within 0.5 points of speculation, here the same) lets them go;
+  together with out-of-order issue that is 9-10 points there and 1 point on the geomean.
+
 ## CPI stack
 
 `perf_stack.sv` (instantiated by `perf_tb.sv`, not part of the reference build) splits every cycle of a
