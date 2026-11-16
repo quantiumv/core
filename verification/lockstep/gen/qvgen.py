@@ -485,7 +485,11 @@ def emit_mem_pair(p: Program, recent: list[int]):
         p.e(f"    sb      x{other()}, 0(x{m})")
         p.li(m, 0x0400F018)
         rd = other()
-        p.e(f"    lbu     x{rd}, 0(x{m})")
+        if p.args.no_dev_read:
+            # the value the LSR always reads, in an instruction of the same size: the program is otherwise the same
+            p.e(f"    addi    x{rd}, x0, 0x60")
+        else:
+            p.e(f"    lbu     x{rd}, 0(x{m})")
         recent.append(rd)
     mem_op(False)
     del recent[:-8]
@@ -3095,6 +3099,10 @@ def main():
                          "aligner (O8b)")
     ap.add_argument("--no-div", action="store_true", dest="no_div",
                     help="keep M to the multiplies (for cores without a divider yet)")
+    ap.add_argument("--no-dev-read", action="store_true", dest="no_dev_read",
+                    help="no device read that runs for real (--mem-dense's UART LSR read becomes the value it reads): "
+                         "for a side whose data path caches devices (lockstep's cache configuration refills the "
+                         "device's line, so its MMIO-read log can never match the other side's)")
     ap.add_argument("--len", type=int, default=200)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--dep-bias", type=float, default=0.3, dest="dep_bias")

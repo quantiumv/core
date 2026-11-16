@@ -345,6 +345,9 @@ build_fw_entries() {
 RANDOM_PROFILE="--isa imac --priv msu --sv39 --smc"
 RANDOM_PROFILE="${QV_RANDOM_PROFILE:-$RANDOM_PROFILE}"   # experiments: override the profile
 [ "$DBG_MODE" != "0" ] && RANDOM_PROFILE="$RANDOM_PROFILE --dbg"   # x22/x23 are the debug script's
+# the cache configuration takes side B's data accesses, devices included, through cache_complex's D$: a device read
+# refills the device's whole line, so the two sides' MMIO-read logs can never match; its programs read no device
+[ "$MEMCFG_B" == "cache" ] && RANDOM_PROFILE="$RANDOM_PROFILE --no-dev-read"
 
 build_random_entries() {
     # programs are regenerated whenever the generator or the profile changes
