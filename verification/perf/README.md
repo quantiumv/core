@@ -468,6 +468,46 @@ share one bus, loses 2.6 % on S `memcpy` (not gated: the SoC decides, as for the
   1").
 - The Sv39 loop of `core_sv39_cpi_tb`: 3198 cycles in M mode and 3262 in S mode under Sv39 (O1: 3304 and 3311).
 
+## What each milestone of the complete core would buy (OX.0, branch `OOO`)
+
+Measured on the two-wide core before O3 was built, and again on the core with O3 (the table below), to order O8,
+O5/6 and O7 (O3 came first by plan: every later structure kills speculative work with its network):
+- The monitor (`5dced9c`, `8b14608`) traces both commit channels and both dispatch slots (`+ILPTRACE`: issue cycle,
+  slot, channel, the cycle the first dword reached the fetch buffer, a D$ refill), keeps a slot stack (two commit
+  slots a cycle in exclusive classes) and the milestones' upper bounds (branches in flight, how long a resolved
+  mispredict waited for commit, D$ and I$ misses) in `_ox.csv`; the six CSVs keep their schema. `run_perf.sh --memlat
+  L` (`05fd38f`) swaps in a memory with latency on the cache configuration (at L=1 it reproduces the cache rows
+  exactly). `ilp.py --fit o4 --set ox` (`e9cceac`, `7a857e7`, `fd73467`) fits the model on traces of the two-wide core
+  (a unit's latency from its issue, the pair rules in the fit too), and `--fit o3 --set o8` (`f3dc834`) on traces of
+  the core with O3, with the frontend modelled per branch from `brpred.py`'s replay of the BTB, the aligner and the
+  predictors (`99ab21c`).
+- Validation, runs of the two-wide core with one knob changed (one-wide, the station off, the store buffer at 2,
+  streaming fetch off): the model is within 1.3 points of the measured geomean in every row and mode; the worst
+  kernels are one-wide `crc32` (2.8 / 3.6 points), `qsort` with streaming off (5.2 / 7.5) and S `memcpy` with a
+  2-entry buffer (6.7: an early load meeting a drain beat, whose early start the model takes from the trace).
+
+Rule D1 (geomean cycle change on the SoC, mean of M and S, at L=1, the memory as built; and at L=20, a memory 20
+cycles away), each milestone on top of O3:
+
+| milestone | L=1 M | L=1 S | L=20 M | L=20 S |
+|---|---|---|---|---|
+| O8: the window aligner, the BTB's counter, gshare | -11.4 % | -10.8 % | -3.3 % | -4.1 % |
+| ... and 16-byte fetch | -14.5 % | -10.7 % | -3.3 % | -4.0 % |
+| O5/6: out-of-order memory with a non-blocking D$ (as modelled then) | -7.4 % | -8.7 % | -7.3 % | -8.1 % |
+| O7: ROB 16, RS 8 | -1.4 % | -2.3 % | -3.1 % | -3.1 % |
+| no mispredicts at all (the predictors' bound) | -19.5 % | -15.9 % | -4.5 % | -5.5 % |
+
+- O8 first, then O5/6, then O7. At L=20 O5/6 leads O8 by 4.0 points, under the 5 at which the platform question would
+  have been asked. O7 last: on the core before O3 the model gave it 1.8 points alone and 9.2 on top of the others,
+  and a milestone worth under half its share on top waits.
+- D5: gshare (12 bits of history, 4,096 counters). A TAGE-lite cut mispredicts by about 15 % more than gshare, under
+  the 25 % that would have chosen it. D7: restarting fetch in the mispredict's writeback cycle is worth 1.4 points,
+  so it ships (`QV_PIPE_XR_EARLY`).
+- Measured afterwards (D8): O3 -3.2 / -3.6 % against -3.2 / -3.8; O8 -11.2 / -10.4 % against -11.4 / -10.8. O5/6's
+  figure was mostly the model's two engines sharing one blocking D$, which O5.0 fixed: the D$ inside the core with the
+  8-entry queue measured -14.2 / -16.9 % on top of O8, and the rest of O5/6 was worth 0.0 at ROB 8 (see O5a). O7 measured -2.6 / -3.8 % on top of all
+  of it (see "The big window").
+
 ## The D$ inside the core and an 8-entry queue (O5a, branch `OOO`)
 
 `QV_PIPE_DCACHE=1` (default 0 until O5/6 closes): a 2 KiB direct-mapped, write-through, no-allocate D$ (`qv_dc`, 64
