@@ -1,0 +1,11 @@
+kernel,config,cycles,instret,cpi
+memcpy,cache,442,659,0.671
+crc32,cache,5429,8841,0.614
+qsort,cache,4896,4611,1.062
+matmul,cache,2629,4285,0.614
+sieve,cache,4541,5895,0.770
+listchase,cache,1551,2564,0.605
+mixedint,cache,2742,4393,0.624
+trap,cache,8417,5605,1.502
+fmatmul,cache,2564,3773,0.680
+fpmix,cache,4056,402,10.090

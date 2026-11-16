@@ -468,6 +468,85 @@ share one bus, loses 2.6 % on S `memcpy` (not gated: the SoC decides, as for the
   1").
 - The Sv39 loop of `core_sv39_cpi_tb`: 3198 cycles in M mode and 3262 in S mode under Sv39 (O1: 3304 and 3311).
 
+## The D$ inside the core and an 8-entry queue (O5a, branch `OOO`)
+
+`QV_PIPE_DCACHE=1` (default 0 until O5/6 closes): a 2 KiB direct-mapped, write-through, no-allocate D$ (`qv_dc`, 64
+lines of 32 bytes) beside the LSU instead of on the bus. A plain load from RAM that could start its access (at the
+head, or early: translated, aligned, allowed, no store-buffer match) is answered in that very cycle when the D$ holds
+its dword, and the LSU takes the next op in the same cycle, so the engine does one load a cycle; a miss refills its line
+over the memory port (4 beats, the other masters wait) and the load completes with the refill's dword. The store
+buffer's beats update a held line in their response cycle; the LSU's own writes that do not go through the buffer (an
+SC, an AMO's write, a Program Buffer store) and the Debug Module's writes (a snoop from `soc.sv`) empty their line. In
+the SoC the D$ on the bus (`cache_complex`'s `dcache0`) is then left out (`DC_EN 0`). With the D$ inside, the queue's
+early lookup of the next op's translation is handed to the engine in the very cycle the engine takes it (`XL_FWD`):
+without it a translated load paid its own lookup cycle in S mode. The queue grows to 8 (`QV_PIPE_LSQ_DEPTH=8`): it is
+what `trap` gains from out-of-order memory at this window (4 points). With the knobs off the six CSVs are byte-for-byte
+the committed ones. Cycles against the shipping core (O3 + O8), the D$ and the 8-entry queue on:
+
+| kernel | M SoC | S SoC | M flat SRAM | S flat SRAM |
+|---|---|---|---|---|
+| memcpy | 727 -> 499 (-31.4 %) | 739 -> 508 (-31.3 %) | -17.3 % | -22.3 % |
+| crc32 | 5465 -> 5458 (-0.1 %) | 5716 -> 5589 (-2.2 %) | -1.7 % | -3.8 % |
+| qsort | 5263 -> 4981 (-5.4 %) | 5625 -> 5221 (-7.2 %) | -14.9 % | -15.6 % |
+| matmul | 2967 -> 2699 (-9.0 %) | 3228 -> 2714 (-15.9 %) | -42.4 % | -39.1 % |
+| sieve | 4563 -> 4549 (-0.3 %) | 3195 -> 3176 (-0.6 %) | -3.1 % | -6.9 % |
+| listchase | 2318 -> 1754 (-24.3 %) | 2828 -> 1807 (-36.1 %) | -56.3 % | -49.4 % |
+| mixedint | 3764 -> 2746 (-27.0 %) | 3982 -> 2760 (-30.7 %) | -27.0 % | -25.0 % |
+| trap | 9833 -> 8036 (-18.3 %) | 10441 -> 8644 (-17.2 %) | -18.1 % | -17.0 % |
+| fmatmul | 3402 -> 2767 (-18.7 %) | 3666 -> 3025 (-17.5 %) | -37.5 % | -32.2 % |
+| fpmix | 4114 -> 4103 (-0.3 %) | 4122 -> 4111 (-0.3 %) | +1.0 % | +1.3 % |
+| geomean | -14.2 % | -16.9 % | -24.1 % | -22.6 % |
+
+instret is unchanged on every row. The O5.0 model said -14.7 % (M) and -16.9 % (S) on the SoC (D8 holds). The flat
+SRAM's fpmix is 40 and 51 cycles slower, all of them the head waiting on the FP unit (`blk_fpu` 3719 -> 3760): with
+its loads answered sooner, pipelined FP ops reach the FP unit's one writeback port in the cycles a finished divide wants
+it, and the pipeline wins that port. The flat SRAM is reported, not gated.
+
+### What the rest of O5/6 would buy (O5.0)
+
+`ilp.py --fit o8 --set o5` on traces of the shipping core, the frontend modelled (`fe8`: the window aligner replays
+the traces within 0.1 %), validated against runs of the core with one memory knob changed and against `run_perf.sh
+--oracle dc` (the D$ arm with a D$ that never misses). In M mode every validation row is within 1 point of its
+measurement on the geomean (HANDOFF 0 +9.5 / +9.7 %, LSQ 2 +1.8 / +1.2 %, EARLY_ST 0 +0.4 / +0.9 %, SB 8 -0.1 /
++0.0 %, the oracle -18.1 / -17.1 %); the worst kernels are `matmul` at LSQ 2 (5 points) and `mixedint` in the oracle
+(4.8). In S mode the rows miss by 3 to 4 points (HANDOFF 0 +13.8 / +9.8 %, EARLY_ST 0 +7.5 / +4.3 %, LSQ 2 +1.4 /
++5.1 %: `sieve` and `listchase`, whose translated accesses the model times from the trace); the oracle is within 0.5
+(-20.5 / -20.0 %) when it runs with the D$ knob on, so that the queue hands its lookup to the engine as the D$ that
+ships does (`XL_FWD`; without it every translated hit paid a lookup cycle and the oracle measured -13.3 %). The D$ that
+ships measures what the model said (-16.9 % against -16.9 %). The decisions below rest on M mode and on those
+measurements. The oracle's cycles are `oracle_dc_pipe[_s].csv`. Three of the model's earlier assumptions were wrong and are fixed: two engines could both use one
+blocking D$ (the OX.0 figure for O5/6, -7.4 %, came mostly from `listchase` doing that), forwarding never took a store
+from the buffer, and a hit held the D$ two cycles. Geometric mean against the shipping core, SoC, M / S:
+
+| configuration | L=1 M | L=1 S | L=20 M | L=20 S |
+|---|---|---|---|---|
+| the D$ inside the core (`dc`) | -14.3 % | -16.6 % | -10.1 % | -11.9 % |
+| ... never missing (the oracle's bound) | -18.1 % | -20.5 % | -30.6 % | -32.3 % |
+| ... and the queue at 8 (what ships) | -14.7 % | -16.9 % | -10.1 % | -11.9 % |
+| a pipelined engine on the bus instead | -7.5 % | -8.1 % | -1.6 % | -2.8 % |
+| `dc` + forwarding from the queue and the buffer | -14.3 % | -16.6 % | -12.7 % | -14.7 % |
+| `dc` + critical word first | -14.9 % | -17.2 % | -11.5 % | -13.2 % |
+| `dc` + misses that do not block (4 MSHRs) | -14.4 % | -16.8 % | -10.2 % | -12.1 % |
+| `dc` + out-of-order memory issue (O6a, queue 8) | -14.7 % | -16.9 % | -10.1 % | -11.9 % |
+| ... + forwarding and speculative loads (O6b) | -14.7 % | -16.9 % | -12.7 % | -14.7 % |
+| O6a + forwarding + a second D$ port and engine | -14.8 % | -18.0 % | -13.2 % | -15.7 % |
+| everything (O6a + O6b, forwarding, CWF, 2 MSHRs) | -16.1 % | -18.4 % | -15.9 % | -17.4 % |
+
+- The D$ inside the core is the lever (rule D4: well past 2 points); it ships, with the queue at 8.
+- Out-of-order memory issue (loads in program order among themselves, past stores) buys 0.0 over the in-order engine
+  with an 8-entry queue on every kernel: the whole gain of `dc ooo` over `dc` is the queue's size (`trap`, 4 points).
+  Loads passing loads, speculative loads, forwarding and a memory-dependence predictor buy 0.0 as well at L=1 (rules
+  M1, M2, M3 fail).
+- Critical word first (0.6 points) and misses that do not block (0.1-0.2) fail M4 and M5 at L=1; at L=20 forwarding
+  is worth 2.6-2.8 points and critical word first with two MSHRs about 3, which the platform (a 1-cycle SRAM behind
+  the SoC) does not have.
+- A second D$ port: 0.1 (M) and 1.1 (S) points (M6: under 2).
+- Sizes (D2): the queue at 8 (`trap` gains 4 points from 4 to 8), the D$ at 2 KiB (1 KiB loses 4 points on
+  `listchase`, 4 KiB gains nothing: the kernels' misses are all compulsory).
+- The user's decision (2026-11-15): ship the D$ and the 8-entry queue, record the rest as measured not worth it at
+  this window, and go on to O7. Out-of-order memory issue and speculative loads are modelled again at the big window
+  (see "The big window").
+
 ## CPI stack
 
 `perf_stack.sv` (instantiated by `perf_tb.sv`, not part of the reference build) splits every cycle of a

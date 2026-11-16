@@ -444,6 +444,64 @@ snapshot of `272882c` (two-wide by default):
 - Module proofs and riscv-formal: run separately; their results go to `../riscv-formal/quantiumv_pipe/README.md`
   ("After O4").
 
+### O5a: the D$ inside the core (branch `OOO`)
+
+`QV_PIPE_DCACHE=1` (default 0 until O5/6 closes) puts a D$ beside the LSU, and `QV_PIPE_LSQ_DEPTH=8` grows the queue;
+with both at their defaults the six perf CSVs are byte-identical to O4's. The rest of O5/6 (out-of-order memory issue,
+speculative loads, forwarding, critical word first, misses that do not block, a second port) was measured not worth it
+at this window and is not built (`../perf/README.md`, "The D$ inside the core").
+- O5a-0 (`527fbda`): `qv_dc`, direct-mapped, write-through, no allocate (2 KiB: 64 lines of 32 bytes; 2 x 2 under
+  `QV_FORMAL_SMALL`). A lookup has no handshake (the dword comes back in the cycle its address is presented); a miss
+  refills its line over the memory port in four beats, one at a time, each dropped in its response cycle; the store
+  buffer's beats update a held line in their response cycle; the LSU's own writes that bypass the buffer empty their
+  line; a snoop (a Debug Module write) empties its line and, if it is the line being refilled, keeps the refill from
+  installing it. `cache_complex`'s `DC_EN 0` passes its data port straight to memory.
+- O5a-1 (`9f7eb38`): in `qv_lsu` (`DC_EN`, additive), a plain RAM load that could start its access completes in that
+  very cycle on a hit and the engine takes the next op at once; a miss asks for the refill and completes with its
+  dword. A flush or a kill during a refill waits for it in DRAIN (a refill is never abandoned), and a refill is a RAM
+  read, so an interrupt or a halt may find one in flight. Atomics, device accesses and Program Buffer accesses still
+  go to the bus at the head. The core adds the D$ as a fourth master of the memory port (the LSU, the walker, the
+  store buffer and the refill never drive it together), the walker and the buffer's drain wait for it, and the Debug
+  Module sees the hart halted only once no refill is in flight. In the SoC, `cache_complex`'s own D$ is left out
+  (`DC_EN 0`) and the Debug Module's RAM writes snoop the D$. The queue hands a same-cycle lookup hit to the engine
+  (`XL_FWD`): without it every translated hit in S mode paid a lookup cycle.
+- Tests (`b8fe256`, `044624c`): `qv_dc_tb` against a golden memory (directed cases and 40,000 random cycles at three
+  sizes, slow and erroring memories, snoops racing refills), `cache_complex_tb` with `DC_EN 0`, `qv_lsu_dc_tb`,
+  `core_dc_tb` (load-to-use, a pointer chase over held lines with no bus access, stores draining while loads of their
+  line hit, two lines that share an index, an interrupt and a halt during a refill; the hart never shows as halted
+  while a refill runs), a fifth phase of `soc_sba_running_tb` (Debug Module writes to lines the hart
+  reads); `core_lsq_tb`'s bus-order checks become relations with the D$ on; `qvgen --dc` (two lines of the sandbox
+  2 KiB apart: every dword of a line just missed, evictions, stores to held and to evicted lines, atomics, LR and SC on
+  held lines); the lockstep build audits the D$ against RAM at every halt.
+- Mutation (`a92989a`, `c6733d1`): `o5a_unit_dc` 18/18, `o5a_unit_lsu` 15/15, `o5a_unit_lsq` 3/3; the LSU and queue
+  specs whose lines O5a-1 touched are re-anchored.
+- Proofs (`3258160`): `dc_props` (`qv_dc` against a shadow of one dword: every valid copy equals what the core may see,
+  a fill equals memory at the beat that read it, no install after a snoop or an error, the beat protocol), proved at
+  2 x 2 and checked to a bound at 4 x 4, with 11 known-bad versions; the `pipe-dc` riscv-formal model (the RAM window
+  and the D$ on). Their results: `../riscv-formal/quantiumv_pipe/README.md`.
+
+The gate (2026-11-15 to 2026-11-16), on a snapshot of `3140501` with the shipping knobs (O3, O8) and the D$ and the
+8-entry queue on:
+- Perf: every knob off, the six CSVs byte-identical; with the D$ and the queue, no SoC kernel slower (see the perf
+  README).
+- Regression 206/207 and, with every O4 knob at 1, 207/207; the one is `core_sv39_random_tb` running into its row's
+  1,800 s limit on the loaded machine, and by hand it passes both ways (3,000 iterations, 9,137 checks). Lint clean.
+  The RVFI diff with `--ooo`: 150/150.
+- Lockstep, the FP Sv39 profile with `--pair --ooo --xr --win --dc --mem-dense`, interrupts and the debug script:
+  500 x 4 (499 each: one seed's program did not build), the late modes 300 x 4 (299 each, likewise), interrupts off
+  300 x 4, an M-mode body 300 x 4, every O4 knob at 1 100 x 4, the D$ off on the same stimulus 100 x 4, the corpora x 4
+  (act-fd 426, act + fw + 100 random 306, smc, irq, dbg 200), REF vs REF 50 x 4: all pass. `check_patterns.py`
+  1,431/1,431.
+- What the gate found, none of it in the RTL:
+  - The M-mode body failed 137 of 300 programs on both cache configurations and none on the SRAM ones, and REF vs REF
+    failed the same programs. Without Sv39, `--mem-dense` reads the UART's status register for real, and lockstep's
+    cache configuration takes side B's data accesses, devices included, through `cache_complex`'s D$, which refills
+    the device's whole line: the MMIO-read logs can never match. `qvgen --no-dev-read` (`facb124`, passed by
+    `run_lockstep.sh` on the cache configuration) turns the read into the value it reads; with it the M-mode body
+    passes 300/300 on both.
+  - One program (`random_5270032`, 775,000 retirements and 28,000 interrupts) ran out of its 12 M-cycle budget at delay
+    8 on both memories; it passes at delay 0, and at delay 8 with 40 M cycles on both.
+
 ## Where the core differs from ref_core.sv
 
 Architectural behavior is the same: the lockstep gate compares every retirement, a CSR snapshot, the bus
