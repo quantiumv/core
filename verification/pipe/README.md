@@ -500,6 +500,54 @@ write the branch's own register, so the wrong path ran for real and its device r
 riscv-formal: the models with recovery at execute and the early restart (`pipe`, the RAM-window, two-wide and
 station-off models) run separately; their results go to `../riscv-formal/quantiumv_pipe/README.md` ("O3").
 
+### O8: the frontend (branch `OOO`)
+
+Three knobs, each default 0 until O8 closes; with all three at 0 the six perf CSVs are byte-identical to O4's. No fetch
+target queue: the fetch buffer's depth changes nothing on the kernels (the I$ answers a hit the next cycle and fetch
+already streams). 16-byte fetch (O8d) was not built (`../perf/README.md`, "Global history").
+- O8b (`df88b8a`, `QV_PIPE_ALIGN_WIN`): `qv_align2` aligns over the fetch buffer's head and the entry behind it when
+  that one is its sequential successor (no hint ends the head, no fault on either), so its two slots take any two
+  instructions in those 16 bytes and a 32-bit instruction crossing a dword goes out without a stash cycle. When the
+  next entry cannot be used it still stashes the head's last halfword and pops the head, as before (a walk outside RAM
+  for the next dword waits for the frontend to be empty, so holding the head would deadlock). `qv_fetch` (additive)
+  shows the second entry and pops two; with the window it sends a request from an idle bus in the cycle it issues it
+  (`b51300a`; `62591e1` keeps that from raising `cyc` in reset); `c733123` removes a branch the proof showed dead.
+- O8c (`95b3321`, `QV_PIPE_BTB_CTR`): a 2-bit direction counter per BTB entry; a conditional entry steers fetch only
+  while its counter says taken, and a fall-through counts down instead of removing the entry.
+- O8a (`fe842cd`, `93d4d2e`, `QV_PIPE_GSHARE_H`): `qv_gshare`, 4,096 counters indexed by the pc and 12 bits of
+  history, read in the aligner (one conditional branch an aligner cycle); only a strong counter overrides the per-pc
+  table. Each instruction carries the history before it (in `ras_snap_t`): a recovery at execute restores the branch's
+  history and its resolved direction, a commit flush copies the committed history. At every training commit the core
+  checks that the instruction's snapshot equals the committed history (a `$fatal` in simulation, an assertion in the
+  formal models), so every run checks the history; it found that a branch predicted taken to its own fall-through
+  never mispredicts, which now counts as not taken.
+- Tests: the aligner testbenches drive `qv_align2` too (`9ecc5ac`, the window rows), the hint testbench checks that a
+  hint is taken up on exactly its own instruction (`2ef2a30`), `qv_btb_tb` with the counter (`de10d09`), `qv_gshare_tb`
+  against a model at both sizes (`7a50ce5`, `4ecc2d9`); `qvgen --win` (`b76a3dc`: 32-bit instructions crossing
+  dwords, branch targets at every halfword, two branches in a dword).
+- Mutation: `o8b_unit_align2` 18/18 (17 by the hint testbench, 1 by the `align2` proof), `o8c_unit_btb` 10/10,
+  `o8a_unit_gshare` 15/15; four `p9c` BTB patterns and two fetch patterns re-anchored.
+- Proofs: `align2` (`95d193c`: `qv_align2` against a model fetch buffer whose data are a function of their pc; what it
+  emits is the program-order decode, nothing skipped or repeated, by k-induction on a small model) with `fetch`'s
+  window tasks, and `gh` (`5d0ed85`: the history against a ghost of the predictions in flight through kills and
+  flushes, by k-induction), with four `align2`, eight window `fetch` and five `gh` known-bad versions in `run.sh
+  --mutants`. Their results and the riscv-formal models with the O8 knobs: `../riscv-formal/quantiumv_pipe/README.md`
+  ("O8").
+- Results: `../perf/README.md` ("The window aligner", "The BTB's direction counter", "Global history").
+
+The gates, the core against the reference, Verilator, four memory configurations:
+- O8b (on a snapshot of `3cb2a4a`, the window and O3's knobs on): with the knob off the six CSVs byte-identical;
+  regression 194/194 at the default width and with every O4 knob at 1 (one row ran into its 1,800 s limit on the loaded
+  machine and passed alone); the RVFI diff 150/150; REF vs REF on the `--win` stimulus 50 x 4 twice (the FP and the
+  M-mode bodies); lockstep with `--pair --ooo --xr --win` on the FP Sv39 profile 500 x 4, the late modes 300 x 4,
+  interrupts off 300 x 4, an M-mode body 300 x 4, every O4 knob at 1 100 x 4, the window off on its stimulus 100 x 4,
+  the corpora x 4 (act-fd 426, act + fw + 100 random 307, smc, irq, dbg 200): all pass. `check_patterns.py`
+  1,352/1,352.
+- O8 as a whole (on a snapshot of `cd7f5b2`, all three knobs and O3's on): with the knobs off the six CSVs
+  byte-identical; regression 197/197 and 197/197 with every O4 knob at 1; the RVFI diff 150/150; lockstep 500 x 4, the
+  late modes, interrupts off and an M-mode body 300 x 4 each, every O4 knob at 1 100 x 4, the corpora x 4: all pass.
+  `check_patterns.py` 1,395/1,395.
+
 ### O5a: the D$ inside the core (branch `OOO`)
 
 `QV_PIPE_DCACHE=1` (default 0 until O5/6 closes) puts a D$ beside the LSU, and `QV_PIPE_LSQ_DEPTH=8` grows the queue;

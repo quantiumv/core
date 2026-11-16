@@ -534,6 +534,115 @@ instret is unchanged on every row. The recovery at execute alone (the restart re
 wait of a mispredicted branch behind older work, so the gain is on the kernels that mispredict (`qsort`, `fmatmul`,
 `mixedint`); `trap`, `listchase` and `fpmix` hardly do.
 
+## The window aligner (O8b, branch `OOO`)
+
+`qv_align2` (`QV_PIPE_ALIGN_WIN=1`, default 0 until O8 closes) aligns over two fetch-buffer entries: the head dword and
+the one behind it when that one is its sequential successor. The two slots take any two instructions that start and
+end in that 16-byte window, so a 32-bit instruction crossing a dword goes out with the one before it instead of costing
+a cycle of its own, and an instruction from the next dword can pair with one from the head. Fetch pops one or two
+entries a cycle, and, with the window, sends a request from an idle bus in the cycle it issues it (`IDLE_GO`): a
+redirect that found the bus idle otherwise started its fetch a cycle later than one that found a stale answer
+streaming (trap S was +1.9 % before it). With the knob off the six CSVs are byte-for-byte O3's. Cycles, SoC, then the
+change in the other builds, against O3 (`QV_PIPE_EXEC_REDIRECT=1 QV_PIPE_XR_EARLY=1`):
+
+| kernel | M, O3 | M, O8b | change | S change | M, sram | S, sram |
+|---|---|---|---|---|---|---|
+| memcpy | 739 | 733 | -0.8 % | -1.3 % | -1.0 % | -2.6 % |
+| crc32 | 6826 | 6586 | -3.5 % | -11.1 % | -1.9 % | -9.5 % |
+| qsort | 5609 | 5395 | -3.8 % | -2.2 % | -1.5 % | -1.9 % |
+| matmul | 4199 | 3431 | -18.3 % | -5.4 % | -11.5 % | -4.0 % |
+| sieve | 6029 | 4610 | -23.5 % | -30.1 % | -5.7 % | -2.7 % |
+| listchase | 2318 | 2318 | +0.0 % | +0.0 % | +24.9 % | +0.0 % |
+| mixedint | 4353 | 4241 | -2.6 % | -4.1 % | -3.5 % | -8.1 % |
+| trap | 9833 | 9833 | +0.0 % | -0.0 % | +0.0 % | -0.0 % |
+| fmatmul | 3799 | 3569 | -6.1 % | -1.9 % | -4.8 % | +9.4 % |
+| fpmix | 4113 | 4114 | +0.0 % | +0.0 % | +0.1 % | +0.0 % |
+| geomean | | | -6.2 % | -6.1 % | -0.9 % | -2.1 % |
+
+instret is unchanged on every row.
+
+- The O8.0 model said -6.5 % (M) and -5.9 % (S) for the window on the O3 core; measured -6.2 % and -6.1 % (D8: within
+  2 points).
+- `fpmix` M on the SoC is one cycle slower (4113 to 4114), the only SoC row that loses: its window has one I$ miss, and
+  that refill takes a cycle more (the stack's `ic_cyc` 29 to 30; the ROB runs empty 4 cycles instead of 2). The rest of
+  the kernel is the FP divider's (`blk_fpu` 3758 of 4114 cycles), which the frontend cannot touch.
+- The flat SRAM harness, where fetch and data share one single-ported SRAM through `wb_arbiter2`, loses 24.9 % on M
+  `listchase` and 9.4 % on S `fmatmul` (not gated: the SoC decides). Neither is fetch doing more: the same dwords are
+  fetched (1030 against 1031 buffer pushes on `listchase`), but the LSU waits for fetch's beat far more often (the
+  stack's `bus_wait`: 204 to 1022 cycles on `listchase`, 240 to 750 on `fmatmul`). `listchase`'s loop is two dwords
+  and two dependent loads; with the old aligner fetch ran two iterations ahead in a burst (streaming) while the loads
+  waited for their data, and the loads then went back to back. The window aligner delivers the first load to the LSU a
+  cycle sooner, it is ready at fetch's next answer, fetch yields (`FETCH_YIELD`) instead of streaming, and the loop
+  locks into fetch and load beats taking turns: 8 cycles an iteration against 6.4. The S build of the same loop, laid
+  out one halfword differently, is unchanged (3591 cycles either way), and the SoC, where fetch has its own path to the
+  I$, is unchanged too. A yield that also holds back a new fetch request while the LSU waits would undo it on this
+  harness only; not done (no SoC effect).
+
+## The BTB's direction counter (O8c, branch `OOO`)
+
+`QV_PIPE_BTB_CTR=1` (default 0 until O8 closes): a BTB entry keeps whether its branch is conditional and a 2-bit
+direction counter. A taken branch that is not the entry's own replaces it at 2, a taken one that is counts up, a
+conditional that falls through counts down (and keeps its entry: before, it removed it), and a conditional entry steers
+fetch only while its counter says taken. A loop that exits keeps its entry for the next time it runs; a branch that
+mostly falls through stops steering fetch past code it runs. The BTB learns which branches are conditional from
+commit's history-table strobe, so commit is unchanged. Return entries in the BTB were left out: the model gives them
+0.1 (M) and 0.2 (S) points. Cycles, SoC, then the change in the other builds, against O8b:
+
+| kernel | M, O8b | M, O8c | change | S change | M, sram | S, sram |
+|---|---|---|---|---|---|---|
+| memcpy | 733 | 727 | -0.8 % | +0.0 % | -1.5 % | -2.4 % |
+| crc32 | 6586 | 6463 | -1.9 % | -3.5 % | -1.9 % | -5.2 % |
+| qsort | 5395 | 5307 | -1.6 % | -1.3 % | -2.8 % | -2.9 % |
+| matmul | 3431 | 3388 | -1.3 % | -2.3 % | +3.4 % | -5.4 % |
+| sieve | 4610 | 4554 | -1.2 % | -2.4 % | +1.9 % | -3.1 % |
+| listchase | 2318 | 2318 | +0.0 % | +0.0 % | +0.0 % | +0.0 % |
+| mixedint | 4241 | 3997 | -5.8 % | +0.0 % | -2.6 % | -6.2 % |
+| trap | 9833 | 9833 | +0.0 % | +0.0 % | +0.0 % | +0.0 % |
+| fmatmul | 3569 | 3561 | -0.2 % | -0.4 % | -5.2 % | -15.4 % |
+| fpmix | 4114 | 4114 | +0.0 % | +0.0 % | +0.0 % | +0.0 % |
+| geomean | | | -1.3 % | -1.0 % | -0.9 % | -4.2 % |
+
+instret is unchanged on every row, and no SoC row is slower. Against O3 the window and the counter together are
+-7.4 % (M) and -7.0 % (S); the O8.0 model said -7.8 % and -7.3 %. The flat SRAM harness loses on M `matmul` (+3.4 %)
+and `sieve` (+1.9 %): the same mispredicts, but their refills wait behind loads on the shared bus (`matmul`'s empty ROB
+after a mispredict, `ear_mispred`, 228 to 414 cycles).
+
+## Global history (O8a, gshare, branch `OOO`)
+
+`QV_PIPE_GSHARE_H=12` (default 0 until O8 closes): a 4096-entry table of 2-bit counters indexed by the branch's pc
+XOR the last 12 conditional outcomes, read in the aligner beside the per-pc history table. Only a counter that is
+strong (00 or 11) overrides the history table; a weak one leaves the old prediction. The speculative history is
+shifted in the aligner (at most one conditional branch an aligner cycle, `ONE_COND`); each instruction carries the
+history before it, so a recovery at execute puts back the branch's own history plus its resolved direction, and a
+commit flush copies the committed history. A branch predicted taken to its own fall-through counts as not taken. At
+every training commit the core checks (simulation and formal) that the instruction's snapshot equals the committed
+history, so every lockstep and regression run checks the history too. Cycles, SoC, then the change in the other
+builds, against O8c:
+
+| kernel | M, O8c | M, O8a | change | S change | M, sram | S, sram |
+|---|---|---|---|---|---|---|
+| memcpy | 727 | 727 | +0.0 % | +0.0 % | +0.0 % | +0.0 % |
+| crc32 | 6463 | 5465 | -15.4 % | -16.4 % | -15.3 % | -16.2 % |
+| qsort | 5307 | 5263 | -0.8 % | -0.5 % | -0.3 % | -0.3 % |
+| matmul | 3388 | 2967 | -12.4 % | -8.4 % | -6.7 % | -4.9 % |
+| sieve | 4554 | 4563 | +0.2 % | +0.3 % | +0.1 % | +0.3 % |
+| listchase | 2318 | 2318 | +0.0 % | +0.0 % | +0.0 % | +0.0 % |
+| mixedint | 3997 | 3764 | -5.8 % | -5.4 % | -2.7 % | -0.9 % |
+| trap | 9833 | 9833 | +0.0 % | +0.0 % | +0.0 % | +0.0 % |
+| fmatmul | 3561 | 3402 | -4.5 % | -4.3 % | -3.9 % | -0.1 % |
+| fpmix | 4114 | 4114 | +0.0 % | +0.0 % | +0.0 % | +0.0 % |
+| geomean | | | -4.0 % | -3.6 % | -3.0 % | -2.3 % |
+
+instret is unchanged on every row. Against O3 the window, the counter and gshare together are -11.2 % (M) and -10.4 %
+(S) on the SoC; the O8.0 model said -11.4 % and -10.8 %. `sieve` is 9 cycles slower (+0.2 % M, +0.3 % S): a few
+warm-up branches that the history table had right are taken over by strong gshare counters trained on another path.
+Every gshare variant left one kernel a few cycles slower while the geometric mean gained about 4 %; such a step may
+lose up to 0.3 % on one SoC kernel (a rule decided 2026-11-15; `fpmix` M's one cycle under O8b is the other case).
+Letting weak counters override too made `trap` S 10 cycles slower and was not kept.
+
+16-byte fetch (O8d) was not built: the model's M gain is `sieve` alone, `qsort` gets 1.3 % (M) and 2 % (S) slower,
+and the S geometric mean does not move.
+
 ## The D$ inside the core and an 8-entry queue (O5a, branch `OOO`)
 
 `QV_PIPE_DCACHE=1` (default 0 until O5/6 closes): a 2 KiB direct-mapped, write-through, no-allocate D$ (`qv_dc`, 64
