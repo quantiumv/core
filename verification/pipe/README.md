@@ -606,6 +606,54 @@ The gate (2026-11-15 to 2026-11-16), on a snapshot of `3140501` with the shippin
   - One program (`random_5270032`, 775,000 retirements and 28,000 interrupts) ran out of its 12 M-cycle budget at delay
     8 on both memories; it passes at delay 0, and at delay 8 with 40 M cycles on both.
 
+### O7: the big window (branch `OOO`)
+
+The window grows by sizes only: the station stays one collapsing queue, a recovery still rebuilds the producer tables
+from the surviving ROB entries, and the queue and the store buffer are unchanged.
+- O7a (`d54bc8c`, `b02defa`, `7c6009e`): the ROB's package depth and tag width come from `QV_ROB_MAX` (`qv_pkg.sv`, 8
+  until O7c) and the core's ROB from `QV_PIPE_ROB_DEPTH` (default: the package depth; 4 in the formal models). A ROB
+  larger than its package, smaller than 2 or not a power of two stops the elaboration. Everything that walks the ROB
+  (the kill vector, the survivors, the rebuild, the producer tables, the queue's kill and age scans, the LSU's distance
+  to the head, the RVFI source values) already read its size from the package or its own parameter; only the station's
+  occupancy is new (an issue-level wire for the perf monitor). `run_perf.sh` puts the defines into its build key, so a
+  run that changes only `--defines` no longer reuses an earlier build, and the early-load oracle of O2.0 (`--oracle
+  early`, which no longer built) is gone.
+- Tests (`fa9258e`, `c4e846e`): rows at package 32 and 64 (the ROB at 32, 16 and 8 inside a package of 32; the station
+  at 8; the queue at 16 and 32; the units, the commit pair rule and dispatch; the core-level queue, D$ and multiply
+  rows at ROB 32); `qv_rebuild_tb`
+  kills in alternating phases so a 32-entry ROB is full at a kill, and must see kills that keep or remove more than half
+  of it; `qvgen --deep` (long producers, then runs of 10 to 30 independent ops with a reused destination and memory
+  ops, a branch over a second run, a late consumer); the lockstep build prints the window it reached (`LS_WIN:`) and
+  the gate fails a size whose programs never fill its ROB, never keep or remove more than half of it in a recovery, or
+  never fill the queue. A generated body that runs into the trap handlers at address 0x8000 is made again shorter.
+- Mutation (`41815b0`): `o7a_unit_rob` 2/2, `o7a_unit_rob_kv` 1/1, `o7a_unit_issue` 1/1, `o7a_unit_lsq` 1/1,
+  `o7a_unit_lsu` 1/1, each a literal that is right at package 8 and wrong above it (the survivor loop, the survivor
+  count's width, the kill vector's range, the rebuild loop, the queue's index width, the distance to the head);
+  `o7a_lockstep` 2/2 at ROB 32 (the RVFI source values indexed by 3 bits of the tag: a mismatch at retirement 127;
+  the history check reading the snapshot of the tag modulo 8: the check's own `$fatal`).
+- Proofs (`e62d401`): every module proof and riscv-formal model reads the package with `-D QV_ROB_MAX=8`, and every
+  formal top checks the package depth, so a forgotten pin stops the elaboration instead of growing the model;
+  `pipe-full` also pins the station and the queue at their old depths. The models' results stand.
+- O7b: the sizes measured (`../perf/README.md`, "The big window"): ROB 32, RS 8, LSQ 8.
+- O7c, the defaults at these sizes, comes after the defaults of O3, O8 and O5/6.
+
+The O7 gate (2026-11-16 to 2026-11-17), the core against the reference, Verilator, four memory configurations, on a
+snapshot of `c4e846e` with `facb124` and `o7a_lockstep.json`, the shipping knobs (O3, O8, the D$) on and the window at
+ROB 32, RS 8, LSQ 8:
+- Perf at the defaults: the six CSVs byte-identical. Lint clean at the defaults and at the window.
+- Regression 238/238 at the window and 238/238 at the defaults; `core_sv39_random_tb` by hand at the window (3,000
+  iterations, 9,137 checks). The RVFI diff with `--ooo`: 150/150.
+- Lockstep on the FP Sv39 profile with `--pair --ooo --xr --win --dc --mem-dense --deep`, interrupts and the debug
+  script: 500 x 4, the late modes 300 x 4, interrupts off 300 x 4, an M-mode body 300 x 4; the same stimulus at ROB 16
+  (RS 8, LSQ 8), at ROB 64 (RS 16, LSQ 32), with a ROB of 16 in a package of 32 and at the defaults (ROB 8), 100 x 4
+  each; the corpora x 4 (act-fd 426, act + fw + 100 random 307, smc, irq, dbg 200); REF vs REF on the `--deep`
+  stimulus 50 x 4: all pass. Two programs of the 100 random ones (`random_7380012`, `random_7380081`: 775,000 and
+  907,000 retirements, 28,000 and 36,000 interrupts) ran out of their 12 M-cycle budget at delay 8 on both memories;
+  they pass at delay 0, and at delay 8 with 40 M cycles on both.
+- The window was reached at every size: the ROB full (in 1,984 of the 2,000 programs at ROB 32), recoveries that kept
+  and that removed more than half of it (75,402 and 51,348 of 1.44 M at ROB 32), the queue full.
+- `check_patterns.py` 1,439/1,439.
+
 ## Where the core differs from ref_core.sv
 
 Architectural behavior is the same: the lockstep gate compares every retirement, a CSR snapshot, the bus
