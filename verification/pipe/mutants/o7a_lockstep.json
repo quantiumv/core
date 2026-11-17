@@ -1,0 +1,38 @@
+{
+ "counts": [
+  8,
+  24,
+  64
+ ],
+ "memcfg": "sram",
+ "delay": 0,
+ "jobs": 3,
+ "inner_jobs": 2,
+ "sim": "verilator",
+ "profile": "--isa imafdc --priv msu --pmp --irq --smc --sv39 --pair --ooo --xr --win --dc --mem-dense --deep",
+ "extra": [
+  "--defines",
+  "QV_FPU_EN=1 QV_PIPE_EXEC_REDIRECT=1 QV_PIPE_XR_EARLY=1 QV_PIPE_ALIGN_WIN=1 QV_PIPE_BTB_CTR=1 QV_PIPE_GSHARE_H=12 QV_PIPE_DCACHE=1 QV_ROB_MAX=32 QV_PIPE_RS_DEPTH=8 QV_PIPE_LSQ_DEPTH=8",
+  "--irq-mode",
+  "2",
+  "--irq-density",
+  "1",
+  "--dbg-mode",
+  "1"
+ ],
+ "mutants": [
+  {
+   "name": "(O7) core: the RVFI source values are indexed by 3 bits of the tag",
+   "file": "core.sv",
+   "old": "    localparam int SRCW = (ROB_DEPTH > 1) ? $clog2(ROB_DEPTH) : 1;",
+   "new": "    localparam int SRCW = 3;"
+  },
+  {
+   "name": "(O7) core: the history check reads the snapshot of tag modulo 8",
+   "file": "core.sv",
+   "old": "int'(head1_tag) % ROB_DEPTH",
+   "new": "int'(head1_tag) % 8",
+   "count": 1
+  }
+ ]
+}
