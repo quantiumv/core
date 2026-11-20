@@ -502,7 +502,7 @@ station-off models) run separately; their results go to `../riscv-formal/quantiu
 
 ### O8: the frontend (branch `OOO`)
 
-Three knobs, each default 0 until O8 closes; with all three at 0 the six perf CSVs are byte-identical to O4's. No fetch
+Three knobs, each on by default since O8 closed; with all three at 0 the six perf CSVs are byte-identical to O4's. No fetch
 target queue: the fetch buffer's depth changes nothing on the kernels (the I$ answers a hit the next cycle and fetch
 already streams). 16-byte fetch (O8d) was not built (`../perf/README.md`, "Global history").
 - O8b (`df88b8a`, `QV_PIPE_ALIGN_WIN`): `qv_align2` aligns over the fetch buffer's head and the entry behind it when

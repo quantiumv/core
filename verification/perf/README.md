@@ -536,7 +536,7 @@ wait of a mispredicted branch behind older work, so the gain is on the kernels t
 
 ## The window aligner (O8b, branch `OOO`)
 
-`qv_align2` (`QV_PIPE_ALIGN_WIN=1`, default 0 until O8 closes) aligns over two fetch-buffer entries: the head dword and
+`qv_align2` (`QV_PIPE_ALIGN_WIN=1`, the default since O8 closed) aligns over two fetch-buffer entries: the head dword and
 the one behind it when that one is its sequential successor. The two slots take any two instructions that start and
 end in that 16-byte window, so a 32-bit instruction crossing a dword goes out with the one before it instead of costing
 a cycle of its own, and an instruction from the next dword can pair with one from the head. Fetch pops one or two
@@ -580,7 +580,7 @@ instret is unchanged on every row.
 
 ## The BTB's direction counter (O8c, branch `OOO`)
 
-`QV_PIPE_BTB_CTR=1` (default 0 until O8 closes): a BTB entry keeps whether its branch is conditional and a 2-bit
+`QV_PIPE_BTB_CTR=1` (the default since O8 closed): a BTB entry keeps whether its branch is conditional and a 2-bit
 direction counter. A taken branch that is not the entry's own replaces it at 2, a taken one that is counts up, a
 conditional that falls through counts down (and keeps its entry: before, it removed it), and a conditional entry steers
 fetch only while its counter says taken. A loop that exits keeps its entry for the next time it runs; a branch that
@@ -609,7 +609,7 @@ after a mispredict, `ear_mispred`, 228 to 414 cycles).
 
 ## Global history (O8a, gshare, branch `OOO`)
 
-`QV_PIPE_GSHARE_H=12` (default 0 until O8 closes): a 4096-entry table of 2-bit counters indexed by the branch's pc
+`QV_PIPE_GSHARE_H=12` (the default since O8 closed): a 4096-entry table of 2-bit counters indexed by the branch's pc
 XOR the last 12 conditional outcomes, read in the aligner beside the per-pc history table. Only a counter that is
 strong (00 or 11) overrides the history table; a weak one leaves the old prediction. The speculative history is
 shifted in the aligner (at most one conditional branch an aligner cycle, `ONE_COND`); each instruction carries the
