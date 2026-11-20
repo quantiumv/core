@@ -645,7 +645,7 @@ and the S geometric mean does not move.
 
 ## The D$ inside the core and an 8-entry queue (O5a, branch `OOO`)
 
-`QV_PIPE_DCACHE=1` (default 0 until O5/6 closes): a 2 KiB direct-mapped, write-through, no-allocate D$ (`qv_dc`, 64
+`QV_PIPE_DCACHE=1` (the default since O5/6 closed, with `QV_PIPE_LSQ_DEPTH=8`): a 2 KiB direct-mapped, write-through, no-allocate D$ (`qv_dc`, 64
 lines of 32 bytes) beside the LSU instead of on the bus. A plain load from RAM that could start its access (at the
 head, or early: translated, aligned, allowed, no store-buffer match) is answered in that very cycle when the D$ holds
 its dword, and the LSU takes the next op in the same cycle, so the engine does one load a cycle; a miss refills its line

@@ -550,9 +550,10 @@ The gates, the core against the reference, Verilator, four memory configurations
 
 ### O5a: the D$ inside the core (branch `OOO`)
 
-`QV_PIPE_DCACHE=1` (default 0 until O5/6 closes) puts a D$ beside the LSU, and `QV_PIPE_LSQ_DEPTH=8` grows the queue;
-with both at their defaults the six perf CSVs are byte-identical to O4's. The rest of O5/6 (out-of-order memory issue,
-speculative loads, forwarding, critical word first, misses that do not block, a second port) was measured not worth it
+`QV_PIPE_DCACHE=1` puts a D$ beside the LSU, and `QV_PIPE_LSQ_DEPTH=8` grows the queue (both the defaults since O5/6
+closed; with `QV_PIPE_DCACHE=0 QV_PIPE_LSQ_DEPTH=4` the six perf CSVs are O8's byte for byte). The rest of O5/6
+(out-of-order memory issue, speculative loads, forwarding, critical word first, misses that do not block, a second
+port) was measured not worth it
 at this window and is not built (`../perf/README.md`, "The D$ inside the core").
 - O5a-0 (`527fbda`): `qv_dc`, direct-mapped, write-through, no allocate (2 KiB: 64 lines of 32 bytes; 2 x 2 under
   `QV_FORMAL_SMALL`). A lookup has no handshake (the dword comes back in the cycle its address is presented); a miss

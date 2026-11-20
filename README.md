@@ -13,9 +13,9 @@ and debug entry). Two instructions dispatched and two committed a cycle; fetch r
 takes any two instructions a cycle across two fetch-buffer entries, and branches are predicted (a target buffer
 with direction counters, a global-history predictor in front of a history table, a return-address stack); a
 mispredicted branch recovers when it executes (everything younger is killed and fetch restarts at once); memory
-ops wait for their operands in a load/store queue and are performed one at a time in program order, a plain load
-from RAM before it
-reaches the head of the ROB, and stores to RAM retire into a store buffer that writes them out behind it.
+ops wait for their operands in an 8-entry load/store queue and are performed one at a time in program order, a
+plain load from RAM before it reaches the head of the ROB and from a 2 KiB D$ inside the core (one load a cycle
+when it hits), and stores to RAM retire into a store buffer that writes them out behind it.
 Translated code runs at nearly untranslated speed (fetch reuses its last page, the data side looks up its
 TLB before the head), and CSR reads and trap-CSR writes do not flush the pipeline.
 
@@ -33,8 +33,8 @@ It doesn't have misaligned access support (those trap) or hardware performance c
 `minstret`. An access to a CSR that doesn't exist traps. `QV_FPU_EN=0` builds it without F/D, `QV_ZICNTR_EN=0`
 without Zicntr.
 
-**SoC** (`design/soc.sv`): the core, write-through L1 I/D caches, and Wishbone
-peripherals.
+**SoC** (`design/soc.sv`): the core, a write-through L1 I$ (and a D$ on the bus when the core is built without
+its own, `QV_PIPE_DCACHE=0`), and Wishbone peripherals.
 
 | Address | Device |
 |---|---|
