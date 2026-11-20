@@ -611,8 +611,8 @@ The gate (2026-11-15 to 2026-11-16), on a snapshot of `3140501` with the shippin
 
 The window grows by sizes only: the station stays one collapsing queue, a recovery still rebuilds the producer tables
 from the surviving ROB entries, and the queue and the store buffer are unchanged.
-- O7a (`d54bc8c`, `b02defa`, `7c6009e`): the ROB's package depth and tag width come from `QV_ROB_MAX` (`qv_pkg.sv`, 8
-  until O7c) and the core's ROB from `QV_PIPE_ROB_DEPTH` (default: the package depth; 4 in the formal models). A ROB
+- O7a (`d54bc8c`, `b02defa`, `7c6009e`): the ROB's package depth and tag width come from `QV_ROB_MAX` (`qv_pkg.sv`, 32
+  since O7c, 8 before) and the core's ROB from `QV_PIPE_ROB_DEPTH` (default: the package depth; 4 in the formal models). A ROB
   larger than its package, smaller than 2 or not a power of two stops the elaboration. Everything that walks the ROB
   (the kill vector, the survivors, the rebuild, the producer tables, the queue's kill and age scans, the LSU's distance
   to the head, the RVFI source values) already read its size from the package or its own parameter; only the station's
@@ -636,7 +636,8 @@ from the surviving ROB entries, and the queue and the store buffer are unchanged
   formal top checks the package depth, so a forgotten pin stops the elaboration instead of growing the model;
   `pipe-full` also pins the station and the queue at their old depths. The models' results stand.
 - O7b: the sizes measured (`../perf/README.md`, "The big window"): ROB 32, RS 8, LSQ 8.
-- O7c, the defaults at these sizes, comes after the defaults of O3, O8 and O5/6.
+- O7c: these sizes are the defaults (`QV_ROB_MAX` 32, `QV_PIPE_RS_DEPTH` 8; the queue's 8 came with O5/6), after the
+  defaults of O3 (O3i), O8 and O5/6 (O5/6z) went on in that order, each with its six perf CSVs.
 
 The O7 gate (2026-11-16 to 2026-11-17), the core against the reference, Verilator, four memory configurations, on a
 snapshot of `c4e846e` with `facb124` and `o7a_lockstep.json`, the shipping knobs (O3, O8, the D$) on and the window at

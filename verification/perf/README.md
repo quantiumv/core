@@ -724,10 +724,11 @@ from the buffer, and a hit held the D$ two cycles. Geometric mean against the sh
 
 ## The big window (O7, branch `OOO`)
 
-The ROB's package depth and tag width come from `QV_ROB_MAX` (8 until O7c), the ROB itself from `QV_PIPE_ROB_DEPTH`
-(default: the package depth), the station from `QV_PIPE_RS_DEPTH` and the queue from `QV_PIPE_LSQ_DEPTH`. Only the
-sizes change: the station is still one collapsing queue, a recovery still rebuilds the producer tables from the
-surviving ROB entries. With the defaults the six CSVs are byte for byte the committed ones. Seven points on the
+The ROB's package depth and tag width come from `QV_ROB_MAX` (32 since O7c, 8 before), the ROB itself from
+`QV_PIPE_ROB_DEPTH` (default: the package depth), the station from `QV_PIPE_RS_DEPTH` (8 since O7c) and the queue from
+`QV_PIPE_LSQ_DEPTH`. Only the sizes change: the station is still one collapsing queue, a recovery still rebuilds the
+producer tables from the surviving ROB entries. With `QV_ROB_MAX=8 QV_PIPE_RS_DEPTH=4` the six CSVs are O5/6z's byte
+for byte. Seven points on the
 shipping core with the D$ (O3 + O8 + O5a: ROB 8, RS 4, LSQ 8), geomean cycles against it:
 
 | window | M SoC | S SoC | M flat SRAM | S flat SRAM |
