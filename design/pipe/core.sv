@@ -97,18 +97,18 @@
 // (O8b) The aligner works on a window of two fetch-buffer entries (qv_align2): any two instructions a cycle, a
 // crossing one with no cycle of its own. 0: one entry at a time (qv_align).
 `ifndef QV_PIPE_ALIGN_WIN
-`define QV_PIPE_ALIGN_WIN 1'b0
+`define QV_PIPE_ALIGN_WIN 1'b1
 `endif
 // (O8c) The branch target buffer keeps a direction counter per conditional branch: a branch that falls through counts
 // it down instead of losing its entry, and steers fetch only while the counter says taken. 0: the entry goes.
 `ifndef QV_PIPE_BTB_CTR
-`define QV_PIPE_BTB_CTR 1'b0
+`define QV_PIPE_BTB_CTR 1'b1
 `endif
 // (O8a) A global-history direction predictor (qv_gshare) in front of the branch history table: a conditional branch
 // takes its direction where its counter is trained, the table's where not. QV_PIPE_GSHARE_H history bits (0: none;
 // needs the window aligner and the table), 2^QV_PIPE_GSHARE_BITS counters.
 `ifndef QV_PIPE_GSHARE_H
-`define QV_PIPE_GSHARE_H 0
+`define QV_PIPE_GSHARE_H 12
 `endif
 `ifndef QV_PIPE_GSHARE_BITS
 `ifdef QV_FORMAL_SMALL
