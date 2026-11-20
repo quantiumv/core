@@ -183,12 +183,12 @@
 `define QV_PIPE_PMA_RAM_BASE 64'h0
 `endif
 // The load/store queue (O2). QV_PIPE_LSQ_DEPTH 0 leaves it out: issue then dispatches a memory op only into a free
-// LSU, which is the timing without it.
+// LSU, which is the timing without it. 8 entries since O5/6 (4 before).
 `ifndef QV_PIPE_LSQ_DEPTH
 `ifdef QV_FORMAL_SMALL
 `define QV_PIPE_LSQ_DEPTH 2
 `else
-`define QV_PIPE_LSQ_DEPTH 4
+`define QV_PIPE_LSQ_DEPTH 8
 `endif
 `endif
 // With the queue, a plain load from RAM starts and a plain store to RAM is posted before it is the ROB head, once
@@ -273,7 +273,7 @@
 // goes out, as a refill on the memory port. It caches only the PMA window (RAM), so a core with no window has none.
 // 0: every load goes to the bus (and the SoC keeps its D$ on the bus). The SoC turns its own D$ off when this is on.
 `ifndef QV_PIPE_DCACHE
-`define QV_PIPE_DCACHE 0
+`define QV_PIPE_DCACHE 1
 `endif
 `ifndef QV_PIPE_DC_LINES
 `ifdef QV_FORMAL_SMALL

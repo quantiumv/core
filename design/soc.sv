@@ -236,7 +236,7 @@ module soc (
     // the bus is then left out (cache0's data port goes straight to memory, as the D$ would forward a miss), and the
     // Debug Module's writes to RAM empty their line from the core's D$
 `ifndef QV_PIPE_DCACHE
-`define QV_PIPE_DCACHE 0
+`define QV_PIPE_DCACHE 1
 `endif
 `ifdef QV_REF_AS_CORE
     localparam bit SOC_BUS_DC = 1'b1;
