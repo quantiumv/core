@@ -83,10 +83,11 @@ package qv_pkg;
     // because packed-struct tag fields need a compile-time width.
     // qv_rob.sv may still be instantiated smaller; the tag is then just
     // wider than strictly needed, which is harmless.
-    // (O7) The depth is the largest ROB a build may instantiate, from the define QV_ROB_MAX (default 8). A formal
-    // build pins it at 8 on its command line, and every formal top asserts that, so its models keep 4-bit tags.
+    // (O7) The depth is the largest ROB a build may instantiate, from the define QV_ROB_MAX (default 32 since O7c, 8
+    // before). A formal build pins it at 8 on its command line, and every formal top asserts that, so its models keep
+    // 4-bit tags.
 `ifndef QV_ROB_MAX
-`define QV_ROB_MAX 8
+`define QV_ROB_MAX 32
 `endif
     localparam int QV_ROB_DEPTH = `QV_ROB_MAX;
     localparam int QV_ROB_TAG_W = $clog2(QV_ROB_DEPTH) + 1;  // index + wrap bit
