@@ -23,7 +23,8 @@
 #   pipe-sb   -> $RVFORMAL/cores/quantiumv_pipe_sb: the same as pipe, with the core told a RAM window
 #                (the first 2 GiB), so the store buffer really takes stores: in the other models the window is empty and
 #                it never does. The wrapper then assumes a drain beat gets no bus error. Run the checks that see the
-#                drain (liveness, hang, the store instructions, cover, causal; see quantiumv_pipe/README.md)
+#                drain (liveness, hang, the store instructions, cover, causal; see quantiumv_pipe/README.md). It keeps
+#                loads on the bus (QV_PIPE_DCACHE=0), whatever the core's default
 #   pipe-dc   -> $RVFORMAL/cores/quantiumv_pipe_dc: pipe-sb with the D$ inside the core too (QV_PIPE_DCACHE, O5a):
 #                plain loads from the window are answered by the D$, refills go out on the memory port. Run the checks
 #                that see it (reg, causal, unique, liveness, hang, cover, the integer load/store insn checks)
@@ -79,7 +80,7 @@ cp "$REPO/verification/riscv-formal/$NAME/checks.cfg" "$DST/"
 [ "$1" != "pipe-full" ] || sed -i 's/ -D QV_FORMAL_SMALL//' "$DST/checks.cfg"
 [ "$1" != "pipe-sv39" ] || sed -i 's/ -D QV_FORMAL_NO_SV39//' "$DST/checks.cfg"
 [ "$1" != "pipe-fpu" ] || sed -i 's/ -D QV_FORMAL_NO_FPU/ -D QV_FORMAL_FPU_ABSTRACT/' "$DST/checks.cfg"
-[ "$1" != "pipe-sb" ] || sed -i 's/ -D QV_FORMAL_SMALL/ -D QV_FORMAL_SMALL -D QV_PIPE_PMA_RAM_SIZE=2147483648/' "$DST/checks.cfg"
+[ "$1" != "pipe-sb" ] || sed -i 's/ -D QV_FORMAL_SMALL/ -D QV_FORMAL_SMALL -D QV_PIPE_PMA_RAM_SIZE=2147483648 -D QV_PIPE_DCACHE=0/' "$DST/checks.cfg"
 [ "$1" != "pipe-dc" ] || sed -i 's/ -D QV_FORMAL_SMALL/ -D QV_FORMAL_SMALL -D QV_PIPE_PMA_RAM_SIZE=2147483648 -D QV_PIPE_DCACHE=1/' "$DST/checks.cfg"
 # (O7) every pipelined model keeps the 8-entry package and its 4-bit tags (the wrapper checks it), and pipe-full
 # keeps the station and queue it was proven at, whatever the core's defaults become
