@@ -448,7 +448,7 @@ snapshot of `272882c` (two-wide by default):
 
 A mispredicted branch recovers when it writes back, not when it retires: the next cycle (the kill cycle) everything
 younger is killed and fetch restarts at the resolved target; commit then retires the branch without a redirect. Behind
-`QV_PIPE_EXEC_REDIRECT` (default 0 until O3 closes, O3i); with it at 0 the six perf CSVs are byte-identical to O4's.
+`QV_PIPE_EXEC_REDIRECT` (default 1 since O3i; with it at 0 the six perf CSVs are byte-identical to O4's).
 - O3a-c (`e6ad670`, `63b6ce0`): the kill network. The ROB marks every tag younger than the branch (`o_kill_vec`, in the
   ROB's own pointer width) and rolls its tail back to the entry after it; the ALU and branch units, the divider, the
   FPU's pipeline and its divide/square-root unit, the station, the load/store queue and the LSU drop what they hold for
@@ -466,7 +466,7 @@ younger is killed and fetch restarts at the resolved target; commit then retires
   and fetch takes the target (a redirect from commit wins over it, and it over the aligner's). A commit redirect in
   either cycle wins: it flushes the branch too. An older branch that writes back in a kill cycle survives it and is
   caught for the next. Program Buffer runs keep the commit redirect.
-- The early restart (`e16cc89`, `QV_PIPE_XR_EARLY`, default 0 until O3i): fetch and the frontend restart in the mispredict's
+- The early restart (`e16cc89`, `QV_PIPE_XR_EARLY`, default 1 since O3i): fetch and the frontend restart in the mispredict's
   writeback cycle, straight from the branch unit, while the kill stays in the next cycle; the model put it at 1.4
   points and it measured -1.4 % (M) and -1.3 % (S) on the SoC.
 - Stimulus: `qvgen --xr` (`128e667`): forward branches that are always taken but resolve late (a divide by x0, or a

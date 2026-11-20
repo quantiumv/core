@@ -10,7 +10,8 @@ Fetch, align (RVC), decode, in-order dispatch into a reorder buffer, out-of-orde
 reservation station to two ALUs and the branch / divide / floating-point units, a load/store unit, and in-order
 commit, which owns every architectural effect (register writes, CSRs, traps, privilege changes, interrupts
 and debug entry). Two instructions dispatched and two committed a cycle; fetch runs back to back and
-predicts branches (a target buffer, a history table, a return-address stack); memory ops wait for their
+predicts branches (a target buffer, a history table, a return-address stack), and a mispredicted branch recovers
+when it executes (everything younger is killed and fetch restarts at once); memory ops wait for their
 operands in a load/store queue and are performed one at a time in program order, a plain load from RAM before it
 reaches the head of the ROB, and stores to RAM retire into a store buffer that writes them out behind it.
 Translated code runs at nearly untranslated speed (fetch reuses its last page, the data side looks up its

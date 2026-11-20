@@ -512,8 +512,8 @@ cycles away), each milestone on top of O3:
 
 A mispredicted branch recovers when it writes back instead of when it retires (`QV_PIPE_EXEC_REDIRECT`), and fetch
 restarts in that very cycle, straight from the branch unit (`QV_PIPE_XR_EARLY`); the kill of everything younger is the
-next cycle. Both default to 0 until O3 closes (O3i); with them at 0 the six CSVs are the committed ones byte for
-byte. Cycles against O4:
+next cycle. Both default to 1 since O3i, whose six CSVs are this table's new column; with them at 0 the CSVs are O4's
+byte for byte. Cycles against O4:
 
 | kernel | M SoC | S SoC | M flat SRAM | S flat SRAM |
 |---|---|---|---|---|
