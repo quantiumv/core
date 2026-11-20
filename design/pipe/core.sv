@@ -126,12 +126,12 @@
 // (O3) A mispredicted branch recovers at execute: the cycle after its writeback everything younger is killed and
 // fetch restarts at the resolved target (commit then retires it without a redirect). 0: commit redirects, as before.
 `ifndef QV_PIPE_EXEC_REDIRECT
-`define QV_PIPE_EXEC_REDIRECT 1'b0
+`define QV_PIPE_EXEC_REDIRECT 1'b1
 `endif
 // (O3, D7) With a recovery at execute, fetch and the frontend restart in the mispredict's writeback cycle rather than
 // the kill cycle after it (the backend's kill stays registered). 0: fetch restarts in the kill cycle.
 `ifndef QV_PIPE_XR_EARLY
-`define QV_PIPE_XR_EARLY 1'b0
+`define QV_PIPE_XR_EARLY 1'b1
 `endif
 // (O3) What a recovery at execute puts back in the return-address stack: 0 nothing, 1 its index and count, 2 also
 // its top entry (qv_ras REPAIR). The formal models keep the smaller snapshot.
