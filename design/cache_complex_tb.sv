@@ -278,10 +278,11 @@ module cache_complex_tb #(
 
     // (DC_EN 0) the data port goes downstream itself: every access is one beat, nothing is cached, dcache0 stays idle,
     // and the data port still wins a tie and still waits out a beat of the I$ already on the bus
-    logic dc_moved = 1'b0;
+    logic dc_moved = 1'b0, dc_heard = 1'b0;
     int   nd_ties = 0, nd_tie_bad = 0;
     always @(posedge clk) if (!rst) begin
         if (dut.dcache0.state_q != 0 || dut.dcache0.mem_cyc_o) dc_moved = 1'b1;
+        if (dut.dcache0.mem_ack_i || dut.dcache0.mem_err_i) dc_heard = 1'b1;   // the data port's responses are not its
         if (dut.icache0.mem_cyc_o && dp_cyc && !dn_hold) begin
             nd_ties++;
             if (!(mem_cyc && mem_addr === dp_addr && mem_we === dp_we)) nd_tie_bad++;
@@ -336,6 +337,7 @@ module cache_complex_tb #(
         check("N5 a tie occurred", {63'b0, nd_ties > 0}, 64'd1);
         check("N5 every tie granted to the data port", nd_tie_bad, 0);
         check("dcache0 never left idle", {63'b0, dc_moved}, 64'd0);
+        check("dcache0 never saw a response", {63'b0, dc_heard}, 64'd0);
         repeat (3) @(negedge clk);
         check("DC_EN 0: fetch port acks == fetch requests", fp_acks, fp_reqs);
         check("DC_EN 0: data port acks == data requests but the one error", dp_acks, dp_reqs - 1);
