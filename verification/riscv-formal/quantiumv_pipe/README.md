@@ -532,3 +532,46 @@ rest 0:03:10 .. 0:10:48.
   2026-11-20 and 21 after a Windows restart): 25 of 25 PASS, among them the station's three (`rs_props.sv`: `prove`,
   `bmc`, `cover`) and the queue's operand-wait tasks (`opw`, `opw_cover`); all 79 known-bad versions are caught.
 - **Not re-run:** the reference: its RTL and the formal configs are unchanged since `2673a2a`.
+
+### After O4 (two-wide)
+
+The tree of `ce711b2` (O4 on top of O1; `174d7b2` before it was rebased onto `169a4b2`). Two uops are dispatched,
+issued to two ALU ports and committed a cycle (`QV_PIPE_COMMIT_W`, `QV_PIPE_DISPATCH_W`, `QV_PIPE_ALU_PORTS`, all 2);
+`../../pipe/README.md` describes them. The one-channel models pin `QV_PIPE_COMMIT_W=1`, so `nret 1` still sees every
+retirement, and keep the two-wide dispatch; the new `pipe-w2` model (`d9b1558`: `nret 2`, every width at 2, the small
+sizes) checks both channels.
+
+`pipe-w2` ran from 2026-11-13 with `run_sweep.sh` (bitwuzla), CPU times:
+- `causal_ch0` (0:32:10), `causal_ch1` (0:24:12) and `cover` (1:09:39) PASS.
+- The first `insn_add_ch0`, `insn_addw_ch0` and `insn_beq_ch0` FAILed on the model, not the core: its `checks.cfg`
+  had no `[csrs]` section, so `mcause` was never exported and the checks' cause pin on channel 0 read an unconnected
+  wire (the counterexamples were U-mode fetch faults above 2^56). Fixed in `6b32cae`; on the fixed model (run
+  2026-11-14 and 15) `insn_add_ch0` (9:29:47), `insn_addw_ch0` (7:02:15) and `insn_c_add_ch0` (9:44:12) PASS, and
+  `insn_beq_ch0` was stopped by its 60,000 s limit.
+- The channel-1 instruction checks were never reached.
+
+The rest of O4's own formal (the one-channel models on this tree) was not run on its own: a WSL stop on 2026-11-14 cut
+it off, and O3's runs below are on a tree with all of O4 plus recovery at execute, so they stand for it.
+
+### After O8 and O5a (the frontend; the D$ inside the core)
+
+The tree of `41815b0` on branch `o4`, with the knobs of what ships turned on by `QV_FORMAL_DEFS` (`QV_PIPE_EXEC_REDIRECT`,
+`QV_PIPE_XR_EARLY`, `QV_PIPE_ALIGN_WIN`, `QV_PIPE_BTB_CTR` at 1, `QV_PIPE_GSHARE_H=12`; they have been the defaults
+since O3i and O8's flip): the window aligner, the BTB's direction counters and gshare (O8), on top of O3's recovery at
+execute, and the D$ inside the core (O5a, the `pipe-dc` model: `pipe-sb` with `QV_PIPE_DCACHE=1`, 2 x 2 lines under
+`QV_FORMAL_SMALL`). `../../pipe/README.md` describes them. As for O3, the station-on models ran the cheap checks and the
+station-off models (`QV_PIPE_RS_DEPTH=0`) the rest, at 12 h each. Run from 2026-11-16 with `run_sweep.sh` (bitwuzla)
+in a private copy of the framework, beside O3's and O1's runs; a Windows restart on 2026-11-20 killed the runs and the
+last model resumed from its finished checks. CPU times; nothing failed.
+
+- **`pipe`** (the station on): 5 of 5 PASS: `ill` 0:22:52, `causal` 1:08:04, `pc_fwd` 1:19:51, `pc_bwd` 1:40:50 and
+  `cover` 1:50:15.
+- **`pipe-rs0`** (the station off): 16 of 19 PASS: the 13 branch and jump instruction checks (`c_jr` 0:21:13 .. `beq`
+  4:48:18), `pc_bwd` 0:09:00, `pc_fwd` 0:10:42 and `unique` 0:30:07; `reg`, `liveness` and `hang` reached the 12 h cap.
+- **`pipe-dc`** (the D$ on, the station on): 4 of 4 PASS: `pc_bwd` 1:10:44, `cover` 1:27:04, `causal` 1:29:49 and
+  `pc_fwd` 1:36:40.
+- **`pipe-dc`, the station off**: 9 of 15 PASS: eight load and store checks (`lb` 6:41:05 .. `lhu` 10:36:32: `lb lbu
+  lh lhu lw ld sb sw`) and `unique` (1:24:43). `lwu`, `sd`, `sh`, `reg` and `liveness` reached the 12 h cap. `hang` is
+  not proved: bitwuzla ran out of the sweep's 8 GB at the step-40 query (6:35), and boolector, given 12 GB, sat 9.5 h
+  on the same query before it was stopped for the machine's memory. riscv-formal cannot see a stale line in the D$
+  (`dc_props.sv` carries that: see "After O7", the module proofs).
