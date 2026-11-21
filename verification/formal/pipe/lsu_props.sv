@@ -207,6 +207,7 @@ module lsu_props (
     always @* begin
         if (!init && !rst) begin
             assert (free == idle_s);
+            assert (!dut.fill_q);   // (O5a) the D$ arm is off here (DC_EN 0): no op ever waits for a refill
             if (!free)  assert (dut.tag_q == g_tag && dut.misaligned_q == g_mis);
             if (!free)  assert (dut.addr_q == g_ra);
             if (!free)  assert (dut.sc_q == g_sc);
