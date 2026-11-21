@@ -214,8 +214,8 @@ EOF
             printf '%-30s %s\n' "mutant $name" "NOT CAUGHT ($r)"; fail=1
         fi
     }
-    fpu_mutant fpu_wb_in_flush     qv_exu_fpu 's/o_wb.valid = (pwb.valid || ds_done) \&\& !i_flush;/o_wb.valid = (pwb.valid || ds_done);/'
-    fpu_mutant fpu_ack_over_pipe   qv_exu_fpu 's/assign ds_ack    = ds_done \&\& !pwb.valid \&\& !i_flush;/assign ds_ack    = ds_done \&\& !i_flush;/'
+    fpu_mutant fpu_wb_in_flush     qv_exu_fpu 's/o_wb.valid = (pwb.valid || ds_live) \&\& !i_flush;/o_wb.valid = (pwb.valid || ds_live);/'
+    fpu_mutant fpu_ack_over_pipe   qv_exu_fpu 's/assign ds_ack    = ds_live \&\& !pwb.valid \&\& !i_flush;/assign ds_ack    = ds_live \&\& !i_flush;/'
     fpu_mutant fpu_ds_always_free  qv_exu_fpu 's/assign o_ds_free = !ds_busy;/assign o_ds_free = 1'"'"'b1;/'
     fpu_mutant fpu_flush_keeps_r1  qv_fpu_pipe 's/if (rst || i_flush) r1_valid <= 1'"'"'b0;/if (rst) r1_valid <= 1'"'"'b0;/'
     fpu_mutant fpu_ds_not_killed   qv_fpu_divsqrt 's/if (rst || i_flush) begin/if (rst) begin/'
@@ -250,7 +250,7 @@ EOF
     lsq_mutant lsq_match_no_copy      qv_lsq 's/r    = (copy_q \&\& copy_idx_q == IW.(i)) ? i_eng_res : res_q\[i\];/r    = res_q[i];/'
     lsq_mutant lsq_head_no_bypass     qv_lsq 's/assign o_head_res = (copy_q \&\& copy_idx_q == head_i) ? i_eng_res : res_q\[head_i\];/assign o_head_res = res_q[head_i];/'
     lsq_mutant lsq_pop_any_tag        qv_lsq 's/ \&\& (i_pop_tag == tag_q\[head_i\])//'
-    lsq_mutant lsq_bar_ignored        qv_lsq 's/assign o_early  = (cmpl_q != send_q) \&\& !bar_q\[cmpl_i\];/assign o_early  = (cmpl_q != send_q);/'
+    lsq_mutant lsq_bar_ignored        qv_lsq 's/assign o_early  = (cmpl_q != send_q) \&\& !bar_q\[cmpl_i\] \&\& /assign o_early  = (cmpl_q != send_q) \&\& /'
     lsq_mutant lsq_newest_first       qv_lsq 's/o_eng_req       = has_q ? send_e : i_req;/o_eng_req       = i_req.valid ? i_req : send_e;/'
     # rs_mutant NAME SED-EXPR [FILE]: the reservation station, at rs.sby's own BMC depth (the generic 24 is far too deep
     # for it); FILE (default qv_rs) is the one mutated: qv_pkg for the waiting-operand rules (qv_opnd_*, O4d)
