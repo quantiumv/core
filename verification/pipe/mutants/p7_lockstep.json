@@ -116,10 +116,18 @@
   {
    "from": "p7d_unit_align.json",
    "unit_only": {
-    "2": "killed by p7_lockstep_extra.json (an M-mode body, a Bare satp, no PMP, or PMP without interrupts: the profile that reaches it)",
+    "2": "killed by p7_lockstep_extra.json (an M-mode body, a Bare satp, no PMP, or PMP without interrupts: the profile that reaches it); since O8's flip by p7_lockstep_win0.json's second group",
     "3": "the frames of the two halves of a straddling fetch are checked in pockets that give the same verdict for a span across their common edge (a partial overlap is no match for either)",
-    "4": "killed by p7_lockstep_extra.json (an M-mode body, a Bare satp, no PMP, or PMP without interrupts: the profile that reaches it)",
-    "7": "the same frames, the same pockets as the mutant before it: a marker's low span gives the same verdict on either frame"
+    "4": "killed by p7_lockstep_extra.json (an M-mode body, a Bare satp, no PMP, or PMP without interrupts: the profile that reaches it); since O8's flip by p7_lockstep_win0.json's second group",
+    "7": "the same frames, the same pockets as the mutant before it: a marker's low span gives the same verdict on either frame",
+    "0": "qv_align is built only with QV_PIPE_ALIGN_WIN=0 since O8's flip (the window aligner is the default): p7_lockstep_win0.json runs it there",
+    "1": "qv_align is built only with QV_PIPE_ALIGN_WIN=0 since O8's flip (the window aligner is the default): p7_lockstep_win0.json runs it there",
+    "5": "qv_align is built only with QV_PIPE_ALIGN_WIN=0 since O8's flip (the window aligner is the default): p7_lockstep_win0.json runs it there",
+    "6": "qv_align is built only with QV_PIPE_ALIGN_WIN=0 since O8's flip (the window aligner is the default): p7_lockstep_win0.json runs it there",
+    "8": "qv_align is built only with QV_PIPE_ALIGN_WIN=0 since O8's flip (the window aligner is the default): p7_lockstep_win0.json runs it there",
+    "9": "qv_align is built only with QV_PIPE_ALIGN_WIN=0 since O8's flip (the window aligner is the default): p7_lockstep_win0.json runs it there",
+    "10": "qv_align is built only with QV_PIPE_ALIGN_WIN=0 since O8's flip (the window aligner is the default): p7_lockstep_win0.json runs it there",
+    "11": "qv_align is built only with QV_PIPE_ALIGN_WIN=0 since O8's flip (the window aligner is the default): p7_lockstep_win0.json runs it there"
    }
   },
   {

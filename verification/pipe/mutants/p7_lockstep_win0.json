@@ -1,0 +1,82 @@
+{
+ "counts": [
+  8,
+  24,
+  64
+ ],
+ "sim": "verilator",
+ "memcfg": "sram",
+ "delay": 0,
+ "jobs": 3,
+ "inner_jobs": 2,
+ "profile": "--isa imac --priv msu --pmp --irq --smc --sv39",
+ "extra": [
+  "--defines",
+  "QV_PIPE_ALIGN_WIN=0 QV_PIPE_GSHARE_H=0",
+  "--irq-mode",
+  "2",
+  "--irq-density",
+  "1",
+  "--dbg-mode",
+  "1",
+  "--dbg-features",
+  "191",
+  "--timeout",
+  "2000000"
+ ],
+ "mutants": [
+  {
+   "from": "p7d_unit_align.json",
+   "unit_only": {
+    "2": "killed by this spec's second group (p7_lockstep_extra.json's profile, with no interrupts)",
+    "3": "the frames of the two halves of a straddling fetch are checked in pockets that give the same verdict for a span across their common edge (a partial overlap is no match for either)",
+    "4": "killed by this spec's second group (p7_lockstep_extra.json's profile, with no interrupts)",
+    "7": "the same frames, the same pockets as the mutant before it: a marker's low span gives the same verdict on either frame"
+   },
+   "profile": "--isa imac --priv msu --pmp --irq --smc --sv39",
+   "extra": [
+    "--defines",
+    "QV_PIPE_ALIGN_WIN=0 QV_PIPE_GSHARE_H=0",
+    "--irq-mode",
+    "2",
+    "--irq-density",
+    "1",
+    "--dbg-mode",
+    "1",
+    "--dbg-features",
+    "191",
+    "--timeout",
+    "2000000"
+   ]
+  },
+  {
+   "from": "p7d_unit_align.json",
+   "only": [
+    0,
+    2,
+    3,
+    4,
+    6,
+    7,
+    11
+   ],
+   "unit_only": {
+    "3": "the generated programs cannot show it either: see the reason in p7_lockstep.json",
+    "7": "the generated programs cannot show it either: see the reason in p7_lockstep.json"
+   },
+   "profile": "--isa imac --priv msu --pmp --smc --sv39",
+   "extra": [
+    "--defines",
+    "QV_PIPE_ALIGN_WIN=0 QV_PIPE_GSHARE_H=0",
+    "--irq-mode",
+    "0",
+    "--dbg-mode",
+    "1",
+    "--dbg-features",
+    "191",
+    "--timeout",
+    "2000000"
+   ]
+  }
+ ]
+}

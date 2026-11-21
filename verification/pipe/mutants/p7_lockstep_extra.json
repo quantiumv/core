@@ -108,7 +108,12 @@
    ],
    "unit_only": {
     "3": "the generated programs cannot show it either: see the reason in p7_lockstep.json",
-    "7": "the generated programs cannot show it either: see the reason in p7_lockstep.json"
+    "7": "the generated programs cannot show it either: see the reason in p7_lockstep.json",
+    "0": "qv_align is built only with QV_PIPE_ALIGN_WIN=0 since O8's flip (the window aligner is the default): p7_lockstep_win0.json runs it there",
+    "2": "qv_align is built only with QV_PIPE_ALIGN_WIN=0 since O8's flip (the window aligner is the default): p7_lockstep_win0.json runs it there",
+    "4": "qv_align is built only with QV_PIPE_ALIGN_WIN=0 since O8's flip (the window aligner is the default): p7_lockstep_win0.json runs it there",
+    "6": "qv_align is built only with QV_PIPE_ALIGN_WIN=0 since O8's flip (the window aligner is the default): p7_lockstep_win0.json runs it there",
+    "11": "qv_align is built only with QV_PIPE_ALIGN_WIN=0 since O8's flip (the window aligner is the default): p7_lockstep_win0.json runs it there"
    },
    "profile": "--isa imac --priv msu --pmp --smc --sv39",
    "extra": [
