@@ -22,7 +22,8 @@
    "from": "p5d_unit_commit.json",
    "unit_only": {
     "12": "needs M mode running with MIE set and a delegated source: an M-mode body has no S mode to delegate to, an S/U body never has MIE=1 in M",
-    "25": "the stale architectural pc shows only if the handler's very first instruction traps (mepc), and none of the generated handlers' first instructions can"
+    "25": "the stale architectural pc shows only if the handler's very first instruction traps (mepc), and none of the generated handlers' first instructions can",
+    "27": "since E4 a vectored xtvec points at a table of jumps: BASE + 1 + 4 * cause fetches the same jump as BASE + 4 * cause (the aligner drops bit 0 of an instruction's pc) and no event is sampled before it retires, so no program can tell them apart; qv_commit_tb checks the vector exactly"
    }
   }
  ]
