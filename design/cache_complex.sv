@@ -221,6 +221,8 @@ module cache_complex #(
     /* verilator lint_on UNUSEDSIGNAL */
     logic        dc_mem_we, dc_mem_cyc, dc_mem_ack, dc_mem_err;
 
+    // (DC_EN 0) the idle D$ sees neither requests nor the data port's responses, which it would take for answers to
+    // writes it never made
     dcache #(.num_lines(num_lines), .line_words(line_words)) dcache0 (
         .clk(clk), .rst(rst),
         .addr_i(data_addr_i), .dat_i(data_dat_i), .dat_o(dc_dat_o), .sel_i(data_sel_i),
@@ -228,7 +230,7 @@ module cache_complex #(
         .ack_o(dc_ack), .err_o(dc_err),
         .mem_addr_o(dc_mem_addr), .mem_dat_o(dc_mem_dat_o), .mem_dat_i(dc_mem_dat_i),
         .mem_sel_o(dc_mem_sel), .mem_we_o(dc_mem_we), .mem_cyc_o(dc_mem_cyc), .mem_stb_o(dc_mem_stb),
-        .mem_ack_i(dc_mem_ack), .mem_err_i(dc_mem_err)
+        .mem_ack_i(DC_EN && dc_mem_ack), .mem_err_i(DC_EN && dc_mem_err)
     );
 
     // Each core-facing port is permanently wired to its own sub-cache --
