@@ -9,7 +9,7 @@
 #                verification/reference/ref_*.sv built as `core` by -D QV_REF_AS_CORE)
 #   pipe      -> $RVFORMAL/cores/quantiumv_pipe  (the pipelined core, design/pipe/core.sv)
 #   pipe-rs0  -> $RVFORMAL/cores/quantiumv_pipe_rs0: the same with the reservation station off
-#                (QV_PIPE_RS_DEPTH=0): the opcode-by-opcode insn checks, about 10x cheaper than with the
+#                (QV_PIPE_RS_DEPTH=0): the opcode-by-opcode insn checks, about 3-5x cheaper than with the
 #                station, which treats every opcode of a unit alike; pipe keeps the checks that see
 #                the station and one instruction per class (see quantiumv_pipe/README.md)
 #   pipe-full -> $RVFORMAL/cores/quantiumv_pipe_full: the same without
