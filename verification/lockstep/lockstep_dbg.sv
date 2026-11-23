@@ -47,8 +47,13 @@
  * 3 ebreak (arms dcsr.ebreak*), 4 trigger, 5 progbuf, 6 reserved
  * registers x22/x23 and the sandbox base x27 are the script's to use
  * (the program was generated with qvgen --dbg), 7 hold the halt request
- * across a resume, 8 action-0 triggers allowed. mode_i == 0 disables the
- * script.
+ * across a resume, 8 action-0 triggers allowed, 9 a trigger is armed in
+ * two phases of three and only 2 or 4 bytes past dpc: on the instruction
+ * after the one the hart resumes at, which heads the ROB at the first
+ * sample point after the resume, where an interrupt left pending by the
+ * halt (or raised by its Program Buffer runs) is taken (the same number
+ * of draws, so bit 9 off is the stream it always was). mode_i == 0
+ * disables the script.
  *
  * An action-0 trigger is a breakpoint exception, and the generated
  * programs' trap handlers answer a breakpoint by skipping the
@@ -610,9 +615,9 @@ module lockstep_dbg (
                     newdcsr[12] = (k == 0) || (b12 == 0);
                 end
                 if (feat_i[2] && rnd(4) == 0) newdcsr[10] = ~newdcsr[10];    // stopcount
-                if (feat_i[4] && rnd(3) == 0) begin                   // arm one trigger a few instructions ahead
+                if (feat_i[4] && (feat_i[9] ? rnd(3) != 0 : rnd(3) == 0)) begin   // arm one trigger a few instructions ahead
                     slot = rnd(2);
-                    cnt  = rnd(11);
+                    cnt  = feat_i[9] ? 1 + rnd(2) : rnd(11);         // (bit 9) the instruction after dpc's
                     ar_write({4'b0, CSR_TSELECT}, 64'(slot));
                     ar_write({4'b0, CSR_TDATA2},  dpc + 64'(2 * cnt));
                     v = 64'b0;

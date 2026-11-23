@@ -79,7 +79,8 @@ IRQ_LATE=0
 MODE_B=0
 # 0 (off) matches every run before the scripted debugger existed. DBG_FEAT is the lockstep_dbg.sv feature mask:
 # 1 halt, 2 step, 4 access (Access Register), 8 ebreak, 16 trigger, 32 progbuf, 64 (set per program: it is
-# qvgen --dbg output), 128 hold the halt request across a resume.
+# qvgen --dbg output), 128 hold the halt request across a resume, 256 (set for the dbg_* corpus) action-0
+# triggers, 512 a trigger only on the instruction after the one the hart resumes at.
 DBG_MODE=0
 DBG_FEAT=191
 DBG_DENSITY=0     # 0 = auto: 4, 8, ... 256 by program, so the halts spread over runs of any length
