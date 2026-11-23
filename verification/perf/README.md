@@ -22,6 +22,47 @@ never do.
 (and `make clean` in this directory for the kernels): re-run from clean after any
 RTL change.
 
+## Results (the complete core, 2026-11, branch `OOO`)
+
+CPI, M mode, at the defaults since O7c: recovery at execute (O3), the window aligner, the BTB's direction counters and
+gshare (O8), the D$ inside the core with an 8-entry queue (O5a), a 32-entry ROB and an 8-entry station (O7):
+
+| Kernel | reference, sram | core, sram | reference, cache | core, cache | core after O4, cache |
+|---|---|---|---|---|---|
+| memcpy | 3.78 | 1.33 | 3.90 | 0.73 | 1.15 |
+| crc32 | 3.03 | 0.60 | 3.04 | 0.60 | 0.79 |
+| qsort | 3.56 | 1.17 | 3.59 | 1.06 | 1.34 |
+| matmul | 3.63 | 0.68 | 3.66 | 0.62 | 1.00 |
+| sieve | 3.97 | 1.40 | 3.98 | 0.77 | 1.03 |
+| listchase | 3.80 | 0.70 | 3.91 | 0.68 | 0.91 |
+| mixedint | 4.00 | 1.06 | 4.01 | 0.63 | 1.06 |
+| trap (P10.0) | 4.00 | 1.43 | 4.00 | 1.43 | 1.75 |
+| fmatmul (F/D) | 4.61 | 0.68 | 4.68 | 0.64 | 1.10 |
+| fpmix (F/D) | 15.25 | 9.78 | 15.49 | 9.79 | 10.25 |
+
+On the SoC the core is 3.4 to 7.3 times faster than the reference (`trap` 2.8 times, `fpmix`, bound by its one
+divider, 1.6 times), and seven kernels run at under one cycle per instruction. Cycles against O4 (the four flips, in
+order, gave -3.2 / -3.6, -11.2 / -10.4, -14.2 / -16.9 and -2.6 / -3.8 % geomean on the SoC, M / S; each matched its
+own gate's numbers):
+
+| kernel | M SoC | S SoC | M flat SRAM | S flat SRAM |
+|---|---|---|---|---|
+| memcpy | 760 -> 484 (-36.3 %) | 770 -> 486 (-36.9 %) | -19.4 % | -26.6 % |
+| crc32 | 6955 -> 5334 (-23.3 %) | 8100 -> 5348 (-34.0 %) | -23.2 % | -34.9 % |
+| qsort | 6172 -> 4895 (-20.7 %) | 6514 -> 5083 (-22.0 %) | -24.2 % | -26.5 % |
+| matmul | 4293 -> 2657 (-38.1 %) | 4033 -> 2666 (-33.9 %) | -50.9 % | -49.6 % |
+| sieve | 6053 -> 4547 (-24.9 %) | 4696 -> 3173 (-32.4 %) | -6.9 % | -12.1 % |
+| listchase | 2323 -> 1747 (-24.8 %) | 2834 -> 1805 (-36.3 %) | -45.5 % | -49.5 % |
+| mixedint | 4654 -> 2746 (-41.0 %) | 4691 -> 2747 (-41.4 %) | -33.8 % | -36.0 % |
+| trap | 9834 -> 8036 (-18.3 %) | 10446 -> 8644 (-17.3 %) | -18.2 % | -17.0 % |
+| fmatmul | 4134 -> 2419 (-41.5 %) | 4277 -> 2462 (-42.4 %) | -51.7 % | -50.3 % |
+| fpmix | 4122 -> 3937 (-4.5 %) | 4131 -> 3938 (-4.7 %) | -3.2 % | -3.2 % |
+| geomean | -28.2 % | -31.0 % | -29.7 % | -32.3 % |
+
+With every knob of the track off (`QV_PIPE_EXEC_REDIRECT=0 QV_PIPE_XR_EARLY=0 QV_PIPE_ALIGN_WIN=0 QV_PIPE_BTB_CTR=0
+QV_PIPE_GSHARE_H=0 QV_PIPE_DCACHE=0 QV_PIPE_LSQ_DEPTH=4 QV_ROB_MAX=8 QV_PIPE_RS_DEPTH=4`) the six CSVs are O4's byte for
+byte (checked in the exit gate).
+
 ## Results (after O4, two-wide, 2026-11, branch `OOO`)
 
 CPI (cycles per retired instruction), M mode:
