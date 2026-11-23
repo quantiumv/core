@@ -137,9 +137,27 @@
     9
    ],
    "unit_only": {
+    "3": "killed by the --probe-half entry below: with the high probe page's pocket over the whole page, an offset taken from the first parcel (0xFFE) is in the same pocket as the right one (0x000)",
     "9": "the generated programs cannot show it either: see the reason in p7_lockstep.json"
    },
    "profile": "--isa imac --priv msu --pmp --smc --sv39",
+   "extra": [
+    "--irq-mode",
+    "0",
+    "--dbg-mode",
+    "1",
+    "--dbg-features",
+    "191",
+    "--timeout",
+    "2000000"
+   ]
+  },
+  {
+   "from": "p7d_unit_decode.json",
+   "only": [
+    3
+   ],
+   "profile": "--isa imac --priv msu --pmp --smc --sv39 --probe-half",
    "extra": [
     "--irq-mode",
     "0",

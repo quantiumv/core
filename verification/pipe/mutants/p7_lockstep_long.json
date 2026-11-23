@@ -1,0 +1,33 @@
+{
+ "counts": [
+  24,
+  96,
+  256
+ ],
+ "sim": "verilator",
+ "memcfg": "sram",
+ "delay": 0,
+ "jobs": 3,
+ "inner_jobs": 2,
+ "profile": "--isa imac --priv msu --pmp --irq --smc --sv39",
+ "extra": [
+  "--irq-mode",
+  "2",
+  "--irq-density",
+  "1",
+  "--dbg-mode",
+  "1",
+  "--dbg-features",
+  "191",
+  "--timeout",
+  "2000000"
+ ],
+ "mutants": [
+  {
+   "from": "p7a_unit_tlb.json",
+   "only": [
+    24
+   ]
+  }
+ ]
+}

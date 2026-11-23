@@ -111,7 +111,12 @@
    }
   },
   {
-   "from": "p6c_unit_lsu.json"
+   "from": "p6c_unit_lsu.json",
+   "unit_only": {
+    "0": "killed by p6_lockstep_extra.json: a Program Buffer access has to land in a PMP pocket that denies it at the halted privilege, which 64 programs no longer reach on the current core (96 do; they did at P6)",
+    "1": "killed by p6_lockstep_extra.json: a Program Buffer access has to land in a PMP pocket that denies it at the halted privilege, which 64 programs no longer reach on the current core (96 do; they did at P6)",
+    "2": "killed by p6_lockstep_extra.json: a Program Buffer access has to land in a PMP pocket that denies it at the halted privilege, which takes more than 64 programs"
+   }
   }
  ]
 }

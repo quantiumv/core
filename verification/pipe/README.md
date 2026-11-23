@@ -51,8 +51,10 @@ The qvgen profiles the specs use (`verification/lockstep/gen/qvgen.py`):
 | `p6_lockstep_dense.json` | the same plus `--ebreak-rate 0.1` | the same plus `--dbg-density 1` |
 | `p6_lockstep_dbgexc.json` | the same, `--corpus dbg`: the directed programs `dbg_exc.s` and `dbg_res.s`, the only ones that can take an action-0 trigger | `--irq-mode 0 --dbg-mode 1 --dbg-features 191` |
 | `p7_lockstep.json` | `--isa imac --priv msu --pmp --irq --smc --sv39` | `--irq-mode 2 --irq-density 1 --dbg-mode 1 --dbg-features 191 --timeout 2000000` |
-| `p7_lockstep_extra.json` | an M-mode body (`--priv m --pmp --smc --sv39`: MPRV, a locked pocket binding M); `--priv msu --pmp --irq --smc` without `--sv39` (satp Bare below M); `--priv msu --irq --smc --sv39` without `--pmp` (the bus-error region is reachable); `--priv msu --pmp --smc --sv39` without `--irq` (a pocket of its own over the high probe page) | `--irq-mode 0` where the profile has no `--irq` |
+| `p7_lockstep_extra.json` | an M-mode body (`--priv m --pmp --smc --sv39`: MPRV, a locked pocket binding M); `--priv msu --pmp --irq --smc` without `--sv39` (satp Bare below M); `--priv msu --irq --smc --sv39` without `--pmp` (the bus-error region is reachable); `--priv msu --pmp --smc --sv39` without `--irq` (a pocket of its own over the high probe page; with `--probe-half` it covers only the first half) | `--irq-mode 0` where the profile has no `--irq` |
 | `p7_lockstep_slow.json` | the first profile (and the no-`--pmp` one) on the cache with 8 wait states, where the caches answer with ack and err together | `--timeout 3000000` |
+| `p7_lockstep_win0.json` | `p7_lockstep`'s first profile and the one without `--irq`, built with the one-entry aligner `qv_align` (the defaults build `qv_align2` since O8) | `--defines "QV_PIPE_ALIGN_WIN=0 QV_PIPE_GSHARE_H=0"` plus the same |
+| `p7_lockstep_long.json` | `p7_lockstep`'s first profile, up to 256 programs, for what 64 do not reach | the same |
 
 `p6_lockstep.json` holds every mutant of the P6 unit specs. 85 of its 134 are killed by the random programs
 alone and 49 survive them; each survivor is annotated (`unit_only`) with the reason, either the spec that kills it

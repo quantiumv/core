@@ -43,6 +43,8 @@
   {
    "from": "p6c_unit_lsu.json",
    "only": [
+    0,
+    1,
     2
    ]
   }

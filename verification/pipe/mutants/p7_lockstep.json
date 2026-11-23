@@ -46,7 +46,8 @@
     "9": "an over-strict tag compare only adds misses (a walk that refills the same entry); no timing is compared",
     "11": "an over-strict tag compare only adds misses (a walk that refills the same entry); no timing is compared",
     "16": "an over-strict tag compare only adds misses (a walk that refills the same entry); no timing is compared",
-    "20": "qv_xlate holds the request address from the start of the walk to the fill, so the lookup address and the fill address are the same"
+    "20": "qv_xlate holds the request address from the start of the walk to the fill, so the lookup address and the fill address are the same",
+    "24": "killed by p7_lockstep_long.json: it needs an execute-only data page read with MXR set and then with MXR clear through the same entry, which 64 programs do not reach (256 do)"
    }
   },
   {
@@ -134,11 +135,12 @@
    "from": "p7d_unit_decode.json",
    "unit_only": {
     "2": "killed by p7_lockstep_extra.json (an M-mode body: a locked pocket binds M and the jump into it is untranslated)",
-    "3": "killed by p7_lockstep_extra.json (an M-mode body, a Bare satp, no PMP, or PMP without interrupts: the profile that reaches it)",
+    "3": "killed by p7_lockstep_extra.json (PMP without interrupts, with qvgen --probe-half: the high probe page's pocket covers only its first half, so the second parcel's offset decides the verdict)",
     "4": "the second span 4 bytes off stays in the same page and in the same pocket in every generated program; qv_decode_tb covers it",
     "6": "killed by p7_lockstep_extra.json (an M-mode body, a Bare satp, no PMP, or PMP without interrupts: the profile that reaches it)",
     "9": "needs a straddling fetch whose second page both page-faults and sits in a pocket that forbids X while the first page is fine: too rare in generated programs; qv_decode_tb covers it",
-    "12": "the same bypass line is killed in p6_lockstep.json (p6c_unit_decode); P7 only moved the span it applies to"
+    "12": "the same bypass line is killed in p6_lockstep.json (p6c_unit_decode); P7 only moved the span it applies to",
+    "13": "equivalent in the core: both aligners give an instruction that does not cross into the next dword pg_hi = pg_lo (qv_align.sv, qv_align2.sv), and a fault marker's second parcel is never looked at; qv_decode_tb drives pg_hi apart"
    }
   },
   {
