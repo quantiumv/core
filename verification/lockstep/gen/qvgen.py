@@ -2113,7 +2113,8 @@ def emit_pmp(p: Program):
             # dword): the two pages of the straddling instruction, and the span of a fetch that starts in the first, can
             # then differ in X
             entries[2] = entries[1]
-            entries[1] = (pocket_cfg(_PMP_A_NAPOT), napot_pmpaddr(PROBE_HI_VPN << 12, 0x1000))
+            entries[1] = (pocket_cfg(_PMP_A_NAPOT),
+                          napot_pmpaddr(PROBE_HI_VPN << 12, 0x800 if p.args.probe_half else 0x1000))
         if p.args.sv39 and rng.random() < 0.35:
             # an NA4 word over the first half of one PTE of the PMPT_VA table, ahead of the region that covers the
             # whole table: a PTE read is eight bytes, so it only partly overlaps the word and is no match for it,
@@ -3064,6 +3065,10 @@ def main():
                     help="with --sv39: also provoke instruction page faults (code pages with A clear, jumps to "
                          "pages that cannot be fetched from, a 32-bit instruction whose second page faults). "
                          "--no-sv39-fetch keeps every fetch fault-free, for a core that does not translate fetches")
+    ap.add_argument("--probe-half", action="store_true", dest="probe_half",
+                    help="with --sv39 --pmp and no --irq: the high probe page's own PMP pocket covers only the first "
+                         "half of the page. A fetch reaches only that page's first parcel, so nothing a correct core "
+                         "does changes; a second-parcel check at the wrong offset falls outside the pocket")
     ap.add_argument("--irq", action="store_true",
                      help="run the body with interrupts enabled, for the lockstep "
                           "harness's own interrupt injection (--irq-mode): source "
