@@ -553,6 +553,42 @@ sizes) checks both channels.
 The rest of O4's own formal (the one-channel models on this tree) was not run on its own: a WSL stop on 2026-11-14 cut
 it off, and O3's runs below are on a tree with all of O4 plus recovery at execute, so they stand for it.
 
+
+### After O3 (recovery at execute)
+
+The tree of `ff03e52` on branch `o4` (O3 on top of O4), with `QV_PIPE_EXEC_REDIRECT` and `QV_PIPE_XR_EARLY` at 1 by
+`QV_FORMAL_DEFS` (the defaults since O3i): a mispredicted branch kills everything younger and fetch restarts at the
+branch's writeback; `../../pipe/README.md` describes it. Run from 2026-11-15 with `run_sweep.sh` (bitwuzla) in a
+private copy of the framework, beside O1's, O4's and O8's runs, on 5 cores (10 threads) shared with other users' jobs.
+CPU times; nothing failed.
+
+With the station on, one instruction check's query ran past 10 h, so the plan's fallback was taken: the station-on
+models ran the checks that see the whole machine, and the instruction checks moved to the station-off model. That model
+was then trimmed by choice (2026-11-19) to the checks a recovery at execute can change: `reg`, `unique`, `causal`,
+`pc_fwd`, `pc_bwd`, `liveness`, `hang`, `cover` and the branch, jump, load and store instruction checks, 12 h each.
+A Windows restart on 2026-11-20 and a killed driver the same afternoon stopped the runs; the checks that were cut off
+started again.
+
+- **`pipe`** (the station on, 60,000 s each): 9 of 11 PASS: `ill` 0:31:43, `causal` 0:41:48, `pc_fwd` 0:59:17,
+  `pc_bwd` 0:59:21, `cover` 1:04:19 and the four `csrc_any_*` (2:17:56 .. 2:56:39); `reg` and `unique` reached the cap.
+- **`pipe-sb`** (the store buffer and early loads, the station on, 6 h each): 4 of 20 PASS: `cover` 1:31:41, `pc_bwd`
+  1:38:59, `pc_fwd` 1:50:11 and `causal` 2:09:55; `reg`, `unique` and the 14 instruction checks reached the cap.
+- **`pipe-w2`** (two channels, the station on, 6 h each): 6 of 23 PASS: `causal` on both channels (0:52:20, 0:32:45),
+  `pc_bwd` on both (1:07:38, 0:32:33), `pc_fwd_ch0` (1:21:31) and `cover` (1:37:22); the rest reached the cap.
+- **`pipe-rs0`** (the station off, the trimmed list, 12 h each): 37 of 40 PASS: the 32 branch, jump, load and store
+  instruction checks (RV64I 2:38:24 .. 4:54:40, Zca 0:29:56 .. 5:12:44), `pc_fwd` 0:10:51, `pc_bwd` 0:11:03, `causal`
+  0:24:01, `unique` 0:39:05 and `cover` 1:57:38; `reg`, `liveness` and `hang` reached the cap.
+- **`pipe-w2`, the station off** (`liveness` on both channels and `hang`, 12 h each): 0 of 3; all three reached the
+  cap in the single query of their last step, as `pipe-rs0`'s did (two earlier runs were cut off by WSL restarts on
+  2026-11-22, one after 7.5 h).
+- **Module proofs** (`run.sh --mutants` on the snapshot): 34 of 34 PASS, among them the new `kill` (`kill_props.sv`:
+  issue and the ROB under free kills; after every edge both producer tables equal their definition, and the kill
+  vector marks exactly the entries younger than the branch) and `ras` (`ras_props.sv`: a miter of the circular stack
+  against the shift stack it replaced, with nothing restored), and the kills added to `rs`, `rs2`, `lsu`, `lsq` and
+  `fpu`. 101 known-bad versions are caught; three more (`fpu_wb_in_flush`,
+  `fpu_ack_over_pipe`, `lsq_bar_ignored`) found nothing to change, because O3 had rewritten their lines: re-anchored in
+  `428264d` and caught on the current tree.
+
 ### After O8 and O5a (the frontend; the D$ inside the core)
 
 The tree of `41815b0` on branch `o4`, with the knobs of what ships turned on by `QV_FORMAL_DEFS` (`QV_PIPE_EXEC_REDIRECT`,
@@ -575,3 +611,30 @@ last model resumed from its finished checks. CPU times; nothing failed.
   not proved: bitwuzla ran out of the sweep's 8 GB at the step-40 query (6:35), and boolector, given 12 GB, sat 9.5 h
   on the same query before it was stopped for the machine's memory. riscv-formal cannot see a stale line in the D$
   (`dc_props.sv` carries that: see "After O7", the module proofs).
+
+### After O7 and the default flips (the complete core)
+
+O7 changes sizes only (`QV_ROB_MAX` 32, `QV_PIPE_RS_DEPTH` 8), and every riscv-formal model and module proof pins
+`QV_ROB_MAX=8` and checks it (`e62d401`), so the models above are unchanged by it: the small configuration's ROB 4,
+station 2 and queue 2, and `pipe-full` at the station and queue it was proven at (4 and 4). The flips that made O3,
+O8, the D$ and the big window the defaults (`35b7474`, `7e1087d`, `4d75eb5`, `1b5740c`) only change what a model built
+without `QV_FORMAL_DEFS` gets: `pipe` and the other models now build the shipping knobs, which the runs above turned
+on by hand; `pipe-sb` keeps its loads on the bus (`QV_PIPE_DCACHE=0`, `1bfb618`) so that model still checks the bus
+path, and `pipe-dc` is the D$.
+
+**Module proofs** (`run.sh --mutants` on `2559e8a`, the tree after the flips, 2026-11-21 and 22): 48 of 48 PASS and
+131 known-bad versions caught. `lsu prove` came back UNKNOWN first: O5a's `fill_q` (an op waiting for the D$'s
+refill) was free in the induction step although the proof builds the LSU with its D$ arm off, so the step could start
+in a state no run reaches; a lemma (`1be5530`, `fill_q` is never set with `DC_EN` 0) closes it, and `lsu` prove, bmc
+and cover PASS. Among the 48: `dc` (`dc_props.sv`: every valid copy of one dword equals what the core may see of it,
+fills equal memory, nothing installs after a snoop or an error; prove 2 x 2, bmc 2 x 2 and 4 x 4), `align2` (the window
+aligner against a program-order decode) and `gh` (the global history against a ghost of the branches in flight).
+
+**The capped station-off checks, with another engine** (2026-11-23). The `reg`, `liveness` and `hang` checks that
+reached their caps on the station-off models (O3's `pipe-rs0`, O8's `pipe-rs0` and `pipe-dc-rs0`, the last one the D$
+hang bitwuzla ran out of memory on) each stalled in the single query of their last step. `abc bmc3` on the same models
+(the bit-level model; sby gives abc no `skip`, so `chformal -assert -skip N` leaves the assertions out of the first N
+cycles instead, as smtbmc's `skip` does, or the core's own `RISCV_FORMAL` assertions fail on the free state of cycle 0)
+needs far less memory (0.4 to 1.2 GB against bitwuzla's 5 GB) but did not answer either: `pipe-rs0` `reg` in 4 h
+(1.2 CPU-hours) and the three `hang` checks in 6 h (about 2 CPU-hours each, on a machine shared with the exit gate).
+They stay unproven; what is left is longer runs on a quiet machine.
