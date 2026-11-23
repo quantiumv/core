@@ -54,6 +54,7 @@
     "9": "timing only: the entry comes a cycle or two earlier, the architectural result is the same",
     "10": "timing only: the entry comes a cycle or two earlier, the architectural result is the same",
     "11": "killed by p6_lockstep_dense.json: it needs an EBREAK at the head in the very cycle a halt request or a step is sampled, which takes dense EBREAKs and halts",
+    "14": "killed by p6_lockstep_dense.json (debug-script feature 512 and --irq-density 4): it needs a trigger-marked head at a sample point that also takes an interrupt, which is the first sample point after a resume when the trigger sits on the instruction after dpc's and the halt left an interrupt pending",
     "15": "reporting wire only (compatibility and formal tap)",
     "18": "the redirect target of a head entry is never used: fetch is held in Debug Mode and the resume redirects to dpc",
     "20": "a fetch-fault marker never travels with an EBREAK word in generated programs; qv_commit_tb covers it",

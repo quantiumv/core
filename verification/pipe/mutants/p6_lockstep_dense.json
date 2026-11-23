@@ -28,6 +28,24 @@
    "only": [
     11
    ]
+  },
+  {
+   "from": "p6b_unit_commit.json",
+   "only": [
+    14
+   ],
+   "extra": [
+    "--irq-mode",
+    "2",
+    "--irq-density",
+    "4",
+    "--dbg-mode",
+    "1",
+    "--dbg-features",
+    "703",
+    "--dbg-density",
+    "1"
+   ]
   }
  ]
 }
