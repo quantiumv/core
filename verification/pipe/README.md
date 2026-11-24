@@ -658,6 +658,78 @@ ROB 32, RS 8, LSQ 8:
   and that removed more than half of it (75,402 and 51,348 of 1.44 M at ROB 32), the queue full.
 - `check_patterns.py` 1,439/1,439.
 
+### The complete core: the default flips and the exit gate (branch `OOO`)
+
+The four milestones' knobs became the defaults in the order the plan gave, each as one RTL commit and one results
+commit with its six perf CSVs (and the two counter CSVs, `_ox`), each measured equal to its own gate's numbers:
+- O3i (`35b7474`): `QV_PIPE_EXEC_REDIRECT`, `QV_PIPE_XR_EARLY` 1.
+- O8 (`7e1087d`): `QV_PIPE_ALIGN_WIN` 1, `QV_PIPE_BTB_CTR` 1, `QV_PIPE_GSHARE_H` 12.
+- O5/6z (`4d75eb5`): `QV_PIPE_DCACHE` 1 (in `core.sv` and `soc.sv`, so the SoC's bus D$ is left out),
+  `QV_PIPE_LSQ_DEPTH` 8. With it (`1bfb618`) the lockstep's D$ audit runs unless `QV_PIPE_DCACHE=0`, and `pipe-sb`
+  keeps its loads on the bus.
+- O7c (`1b5740c`): `QV_ROB_MAX` 32, `QV_PIPE_RS_DEPTH` 8.
+
+What the exit gate found and fixed:
+- `d19ad6d` (and the testbench check `62589bb`): with the SoC's bus D$ left out (`cache_complex` `DC_EN` 0), its idle
+  `dcache0` still saw the data port's responses and fired its own "response while idle" check on every one. Icarus only
+  prints it, but Verilator stops on it, so the OpenOCD smoke died at its first SBA write (item 8) at the new defaults.
+  The D$'s response inputs are gated by `DC_EN` too; OpenOCD is 29/29 again.
+- `1be5530`: `lsu prove` was UNKNOWN since O5a (`fill_q` free in the induction step with the D$ arm off); a lemma.
+- `428264d`: three module-proof mutants whose lines O3 had rewritten matched nothing; re-anchored, caught.
+- `2559e8a`: `p7b_unit_ptw` [6] (a one-byte PMP span for a PTE read) survived its testbench, before the flips too; a
+  4-byte region over the PTE's second half kills it.
+- `825e239`: since O8's flip the one-entry aligner `qv_align` is not built at the defaults, so its lockstep mutants
+  (`p7d_unit_align` in `p7_lockstep` and `p7_lockstep_extra`) cannot show; `p7_lockstep_win0.json` runs them with
+  `QV_PIPE_ALIGN_WIN=0`: 13/13 killed.
+- `f9a5f9c`: `p5d_lockstep` [27] (the interrupt vector keeps the MODE bits) is unobservable since E4's vector tables.
+
+The gate, on a snapshot of `ab054ef` (the cache_complex fix `d19ad6d` came after it: OpenOCD on `2559e8a`):
+- Lint clean at the defaults, with every knob off and on the reference. Perf with every knob off: the six CSVs O4's
+  byte for byte.
+- Regression: pipe 238/238 and ref 81/81 (seven pipe rows ran past their row time limits on the loaded machine:
+  each passes on its own with a 3 h limit, `core_sv39_random_tb` 3,000 iterations, 9,137 checks). RVFI diff with
+  `--ooo` 150/150. `make run` on both cores. ACT: 202/204 and 426/430, as committed.
+- Mutation at the new defaults: the 110 unit specs 1,373/1,373 (after `2559e8a`); end to end p5a 12/12, p5b 14/14,
+  p10c 4/4; the lockstep specs (`--skip-annotated`) all killed or annotated, with `p7_lockstep_win0` 13/13. Six
+  lockstep mutants survived that also survive on the tree before the flips (`4dd6c7e`), each killed by its unit
+  testbench: a loss of lockstep coverage since P6/P7, not from the flips. The follow-up (`035b32f`..`d3ea65e`)
+  placed each:
+  - `p6_lockstep` [131] and [132] (the Program Buffer's PMP bypass) need 96 programs: moved to `p6_lockstep_extra`,
+    beside [133].
+  - `p7_lockstep` [71] (a TLB fill drops R: an execute-only page read with MXR set, then clear) needs 256: the new
+    `p7_lockstep_long.json`.
+  - `p7_lockstep_extra` [18] (the second parcel's offset) could not show while the high probe page's pocket covered
+    the whole page: qvgen `--probe-half` (opt-in, default streams unchanged) puts it over the first half, and an
+    entry with it kills [18] within 64 programs (the unmutated core passes 256).
+  - `p7_lockstep` [237] (the second parcel always takes the second dword's page) is equivalent in the core: both
+    aligners give an instruction that stays in its dword `pg_hi = pg_lo`. Annotated.
+  - `p6_lockstep` [52] (a trigger entry that does not give way to an interrupt sampled with it) needs a trigger-marked
+    head at a sample point that takes an interrupt: the first one after a resume, with the trigger on the instruction
+    after dpc's and an interrupt left pending by the halt. 256 programs did not reach it, nor 256 at
+    `--irq-density 4`; debug-script feature 512 (opt-in: a trigger only 2 or 4 bytes past dpc) with density 4 kills
+    it within 24, in `p6_lockstep_dense` (the unmutated core passes 256).
+- Module proofs on `2559e8a`: 48/48 PASS, 131 known-bad versions caught (`../riscv-formal/quantiumv_pipe/README.md`).
+- Lockstep, Verilator, the four configurations (sram/cache x 0/8 wait states), on a snapshot of `1ca38a3`, at the
+  smaller size chosen after the second WSL restart (2026-11-22). Before the restarts the full-size gate had passed
+  about 9,000 of A's 10,000 runs and about 1,500 of L's 2,000, nothing failing; those results went with `/tmp`.
+  - A, the complete core's profile (`--isa imafdc --priv msu --pmp --irq --smc --sv39 --pair --ooo --xr --win --dc
+    --mem-dense --deep`, interrupts at density 1), 1,000 x 4: 4,000/4,000. The ROB (32) was full in 3,987 runs;
+    2.57 M recoveries at execute, 135,696 keeping more than half of it and 85,520 removing more than half.
+  - L (late modes), I (interrupts off), M (an M-mode body), 300 x 4 each: 1,200/1,200 each. Z, every knob off (O4),
+    100 x 4: 400/400.
+  - The corpora x 4: act-fd 426, act + fw + 100 random 307, smc, irq, dbg 200, all passing. One random program
+    (9450011) ran past the 12 M-cycle limit at 8 wait states with 729 k of its 816 k retirements matched; with 40 M
+    cycles it passes in all four.
+  - Icarus 24 x 4: 96/96, six of them only with a longer wall limit. `run_lockstep.sh` stops a simulation after
+    1 h of real time, and Icarus took longer on 9460001 at 8 wait states and on 9460022 in all four configurations;
+    with 6 h they pass (232,361 and 249,652 retirements matched). On such a program Icarus also prints about half a
+    million `ERROR: design/pipe/core.sv:18xx` lines: the core's `always @*` assertions (O1 to O3) seen on half-updated
+    values at a clock edge, which Verilator (stopping on a failed assertion) never reports. That slows Icarus; making
+    them sample settled values is a follow-up.
+  - REF vs REF 50 x 4: 200/200. The corruption self-test catches every field class at the targeted record
+    (retirement fields 1-8 and 13, event-log fields 9-12); the `ref_core` kill matrix 18/18; `check_patterns.py`
+    1,439/1,439.
+
 ## Where the core differs from ref_core.sv
 
 Architectural behavior is the same: the lockstep gate compares every retirement, a CSR snapshot, the bus
