@@ -722,10 +722,13 @@ The gate, on a snapshot of `ab054ef` (the cache_complex fix `d19ad6d` came after
     cycles it passes in all four.
   - Icarus 24 x 4: 96/96, six of them only with a longer wall limit. `run_lockstep.sh` stops a simulation after
     1 h of real time, and Icarus took longer on 9460001 at 8 wait states and on 9460022 in all four configurations;
-    with 6 h they pass (232,361 and 249,652 retirements matched). On such a program Icarus also prints about half a
+    with 6 h they pass (232,361 and 249,652 retirements matched). On such a program Icarus also printed about half a
     million `ERROR: design/pipe/core.sv:18xx` lines: the core's `always @*` assertions (O1 to O3) seen on half-updated
-    values at a clock edge, which Verilator (stopping on a failed assertion) never reports. That slows Icarus; making
-    them sample settled values is a follow-up.
+    values at a clock edge, which Verilator (stopping on a failed assertion) never reports. Since `9bfd855` a
+    simulation checks them once a cycle, at the falling edge, on settled values (riscv-formal still checks them in
+    every step: yosys-slang elaborates the same RTLIL): Icarus prints none (9460001 at 8 wait states: 566,896 before),
+    and the ALU's killed-writeback mutant (`o3_lockstep.json` [8]) still stops Verilator on the same assertion in the
+    same cycle. The messages were not what made Icarus slow: that run takes 77 min with them and 76 min without.
   - REF vs REF 50 x 4: 200/200. The corruption self-test catches every field class at the targeted record
     (retirement fields 1-8 and 13, event-log fields 9-12); the `ref_core` kill matrix 18/18; `check_patterns.py`
     1,439/1,439.
