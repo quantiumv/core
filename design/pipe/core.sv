@@ -1809,6 +1809,20 @@ module core
     end
     assign rvfi_any_trap_taken     = trap_taken || interrupt_taken;
 
+    // The invariants below are combinational: riscv-formal checks each in every step, on that step's state and
+    // inputs. A simulator runs an `always @*` again whenever an operand changes, also while one clock edge's updates
+    // land one by one (Icarus reported writebacks whose ROB entry the same edge had already marked complete, about half
+    // a million times in a long program), and Icarus 13 has no deferred assertions (`assert final`). So a simulation
+    // checks the same expressions once a cycle, at the falling edge, on the cycle's settled values: the testbenches
+    // that build this block drive the core only at or just after a rising edge. Formal (yosys-slang) keeps `always @*`.
+`ifdef __ICARUS__
+`define QV_EACH_CYCLE always @(negedge clk)
+`elsif VERILATOR
+`define QV_EACH_CYCLE always @(negedge clk)
+`else
+`define QV_EACH_CYCLE always @*
+`endif
+
     // An interrupt or a halt is only ever taken with nothing started on the LSU's side of the data bus: the cycle
     // before retired something, so no memory op was in flight, and a head that would start in that cycle is held
     // off by the flush. An EBREAK or trigger entry happens at a head that is not a memory op, and memory
@@ -1816,23 +1830,23 @@ module core
     // later, and which lsu_head_started does not count. (A started access cannot be abandoned, so this is what makes entering
     // Debug Mode without waiting for the LSU safe. The walker may have a PTE read of a cancelled fetch walk in
     // flight; it is a read that completes and is dropped, and the LSU's next start waits for it.)
-    always @* assert (!((interrupt_taken || debug_halt_req_entry || debug_ebreak_entry || trigger_debug_entry)
-                        && lsu_head_started));
+    `QV_EACH_CYCLE assert (!((interrupt_taken || debug_halt_req_entry || debug_ebreak_entry || trigger_debug_entry)
+                            && lsu_head_started));
     // The LSU, the walker and the store buffer's drain never drive the memory port together: each starts a beat
     // only while the others have nothing started or ready to start, and waits out a beat in flight.
-    always @* assert (!((lsu_cyc && ptw_cyc) || (lsu_cyc && sb_cyc) || (ptw_cyc && sb_cyc)));
+    `QV_EACH_CYCLE assert (!((lsu_cyc && ptw_cyc) || (lsu_cyc && sb_cyc) || (ptw_cyc && sb_cyc)));
     // (O5a) nor does the D$'s refill, which the others wait out
-    always @* assert (!(dc_cyc && (lsu_cyc || ptw_cyc || sb_cyc)));
-    always @* if (o_debug_mode) assert (!dc_busy);
+    `QV_EACH_CYCLE assert (!(dc_cyc && (lsu_cyc || ptw_cyc || sb_cyc)));
+    `QV_EACH_CYCLE if (o_debug_mode) assert (!dc_busy);
     // (O2) An access that goes before the head is a plain load from RAM or a posted plain store to RAM, of an op no
     // barrier is older than, translated, aligned, allowed, and (a load) with no store to its dword that is posted or
     // buffered and not yet in memory; one started early is always such a load.
-    always @* if (!rst && (lsu0.start || lsu0.post_done) && !lsu0.at_head)
+    `QV_EACH_CYCLE if (!rst && (lsu0.start || lsu0.post_done) && !lsu0.at_head)
         assert (lsu0.EARLY && lsq_early && lsu0.pa_in_window && !lsu0.atomic_q && !pb_active && lsu0.pa_valid
                 && !lsu0.misaligned_q && !lsu0.pmp_deny && (lsu0.store_q || !(sb_match || lsq_match)));
-    always @* if (!rst && lsu0.in_bus && lsu0.early_q) assert (!lsu0.store_q && !lsu0.atomic_q);
+    `QV_EACH_CYCLE if (!rst && lsu0.in_bus && lsu0.early_q) assert (!lsu0.store_q && !lsu0.atomic_q);
     // (O5a) a load the D$ answers (or refills for) before the head is such a load too
-    always @* if (!rst && (lsu0.done_dc || lsu0.dc_miss) && !lsu0.at_head)
+    `QV_EACH_CYCLE if (!rst && (lsu0.done_dc || lsu0.dc_miss) && !lsu0.at_head)
         assert (lsu0.EARLY && lsq_early && lsu0.pa_in_window && !lsu0.atomic_q && !pb_active && lsu0.pa_valid
                 && !lsu0.misaligned_q && !lsu0.pmp_deny && !lsu0.store_q && !(sb_match || lsq_match));
 
@@ -1849,7 +1863,7 @@ module core
     wire [RIW:0] rob_h = rob0.head_q;
     wire [RIW:0] rob_t = rob0.tail_q;
     wire [RIW:0] rob_ta = rob0.tail_q + (RIW + 1)'(alloc_valid) + (RIW + 1)'(alloc2_valid);
-    always @* if (!rst) begin
+    `QV_EACH_CYCLE if (!rst) begin
         assert (!(alu_req.valid && bru_req.valid));
         if (alu_req.valid) assert (rob_holds(alu_req.tag, rob_h, rob_ta));
         if (bru_req.valid) assert (rob_holds(bru_req.tag, rob_h, rob_ta));
@@ -1915,7 +1929,7 @@ module core
         g_mxr      <= mstatus_mxr_w;
         g_satp     <= satp_w;
     end
-    always @* begin
+    `QV_EACH_CYCLE begin
         if (!rst && g_f_req && f_xl_req && !g_f_cancel)
             assert (f_xl_va == g_f_va && priv == g_f_priv && satp_w == g_satp);
         if (!rst && g_x_req && x_req && !g_x_cancel)
@@ -1937,7 +1951,7 @@ module core
             g_lp_priv  <= priv;
         end
     end
-    always @* if (!rst && fetch0.can_issue && fetch0.issue_reuse)
+    `QV_EACH_CYCLE if (!rst && fetch0.can_issue && fetch0.issue_reuse)
         assert (g_lp_valid && satp_w == g_lp_satp && priv == g_lp_priv);
 
     // The data side's translation, once taken (P10b: possibly before the op is the head), stays right while the op
@@ -1958,9 +1972,10 @@ module core
             g_px_mxr   <= mstatus_mxr_w;
         end
     end
-    always @* if (!rst && !flush && g_px_valid && lsu0.state_q == 2'd1 && lsu0.xlated_q)
+    `QV_EACH_CYCLE if (!rst && !flush && g_px_valid && lsu0.state_q == 2'd1 && lsu0.xlated_q)
         assert (satp_w == g_px_satp && x_priv == g_px_priv && mstatus_sum_w == g_px_sum && mstatus_mxr_w == g_px_mxr
                 && !c_sfence);
+`undef QV_EACH_CYCLE
 
     assign rvfi_any_debug_entry    = debug_ebreak_entry || debug_halt_req_entry || trigger_debug_entry
                                      || dm_access_active;
