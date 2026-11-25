@@ -604,7 +604,7 @@ last model resumed from its finished checks. CPU times; nothing failed.
   `cover` 1:50:15.
 - **`pipe-rs0`** (the station off): 17 of 19 PASS: the 13 branch and jump instruction checks (`c_jr` 0:21:13 .. `beq`
   4:48:18), `pc_bwd` 0:09:00, `pc_fwd` 0:10:42, `unique` 0:30:07 and `reg` 9:32:33 (on a second run with a 24 h cap,
-  below: it reached the 12 h one); `liveness` and `hang` reached the 12 h cap.
+  below: it reached the 12 h one); `liveness` and `hang` reached the 12 h cap and the 24 h one.
 - **`pipe-dc`** (the D$ on, the station on): 4 of 4 PASS: `pc_bwd` 1:10:44, `cover` 1:27:04, `causal` 1:29:49 and
   `pc_fwd` 1:36:40.
 - **`pipe-dc`, the station off**: 9 of 15 PASS: eight load and store checks (`lb` 6:41:05 .. `lhu` 10:36:32: `lb lbu
@@ -639,5 +639,6 @@ cycles instead, as smtbmc's `skip` does, or the core's own `RISCV_FORMAL` assert
 needs far less memory (0.4 to 1.2 GB against bitwuzla's 5 GB) but did not answer either: `pipe-rs0` `reg` in 4 h
 (1.2 CPU-hours) and the three `hang` checks in 6 h (about 2 CPU-hours each, on a machine shared with the exit gate).
 A longer cap answered one: O8's `pipe-rs0` `.sby` files run again as they are (bitwuzla, 24 h in place of 12,
-2026-11-24) prove `reg` in 9:32:33 (11:47 on the clock); its `liveness` and `hang`, run beside it, were still in
-their step-40 query after 14 h. The others stay unproven; what is left is longer runs on a quiet machine.
+2026-11-24) prove `reg` in 9:32:33 (11:47 on the clock); its `liveness` and `hang`, run beside it, reached the 24 h
+cap in the same step-40 query, without an answer. The others stay unproven; what is left is longer runs on a quiet
+machine.
