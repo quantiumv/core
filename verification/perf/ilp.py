@@ -7,7 +7,7 @@ allocation), reached the LSU and started its access (acc, go), wrote back (cmpl)
 redirected fetch after it, whether it trapped, the commit redirect it caused and its physical dword.
 
 The model replays the retired stream through a dataflow machine with the core's structure:
-  frontend   instructions are pushed into the instruction queue in order, at most two a cycle, no earlier than the
+  frontend   instructions are pushed into the instruction queue in order, at most fe_w (2) a cycle, no earlier than the
              commit of the redirect that started their path, and no earlier than the IQ has room (IQ_DEPTH);
              decode pops one (or W) a cycle, holding at most W uops until they are dispatched
   dispatch   in order, W a cycle, into the ROB (ROB) and, for memory ops, the load/store queue (LSQ); in order mode
@@ -26,6 +26,13 @@ op in a dispatch pair; fp1, at most one uop touching FP state; alone, a CSR, SYS
 atomic or trapping uop dispatches alone; p0, branches and multiplies use port 0 only; slot2, the second commit is never
 a trap, CSR, SYS or FENCE; fpw1, a commit pair writes FP state at most once; dispatch1, two commits with one dispatch.
 --set o4 runs the two-wide configurations with them.
+
+(W.0) Any width: w uops dispatch, cw retire and fe_w enter the IQ a cycle. A dispatch group follows the pair rules as
+counts (mem_n memory ops, fp_n uops touching FP state; alone: a group of one), and so does a commit group (its older
+members plain retirements; st_n posted stores, br_n branches, fpw_n FP-state writes). Ports by capability (alu_ports,
+bru_ports, mul_ports, fpu_ports), `engines` in-order engines, dc_ports D$ hit lookups a cycle. Every default is the
+two-wide core's rule, so the earlier configurations replay as they did. --check counts the cycles in which a replay
+exceeds a width or the integer ports (a residual can break a cap the constraints keep).
 
 Everything the structure does not explain is kept as a per-instruction residual, measured on the core as it is: the
 traced run is replayed in its own configuration ("fit"), each event's residual is its traced cycle minus the latest of
@@ -239,7 +246,19 @@ BASE = dict(w=1, rs=0, rob=8, iq=8, lsq=4, sb=4, handoff=True, early=True, lsu_b
             # an aligner redirect or a phantom costs the traced bubble (its mean where the trace has none); al_ntk: the
             # aligner pairs nothing across a taken branch (the window aligner without pair_taken); al_cond1: at most one
             # conditional branch per aligner cycle (one history per cycle)
-            bp=None, al_ntk=False, al_cond1=False)
+            bp=None, al_ntk=False, al_cond1=False,
+            # (W.0) any width. cw: the commit width (None: w); fe_w: IQ pushes a cycle; al_cond_n: conditional branches
+            # per aligner cycle (None: al_cond1's one, else any). Group rules: mem_n / fp_n, memory ops / uops touching
+            # FP state in a dispatch group; fpw_n / st_n / br_n, FP-state writes / posted stores / branches in a commit
+            # group (None: mem1's, fp1's, fpw1's one, else any; a commit group's older members are plain retirements).
+            # Ports: bru_ports / mul_ports, the ports with a branch unit / a multiplier (with p0 they are nested, port 0
+            # first: a branch and a multiply share max of the two); fpu_ports, FPU pipes. engines also counts for the
+            # in-order engine (ops taken in program order, that many in flight); dc_ports: D$ hit lookups a cycle
+            # (None: any); fb_bytes: the fetch buffer in bytes (None: fb blocks). Sensitivity: book_iss, a port is
+            # booked in the issue cycle (its residual included), not the constraint's; res_clamp, a negative pop,
+            # dispatch or commit residual is not added back
+            cw=None, fe_w=2, al_cond_n=None, mem_n=None, fp_n=None, fpw_n=None, st_n=1, br_n=1,
+            bru_ports=1, mul_ports=1, fpu_ports=1, dc_ports=None, fb_bytes=None, book_iss=False, res_clamp=False)
 
 
 class DPort:
@@ -342,6 +361,14 @@ def sim(tr, p, res=None, fit=False, t0=None):
     record the residuals in res (a dict of lists), which other runs add back."""
     n = len(tr)
     W = p['w']
+    CW = p['cw'] if p['cw'] is not None else W                  # (W.0) the commit width
+    FW = p['fe_w']                                              # ... IQ pushes a cycle
+    n_cond = p['al_cond_n'] if p['al_cond_n'] is not None else (1 if p['al_cond1'] else None)
+    n_mem = p['mem_n'] if p['mem_n'] is not None else (1 if p['mem1'] else None)
+    n_fp = p['fp_n'] if p['fp_n'] is not None else (1 if p['fp1'] else None)
+    n_fpw = p['fpw_n'] if p['fpw_n'] is not None else (1 if p['fpw1'] else None)
+    n_fb = max(1, p['fb_bytes'] // p['fe_blk']) if p['fb_bytes'] else p['fb']
+    E_io = 1 if p['mem_ooo'] else p['engines']                  # engines taking ops in program order
     push = [0] * n; pop = [0] * n; disp = [0] * n; iss = [0] * n
     acc = [0] * n; go = [0] * n; cmpl = [0] * n; com = [0] * n
     if fit:
@@ -349,7 +376,10 @@ def sim(tr, p, res=None, fit=False, t0=None):
             res[k] = [0] * n
     trim = 4 * max(16, p['rob'], p['rs'])       # how far back the occupancy lists look
     ports = {}                      # (port, cycle) -> uses
-    cap = {'alu': p['alu_ports'], 'bru': 1, 'fpu': 1, 'p0': 1}     # p0: port 0's own (branches, multiplies)
+    # p0: branches (p0b) and multiplies (p0m) on their own ports, nested from port 0, so together on max of the two
+    cap = {'alu': p['alu_ports'], 'bru': p['bru_ports'], 'fpu': p['fpu_ports'],
+           'p0': max(p['bru_ports'], p['mul_ports']), 'p0b': p['bru_ports'], 'p0m': p['mul_ports']}
+    hit_go = []                     # (dc_ports) the cycles D$ hits were read in
     rs_occ = []                     # (disp, issue) of uops that waited in the RS
     last_div = None; last_fds = None
     mem_idx = []                    # indices of memory ops, in order
@@ -442,17 +472,22 @@ def sim(tr, p, res=None, fit=False, t0=None):
         return cmpl[k]
 
     def port_of(q):
-        if p['p0'] and (q.cls == 'bru' or q.mul): return 'p0'
+        if p['p0'] and q.cls == 'bru': return 'p0b'
+        if p['p0'] and q.mul: return 'p0m'
         if q.cls in ('bru',): return 'bru'
         if q.cls in ('fpu',): return 'fpu'
         if q.cls in ('div', 'fds', 'lsu'): return None
         return 'alu'
 
+    INT = ('alu', 'bru', 'p0b', 'p0m')
+
     def free_port(pt, t):
         """the first cycle from t at which port pt has room"""
         if pt is None:
             return t
-        while ports.get((pt, t), 0) >= cap[pt] or (pt in ('alu', 'bru', 'p0') and ports.get(('int', t), 0) >= p['alu_ports']):
+        while (ports.get((pt, t), 0) >= cap[pt]
+               or (pt in ('p0b', 'p0m') and ports.get(('p0', t), 0) >= cap['p0'])
+               or (pt in INT and ports.get(('int', t), 0) >= p['alu_ports'])):
             t += 1
         return t
 
@@ -461,7 +496,9 @@ def sim(tr, p, res=None, fit=False, t0=None):
             return t
         t = free_port(pt, t)
         ports[(pt, t)] = ports.get((pt, t), 0) + 1
-        if pt in ('alu', 'bru', 'p0'):
+        if pt in ('p0b', 'p0m'):
+            ports[('p0', t)] = ports.get(('p0', t), 0) + 1
+        if pt in INT:
             ports[('int', t)] = ports.get(('int', t), 0) + 1
         return t
 
@@ -474,6 +511,8 @@ def sim(tr, p, res=None, fit=False, t0=None):
                 neg += 1
             res[name][k] = r
             return actual
+        if p['res_clamp'] and name in ('pop', 'disp', 'com'):
+            return cons + max(0, res[name][k])                # (W.0) sensitivity: no negative residual
         return cons + res[name][k]
 
     for k, q in enumerate(tr):
@@ -491,8 +530,8 @@ def sim(tr, p, res=None, fit=False, t0=None):
             fe_k0 = k
         else:
             c = seg_start if k == 0 else push[k - 1]
-            if k >= 2 and push[k - 2] >= c:
-                c = max(c, push[k - 2] + 1)                   # at most two pushes a cycle
+            if k >= FW and push[k - FW] >= c:
+                c = max(c, push[k - FW] + 1)                  # at most fe_w pushes a cycle
             if k >= p['iq']:
                 c = max(c, pop[k - p['iq']] + 1)              # room in the IQ
             if p['iq_room2'] and k + 1 >= p['iq']:
@@ -502,8 +541,13 @@ def sim(tr, p, res=None, fit=False, t0=None):
                 c = max(c, push[k - 1] + 1)                   # a pair only from one block
             if p['al_ntk'] and k > 0 and push[k - 1] >= c and q.pc != prev.pc + (2 if prev.rvc else 4):
                 c = max(c, push[k - 1] + 1)                   # no pair across a taken branch
-            if p['al_cond1'] and k > 0 and push[k - 1] >= c and q.cond and prev.cond:
-                c = max(c, push[k - 1] + 1)                   # one conditional branch per aligner cycle
+            if n_cond is not None and k > 0 and push[k - 1] >= c and q.cond:
+                j, nc = k - 1, 0
+                while j >= fe_k0 and push[j] == push[k - 1]:
+                    nc += tr[j].cond
+                    j -= 1
+                if nc >= n_cond:
+                    c = max(c, push[k - 1] + 1)               # al_cond_n conditional branches per aligner cycle
             if (p['fe'] == 'ideal' and p['al1dw'] and k > fe_k0 and bhi != blk
                     and q.pc == prev.pc + (2 if prev.rvc else 4)):
                 pair = k - 2 >= fe_k0 and push[k - 2] == push[k - 1]
@@ -516,8 +560,8 @@ def sim(tr, p, res=None, fit=False, t0=None):
                     if (not seq and b == blk and not prev.ared
                             and ((prev.pc + (2 if prev.rvc else 4) - 1) >> shift) != (prev.pc >> shift)):
                         t += p['fe_btb']                      # a taken crossing branch the aligner did not redirect on
-                    if len(fe_blks) >= p['fb']:
-                        t = max(t, fe_blks[-p['fb']][2] + 1)
+                    if len(fe_blks) >= n_fb:
+                        t = max(t, fe_blks[-n_fb][2] + 1)
                     ared_prev = (cls_of(prev) == 'ared') if cls_of(prev) is not None else prev.ared
                     if not seq and b == blk and ared_prev:    # the bubble after a taken branch the aligner
                         t = max(t, push[k - 1] + bubble(q, k))   # redirected on
@@ -549,24 +593,29 @@ def sim(tr, p, res=None, fit=False, t0=None):
                     e[1] = max(e[1], push[k])
             for e in fe_blks[-nb:]:
                 e[2] = push[k]                                # the block's last use so far
-            if len(fe_blks) > 4 * p['fb'] + 4:
-                del fe_blks[:len(fe_blks) - (4 * p['fb'] + 4)]
+            if len(fe_blks) > 4 * n_fb + 4:
+                del fe_blks[:len(fe_blks) - (4 * n_fb + 4)]
         # ---- decode ----
         c = push[k] + 1
         if k >= 1: c = max(c, pop[k - 1] + (1 if W == 1 else 0))
-        if k >= 2 and W == 2: c = max(c, pop[k - 2] + 1)
+        if W >= 2 and k >= W: c = max(c, pop[k - W] + 1)    # W a cycle
         if k >= W: c = max(c, disp[k - W])                    # decode holds W uops until they dispatch
         pop[k] = put('pop', k, c, q.pop)
         # ---- dispatch ----
         c = pop[k] + 1
         if k >= 1: c = max(c, disp[k - 1] + (1 if W == 1 else 0))
-        if k >= 2 and W == 2: c = max(c, disp[k - 2] + 1)
+        if W >= 2 and k >= W: c = max(c, disp[k - W] + 1)
         if p['dispatch1'] and k >= 1: c = max(c, disp[k - 1] + 1)
         # (in the fit too: a two-wide trace is fitted with its rules, or a replay would count a split pair twice)
-        if W == 2 and k >= 1 and disp[k - 1] >= c:
-            pq = tr[k - 1]                                    # would pair with the uop before it: the pair rules
-            if ((p['mem1'] and q.cls == 'lsu' and pq.cls == 'lsu') or (p['fp1'] and q.fp and pq.fp)
-                    or (p['alone'] and (q.alone or pq.alone))):
+        if W >= 2 and k >= 1 and disp[k - 1] >= c:
+            grp = []                                          # would join the group dispatching in that cycle: the
+            j = k - 1                                         # group rules (O4's pair rules, W.0's counts)
+            while j >= 0 and j > k - W and disp[j] == disp[k - 1]:
+                grp.append(tr[j])
+                j -= 1
+            if ((n_mem is not None and q.cls == 'lsu' and sum(1 for g in grp if g.cls == 'lsu') >= n_mem)
+                    or (n_fp is not None and q.fp and sum(1 for g in grp if g.fp) >= n_fp)
+                    or (p['alone'] and (q.alone or any(g.alone for g in grp)))):
                 c = max(c, disp[k - 1] + 1)
         if k >= p['rob']: c = max(c, com[k - p['rob']] + 1)
         if q.cls == 'lsu':
@@ -618,8 +667,14 @@ def sim(tr, p, res=None, fit=False, t0=None):
                         rs_occ.append((disp[k], t))
                         if len(rs_occ) > trim:
                             rs_occ.pop(0)
-                icons = take_port(pt, t)
-            iss[k] = put('iss', k, icons, q.iss) if p['iss_res'] else icons
+                if p['book_iss'] and p['iss_res'] and not fit:
+                    icons = None                              # (W.0) booked below, in its issue cycle
+                else:
+                    icons = take_port(pt, t)
+            if icons is None:
+                iss[k] = take_port(pt, free_port(pt, t) + res['iss'][k])
+            else:
+                iss[k] = put('iss', k, icons, q.iss) if p['iss_res'] else icons
             if fit:
                 res['lat'][k] = (q.cmpl - q.iss) if p['iss_res'] else (q.cmpl - q.disp)
             cmpl[k] = iss[k] + max(1, res['lat'][k])
@@ -643,6 +698,10 @@ def sim(tr, p, res=None, fit=False, t0=None):
                 if p['ld_order'] == 'po' and q.mem == 'ld' and ld_idx:
                     c = max(c, acc[ld_idx[-1]])               # (O5.0) ... but after an older load
                 c = eng_place(c)
+            elif pm is not None and E_io > 1:
+                c = max(c, acc[pm])                           # (W.0) engines in program order: that many in flight
+                if len(mem_idx) >= E_io:
+                    c = max(c, eng_free[mem_idx[-E_io]])
             elif pm is not None:
                 c = max(c, eng_free[pm])
             acc[k] = put('acc', k, c, q.acc if q.acc else q.disp)
@@ -710,7 +769,12 @@ def sim(tr, p, res=None, fit=False, t0=None):
                 if dc_hit:
                     # (O5.0) the D$ in the core: read in the engine's first cycle, no port, no drain held off
                     c = refill_wait(q.addr, c)
+                    if p['dc_ports'] is not None:
+                        while sum(1 for g in hit_go[-8:] if g == c) >= p['dc_ports']:
+                            c += 1                            # (W.0) every D$ lookup of the cycle is taken
                     go[k] = put('go', k, c, q.go if q.go else q.cmpl)
+                    if p['dc_ports'] is not None:
+                        hit_go.append(go[k])
                     cmpl[k] = go[k] + max(0, lat - 1)
                     efree = cmpl[k] if (p['handoff'] and p['lsq'] > 0) else cmpl[k] + 1
                 else:
@@ -772,13 +836,19 @@ def sim(tr, p, res=None, fit=False, t0=None):
         c = cmpl[k] + 1
         if k >= 1:
             c = max(c, com[k - 1] + 1)
-            if W == 2:
-                pq = tr[k - 1]
-                plain = not (pq.trap or redir_of(pq) or pq.cls in ('csr', 'sys', 'fence'))
-                pair = plain and not (pq.posted and q.posted) and not (pq.cls == 'bru' and q.cls == 'bru')
-                if p['slot2'] and (q.trap or q.cls in ('csr', 'sys', 'fence')): pair = False
-                if p['fpw1'] and q.fpw and pq.fpw: pair = False
-                if pair and (k < 2 or com[k - 2] < com[k - 1]):
+            if CW >= 2:
+                g = []                                        # the group retiring in com[k - 1]'s cycle (or, where a
+                j = k - 1                                     # negative residual put an older one later, that one too)
+                while j >= 0 and com[j] >= com[k - 1] and len(g) < CW:
+                    g.append(tr[j])
+                    j -= 1
+                join = (len(g) < CW
+                        and all(not (x.trap or redir_of(x) or x.cls in ('csr', 'sys', 'fence')) for x in g)
+                        and sum(1 for x in g if x.posted) + q.posted <= p['st_n']
+                        and sum(1 for x in g if x.cls == 'bru') + (q.cls == 'bru') <= p['br_n'])
+                if p['slot2'] and (q.trap or q.cls in ('csr', 'sys', 'fence')): join = False
+                if n_fpw is not None and q.fpw and sum(1 for x in g if x.fpw) >= n_fpw: join = False
+                if join:
                     c = max(cmpl[k] + 1, com[k - 1])
         if q.posted and p['sb'] > 0:
             c = max(c, dc.room_at(c))                         # the store buffer has room for it
@@ -791,8 +861,28 @@ def sim(tr, p, res=None, fit=False, t0=None):
         st['miss_lat'] = round(sum(miss_lat_s) / len(miss_lat_s)) if miss_lat_s else 9
         st['dcm_n'] = len(miss_lat_s)
     if p.get('_dbg') is not None:                   # (debugging) the replayed cycles, for a caller to compare
-        p['_dbg'].update(push=push, pop=pop, disp=disp, com=com)
+        p['_dbg'].update(push=push, pop=pop, disp=disp, com=com, iss=iss, port=[port_of(q) for q in tr])
     return com[-1] - t_open, neg
+
+
+def count_caps(dbg, p):
+    """(W.0, --check) the cycles of a replay (sim's _dbg) in which more instructions dispatched than w, retired than
+    cw, entered the IQ than fe_w, or issued to the integer ports than alu_ports: residuals can break a cap that the
+    constraints keep"""
+    W = p['w']
+    CW = p['cw'] if p['cw'] is not None else W
+    out = {}
+    for name, ev, lim in (('disp', dbg['disp'], W), ('com', dbg['com'], CW), ('push', dbg['push'], p['fe_w'])):
+        n = {}
+        for t in ev:
+            n[t] = n.get(t, 0) + 1
+        out[name] = sum(1 for v in n.values() if v > lim)
+    n = {}
+    for t, pt in zip(dbg['iss'], dbg['port']):
+        if pt in ('alu', 'bru', 'p0b', 'p0m'):
+            n[t] = n.get(t, 0) + 1
+    out['int'] = sum(1 for v in n.values() if v > p['alu_ports'])
+    return out
 
 
 def dc_replay(tr, kib, warm):
@@ -1075,6 +1165,9 @@ def main():
     ap.add_argument('--kernels', default=' '.join(KERNELS))
     ap.add_argument('--db', type=int, default=2, help='cycles from a drain beat to its response (2: the D$ passes a store through)')
     ap.add_argument('--stats', action='store_true', help='(O5.0) also print the fit\'s memory statistics per kernel')
+    ap.add_argument('--check', action='store_true',
+                    help='(W.0) also count, per kernel and configuration, the cycles in which a replay exceeds a width '
+                         'or the integer ports (the fit included)')
     ap.add_argument('--set', default='o1', choices=('o1', 'o4', 'ox', 'o8', 'o5', 'o7'),
                     help='o1: the O1.0 configurations; o4: two-wide with the pair rules; ox: the complete-OOO milestones; '
                          'o8: the frontend steps (with --fit o3)')
@@ -1103,6 +1196,7 @@ def main():
     print('|' + '---|' * len(hdr))
     logs = {}
     stats = []
+    checks = []
     for kern in a.kernels.split():
         path = os.path.join(a.traces, '%s%s_%s.ilp' % (kern, sfx, a.config))
         if not os.path.exists(path):
@@ -1113,7 +1207,10 @@ def main():
         meas = int(base[(kern, a.config)]['cycles']) if (kern, a.config) in base else 0
         t0 = tr[-1].commit - meas if meas else None
         res = {}
-        fitc, neg = sim(tr, dict(fitp), res, fit=True, t0=t0)
+        fp = dict(fitp, _dbg={}) if a.check else dict(fitp)
+        fitc, neg = sim(tr, fp, res, fit=True, t0=t0)
+        if a.check:
+            checks.append((kern, 'fit', count_caps(fp['_dbg'], fp)))
         if a.stats:
             stt = dict(res.get('stats', {}))
             nld = sum(1 for q in tr if q.mem == 'ld' and not q.trap)
@@ -1131,9 +1228,13 @@ def main():
             pc, _ = sim(tr, p, res, t0=t0)
             m = int(vals[lab][(kern, a.config)]['cycles']) if (kern, a.config) in vals[lab] else 0
             row.append('%+.1f%% (%+.1f%%)' % (100.0 * (pc - fitc) / fitc, 100.0 * (m - meas) / meas if meas else 0))
-        for ci, (_, kn) in enumerate(configs):
+        for ci, (cname, kn) in enumerate(configs):
             p = dict(fitp); p.update(kn)
+            if a.check:
+                p['_dbg'] = {}
             pc, _ = sim(tr, p, res, t0=t0)
+            if a.check:
+                checks.append((kern, cname, count_caps(p['_dbg'], p)))
             row.append('%+.1f%%' % (100.0 * (pc - fitc) / fitc))
             logs.setdefault(ci, []).append(math.log(pc / fitc))
         print('| ' + ' | '.join(row) + ' |')
@@ -1149,6 +1250,13 @@ def main():
         print('|' + '---|' * (len(keys) + 1))
         for kern, stt in stats:
             print('| %s | ' % kern + ' | '.join(str(stt.get(x, 0)) for x in keys) + ' |')
+    if a.check:
+        bad = [(k, c, v) for (k, c, v) in checks if any(v.values())]
+        print()
+        print('check: %d replays, %d exceed a cap (cycles over: disp > w, com > cw, push > fe_w, int > alu_ports)'
+              % (len(checks), len(bad)))
+        for k, c, v in bad:
+            print('  %s %s: %s' % (k, c, ' '.join('%s %d' % kv for kv in v.items() if kv[1])))
 
 
 if __name__ == '__main__':
