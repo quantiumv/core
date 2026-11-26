@@ -90,10 +90,10 @@ tb_soc_sb_halt_sba_tb|testbench/soc_sb_halt_sba_tb.sv||design|pipe|pass|600
 # === testbench/*_tb.sv (core_wb4_sram_harness) ===
 tb_core_a_ext_tb|testbench/core_a_ext_tb.sv|testbench/core_wb4_sram_harness.sv|design|ref,pipe|pass|
 tb_core_sb_tb|testbench/core_sb_tb.sv|testbench/core_wb4_sram_harness.sv|design|pipe|pass||-DQV_PIPE_COMMIT_W=1
-tb_core_lsq_tb|testbench/core_lsq_tb.sv||design|pipe|pass||-DQV_PIPE_COMMIT_W=1
+tb_core_lsq_tb|testbench/core_lsq_tb.sv||design|pipe|pass||-DQV_PIPE_COMMIT_W=1 -DQV_PIPE_DCACHE=0
 tb_core_lsq_dc_tb|testbench/core_lsq_tb.sv||design|pipe|pass||-DQV_PIPE_COMMIT_W=1 -DQV_PIPE_DCACHE=1
 tb_core_dc_tb|testbench/core_dc_tb.sv||design|pipe|pass||-DQV_PIPE_DCACHE=1
-tb_core_dc_bus_tb|testbench/core_dc_tb.sv||design|pipe|pass|
+tb_core_dc_bus_tb|testbench/core_dc_tb.sv||design|pipe|pass||-DQV_PIPE_DCACHE=0
 tb_core_bus_fault_trap_tb|testbench/core_bus_fault_trap_tb.sv|testbench/core_wb4_sram_harness.sv,testbench/state_reached_monitor.sv|design|ref,pipe|pass|
 tb_core_c_ext_tb|testbench/core_c_ext_tb.sv|testbench/core_wb4_sram_harness.sv|design|ref,pipe|pass|
 tb_core_c_illegal_trap_tb|testbench/core_c_illegal_trap_tb.sv|testbench/core_wb4_sram_harness.sv|design|ref,pipe|pass||-DQV_PIPE_COMMIT_W=1
@@ -281,7 +281,7 @@ pipe_lsu_sb_tb_p32|design/pipe/qv_lsu_sb_tb.sv||design|pipe|pass||-DQV_ROB_MAX=3
 pipe_lsu_sb_rob8_tb_p32|design/pipe/qv_lsu_sb_tb.sv||design|pipe|pass||-DQV_ROB_MAX=32 -Pqv_lsu_sb_tb.ROB=8
 pipe_lsu_early_tb_p32|design/pipe/qv_lsu_early_tb.sv||design|pipe|pass||-DQV_ROB_MAX=32 -Pqv_lsu_early_tb.HANDOFF=1
 pipe_lsu_dc_tb_p32|design/pipe/qv_lsu_dc_tb.sv||design|pipe|pass||-DQV_ROB_MAX=32
-tb_core_lsq_tb_r32|testbench/core_lsq_tb.sv||design|pipe|pass||-DQV_PIPE_COMMIT_W=1 -DQV_ROB_MAX=32 -DQV_PIPE_RS_DEPTH=8 -DQV_PIPE_LSQ_DEPTH=16
+tb_core_lsq_tb_r32|testbench/core_lsq_tb.sv||design|pipe|pass||-DQV_PIPE_COMMIT_W=1 -DQV_PIPE_DCACHE=0 -DQV_ROB_MAX=32 -DQV_PIPE_RS_DEPTH=8 -DQV_PIPE_LSQ_DEPTH=16
 tb_core_lsq_dc_tb_r32|testbench/core_lsq_tb.sv||design|pipe|pass||-DQV_PIPE_COMMIT_W=1 -DQV_PIPE_DCACHE=1 -DQV_ROB_MAX=32 -DQV_PIPE_RS_DEPTH=8 -DQV_PIPE_LSQ_DEPTH=16
 tb_core_dc_tb_r32|testbench/core_dc_tb.sv||design|pipe|pass||-DQV_PIPE_DCACHE=1 -DQV_ROB_MAX=32 -DQV_PIPE_RS_DEPTH=8 -DQV_PIPE_LSQ_DEPTH=16
 tb_core_m_ext_tb_r32|testbench/core_m_ext_tb.sv|testbench/core_wb4_sram_harness.sv|design|pipe|pass||-DQV_ROB_MAX=32 -DQV_PIPE_RS_DEPTH=8
