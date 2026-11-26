@@ -863,6 +863,133 @@ the kernel that gains most:
   and a store's address known before its data (M3a: within 0.5 points of speculation, here the same) lets them go;
   together with out-of-order issue that is 9-10 points there and 1 point on the geomean.
 
+## Three and four wide (W.0, branch `OOO`)
+
+What would a core wider than two buy? Measured with the model only, no RTL (asked 2026-11-25), on traces of the
+shipping core (`c4b4fe8`; its run reproduced the committed `baseline_pipe*.csv`, all eight, byte for byte) and on four
+runs of the core with its width knobs at 1 (`QV_PIPE_COMMIT_W`, `QV_PIPE_DISPATCH_W`, `QV_PIPE_ALU_PORTS`, and all three
+at 1). The tools: `ilp.py` at any width (`b4f037a`: the pair rules as counts on dispatch and commit groups, ports by
+capability, several in-order engines; every older `--fit`/`--set` pair prints byte-identical output, checked again
+after each later commit), its W.0 rows (`3902c98`), two fixes the validation found (`377e29b`, `780725f`), `brpred.py`'s
+two branches per BTB block and 32-byte blocks (`eca53d6`), and `ilp_width.py` (`421c4be`) for the numbers below.
+
+- **A width** n is n dispatches, n commits, n ALU ports and n pushes into the instruction queue a cycle. Branches and
+  multiplies stay on port 0, and every other rule stays the two-wide core's, unless a **rung** lifts it:
+  - fetch: `fe16`, `fe32` (16 or 32 bytes a cycle), `bslots2` (two branches per BTB block), `cond2`, `iq16`;
+  - memory: `mem2` (two memory ops a group, two engines, two D$ lookups a cycle), `db1` (a drain beat a cycle), `st2`,
+    `sb8`;
+  - the rest: `br2`, `mul2`, `fp2`, `fpu2`, `rob64`, `rs16`, `lsq16`.
+- **Every row runs on the modelled frontend** (FE8 with gshare modelled at the row's block size). The reference is the
+  two-wide core so modelled, which replays the traces 1.0 % fast, so the frontend model's error is common to a row and
+  its reference.
+- **Width gain** is the difference between two widths at the same rungs. A two-wide core can take most rungs too, so
+  that difference is what width itself buys.
+- Figures are the geomean cycle change on the SoC, the mean of M and S mode.
+
+**Validation.** Downward, the shipping core's fit predicts the four width-1 runs; upward, each width-1 run's fit
+predicts the shipping core. Upward is the direction W.0 extrapolates in. Model / measured, each against its own
+reference:
+
+| run | down, M | down, S | up, M | up, S |
+|---|---|---|---|---|
+| one commit a cycle | +37.6 / +35.6 % | +41.4 / +39.5 % | -27.8 / -26.3 % | -26.3 / -28.3 % |
+| one dispatch a cycle | +41.8 / +39.3 % | +45.6 / +43.2 % | -29.0 / -28.2 % | -27.0 / -30.2 % |
+| one ALU port | +11.5 / +10.5 % | +15.1 / +14.1 % | -10.4 / -9.5 % | -13.2 / -12.4 % |
+| all three at 1 | +43.2 / +40.8 % | +47.1 / +44.3 % | -29.7 / -29.0 % | -27.7 / -30.7 % |
+
+- **Two model bugs, found and fixed** (`377e29b`). Before them the one-port fit predicted 2.5 % for a second ALU port
+  against 9.5 % measured (crc32 -0.7 % against -39.2 %). Both bugs put a full station's wait into dispatch residuals,
+  which a replay with more ports then added back:
+  - the station's entries were held to the constraint's issue cycle, not the traced one;
+  - a second push in the same cycle did not count against room (`qv_rs` needs `o_room2`, two free).
+
+  The W.0 fits now book ports and entries in the traced issue cycle (`book_iss`); older fits are unchanged.
+- **Upward in M, every row is within 1.5 points.**
+- **Upward in S, dispatch 1 and width 1 fall 3.2 and 3.0 points short.** memcpy and listchase are the cause (-19 % and
+  -17 % predicted, -29 % and -34 % measured): in S their translation is in the residuals, which keep the width-1
+  schedule's overlap. This makes S pessimistic on those two kernels.
+- **Downward, the rows miss by up to 2.8 points.** crc32 at dispatch 1 is the worst (+81 % against +66 %): dispatch
+  residuals that were slack at two-wide become critical at one dispatch a cycle. A wider core gets more slack, not less.
+- **Rule W5** therefore decides on M and reports S.
+
+**What it buys** (points against the two-wide reference; negative saves cycles):
+
+| rungs | two-wide | three-wide | four-wide | width gain 2 to 3 | 3 to 4 |
+|---|---|---|---|---|---|
+| none | 0.0 | -4.5 | -4.9 | -4.5 | -0.4 |
+| `fe16` | -1.3 | -10.1 | -11.3 | -8.8 | -1.2 |
+| `mem2` | -0.7 | -6.8 | -7.2 | -6.1 | -0.4 |
+| `fe16 mem2 db1` | -2.8 | -14.9 | -17.3 | -12.1 | -2.4 |
+| `fe16 bslots2 mem2 db1 st2 sb8 lsq16` | -5.0 | -16.6 | -18.8 | -11.6 | -2.3 |
+| `fe32 bslots2 mem2 db1 st2 sb8 lsq16 rob64` (three-wide's chosen row) | -5.7 | -17.4 | -20.5 | -11.7 | -3.1 |
+| every rung | -5.9 | -17.8 | -21.6 | -11.9 | -3.8 |
+| every rung, no group rule, a unit behind every port | -6.2 | -18.8 | -23.2 | -12.6 | -4.4 |
+
+- **The chosen row** (`ilp_width.py chosen`) is the smallest set of rungs within 0.5 points of the width's best row: a
+  greedy forward selection, from 16- and from 32-byte fetch, which exclude each other.
+- **Leaving each rung out of three-wide's chosen row costs:**
+  - fetch back to 8 bytes: 8.6 points (sieve M 31);
+  - `mem2`: 5.5 (listchase S 28);
+  - `bslots2`: 4.6 (mixedint 32 / 35). At 32 bytes most loops hold two taken branches in a block, and one BTB entry per
+    block evicts one of them every iteration;
+  - `db1`: 1.3 (trap 7.5);
+  - `st2` 0.7 and `sb8` 0.5 (trap 7 and 5), `lsq16` 0.4 (memcpy 2.1), `rob64` 0.2;
+  - 16 bytes in place of 32 bytes: 0.7. At 16 bytes, `bslots2` is worth 0.7 (qsort 4.4) and `lsq16` 0.2 (memcpy 1.2-1.5).
+- **The other rungs:** `br2`, `cond2`, `iq16`, `rs16`, `mul2`, `fp2` and `fpu2` are each worth 0.2 or less at two-
+  and three-wide. At four-wide's chosen row, a second branch unit is worth 0.4 and two predictions a cycle 0.3.
+- **Per kernel, three-wide at `fe16 mem2 db1`** (against the reference, M / S; then its width gain):
+
+  | kernel | memcpy | crc32 | qsort | matmul | sieve | listchase | mixedint | trap | fmatmul | fpmix |
+  |---|---|---|---|---|---|---|---|---|---|---|
+  | three-wide | -25.6 / -25.9 | -0.2 / -0.3 | -11.2 / -6.3 | -22.1 / -22.0 | -31.1 / -1.5 | -27.4 / -28.4 | -30.6 / -30.1 | -5.1 / -4.7 | -3.9 / -4.2 | -0.0 / -0.1 |
+  | width gain | -19.8 / -20.2 | -0.3 / -7.1 | -11.9 / -7.7 | -21.5 / -21.4 | -0.5 / -0.9 | -26.2 / -25.3 | -30.6 / -30.1 | -2.5 / -2.3 | -1.0 / -1.0 | -0.0 / -0.0 |
+
+  Width pays on memcpy, matmul, listchase, mixedint and qsort. crc32 (one dependence chain), trap (redirects and
+  serialising CSRs), fmatmul and fpmix (the FP divider) gain little or nothing. sieve's M gain comes from fetch, at
+  any width: its loop straddles two dwords.
+- **At L=20** (`miss_add=20` on these traces: load misses only, as D1 and O5.0 did) width gains 11.3 points at
+  `fe16 mem2 db1`, and 10.8 at the chosen row.
+
+**The rules** (W.0 plan, 2026-11-26):
+- **W1 passes:** three-wide's width gain is 12.1 points (M 11.8) at `fe16 mem2 db1`, and 11.7 at the chosen row,
+  against a bar of 5.
+- **W2 fails:** four-wide adds 2.4 points at 16-byte fetch, and 3.1 to 3.8 at the 32-byte rows. That is at the bar of
+  3, two widths beyond anything measured, and within a step's validation error.
+- **W3** keeps three rungs: wider fetch (16 bytes is enough: 32 bytes buys 0.7 more and needs two branches per block),
+  `mem2`, and `db1`. Each of the others costs under 1 point. D2 keeps the window: ROB 32, RS 8, LSQ 8 (at 16-byte fetch
+  the 16-entry queue is 0.2 points and at most 1.5 on a kernel).
+- **W4 does not fire:** these rungs buy 2.8 points at two-wide, and width buys another 12.1 on top.
+- **W6:** results stay in the ROB, which was decided for two-wide, so that question goes back to the user. The counts
+  below are what each choice scales with.
+
+| per cycle | two-wide (built) | three-wide, `fe16 mem2 db1` | the same with a merged PRF |
+|---|---|---|---|
+| decoders, IQ pops / pushes | 2 / 2 | 3 / 3 | 3 / 3 |
+| operand reads | RF 4 (+3 FP), ROB lookups 5 | RF 6 (+3 FP), ROB lookups 7 | PRF 15 (two per issue port, three for the FPU), no ROB values |
+| result writes | ROB 5 ports, RF 2 at commit | ROB 7 ports, RF 3 at commit | PRF 7 ports, nothing at commit |
+| station capture (8 entries) | 6 buses x 3 operands, each a 64-bit capture | 8 buses x 3 operands, 64-bit captures | the same tag compares, no data |
+| producer table / rename | 2 claims, 2 clears | 3 claims, 3 clears | map table 7 reads, 3 writes; free list 3 a cycle |
+| same-group dependence compares | 3 | 9 | 9 |
+| fetch | one 8-byte block, BTB and gshare once | one 16-byte block (a 128-bit I$ and fetch port) | the same |
+| memory | 1 queue push, 1 engine, 1 D$ and DTLB lookup, a drain beat per 2 cycles | 2 pushes, 2 engines, 2 D$ and DTLB lookups, a beat a cycle | the same |
+
+**Caveats:**
+- Nothing above two-wide can be measured, so these are model predictions. The one-step upward rows are the evidence
+  that the generic width code transfers.
+- The frontend model has no I$, so the 16- and 32-byte rows are upper bounds. The SoC's I$ and the core's fetch port are
+  64 bits wide today.
+- mixedint's three-wide gain is probably high by a few points: upward in M the model predicts its width gain 4 points
+  high, and the frontend model replays it 6.8 points fast.
+- Nothing here measures clock rate or area. A wider dispatch, a 64-bit capture from 8 buses and two D$ lookups are
+  timing questions for the RTL plan.
+
+Reproduce: run `run_perf.sh --mode m|s --ilptrace DIR --label w0`, then:
+- `ilp.py --traces DIR --base <its CSV> --fit w0 --set w --csv F` gives every row;
+- `--fit w0 --set v --validate DIR` gives the downward check;
+- `--fit v_w1 ...` gives the upward one, on the width-1 runs' traces and CSVs;
+- `ilp_width.py --traces DIR --base-m .. --base-s .. chosen` or `rows fe16,mem2,db1` gives the chosen rows and their
+  rungs.
+
 ## CPI stack
 
 `perf_stack.sv` (instantiated by `perf_tb.sv`, not part of the reference build) splits every cycle of a
