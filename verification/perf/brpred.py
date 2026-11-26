@@ -227,12 +227,14 @@ class FePred:
       ared     taken and predicted so by the aligner only: an aligner-redirect bubble
       phantom  the BTB steered, the aligner's call is not taken (or another target) and right: a bubble
       mis      the final prediction is wrong: a recovery at execute
-    Tables train at once (a trace study: no latency); the history holds every conditional outcome."""
+    Tables train at once (a trace study: no latency); the history holds every conditional outcome. (W.0) bslots: the
+    branches one block may hold in the BTB (1, as built: a new taken branch evicts the block's other one)."""
 
     def __init__(self, blk=8, entries=32, ways=1, ctr=False, ret=False, ind=False, dirp='bht', h=12, bits=12,
-                 fallback='bht', ras=8):
+                 fallback='bht', ras=8, bslots=1):
         self.blk, self.sets, self.ways, self.ctr, self.ret, self.ind = blk, entries // ways, ways, ctr, ret, ind
         self.dirp, self.h, self.bits, self.fallback, self.ras_n = dirp, h, bits, fallback, ras
+        self.bslots = bslots
         self.btb = {}           # set -> list of [block, pc, tgt, ctr] (most recent last)
         self.bht = {}
         self.gs = {}
@@ -258,8 +260,9 @@ class FePred:
         e = self._lookup(pc, ln)
         if taken:
             if e is None:
-                for o in [o for o in s if o[0] == b]:
-                    s.remove(o)                  # one branch per block
+                same = [o for o in s if o[0] == b]
+                for o in same[:max(0, len(same) - (self.bslots - 1))]:
+                    s.remove(o)                  # bslots branches per block (one as built): the oldest goes
                 if len(s) >= self.ways:
                     s.pop(0)
                 s.append([b, pc, nxt, 2])
@@ -375,7 +378,27 @@ FE_CONFIGS = OrderedDict([  # (O8.0) the frontend options, for ilp.py --bp and b
     ('gshare 16B', dict(ctr=True, ret=True, dirp='gshare', blk=16)),     # O8d
     ('gshare 16B w2', dict(ctr=True, ret=True, dirp='gshare', blk=16, ways=2)),
     ('gshare 16B w2 ras16', dict(ctr=True, ret=True, dirp='gshare', blk=16, ways=2, ras=16)),
+    # (W.0) wider fetch: 32-byte blocks, and two branches per block
+    ('gshare b2', dict(ctr=True, ret=True, dirp='gshare', bslots=2)),
+    ('gshare 16B w2 b2', dict(ctr=True, ret=True, dirp='gshare', blk=16, ways=2, bslots=2)),
+    ('gshare 32B w2', dict(ctr=True, ret=True, dirp='gshare', blk=32, ways=2)),
+    ('gshare 32B w2 b2', dict(ctr=True, ret=True, dirp='gshare', blk=32, ways=2, bslots=2)),
 ])
+
+
+def taken_per_block(tr, blk):
+    """(W.0) the dynamic taken branches, by how many distinct taken branches their block of blk bytes holds over the
+    trace: {1: n, 2: n, 3: n (three or more)}"""
+    per = {}
+    for pc, raw, nxt in tr:
+        kind, rvc = decode(raw, pc, nxt)[:2]
+        if kind is not None and nxt != pc + (2 if rvc else 4):
+            per.setdefault(pc // blk, {}).setdefault(pc, 0)
+            per[pc // blk][pc] += 1
+    out = {1: 0, 2: 0, 3: 0}
+    for b in per.values():
+        out[min(3, len(b))] += sum(b.values())
+    return out
 
 
 def load(path):
@@ -404,6 +427,16 @@ def main():
             ("gshare h8 1k+btb32+ras8", dict(gshare=(8, 10), btb=32, ras=8)),
             ("gshare h12 4k+btb32+ras8", dict(gshare=(12, 12), btb=32, ras=8)),
             ("tage-lite+btb32+ras8", dict(tage=True, btb=32, ras=8))]
+    if sys.argv[1:2] == ["--blocks"]:      # (W.0) do blocks of 8, 16, 32 bytes hold more than one taken branch?
+        for path in sys.argv[2:]:
+            tr = load(path)
+            cells = []
+            for blk in (8, 16, 32):
+                n = taken_per_block(tr, blk)
+                tot = sum(n.values()) or 1
+                cells.append(f"{blk}B: " + " / ".join(f"{100.0 * n[k] / tot:.0f}" for k in (1, 2, 3)))
+            print(f"{path}: % of taken branches in a block with 1 / 2 / 3+ taken branches: " + "   ".join(cells))
+        return
     if sys.argv[1:2] == ["--fe"]:          # (O8.0) the classes of the frontend options, per trace
         for path in sys.argv[2:]:
             tr = load(path)
