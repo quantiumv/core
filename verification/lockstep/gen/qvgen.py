@@ -207,6 +207,13 @@ class Program:
     def reg(self):
         return self.rng.choice(FREE_POOL)
 
+    def reg_except(self, *excl: int):
+        """A random register from the pool that is none of excl (drawn again until it is not)."""
+        r = self.reg()
+        while r in excl:
+            r = self.reg()
+        return r
+
     def reg_biased(self, recent: list[int]):
         """--dep-bias: with probability args.dep_bias, reuse one of the
         last K destination registers instead of a fresh random pick --
@@ -357,6 +364,22 @@ def emit_m_ext(p: Program, recent: list[int]):
     del recent[:-8]
 
 
+def _scratch_csr(p: Program) -> str:
+    """A CSR the body may read and write freely: the scratch register of its trap level, or, with interrupts on, that
+    level's tval (the interrupt handlers keep their save-area pointers in the scratch registers)."""
+    if p.irq:
+        return "stval" if p.args.priv == "msu" else "mtval"
+    return "sscratch" if p.args.priv == "msu" else "mscratch"
+
+
+def _to_sandbox(p: Program, dst: int, src: int):
+    """dst = an aligned sandbox address made from src's value (and with a mask, then + x27)."""
+    mreg = p.reg_except(dst, src)
+    p.li(mreg, (SANDBOX_SIZE - 1) & ~7)
+    p.e(f"    and     x{dst}, x{src}, x{mreg}")
+    p.e(f"    add     x{dst}, x{dst}, x27")
+
+
 def _sandbox_addr(p: Program, reg: int, misaligned=False, width=8):
     """Load a real, in-sandbox address into `reg`, either via
     base+imm (x27 + a small offset) or and/add-masked from a computed
@@ -444,10 +467,7 @@ def emit_mem_pair(p: Program, recent: list[int]):
     p.e(f"    addi    x{base}, x27, {8 + p.rng.randrange(0, window, 8)}")
 
     def other():
-        r = p.reg()
-        while r == base:
-            r = p.reg()
-        return r
+        return p.reg_except(base)
 
     def mem_op(store: bool):
         mnem, width = p.rng.choice(_STORES if store else _LOADS)
@@ -502,15 +522,10 @@ def emit_dc(p: Program, recent: list[int]):
     one (no allocate) with loads of the same dwords after them, sub-dword loads at every offset, and an atomic, an LR
     and an SC on a held line (they write past the store buffer: their line must leave the D$)."""
     a = p.reg()
-    b = p.reg()
-    while b == a:
-        b = p.reg()
+    b = p.reg_except(a)
 
     def other():
-        r = p.reg()
-        while r in (a, b):
-            r = p.reg()
-        return r
+        return p.reg_except(a, b)
     p.e(f"    addi    x{a}, x27, {p.rng.randrange(0, 0x800, 32)}")
     p.e(f"    addi    x{b}, x{a}, 0x400")
     for _ in range(2 * p.rng.randint(1, 3) - 1):
@@ -571,19 +586,7 @@ def emit_ooo(p: Program, recent: list[int]):
     two divides of which the younger is ready first (they must still go in order), a memory op whose address or data
     comes from the long result, a CSR read feeding a load's address, and a short pointer chase."""
     have_m = "m" in p.args.isa and not p.args.no_div
-
-    def fresh(*excl):
-        r = p.reg()
-        while r in excl:
-            r = p.reg()
-        return r
-
-    def to_sandbox(dst: int, src: int):
-        """dst = an aligned sandbox address made from src's value (and with a mask, then + x27)."""
-        mreg = fresh(dst, src)
-        p.li(mreg, (SANDBOX_SIZE - 1) & ~7)
-        p.e(f"    and     x{dst}, x{src}, x{mreg}")
-        p.e(f"    add     x{dst}, x{dst}, x27")
+    fresh = p.reg_except
 
     long_rd = p.reg()
     src_a = p.reg_biased(recent)
@@ -596,9 +599,7 @@ def emit_ooo(p: Program, recent: list[int]):
         _sandbox_addr(p, addr, width=8)
         p.e(f"    {p.rng.choice(['ld', 'lw', 'lwu']):<7} x{long_rd}, 0(x{addr})")
     else:
-        csr = "sscratch" if p.args.priv == "msu" else "mscratch"
-        if p.irq:
-            csr = "stval" if p.args.priv == "msu" else "mtval"
+        csr = _scratch_csr(p)
         p.e(f"    csrr    x{long_rd}, {csr}")                  # read only: its value is made at commit
     # independent work that may go first
     for _ in range(p.rng.randint(1, 4)):
@@ -630,7 +631,7 @@ def emit_ooo(p: Program, recent: list[int]):
         recent += [older, younger]
     elif c < 0.72:
         addr = fresh(long_rd)
-        to_sandbox(addr, long_rd)                                 # an address from the long result
+        _to_sandbox(p, addr, long_rd)                              # an address from the long result
         if p.rng.random() < 0.5:
             rd = fresh(addr)
             p.e(f"    ld      x{rd}, 0(x{addr})")
@@ -641,9 +642,9 @@ def emit_ooo(p: Program, recent: list[int]):
         p.e(f"    {p.rng.choice(['sd', 'sw']):<7} x{long_rd}, {p.rng.randrange(0, 0x400, 8)}(x27)")   # its data
     else:
         a1, a2 = fresh(long_rd), fresh(long_rd)                   # a short pointer chase from the long result
-        to_sandbox(a1, long_rd)
+        _to_sandbox(p, a1, long_rd)
         p.e(f"    ld      x{a2}, 0(x{a1})")
-        to_sandbox(a1, a2)
+        _to_sandbox(p, a1, a2)
         p.e(f"    ld      x{a2}, 0(x{a1})")
         recent.append(a2)
     del recent[:-8]
@@ -663,11 +664,7 @@ def emit_deep(p: Program, recent: list[int]):
     have_f = "f" in p.args.isa
     p.deep_n = getattr(p, "deep_n", 0) + 1
 
-    def fresh(*excl):
-        r = p.reg()
-        while r in excl:
-            r = p.reg()
-        return r
+    fresh = p.reg_except
 
     long_rd = p.reg()
     k = p.rng.random()
@@ -687,15 +684,10 @@ def emit_deep(p: Program, recent: list[int]):
         _sandbox_addr(p, addr, width=8)
         p.e(f"    ld      x{long_rd}, 0(x{addr})")
         for _ in range(p.rng.randint(0, 2)):
-            mreg = fresh(long_rd, addr)
-            p.li(mreg, (SANDBOX_SIZE - 1) & ~7)
-            p.e(f"    and     x{addr}, x{long_rd}, x{mreg}")
-            p.e(f"    add     x{addr}, x{addr}, x27")
+            _to_sandbox(p, addr, long_rd)
             p.e(f"    ld      x{long_rd}, 0(x{addr})")
     else:
-        csr = "sscratch" if p.args.priv == "msu" else "mscratch"
-        if p.irq:
-            csr = "stval" if p.args.priv == "msu" else "mtval"
+        csr = _scratch_csr(p)
         p.e(f"    csrr    x{long_rd}, {csr}")
     if p.rng.random() < 0.5:
         p.e(f"    sd      x{long_rd}, {p.rng.randrange(0, 0x400, 8)}(x27)")      # a store that cannot retire early
@@ -748,11 +740,7 @@ def emit_xr(p: Program, recent: list[int]):
     have_f = "f" in p.args.isa
     have_a = "a" in p.args.isa
 
-    def fresh(*excl):
-        r = p.reg()
-        while r in excl:
-            r = p.reg()
-        return r
+    fresh = p.reg_except
 
     def alu(rd=None):
         rd = fresh() if rd is None else rd
@@ -959,11 +947,7 @@ def emit_pair(p: Program, recent: list[int]):
     have_f = "f" in p.args.isa
     have_a = "a" in p.args.isa
 
-    def fresh(*excl):
-        r = p.reg()
-        while r in excl:
-            r = p.reg()
-        return r
+    fresh = p.reg_except
 
     def alu(rd=None, a=None, b=None):
         rd = fresh() if rd is None else rd
@@ -1288,9 +1272,7 @@ def emit_csr(p: Program, recent: list[int]):
         recent.append(rd)
         del recent[:-8]
         return
-    csr = "sscratch" if p.args.priv == "msu" else "mscratch"
-    if p.irq:
-        csr = "stval" if p.args.priv == "msu" else "mtval"     # the scratch CSRs are the handlers' pointers
+    csr = _scratch_csr(p)                                      # the scratch CSRs are the handlers' pointers
     op = p.rng.choice(["csrrw", "csrrs", "csrrc"])
     rd = p.reg_biased(recent)
     rs1 = p.reg_biased(recent)
