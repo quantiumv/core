@@ -934,8 +934,10 @@ _BPC = {}
 
 def bp_classes(tr, name):
     """(O8.0) {id(instruction): class} of the trace's control-flow instructions under brpred.FE_CONFIGS[name]"""
+    # the entry holds the trace itself: keyed by id() alone, a later trace could reuse a freed one's id (and its
+    # instructions those of its instructions) and be given another kernel's classes
     key = (id(tr), name)
-    if key not in _BPC:
+    if key not in _BPC or _BPC[key][0] is not tr:
         brl, ks = [], []
         for k in range(len(tr) - 1):
             q = tr[k]
@@ -944,8 +946,8 @@ def bp_classes(tr, name):
                 brl.append((q.pc, q.raw, tr[k + 1].pc, (q.fr or q.push) - 1, q.commit))
                 ks.append(k)
         cl = brpred.FePred(**brpred.FE_CONFIGS[name]).classify(brl)
-        _BPC[key] = {id(tr[k]): c for k, c in zip(ks, cl)}
-    return _BPC[key]
+        _BPC[key] = (tr, {id(tr[k]): c for k, c in zip(ks, cl)})
+    return _BPC[key][1]
 
 
 # ---------------------------------------------------------------------------------------------------------------
