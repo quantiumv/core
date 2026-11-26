@@ -46,6 +46,7 @@ import argparse
 import math
 import os
 import sys
+from collections import OrderedDict
 
 import brpred
 
@@ -1135,6 +1136,82 @@ CONFIGS_O7 = [('base', cfg()), ('fe8', cfg(FE8))] + [(n, cfg(FE8, c)) for n, c i
     ('sb8', cfg(sb=8)),
 ]]
 
+VREF = {}  # (W.0) --fit -> the knobs of the replay its validation rows are also given against (their frontend model)
+
+# (W.0) three and four wide. Every row runs on the modelled frontend (FE8: the window aligner, one conditional branch an
+# aligner cycle) with the shipping predictor modelled (gshare, at the row's block size), so a row's frontend error is
+# the reference's too and cancels in a difference; the reference is the two-wide core so modelled (REF_W). A width n is
+# n dispatches, n commits, n ALU ports and n IQ pushes a cycle; branches and multiplies stay on port 0 (p0) and the
+# other rules stay the two-wide core's unless a rung lifts them. A rung that a two-wide core could take as well is run
+# at two-wide too: the gain of width is the difference at the same rungs.
+REF_W = cfg(FE8, bp='gshare')
+RUNGS_W = OrderedDict([
+    ('fe16', dict(fe_blk=16, fb_bytes=32)),          # 16 bytes fetched a cycle (the buffer keeps 32 bytes)
+    ('fe32', dict(fe_blk=32, fb_bytes=64)),          # 32 bytes a cycle (64 in the buffer)
+    ('iq16', dict(iq=16)),                           # a 16-entry instruction queue
+    ('mem2', dict(mem_n=2, engines=2, dc_ports=2)),  # two memory ops a group, two engines, two D$ lookups a cycle
+    ('st2', dict(st_n=2)),                           # two posted stores retire in a group
+    ('db1', dict(db=1)),                             # a drain beat a cycle
+    ('sb8', dict(sb=8)),                             # an 8-entry store buffer
+    ('br2', dict(bru_ports=2, br_n=2)),              # a second branch unit, two branches retire in a group
+    ('cond2', dict(al_cond_n=2)),                    # two conditional branches predicted an aligner cycle
+    ('bslots2', dict(_b2=True)),                     # two branches per BTB block
+    ('mul2', dict(mul_ports=2)),                     # a second multiplier
+    ('fp2', dict(fp_n=2, fpw_n=2)),                  # two uops touching FP state a group, two FP writes a commit
+    ('fpu2', dict(fpu_ports=2)),                     # a second FPU pipe
+    ('rob64', dict(rob=64)),
+    ('rs16', dict(rs=16)),
+    ('lsq16', dict(lsq=16)),
+])
+ALL_W = [r for r in RUNGS_W if r != 'fe16']          # every rung, the widest fetch
+
+
+def wrow(n, rungs=(), **extra):
+    """(W.0) the knobs of width n with these rungs"""
+    d = cfg(REF_W, w=n, cw=n, alu_ports=n, fe_w=n)
+    b2 = False
+    for r in rungs:
+        kn = dict(RUNGS_W[r])
+        b2 = kn.pop('_b2', False) or b2
+        d.update(kn)
+    d['bp'] = {8: 'gshare', 16: 'gshare 16B w2', 32: 'gshare 32B w2'}[d.get('fe_blk', 8)] + (' b2' if b2 else '')
+    d.update(extra)
+    return d
+
+
+def ideal_w(n):
+    """(W.0) no group rule, a unit of each kind behind every port"""
+    return dict(mem1=False, mem_n=None, fp1=False, fp_n=None, fpw1=False, fpw_n=None, alone=False, slot2=False,
+                p0=False, st_n=99, br_n=99, bru_ports=n, mul_ports=n, fpu_ports=n, engines=n, dc_ports=None,
+                al_cond_n=n)
+
+
+CONFIGS_W = [('base', cfg()), ('fe8', cfg(FE8)), ('ref', REF_W)]
+for _n in (2, 3, 4):
+    CONFIGS_W.append(('w%d' % _n, wrow(_n)))
+    CONFIGS_W += [('w%d %s' % (_n, r), wrow(_n, [r])) for r in RUNGS_W]
+    CONFIGS_W += [('w%d %s' % (_n, ' '.join(rs)), wrow(_n, rs)) for rs in (
+        ('st2', 'db1'), ('mem2', 'lsq16'), ('mem2', 'st2', 'db1'), ('fe16', 'bslots2'), ('fe32', 'bslots2'),
+        ('fe16', 'cond2'), ('fe32', 'cond2'))]
+    CONFIGS_W.append(('w%d best' % _n, wrow(_n, ALL_W)))
+    CONFIGS_W.append(('w%d best fe16' % _n, wrow(_n, ['fe16'] + [r for r in ALL_W if r != 'fe32'])))
+    CONFIGS_W += [('w%d best -%s' % (_n, r), wrow(_n, [x for x in ALL_W if x != r])) for r in ALL_W]
+    CONFIGS_W.append(('w%d ideal' % _n, wrow(_n, ALL_W, **ideal_w(_n))))
+    CONFIGS_W += [('w%d book_iss' % _n, wrow(_n, book_iss=True)), ('w%d best book_iss' % _n, wrow(_n, ALL_W, book_iss=True)),
+                  ('w%d res_clamp' % _n, wrow(_n, res_clamp=True)), ('w%d best res_clamp' % _n, wrow(_n, ALL_W, res_clamp=True))]
+    CONFIGS_W += [('L20 w%d' % _n, wrow(_n, miss_add=20)), ('L20 w%d best' % _n, wrow(_n, ALL_W, miss_add=20))]
+
+# (W.0) validation: the shipping core's fit predicts runs of the core at width 1 (downward), and each width-1 run's own
+# fit predicts the shipping core (upward: the width code crossing a step with a measured answer); both on REF_W
+BASE_W0 = dict(BASE_O7)
+VALID_W0 = [(lab, cfg(REF_W, kn)) for lab, kn in (
+    ('v_c1', dict(cw=1)), ('v_d1', dict(w=1, cw=2)), ('v_a1', dict(alu_ports=1)), ('v_w1', dict(w=1, cw=1, alu_ports=1)))]
+BASE_UP = {'v_c1': dict(BASE_O7, cw=1), 'v_d1': dict(BASE_O7, w=1, cw=2), 'v_a1': dict(BASE_O7, alu_ports=1),
+           'v_w1': dict(BASE_O7, w=1, cw=1, alu_ports=1)}
+VALID_UP = [('w0', cfg(REF_W, w=2, cw=2, alu_ports=2))]
+VREF.update({f: REF_W for f in ['w0'] + list(BASE_UP)})
+CONFIGS_V = [('base', cfg()), ('ref', REF_W)]           # (W.0) --set v: the validation rows with their reference only
+
 CONFIGS_O4 = [  # name, knobs: two-wide with the pair rules (O4.0)
     ('ooo rs4', dict(rs=4)),
     ('commit2 rob8 rs4', dict(w=2, rs=4, dispatch1=True, slot2=True, fpw1=True)),
@@ -1165,38 +1242,50 @@ def main():
     ap.add_argument('--kernels', default=' '.join(KERNELS))
     ap.add_argument('--db', type=int, default=2, help='cycles from a drain beat to its response (2: the D$ passes a store through)')
     ap.add_argument('--stats', action='store_true', help='(O5.0) also print the fit\'s memory statistics per kernel')
+    ap.add_argument('--csv', help='(W.0) also write every replay to this file: kernel,kind,name,cycles,fit,ref,meas')
     ap.add_argument('--check', action='store_true',
                     help='(W.0) also count, per kernel and configuration, the cycles in which a replay exceeds a width '
                          'or the integer ports (the fit included)')
-    ap.add_argument('--set', default='o1', choices=('o1', 'o4', 'ox', 'o8', 'o5', 'o7'),
+    ap.add_argument('--set', default='o1', choices=('o1', 'o4', 'ox', 'o8', 'o5', 'o7', 'w', 'v'),
                     help='o1: the O1.0 configurations; o4: two-wide with the pair rules; ox: the complete-OOO milestones; '
-                         'o8: the frontend steps (with --fit o3)')
-    ap.add_argument('--fit', default='o1', choices=('o1', 'o4', 'o3', 'o8', 'o7'),
+                         'o8: the frontend steps (with --fit o3); w: three and four wide (W.0, with --fit w0); v: only '
+                         'the fit and its reference (for the validation rows)')
+    ap.add_argument('--fit', default='o1', choices=('o1', 'o4', 'o3', 'o8', 'o7', 'w0') + tuple(BASE_UP),
                     help='o1: fit one-wide traces with the station off (O1.0, O4.0); o4: fit traces of the core as built '
                          'after O4 (two-wide, the station on, issue cycles traced: OX.0); o3: ... after O3 (recovery at '
-                         'execute, XR_EARLY); o8: ... after O8 (O5.0); o7: ... with the D$ and the big window (O7b)')
+                         'execute, XR_EARLY); o8: ... after O8 (O5.0); o7: ... with the D$ and the big window (O7b); '
+                         'w0: the shipping core (W.0), validated on its width-1 runs; v_c1 v_d1 v_a1 v_w1: those runs, '
+                         'fitted on their own traces (--base their CSV), validated on the shipping core (label w0)')
     a = ap.parse_args()
     configs = {'o1': CONFIGS, 'o4': CONFIGS_O4, 'ox': CONFIGS_OX, 'o8': CONFIGS_O8, 'o5': CONFIGS_O5,
-               'o7': CONFIGS_O7}[a.set]
+               'o7': CONFIGS_O7, 'w': CONFIGS_W, 'v': CONFIGS_V}[a.set]
     sfx = '_s' if a.mode == 's' else ''
     base = load_csv(a.base or os.path.join(os.path.dirname(os.path.abspath(__file__)), 'baseline_pipe%s.csv' % sfx))
-    fitp = dict({'o4': BASE_O4, 'o3': BASE_O3, 'o8': BASE_O8, 'o7': BASE_O7}.get(a.fit, BASE))
+    fitp = dict({'o4': BASE_O4, 'o3': BASE_O3, 'o8': BASE_O8, 'o7': BASE_O7, 'w0': BASE_W0}.get(
+        a.fit, BASE_UP.get(a.fit, BASE)))
     fitp['db'] = a.db
-    valid = {'o4': VALID_O4, 'o3': [], 'o8': VALID_O8, 'o7': VALID_O7}.get(a.fit, VALID)
+    valid = {'o4': VALID_O4, 'o3': [], 'o8': VALID_O8, 'o7': VALID_O7, 'w0': VALID_W0}.get(
+        a.fit, VALID_UP if a.fit in BASE_UP else VALID)
     vals = {}
     if a.validate:
         for lab, _ in valid:
             f = os.path.join(a.validate, 'baseline_pipe%s_%s.csv' % (sfx, lab))
             if os.path.exists(f):
                 vals[lab] = load_csv(f)
+    # (W.0) a fit's validation rows may run on a modelled frontend: they are then also given against that frontend's
+    # own replay of the fit (vref), so its error, common to the row and the fit, cancels
+    vref = VREF.get(a.fit)
     hdr = ['kernel', 'cycles', 'fit', 'neg']
-    hdr += ['%s (meas)' % lab for lab, _ in valid if lab in vals]
+    hdr += [('%s / vs ref (meas)' if vref is not None else '%s (meas)') % lab for lab, _ in valid if lab in vals]
     hdr += [c for c, _ in configs]
     print('| ' + ' | '.join(hdr) + ' |')
     print('|' + '---|' * len(hdr))
     logs = {}
+    vlogs = {}                      # validation label -> ([log model/fit], [log model/ref], [log measured/base])
     stats = []
+    resid = []
     checks = []
+    csv_rows = []
     for kern in a.kernels.split():
         path = os.path.join(a.traces, '%s%s_%s.ilp' % (kern, sfx, a.config))
         if not os.path.exists(path):
@@ -1220,14 +1309,36 @@ def main():
                     stt['dc%dk%s' % (kib, 'w' if w else 'c')] = sum(1 for v in d.values() if v)
             stt['loads'] = nld
             stats.append((kern, stt))
+            rr = {}
+            for name, sel in (('push', None), ('pop', None), ('disp', None), ('iss', 'op'), ('acc', 'mem'),
+                              ('go', 'mem'), ('com', None)):
+                v = [res[name][k] for k, q in enumerate(tr)
+                     if sel is None or (sel == 'mem') == (q.cls == 'lsu')]
+                rr[name] = (sum(1 for x in v if x < 0), sum(v) / len(v) if v else 0.0)
+            resid.append((kern, rr))
         row = [kern, str(meas), str(fitc), str(neg)]
+        refc = None
+        if vref is not None and any(lab in vals for lab, _ in valid):
+            p = dict(fitp); p.update(vref)
+            refc, _ = sim(tr, p, res, t0=t0)
         for lab, kn in valid:
             if lab not in vals:
                 continue
             p = dict(fitp); p.update(kn)
             pc, _ = sim(tr, p, res, t0=t0)
             m = int(vals[lab][(kern, a.config)]['cycles']) if (kern, a.config) in vals[lab] else 0
-            row.append('%+.1f%% (%+.1f%%)' % (100.0 * (pc - fitc) / fitc, 100.0 * (m - meas) / meas if meas else 0))
+            vm = 100.0 * (m - meas) / meas if (meas and m) else 0
+            vl = vlogs.setdefault(lab, ([], [], []))
+            vl[0].append(math.log(pc / fitc))
+            if refc is not None:
+                vl[1].append(math.log(pc / refc))
+            if meas and m:
+                vl[2].append(math.log(m / meas))
+            if refc is not None:
+                row.append('%+.1f%% / %+.1f%% (%+.1f%%)' % (100.0 * (pc - fitc) / fitc, 100.0 * (pc - refc) / refc, vm))
+            else:
+                row.append('%+.1f%% (%+.1f%%)' % (100.0 * (pc - fitc) / fitc, vm))
+            csv_rows.append((kern, 'valid', lab, pc, fitc, refc or '', m))
         for ci, (cname, kn) in enumerate(configs):
             p = dict(fitp); p.update(kn)
             if a.check:
@@ -1235,13 +1346,28 @@ def main():
             pc, _ = sim(tr, p, res, t0=t0)
             if a.check:
                 checks.append((kern, cname, count_caps(p['_dbg'], p)))
+            csv_rows.append((kern, 'cfg', cname, pc, fitc, '', meas))
             row.append('%+.1f%%' % (100.0 * (pc - fitc) / fitc))
             logs.setdefault(ci, []).append(math.log(pc / fitc))
         print('| ' + ' | '.join(row) + ' |')
-    if logs:
-        row = ['geomean', '', '', ''] + [''] * len([l for l, _ in valid if l in vals])
-        row += ['%+.1f%%' % (100.0 * (math.exp(sum(v) / len(v)) - 1)) for ci, v in sorted(logs.items())]
+    gm = lambda v: 100.0 * (math.exp(sum(v) / len(v)) - 1) if v else 0.0
+    if logs or vlogs:
+        row = ['geomean', '', '', '']
+        for lab, _ in valid:                                  # (W.0) the validation rows' geomeans too
+            if lab not in vals:
+                continue
+            v = vlogs.get(lab, ([], [], []))
+            if vref is not None:
+                row.append('%+.1f%% / %+.1f%% (%+.1f%%)' % (gm(v[0]), gm(v[1]), gm(v[2])))
+            else:
+                row.append('%+.1f%% (%+.1f%%)' % (gm(v[0]), gm(v[2])))
+        row += ['%+.1f%%' % gm(v) for ci, v in sorted(logs.items())]
         print('| ' + ' | '.join(row) + ' |')
+    if a.csv:
+        with open(a.csv, 'w') as f:
+            f.write('kernel,kind,name,cycles,fit,ref,meas\n')
+            for r in csv_rows:
+                f.write(','.join(str(x) for x in r) + '\n')
     if stats:
         keys = ['loads', 'dcm_n', 'dc2kc', 'dc2kw', 'dc4kw', 'dc8kw', 'miss_lat', 'ld_drain',
                 'ldb_ld', 'ldb_st', 'ldb_head', 'ldb_busy']
@@ -1250,6 +1376,14 @@ def main():
         print('|' + '---|' * (len(keys) + 1))
         for kern, stt in stats:
             print('| %s | ' % kern + ' | '.join(str(stt.get(x, 0)) for x in keys) + ' |')
+        # (W.0) the fit's residuals per event: how many are negative, and their mean (iss over the other ops, acc and
+        # go over the memory ops, the rest over every instruction)
+        ev = ['push', 'pop', 'disp', 'iss', 'acc', 'go', 'com']
+        print()
+        print('| kernel | ' + ' | '.join('%s neg / mean' % e for e in ev) + ' |')
+        print('|' + '---|' * (len(ev) + 1))
+        for kern, rr in resid:
+            print('| %s | ' % kern + ' | '.join('%d / %.2f' % rr[e] for e in ev) + ' |')
     if a.check:
         bad = [(k, c, v) for (k, c, v) in checks if any(v.values())]
         print()
