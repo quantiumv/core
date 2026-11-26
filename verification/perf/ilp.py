@@ -255,9 +255,9 @@ BASE = dict(w=1, rs=0, rob=8, iq=8, lsq=4, sb=4, handoff=True, early=True, lsu_b
             # Ports: bru_ports / mul_ports, the ports with a branch unit / a multiplier (with p0 they are nested, port 0
             # first: a branch and a multiply share max of the two); fpu_ports, FPU pipes. engines also counts for the
             # in-order engine (ops taken in program order, that many in flight); dc_ports: D$ hit lookups a cycle
-            # (None: any); fb_bytes: the fetch buffer in bytes (None: fb blocks). Sensitivity: book_iss, a port is
-            # booked in the issue cycle (its residual included), not the constraint's; res_clamp, a negative pop,
-            # dispatch or commit residual is not added back
+            # (None: any); fb_bytes: the fetch buffer in bytes (None: fb blocks). book_iss: a port is booked in the
+            # issue cycle (the traced one in the fit, the constraint's plus the residual in a replay), not the
+            # constraint's. Sensitivity: res_clamp, a negative pop, dispatch or commit residual is not added back
             cw=None, fe_w=2, al_cond_n=None, mem_n=None, fp_n=None, fpw_n=None, st_n=1, br_n=1,
             bru_ports=1, mul_ports=1, fpu_ports=1, dc_ports=None, fb_bytes=None, book_iss=False, res_clamp=False)
 
@@ -459,6 +459,13 @@ def sim(tr, p, res=None, fit=False, t0=None):
         j = tr[s].prod_a
         return max(disp[s], avail(j) if j is not None else 0) + 1
 
+    def rs_held(c):
+        """the station entries a uop dispatching in cycle c finds taken: those in it during c and, with book_iss
+        (W.0), those the older uops of its own dispatch group take in c (qv_rs: two pushes need o_room2, two free)"""
+        if p['book_iss']:
+            return sum(1 for (d, i) in rs_occ if d <= c <= i)
+        return sum(1 for (d, i) in rs_occ if d < c <= i)
+
     def avail(k):
         """when a consumer may take producer k's value (the cycle it issues in)"""
         q = tr[k]
@@ -492,10 +499,12 @@ def sim(tr, p, res=None, fit=False, t0=None):
             t += 1
         return t
 
-    def take_port(pt, t):
+    def take_port(pt, t, exact=False):
+        """book port pt in the first cycle from t with room (exact: in cycle t, as traced, room or not)"""
         if pt is None:
             return t
-        t = free_port(pt, t)
+        if not exact:
+            t = free_port(pt, t)
         ports[(pt, t)] = ports.get((pt, t), 0) + 1
         if pt in ('p0b', 'p0m'):
             ports[('p0', t)] = ports.get(('p0', t), 0) + 1
@@ -647,7 +656,7 @@ def sim(tr, p, res=None, fit=False, t0=None):
             # is part of the constraint, so a fit of a run whose station filled does not keep it as a residual (a
             # configuration with no station, or a bigger one, would add it back where it does not happen)
             if earliest(c) > c:
-                while sum(1 for (d, i) in rs_occ if d < c <= i) >= p['rs']:
+                while rs_held(c) >= p['rs']:
                     c += 1
         disp[k] = put('disp', k, c, q.disp)
         # ---- issue (non-memory) ----
@@ -661,21 +670,32 @@ def sim(tr, p, res=None, fit=False, t0=None):
                 t = earliest(disp[k])
                 if t > disp[k]:
                     # it waits in a reservation-station entry (from its dispatch to its issue): dispatch needs room
-                    while sum(1 for (d, i) in rs_occ if d < disp[k] <= i) >= p['rs']:
+                    while rs_held(disp[k]) >= p['rs']:
                         disp[k] += 1
                     t = earliest(disp[k])
-                    if t > disp[k]:
+                    if t > disp[k] and not p['book_iss']:
                         rs_occ.append((disp[k], t))
                         if len(rs_occ) > trim:
                             rs_occ.pop(0)
-                if p['book_iss'] and p['iss_res'] and not fit:
+                if p['book_iss'] and p['iss_res']:
                     icons = None                              # (W.0) booked below, in its issue cycle
                 else:
                     icons = take_port(pt, t)
-            if icons is None:
+            if icons is None and fit:
+                # the fit books the traced issue cycle, so a later op's constraint sees the ports as they were taken
+                # (booked at the constraint cycle, a wait for a busy port would become part of the residual)
+                iss[k] = put('iss', k, free_port(pt, t), q.iss)
+                take_port(pt, iss[k], exact=True)
+            elif icons is None:
                 iss[k] = take_port(pt, free_port(pt, t) + res['iss'][k])
             else:
                 iss[k] = put('iss', k, icons, q.iss) if p['iss_res'] else icons
+            if p['book_iss'] and p['rs'] > 0 and iss[k] > disp[k]:
+                # (W.0) its station entry is held to its issue as it happens (traced in the fit), not to the
+                # constraint's: else a full station's wait would become a dispatch residual
+                rs_occ.append((disp[k], iss[k]))
+                if len(rs_occ) > trim:
+                    rs_occ.pop(0)
             if fit:
                 res['lat'][k] = (q.cmpl - q.iss) if p['iss_res'] else (q.cmpl - q.disp)
             cmpl[k] = iss[k] + max(1, res['lat'][k])
@@ -1197,17 +1217,18 @@ for _n in (2, 3, 4):
     CONFIGS_W.append(('w%d best fe16' % _n, wrow(_n, ['fe16'] + [r for r in ALL_W if r != 'fe32'])))
     CONFIGS_W += [('w%d best -%s' % (_n, r), wrow(_n, [x for x in ALL_W if x != r])) for r in ALL_W]
     CONFIGS_W.append(('w%d ideal' % _n, wrow(_n, ALL_W, **ideal_w(_n))))
-    CONFIGS_W += [('w%d book_iss' % _n, wrow(_n, book_iss=True)), ('w%d best book_iss' % _n, wrow(_n, ALL_W, book_iss=True)),
-                  ('w%d res_clamp' % _n, wrow(_n, res_clamp=True)), ('w%d best res_clamp' % _n, wrow(_n, ALL_W, res_clamp=True))]
+    CONFIGS_W += [('w%d res_clamp' % _n, wrow(_n, res_clamp=True)), ('w%d best res_clamp' % _n, wrow(_n, ALL_W, res_clamp=True))]
     CONFIGS_W += [('L20 w%d' % _n, wrow(_n, miss_add=20)), ('L20 w%d best' % _n, wrow(_n, ALL_W, miss_add=20))]
 
 # (W.0) validation: the shipping core's fit predicts runs of the core at width 1 (downward), and each width-1 run's own
-# fit predicts the shipping core (upward: the width code crossing a step with a measured answer); both on REF_W
-BASE_W0 = dict(BASE_O7)
+# fit predicts the shipping core (upward: the width code crossing a step with a measured answer); both on REF_W. The
+# W.0 fits book a port in the traced issue cycle (book_iss): fitted at the constraint cycle, a one-port trace keeps its
+# waits for the port as residuals, and two ports then buy almost nothing (--book-cons shows that convention)
+BASE_W0 = dict(BASE_O7, book_iss=True)
 VALID_W0 = [(lab, cfg(REF_W, kn)) for lab, kn in (
     ('v_c1', dict(cw=1)), ('v_d1', dict(w=1, cw=2)), ('v_a1', dict(alu_ports=1)), ('v_w1', dict(w=1, cw=1, alu_ports=1)))]
-BASE_UP = {'v_c1': dict(BASE_O7, cw=1), 'v_d1': dict(BASE_O7, w=1, cw=2), 'v_a1': dict(BASE_O7, alu_ports=1),
-           'v_w1': dict(BASE_O7, w=1, cw=1, alu_ports=1)}
+BASE_UP = {'v_c1': dict(BASE_W0, cw=1), 'v_d1': dict(BASE_W0, w=1, cw=2), 'v_a1': dict(BASE_W0, alu_ports=1),
+           'v_w1': dict(BASE_W0, w=1, cw=1, alu_ports=1)}
 VALID_UP = [('w0', cfg(REF_W, w=2, cw=2, alu_ports=2))]
 VREF.update({f: REF_W for f in ['w0'] + list(BASE_UP)})
 CONFIGS_V = [('base', cfg()), ('ref', REF_W)]           # (W.0) --set v: the validation rows with their reference only
@@ -1243,6 +1264,8 @@ def main():
     ap.add_argument('--db', type=int, default=2, help='cycles from a drain beat to its response (2: the D$ passes a store through)')
     ap.add_argument('--stats', action='store_true', help='(O5.0) also print the fit\'s memory statistics per kernel')
     ap.add_argument('--csv', help='(W.0) also write every replay to this file: kernel,kind,name,cycles,fit,ref,meas')
+    ap.add_argument('--book-cons', action='store_true',
+                    help='(W.0) the fit and every replay book a port at its constraint cycle (the convention before W.0)')
     ap.add_argument('--check', action='store_true',
                     help='(W.0) also count, per kernel and configuration, the cycles in which a replay exceeds a width '
                          'or the integer ports (the fit included)')
@@ -1264,6 +1287,8 @@ def main():
     fitp = dict({'o4': BASE_O4, 'o3': BASE_O3, 'o8': BASE_O8, 'o7': BASE_O7, 'w0': BASE_W0}.get(
         a.fit, BASE_UP.get(a.fit, BASE)))
     fitp['db'] = a.db
+    if a.book_cons:
+        fitp['book_iss'] = False
     valid = {'o4': VALID_O4, 'o3': [], 'o8': VALID_O8, 'o7': VALID_O7, 'w0': VALID_W0}.get(
         a.fit, VALID_UP if a.fit in BASE_UP else VALID)
     vals = {}
