@@ -955,9 +955,14 @@ reference:
   against a bar of 5.
 - **W2 fails:** four-wide adds 2.4 points at 16-byte fetch, and 3.1 to 3.8 at the 32-byte rows. That is at the bar of
   3, two widths beyond anything measured, and within a step's validation error.
-- **W3** keeps three rungs: wider fetch (16 bytes is enough: 32 bytes buys 0.7 more and needs two branches per block),
-  `mem2`, and `db1`. Each of the others costs under 1 point. D2 keeps the window: ROB 32, RS 8, LSQ 8 (at 16-byte fetch
-  the 16-entry queue is 0.2 points and at most 1.5 on a kernel).
+- **W3** keeps three rungs: wider fetch, `mem2`, and `db1`. Each of the others costs under 1 point.
+  - 16 bytes is enough: 32 bytes buys 0.7 more and needs two branches per block.
+  - At 16 bytes, two branches per block are worth only 0.7 on the geomean. But without them the two-wide core loses on
+    two kernels: crc32 in S by 6.8 % (its loop's two taken branches share a 16-byte block) and qsort by 1 %. That is
+    past the 0.3 % a step may lose on one kernel, so the build pairs 16-byte fetch with them ("The track as built",
+    below).
+  - D2 keeps the window: ROB 32, RS 8, LSQ 8 (at 16-byte fetch the 16-entry queue is 0.2 points and at most 1.5 on a
+    kernel).
 - **W4 does not fire:** these rungs buy 2.8 points at two-wide, and width buys another 12.1 on top.
 - **W6:** results stay in the ROB, which was decided for two-wide, so that question goes back to the user. The counts
   below are what each choice scales with.
@@ -989,6 +994,53 @@ Reproduce: run `run_perf.sh --mode m|s --ilptrace DIR --label w0`, then:
 - `--fit v_w1 ...` gives the upward one, on the width-1 runs' traces and CSVs;
 - `ilp_width.py --traces DIR --base-m .. --base-s .. chosen` or `rows fe16,mem2,db1` gives the chosen rows and their
   rungs.
+
+### The track as built (W3.0)
+
+The W3 plan builds the rungs at two-wide first, then the width, in this order:
+- **W3a:** a drain beat a cycle.
+- **W3b:** 16-byte fetch, with a 32-entry two-way BTB whose 16-byte block may hold two branches (`brpred.py`'s
+  `gshare 16B w2 b2`), and a 32-byte fetch buffer.
+- **W3c:** the second memory engine.
+- **W3e:** three commits at two dispatches.
+- **W3f:** three dispatches at two ALU ports.
+- **W3g:** the third ALU port.
+
+Each step against the one before it, then cumulative against the two-wide core (`ilp_width.py ... steps`, the model,
+SoC, points):
+
+| step | the step, M / S | cumulative, M / S (mean) | cumulative at L=20 |
+|---|---|---|---|
+| W3a | -0.5 / -0.5 | -0.5 / -0.5 (-0.5) | -0.5 |
+| W3b | -4.1 / -0.5 | -4.6 / -1.1 (-2.8) | -3.0 |
+| W3c | -0.8 / -1.1 | -5.5 / -2.1 (-3.8) | -4.0 |
+| W3e | -0.3 / -0.3 | -5.7 / -2.4 (-4.1) | -4.3 |
+| W3f | -11.3 / -11.2 | -17.1 / -13.7 (-15.4) | -14.6 |
+| W3g | -0.3 / -0.2 | -17.3 / -13.9 (-15.6) | -14.9 |
+
+| kernel | W3a | W3b | W3c | W3e | W3f | W3g |
+|---|---|---|---|---|---|---|
+| memcpy | -2.5 / -2.5 | -2.1 / -2.1 | -3.3 / -3.3 | +0.0 / +0.0 | -20.2 / -20.0 | -0.2 / -0.2 |
+| crc32 | +0.0 / +0.0 | +0.0 / -0.1 | +0.0 / +0.0 | +0.0 / +0.0 | -0.1 / -0.1 | -0.1 / -0.1 |
+| qsort | -0.1 / -0.3 | -2.7 / -2.1 | -0.9 / -0.9 | -0.0 / -0.0 | -9.9 / -6.4 | -1.9 / -1.4 |
+| matmul | +0.0 / +0.0 | -0.3 / -0.3 | -0.3 / -0.3 | -0.0 / -0.0 | -21.0 / -21.0 | -0.4 / -0.3 |
+| sieve | +0.0 / +0.0 | -30.6 / -0.6 | +0.0 / +0.0 | +0.0 / +0.0 | -0.4 / -0.6 | -0.1 / -0.3 |
+| listchase | +0.0 / +0.0 | +0.0 / +0.0 | -1.3 / -3.0 | +0.0 / +0.0 | -26.2 / -25.3 | +0.0 / +0.0 |
+| mixedint | +0.0 / +0.0 | +0.0 / +0.0 | +0.0 / +0.0 | +0.0 / -0.0 | -30.6 / -30.1 | +0.0 / +0.0 |
+| trap | -2.5 / -2.3 | +0.0 / +0.0 | -0.0 / -0.0 | -2.5 / -2.3 | +0.0 / +0.0 | +0.0 / +0.0 |
+| fmatmul | -0.0 / -0.1 | -0.3 / -0.2 | -2.6 / -2.8 | -0.4 / -0.4 | -0.6 / -0.6 | +0.0 / -0.0 |
+| fpmix | +0.0 / +0.0 | +0.0 / +0.0 | +0.0 / -0.0 | -0.0 / -0.0 | +0.0 / +0.0 | +0.0 / +0.0 |
+
+These are the predictions each slice's gate checks (D8), per kernel where the step moves one. No step makes a kernel
+slower.
+- **W3a** is memcpy and trap: their stores no longer wait two cycles a beat.
+- **W3b** is sieve M (its loop straddles two dwords), qsort and memcpy.
+- **W3c** is memcpy, listchase and fmatmul.
+- **W3f** is the width.
+- **W3e** alone is worth 0.3 (trap), but three dispatches need three commits.
+- **The third ALU port (W3g) is worth 0.25 points** (qsort 1.9 / 1.4), under the 1 point a rung needs (W3). It costs
+  the station an eighth bus and the ROB a seventh write port, so whether it is built is a question for the user before
+  W3f.
 
 ## CPI stack
 
