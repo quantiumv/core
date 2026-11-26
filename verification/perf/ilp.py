@@ -277,16 +277,25 @@ class DPort:
         self.drain_avail = 0    # the next beat may be decided from here (the last one's response)
         self.load_end = -1      # the last load's writeback
         self.beats = []         # (s, resp) of the scheduled beats
+        self.last = {}          # addr -> the index of the last posted store to it
 
     def push(self, ready, addr, idx=None):
+        self.last[addr] = len(self.sb)
         self.sb.append([ready, None, None, addr, idx])
 
     def _start(self, e):
         return max(e[0], self.drain_avail, self.load_end + 1)
 
     def _cnt(self, x):
-        """entries in the buffer at cycle x (one leaves at the edge after its response)"""
-        return sum(1 for e in self.sb if e[0] <= x and (e[2] is None or e[2] >= x))
+        """entries in the buffer at cycle x (one leaves at the edge after its response). Beats are scheduled in order,
+        each from the last one's response on, so the responses grow with the index: the scheduled entries still there
+        at x are the last few scheduled, and the walk back stops at the first one gone"""
+        n = sum(1 for e in self.sb[self.nd:] if e[0] <= x)
+        i = self.nd - 1
+        while i >= 0 and self.sb[i][2] >= x:
+            n += self.sb[i][0] <= x
+            i -= 1
+        return n
 
     def _sched(self, at=None):
         e = self.sb[self.nd]
@@ -343,10 +352,7 @@ class DPort:
         return self.sb[i][2]
 
     def last_store_to(self, addr):
-        for i in range(len(self.sb) - 1, -1, -1):
-            if self.sb[i][3] == addr:
-                return i
-        return None
+        return self.last.get(addr)
 
     def room_at(self, c):
         """the first cycle from c at which the buffer has room for one more"""
