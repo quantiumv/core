@@ -1235,6 +1235,21 @@ VALID_UP = [('w0', cfg(REF_W, w=2, cw=2, alu_ports=2))]
 VREF.update({f: REF_W for f in ['w0'] + list(BASE_UP)})
 CONFIGS_V = [('base', cfg()), ('ref', REF_W)]           # (W.0) --set v: the validation rows with their reference only
 
+# (W3.0) the three-wide track as built, step by step and cumulative (W3 plan): the drain beat (W3a), 16-byte fetch with
+# a two-way BTB holding two branches per block and a 32-byte fetch buffer (W3b), the second memory engine (W3c), three
+# commits at two dispatches (W3e), three dispatches at two ALU ports (W3f), the third ALU port (W3g)
+W3_RUNGS = ['db1', 'fe16', 'bslots2', 'mem2']
+STEPS_W3 = [
+    ('W3a', wrow(2, ['db1'])),
+    ('W3b', wrow(2, ['db1', 'fe16', 'bslots2'])),
+    ('W3c', wrow(2, W3_RUNGS)),
+    ('W3e', wrow(2, W3_RUNGS, cw=3)),
+    ('W3f', wrow(2, W3_RUNGS, w=3, cw=3, fe_w=3)),
+    ('W3g', wrow(3, W3_RUNGS)),
+]
+CONFIGS_W3 = ([('base', cfg()), ('ref', REF_W)] + STEPS_W3
+              + [('L20 ref', cfg(REF_W, miss_add=20))] + [('L20 ' + n, cfg(kn, miss_add=20)) for n, kn in STEPS_W3])
+
 CONFIGS_O4 = [  # name, knobs: two-wide with the pair rules (O4.0)
     ('ooo rs4', dict(rs=4)),
     ('commit2 rob8 rs4', dict(w=2, rs=4, dispatch1=True, slot2=True, fpw1=True)),
@@ -1271,10 +1286,11 @@ def main():
     ap.add_argument('--check', action='store_true',
                     help='(W.0) also count, per kernel and configuration, the cycles in which a replay exceeds a width '
                          'or the integer ports (the fit included)')
-    ap.add_argument('--set', default='o1', choices=('o1', 'o4', 'ox', 'o8', 'o5', 'o7', 'w', 'v'),
+    ap.add_argument('--set', default='o1', choices=('o1', 'o4', 'ox', 'o8', 'o5', 'o7', 'w', 'v', 'w3'),
                     help='o1: the O1.0 configurations; o4: two-wide with the pair rules; ox: the complete-OOO milestones; '
                          'o8: the frontend steps (with --fit o3); w: three and four wide (W.0, with --fit w0); v: only '
-                         'the fit and its reference (for the validation rows)')
+                         'the fit and its reference (for the validation rows); w3: the three-wide track as built, '
+                         'step by step (W3.0, with --fit w0)')
     ap.add_argument('--fit', default='o1', choices=('o1', 'o4', 'o3', 'o8', 'o7', 'w0') + tuple(BASE_UP),
                     help='o1: fit one-wide traces with the station off (O1.0, O4.0); o4: fit traces of the core as built '
                          'after O4 (two-wide, the station on, issue cycles traced: OX.0); o3: ... after O3 (recovery at '
@@ -1283,7 +1299,7 @@ def main():
                          'fitted on their own traces (--base their CSV), validated on the shipping core (label w0)')
     a = ap.parse_args()
     configs = {'o1': CONFIGS, 'o4': CONFIGS_O4, 'ox': CONFIGS_OX, 'o8': CONFIGS_O8, 'o5': CONFIGS_O5,
-               'o7': CONFIGS_O7, 'w': CONFIGS_W, 'v': CONFIGS_V}[a.set]
+               'o7': CONFIGS_O7, 'w': CONFIGS_W, 'v': CONFIGS_V, 'w3': CONFIGS_W3}[a.set]
     sfx = '_s' if a.mode == 's' else ''
     base = load_csv(a.base or os.path.join(os.path.dirname(os.path.abspath(__file__)), 'baseline_pipe%s.csv' % sfx))
     fitp = dict({'o4': BASE_O4, 'o3': BASE_O3, 'o8': BASE_O8, 'o7': BASE_O7, 'w0': BASE_W0}.get(

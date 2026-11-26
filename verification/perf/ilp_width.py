@@ -126,6 +126,36 @@ def rows(rungs, title=None):
     print(flush=True)
 
 
+def steps():
+    """(W3.0) the three-wide track as built (ilp.STEPS_W3), each step against the one before and cumulative against
+    the reference, per kernel; and at L=20"""
+    names = [n for n, _ in ilp.STEPS_W3]
+    ev = evaluate([kn for _, kn in ilp.STEPS_W3] + [ilp.cfg(kn, miss_add=20) for _, kn in ilp.STEPS_W3]
+                  + [ilp.cfg(ilp.REF_W, miss_add=20)])
+    n = len(names)
+    cur, l20, r20 = ev[:n], ev[n:2 * n], ev[2 * n]
+    print('| step | the step (M / S) | cumulative (M / S) | L=20 cumulative |')
+    print('|---|---|---|---|')
+    prev = None
+    for i, name in enumerate(names):
+        e = cur[i]
+        own = (e[1]['m'] - (prev[1]['m'] if prev else 0), e[1]['s'] - (prev[1]['s'] if prev else 0))
+        print('| %s | %+.1f / %+.1f | %+.1f / %+.1f (%+.1f) | %+.1f |' % (
+            name, own[0], own[1], e[1]['m'], e[1]['s'], e[0], l20[i][0] - r20[0]))
+        prev = e
+    print()
+    print('| kernel | ' + ' | '.join(names) + ' |')
+    print('|---|' + '---|' * n)
+    for k in KERNELS:
+        row = []
+        for i in range(n):
+            pm = cur[i - 1][2][(k, 'm')] if i else 0.0
+            ps = cur[i - 1][2][(k, 's')] if i else 0.0
+            row.append('%+.1f / %+.1f' % (cur[i][2][(k, 'm')] - pm, cur[i][2][(k, 's')] - ps))
+        print('| %s | ' % k + ' | '.join(row) + ' |')
+    print('(each step against the one before it, M / S, points; the cumulative row above)', flush=True)
+
+
 def main():
     global A, POOL
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -133,12 +163,14 @@ def main():
     ap.add_argument('--base-m', required=True)
     ap.add_argument('--base-s', required=True)
     ap.add_argument('--jobs', type=int, default=os.cpu_count())
-    ap.add_argument('what', choices=('chosen', 'rows'))
+    ap.add_argument('what', choices=('chosen', 'rows', 'steps'))
     ap.add_argument('rungs', nargs='*', help='(rows) comma-separated rung lists')
     A = ap.parse_args()
     POOL = Pool(A.jobs)
     if A.what == 'chosen':
         chosen([2, 3, 4])
+    elif A.what == 'steps':
+        steps()
     else:
         for spec in A.rungs:
             rows(spec.split(','))
