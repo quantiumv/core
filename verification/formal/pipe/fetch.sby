@@ -3,6 +3,8 @@
 # prove/bmc/cover: the shipping configuration (FB_DEPTH 4, streaming). *_fb2: the formal small
 # configuration's FB_DEPTH 2. prove_ns: FB_DEPTH 2 without streaming (the old rate).
 # *_w: the window aligner's (O8b) fetch, IDLE_GO, at FB_DEPTH 4 (prove_w2: 2).
+# *_16: (W3b) FETCH16 with the window aligner's fetch at the core's FB_DEPTH 5 (prove_16s: the formal small 3); bmc_16
+# is 12 deep, not 16: at FB_DEPTH 5 its 14th step took the solver over an hour (prove_16 is unbounded anyway).
 [tasks]
 prove
 bmc
@@ -14,6 +16,10 @@ prove_w
 bmc_w
 cover_w
 prove_w2
+prove_16
+bmc_16
+cover_16
+prove_16s
 
 [options]
 prove: mode prove
@@ -26,6 +32,14 @@ prove_w: mode prove
 prove_w: depth 10
 prove_w2: mode prove
 prove_w2: depth 10
+prove_16: mode prove
+prove_16: depth 10
+prove_16s: mode prove
+prove_16s: depth 10
+bmc_16: mode bmc
+bmc_16: depth 12
+cover_16: mode cover
+cover_16: depth 24
 bmc_w: mode bmc
 bmc_w: depth 16
 cover_w: mode cover
@@ -52,6 +66,10 @@ prove_w: read_slang --single-unit -D QV_ROB_MAX=8 -D IDLEGO qv_pkg.sv qv_fetch.s
 bmc_w: read_slang --single-unit -D QV_ROB_MAX=8 -D IDLEGO qv_pkg.sv qv_fetch.sv fetch_props.sv --top fetch_props
 cover_w: read_slang --single-unit -D QV_ROB_MAX=8 -D IDLEGO qv_pkg.sv qv_fetch.sv fetch_props.sv --top fetch_props
 prove_w2: read_slang --single-unit -D QV_ROB_MAX=8 -D FBD=2 -D IDLEGO qv_pkg.sv qv_fetch.sv fetch_props.sv --top fetch_props
+prove_16: read_slang --single-unit -D QV_ROB_MAX=8 -D FBD=5 -D IDLEGO -D F16 qv_pkg.sv qv_fetch.sv fetch_props.sv --top fetch_props
+bmc_16: read_slang --single-unit -D QV_ROB_MAX=8 -D FBD=5 -D IDLEGO -D F16 qv_pkg.sv qv_fetch.sv fetch_props.sv --top fetch_props
+cover_16: read_slang --single-unit -D QV_ROB_MAX=8 -D FBD=5 -D IDLEGO -D F16 qv_pkg.sv qv_fetch.sv fetch_props.sv --top fetch_props
+prove_16s: read_slang --single-unit -D QV_ROB_MAX=8 -D FBD=3 -D IDLEGO -D F16 qv_pkg.sv qv_fetch.sv fetch_props.sv --top fetch_props
 prep -top fetch_props
 
 [files]

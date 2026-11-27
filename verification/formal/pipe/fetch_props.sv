@@ -27,6 +27,12 @@
  *     idle bus in the cycle it is issued (no hold, redirect or yield in that cycle, a slot for its answer), so the
  *     hold properties allow a request in the first cycle without a hold.
  *
+ *   - (W3b, -DF16) FETCH16: every request asks for the 16-byte block of its pc and the slave answers both dwords
+ *     (the upper one a fixed function of its address too); the second BTB lookup (the upper dword's) is free. The
+ *     properties above hold as they are, the entries being dwords; a request presented in an answer's cycle, or from
+ *     an idle bus, needs room for two entries; the lemmas say a request pushes two exactly when it starts in the lower
+ *     dword with no hint there, and is then followed by the upper dword's hint or the next block.
+ *
  * Built for FB_DEPTH = FBD (default 4; -DFBD=2 for the formal small
  * configuration), STREAM (default on; -DNOSTREAM for the old rate) and IDLE_GO (-DIDLEGO: the window aligner's).
  */
@@ -46,7 +52,11 @@ module fetch_props (
     input logic        btb_hit,
     input logic [1:0]  btb_off,
     input logic        btb_x,
-    input logic [63:0] btb_tgt
+    input logic [63:0] btb_tgt,
+    input logic        btb2_hit,
+    input logic [1:0]  btb2_off,
+    input logic        btb2_x,
+    input logic [63:0] btb2_tgt
 );
     localparam logic [63:0] RESET_PC = 64'h0;
     localparam int FBD = `FBD;
@@ -61,6 +71,13 @@ module fetch_props (
 `else
     localparam bit IDLE_GO = 1'b0;
 `endif
+`ifdef F16
+    localparam bit F16 = 1'b1;
+`else
+    localparam bit F16 = 1'b0;
+`endif
+    // (F16) a request needs room for two entries
+    localparam int ROOM = F16 ? 2 : 1;
 
     logic [31:0] addr;
     logic        cyc, stb, idle, buf_valid, buf_err;
@@ -74,11 +91,15 @@ module fetch_props (
     // the slave's memory: data = f(address), registered like wb4_sram's (the data of the request seen the cycle before)
     reg  [63:0]  dat = 64'b0;
     always @(posedge clk) dat <= {addr, ~addr};
+    // (F16) the block's upper dword, the same function of its own address
+    reg  [63:0]  dat_hi = 64'b0;
+    always @(posedge clk) dat_hi <= {addr | 32'h8, ~(addr | 32'h8)};
+    logic [63:0] btb2_pc;
 
 `ifdef FETCH_OLD
     qv_fetch #(.RESET_PC(RESET_PC)) dut (
 `else
-    qv_fetch #(.RESET_PC(RESET_PC), .FB_DEPTH(FBD), .STREAM(STREAM), .BTB_EN(1'b1), .IDLE_GO(IDLE_GO)) dut (
+    qv_fetch #(.RESET_PC(RESET_PC), .FB_DEPTH(FBD), .STREAM(STREAM), .BTB_EN(1'b1), .IDLE_GO(IDLE_GO), .FETCH16(F16)) dut (
 `endif
         .clk(clk), .rst(rst),
         .wb_fetch_addr_o(addr), .wb_fetch_cyc_o(cyc), .wb_fetch_stb_o(stb),
@@ -87,6 +108,8 @@ module fetch_props (
 `ifndef FETCH_OLD
         .i_hold(hold), .o_idle(idle), .i_yield(yield),
         .o_btb_pc(btb_pc), .i_btb_hit(btb_hit), .i_btb_off(btb_off), .i_btb_x(btb_x), .i_btb_tgt(btb_tgt),
+        .wb_fetch_dat_hi_i(dat_hi),
+        .o_btb2_pc(btb2_pc), .i_btb2_hit(btb2_hit), .i_btb2_off(btb2_off), .i_btb2_x(btb2_x), .i_btb2_tgt(btb2_tgt),
         .o_buf_hint(buf_hint), .o_buf_hoff(buf_hoff), .o_buf_hx(buf_hx), .o_buf_htgt(buf_htgt),
         .o_buf1_valid(buf1_valid), .o_buf1_pc(buf1_pc), .o_buf1_data(buf1_data), .o_buf1_err(buf1_err),
         .o_buf1_hint(buf1_hint), .o_buf1_hoff(buf1_hoff), .o_buf1_hx(buf1_hx), .o_buf1_htgt(buf1_htgt),
@@ -147,6 +170,9 @@ module fetch_props (
                 assert (cyc && stb);
                 assert (addr == p_addr);
             end
+            // (F16) every request is for a 16-byte block, and the second lookup is its upper dword
+            if (F16 && cyc) assert (addr[3:0] == 4'h0);
+            if (F16) assert (btb2_pc == {btb_pc[63:4], 4'b1000});
             // held: nothing new starts; held and idle: nothing on the bus (IDLE_GO: a request may go out in the
             // first cycle without a hold, from an idle bus)
 `ifndef FETCH_OLD
@@ -169,8 +195,8 @@ module fetch_props (
         if (!rst && !init && cyc && !dut.req_valid_q) begin
             assert (IDLE_GO);
             assert (!redirect_valid && !hold && !yield);
-            assert (dut.fb_count_next < CW'(FBD));
-            assert (addr == {dut.fpc_q[31:3], 3'b000});
+            assert (dut.fb_count_next < CW'(FBD + 1 - ROOM));
+            assert (addr == (F16 ? {dut.fpc_q[31:4], 4'b0000} : {dut.fpc_q[31:3], 3'b000}));
         end
 `endif
 `ifndef FETCH_OLD
@@ -186,7 +212,7 @@ module fetch_props (
             assert (!redirect_valid);
             assert (!hold);
             assert (!yield);
-            assert (dut.fb_count_next < CW'(FBD));
+            assert (dut.fb_count_next < CW'(FBD + 1 - ROOM));
         end
 `endif
     end
@@ -202,6 +228,12 @@ module fetch_props (
             cover (STREAM && cyc && (ack || err) && p_cyc && !p_hold);   // a request presented in an answer's cycle
             cover (STREAM && yield && ack && p_cyc && !cyc);             // a stream paused by a yield
             cover (buf1_valid && pop && pop2 && !redirect_valid);        // two entries popped
+            if (F16) begin
+                cover (dut.fb_push2 && redirected);                       // an answer that fills two entries
+                cover (dut.fb_push2 && dut.req_h2_q && redirected);       // ... the upper one hinted
+                cover (dut.fb_push && !dut.fb_push2 && dut.req_pc_q[3]);  // a start in the upper dword: one entry
+                cover (dut.fb_push2 && err);                              // an error answer: two fault entries
+            end
 `ifdef IDLEGO
             cover (cyc && !dut.req_valid_q && redirected);              // a request from an idle bus
 `endif
@@ -234,6 +266,9 @@ module fetch_props (
     always @* begin
         if (!init && !rst) begin
             assert (cnt <= CW'(FBD));
+            // (F16's FB_DEPTH 5 and 3 are not powers of two: the pointers have values no buffer slot has)
+            assert (int'(dut.fb_rd_q) < FBD);
+            assert (int'(dut.fb_wr_q) < FBD);
             assert (int'(dut.fb_wr_q) == (int'(dut.fb_rd_q) + int'(cnt)) % FBD);
             for (int j = 0; j < FBD; j++) begin
                 if (j < int'(cnt)) begin
@@ -247,15 +282,24 @@ module fetch_props (
                 end
             end
             if (dut.req_valid_q && !dut.req_stale_q) begin
-                assert (cnt <= CW'(FBD - 1));      // issue reserved its response's slot
+                assert (cnt <= CW'(FBD - ROOM));   // issue reserved its response's slots
                 assert (dut.req_pc_q == npush);
-                assert (dut.fpc_q == (dut.req_hint_q ? dut.req_htgt_q : ahead(npush, 1)));
+                if (F16) begin
+                    // two entries exactly when it starts in the lower dword with no taken branch there; then the
+                    // upper dword's hint or the next block follows
+                    assert (dut.req_two_q == (!dut.req_pc_q[3] && !dut.req_hint_q));
+                    if (dut.req_two_q) assert (dut.fpc_q == (dut.req_h2_q ? dut.req_h2tgt_q : ahead(npush, 2)));
+                    else               assert (dut.fpc_q == (dut.req_hint_q ? dut.req_htgt_q : ahead(npush, 1)));
+                end else begin
+                    assert (!dut.req_two_q);
+                    assert (dut.fpc_q == (dut.req_hint_q ? dut.req_htgt_q : ahead(npush, 1)));
+                end
                 if (dut.req_hint_q) assert (dut.req_hoff_q >= dut.req_pc_q[2:1]);
             end else begin
                 assert (dut.fpc_q == npush);
             end
             if (p_valid && p_cyc) assert (dut.req_valid_q);
-            if (p_valid && p_out) assert (p_addr == {dut.req_pc_q[31:3], 3'b000});
+            if (p_valid && p_out) assert (p_addr == (F16 ? {dut.req_pc_q[31:4], 4'b0000} : {dut.req_pc_q[31:3], 3'b000}));
         end
     end
 `else

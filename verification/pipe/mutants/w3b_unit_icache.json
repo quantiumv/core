@@ -1,0 +1,43 @@
+{
+ "dut": "design/icache.sv",
+ "tb": "design/icache_random_tb.sv",
+ "files": [
+  "design/icache.sv",
+  "design/wb4_sram.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench",
+  "-Picache_random_tb.PAIR=1"
+ ],
+ "cwd": "design",
+ "timeout": 600,
+ "pass_re": "\\b0 checks failed",
+ "mutants": [
+  {
+   "name": "(W3b) a hit answers the requested word as the upper one",
+   "old": "if (PAIR) dat_hi_o <= data_q[req_index][req_offset_hi];",
+   "new": "if (PAIR) dat_hi_o <= data_q[req_index][req_offset];"
+  },
+  {
+   "name": "(W3b) the upper word is the next one, across the line for an odd word",
+   "old": "wire [OFFSET_WIDTH-1:0] req_offset_hi    = req_offset | OFFSET_WIDTH'(1);",
+   "new": "wire [OFFSET_WIDTH-1:0] req_offset_hi    = req_offset + OFFSET_WIDTH'(1);"
+  },
+  {
+   "name": "(W3b) the refill's end reads the upper word from the array, missing its own last beat",
+   "old": "if (PAIR) dat_hi_o <= (refill_beat_q == refill_word_hi)",
+   "new": "if (PAIR) dat_hi_o <= (1'b0)"
+  },
+  {
+   "name": "(W3b) the refill's end answers the requested word as the upper one",
+   "old": "wire [OFFSET_WIDTH-1:0] refill_word_hi   = refill_word_q | OFFSET_WIDTH'(1);",
+   "new": "wire [OFFSET_WIDTH-1:0] refill_word_hi   = refill_word_q;"
+  }
+ ]
+}

@@ -45,6 +45,10 @@
 #   entries popped early, the position in the second entry lost; for the global history a restore with the predicted
 #   direction, a jump's restore that shifts, a flush without this cycle's retirement, a lost shift, a committed history
 #   that never moves.
+#   (W3b) fetch.sby's *_16 tasks (FETCH16: 16-byte blocks, two entries an answer, the second BTB lookup); --mutants:
+#   room for one entry, the upper dword pushed after a taken branch in the lower one or for a start in the upper one,
+#   the upper dword's hint not followed or lost or its target changed, the upper entry's pc or data wrong, a start in
+#   the upper dword with the lower dword's data, the second push not counted or overwritten, the dword asked for.
 #   (O5a) dc.sby (qv_dc, the D$ inside the core, against a shadow of one symbolic dword): prove, bmc and cover at
 #   2 x 2, bmc4 at 4 x 4; --mutants: a hit on an invalid line, an install after a snoop or an error, an update that
 #   writes a line not holding its address or ignores its byte select, a snoop or an invalidation ignored, cyc held into
@@ -75,6 +79,13 @@ done
 for task in prove_p bmc_p cover_p; do
     r=$(sby -f sb.sby $task 2>&1 | status)
     printf '%-12s %s\n' "sb $task" "$r"
+    [ "$r" == "PASS" ] || fail=1
+done
+# (W3b) 16-byte fetch: the core's FB_DEPTH 5, and the formal small 3
+for task in prove_16 bmc_16 cover_16 prove_16s; do
+    r=$(sby -f fetch.sby $task 2>&1 | status)
+    printf '%-12s %s
+' "fetch $task" "$r"
     [ "$r" == "PASS" ] || fail=1
 done
 # (O5a) the D$ at 4 lines x 4 dwords: bounded
@@ -149,7 +160,7 @@ EOF
     mutant fetch_stream_redirect fetch 's/ \&\& !i_redirect_valid \&\& (!i_xl_on || stream_reuse)/ \&\& (!i_xl_on || stream_reuse)/'
     mutant fetch_stream_yield  fetch 's/ \&\& (!i_xl_on || stream_reuse) \&\& !i_yield;/ \&\& (!i_xl_on || stream_reuse);/'
     mutant fetch_stream_room   fetch 's/wire stream_go = STREAM \&\& can_issue \&\& bus_resp/wire stream_go = STREAM \&\& bus_resp/'
-    mutant fetch_credit        fetch 's/(fb_count_next < CNT_W.(FB_DEPTH))/(fb_count_next <= CNT_W'"'"'(FB_DEPTH))/'
+    mutant fetch_credit        fetch 's/(fb_count_next < CNT_W.(FB_DEPTH - (FETCH16 ? 1 : 0)))/(fb_count_next <= CNT_W'"'"'(FB_DEPTH - (FETCH16 ? 1 : 0)))/'
     mutant fetch_stream_addr   fetch 's/: {fpc_q\[31:3\], 3.b000})/: {req_pc_q[31:3], 3'"'"'b000})/'
     mutant fetch_hint_ignored  fetch 's/fpc_q       <= hint ? i_btb_tgt : {issue_pc\[63:3\], 3.b000} + 64.d8;/fpc_q       <= {issue_pc[63:3], 3'"'"'b000} + 64'"'"'d8;/'
     mutant fetch_hint_lost     fetch 's/fb_hint\[fb_wr_q\]  <= req_hint_q;/fb_hint[fb_wr_q]  <= 1'"'"'b0;/'
@@ -157,10 +168,23 @@ EOF
     mutant fetch_idle_room     fetch 's/wire idle_go   = IDLE_GO \&\& !rst \&\& STREAM \&\& can_issue \&\& !req_valid_q/wire idle_go   = IDLE_GO \&\& !rst \&\& STREAM \&\& !i_hold \&\& !req_valid_q/' "-D IDLEGO"
     mutant fetch_idle_redirect fetch 's/ \&\& can_issue \&\& !req_valid_q \&\& !i_redirect_valid$/ \&\& can_issue \&\& !req_valid_q/' "-D IDLEGO"
     mutant fetch_idle_reset    fetch 's/wire idle_go   = IDLE_GO \&\& !rst \&\& STREAM/wire idle_go   = IDLE_GO \&\& STREAM/' "-D IDLEGO"
-    mutant fetch_pop2_count    fetch 's/ - CNT_W.(fb_pop) - CNT_W.(fb_pop2);/ - CNT_W'"'"'(fb_pop);/' "-D IDLEGO"
+    mutant fetch_pop2_count    fetch 's/ - CNT_W.(fb_pop) - CNT_W.(fb_pop2)$/ - CNT_W'"'"'(fb_pop)/' "-D IDLEGO"
     mutant fetch_pop2_ptr      fetch 's/if (fb_pop) fb_rd_q <= fb_pop2 ? ptr_inc(ptr_inc(fb_rd_q)) : ptr_inc(fb_rd_q);/if (fb_pop) fb_rd_q <= ptr_inc(fb_rd_q);/' "-D IDLEGO"
     mutant fetch_pop2_one      fetch 's/wire fb_pop2 = i_buf_pop2 \&\& fb_pop \&\& (fb_count_q >= CNT_W.(2));/wire fb_pop2 = i_buf_pop2 \&\& fb_pop;/' "-D IDLEGO"
     mutant fetch_buf1_head     fetch 's/assign o_buf1_pc    = fb_pc\[fb_rd1\];/assign o_buf1_pc    = fb_pc[fb_rd_q];/' "-D IDLEGO"
+    # (W3b) 16-byte fetch, at the core's FB_DEPTH 5
+    mutant fetch16_room        fetch 's/(fb_count_next < CNT_W.(FB_DEPTH - (FETCH16 ? 1 : 0)))/(fb_count_next < CNT_W'"'"'(FB_DEPTH))/' "-D FBD=5 -D IDLEGO -D F16"
+    mutant fetch16_two_hint    fetch 's/wire        two      = FETCH16 \&\& !issue_pc\[3\] \&\& !hint;/wire        two      = FETCH16 \&\& !issue_pc[3];/' "-D FBD=5 -D IDLEGO -D F16"
+    mutant fetch16_two_upper   fetch 's/wire        two      = FETCH16 \&\& !issue_pc\[3\] \&\& !hint;/wire        two      = FETCH16 \&\& !hint;/' "-D FBD=5 -D IDLEGO -D F16"
+    mutant fetch16_hint2_lost  fetch 's/if (two) fpc_q <= hint2 ? i_btb2_tgt : /if (two) fpc_q <= /' "-D FBD=5 -D IDLEGO -D F16"
+    mutant fetch16_h2_entry    fetch 's/fb_hint\[fb_wr1\]  <= req_h2_q;/fb_hint[fb_wr1]  <= 1'"'"'b0;/' "-D FBD=5 -D IDLEGO -D F16"
+    mutant fetch16_h2_tgt      fetch 's/fb_htgt\[fb_wr1\]  <= req_h2tgt_q;/fb_htgt[fb_wr1]  <= req_h2tgt_q + 64'"'"'d2;/' "-D FBD=5 -D IDLEGO -D F16"
+    mutant fetch16_upper_pc    fetch 's/fb_pc\[fb_wr1\]    <= {req_pc_q\[63:4\], 4.b1000};/fb_pc[fb_wr1]    <= req_pc_q;/' "-D FBD=5 -D IDLEGO -D F16"
+    mutant fetch16_upper_data  fetch 's/fb_data\[fb_wr1\]  <= flt_resp ? 64.b0 : wb_fetch_dat_hi_i;/fb_data[fb_wr1]  <= wb_fetch_dat_i;/' "-D FBD=5 -D IDLEGO -D F16"
+    mutant fetch16_start_data  fetch 's/if (FETCH16 \&\& req_pc_q\[3\] \&\& !flt_resp) fb_data/if (1'"'"'b0) fb_data/' "-D FBD=5 -D IDLEGO -D F16"
+    mutant fetch16_push2_count fetch 's/^ *+ CNT_W.(fb_push2);/;/' "-D FBD=5 -D IDLEGO -D F16"
+    mutant fetch16_push2_ptr   fetch 's/fb_wr_q          <= ptr_inc(fb_wr1);/fb_wr_q          <= fb_wr1;/' "-D FBD=5 -D IDLEGO -D F16"
+    mutant fetch16_dword_addr  fetch 's/assign wb_fetch_addr_o = FETCH16 ? {addr_dw\[31:4\], 4.b0000} : addr_dw;/assign wb_fetch_addr_o = addr_dw;/' "-D FBD=5 -D IDLEGO -D F16"
     mutant lsu_ignores_head    lsu 's/wire at_head  = (state_q == S_WAIT_HEAD) \&\& i_head_valid \&\& (i_head_tag == tag_q) \&\& !i_flush;/wire at_head  = (state_q == S_WAIT_HEAD) \&\& !i_flush;/'
     mutant lsu_misaligned_bus  lsu 's/wire start_raw = go \&\& !misaligned_q \&\& !pmp_deny/wire start_raw = go \&\& !pmp_deny/'
     mutant lsu_pmp_bus         lsu 's/wire start_raw = go \&\& !misaligned_q \&\& !pmp_deny \&\& !sc_fail/wire start_raw = go \&\& !misaligned_q \&\& !sc_fail/'

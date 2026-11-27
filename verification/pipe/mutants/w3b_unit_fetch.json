@@ -1,0 +1,92 @@
+{
+ "dut": "design/pipe/qv_fetch.sv",
+ "tb": "design/pipe/qv_fetch_stream_tb.sv",
+ "files": [
+  "design/pipe/qv_pkg.sv",
+  "design/pipe/qv_fetch.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench",
+  "-Pqv_fetch_stream_tb.FETCH16=1"
+ ],
+ "cwd": "design",
+ "timeout": 900,
+ "mutants": [
+  {
+   "name": "(W3b) room for one entry, not a block's two",
+   "old": "(fb_count_next < CNT_W'(FB_DEPTH - (FETCH16 ? 1 : 0)))",
+   "new": "(fb_count_next < CNT_W'(FB_DEPTH))"
+  },
+  {
+   "name": "(W3b) the upper dword pushed after a taken branch in the lower one",
+   "old": "wire        two      = FETCH16 && !issue_pc[3] && !hint;",
+   "new": "wire        two      = FETCH16 && !issue_pc[3];"
+  },
+  {
+   "name": "(W3b) a request that starts in the upper dword pushes a second entry",
+   "old": "wire        two      = FETCH16 && !issue_pc[3] && !hint;",
+   "new": "wire        two      = FETCH16 && !hint;"
+  },
+  {
+   "name": "(W3b) the upper dword's hint not followed",
+   "old": "if (two) fpc_q <= hint2 ? i_btb2_tgt : {issue_pc[63:4], 4'b0000} + 64'd16;",
+   "new": "if (two) fpc_q <= {issue_pc[63:4], 4'b0000} + 64'd16;"
+  },
+  {
+   "name": "(W3b) the second lookup asks for the start pc",
+   "old": "assign o_btb2_pc = {issue_pc[63:4], 4'b1000};",
+   "new": "assign o_btb2_pc = issue_pc;"
+  },
+  {
+   "name": "(W3b) the upper entry loses its hint",
+   "old": "fb_hint[fb_wr1]  <= req_h2_q;",
+   "new": "fb_hint[fb_wr1]  <= 1'b0;"
+  },
+  {
+   "name": "(W3b) the upper entry gets the lower dword's data",
+   "old": "fb_data[fb_wr1]  <= flt_resp ? 64'b0 : wb_fetch_dat_hi_i;",
+   "new": "fb_data[fb_wr1]  <= flt_resp ? 64'b0 : wb_fetch_dat_i;"
+  },
+  {
+   "name": "(W3b) a start in the upper dword gets the lower dword's data",
+   "old": "if (FETCH16 && req_pc_q[3] && !flt_resp) fb_data[fb_wr_q] <= wb_fetch_dat_hi_i;",
+   "new": ""
+  },
+  {
+   "name": "(W3b) the upper entry of an error or fault answer is no fault",
+   "old": "fb_err[fb_wr1]   <= flt_resp || wb_fetch_err_i;",
+   "new": "fb_err[fb_wr1]   <= 1'b0;"
+  },
+  {
+   "name": "(W3b) the upper entry of a page fault is cause 1",
+   "old": "fb_cause[fb_wr1] <= (flt_resp && req_pf_q) ? 4'd12 : 4'd1;",
+   "new": "fb_cause[fb_wr1] <= 4'd1;"
+  },
+  {
+   "name": "(W3b) the upper entry is not marked translated",
+   "old": "fb_xl[fb_wr1]    <= req_isxl_q;",
+   "new": "fb_xl[fb_wr1]    <= 1'b0;"
+  },
+  {
+   "name": "(W3b) the upper entry loses its physical page",
+   "old": "fb_pg[fb_wr1]    <= req_isxl_q ? req_pa_q : 44'b0;",
+   "new": "fb_pg[fb_wr1]    <= 44'b0;"
+  },
+  {
+   "name": "(W3b) the upper entry overwritten by the next answer",
+   "old": "fb_wr_q          <= ptr_inc(fb_wr1);",
+   "new": "fb_wr_q          <= fb_wr1;"
+  },
+  {
+   "name": "(W3b) the bus asks for the dword, not the block",
+   "old": "assign wb_fetch_addr_o = FETCH16 ? {addr_dw[31:4], 4'b0000} : addr_dw;",
+   "new": "assign wb_fetch_addr_o = addr_dw;"
+  }
+ ]
+}
