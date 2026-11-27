@@ -19,17 +19,17 @@
  "mutants": [
   {
    "name": "drain out of order",
-   "old": "assign o_addr      = {addr_q[rd_q], 3'b000};",
+   "old": "assign o_addr      = {addr_q[cur], 3'b000};",
    "new": "assign o_addr      = {addr_q[wr_q], 3'b000};"
   },
   {
    "name": "byte select lost",
-   "old": "assign o_sel       = sel_q[rd_q];",
+   "old": "assign o_sel       = sel_q[cur];",
    "new": "assign o_sel       = 8'hFF;"
   },
   {
    "name": "data of the wrong entry",
-   "old": "assign o_dat       = dat_q[rd_q];",
+   "old": "assign o_dat       = dat_q[cur];",
    "new": "assign o_dat       = dat_q[wr_q];"
   },
   {
@@ -76,7 +76,7 @@
   },
   {
    "name": "cyc held into the response cycle",
-   "old": "assign o_cyc       = beat_q && !(i_ack || i_err);",
+   "old": "assign o_cyc       = beat_q && (!(i_ack || i_err) || nxt);",
    "new": "assign o_cyc       = beat_q;"
   },
   {
