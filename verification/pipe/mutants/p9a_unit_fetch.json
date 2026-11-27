@@ -56,8 +56,8 @@
   },
   {
    "name": "room for one response too few",
-   "old": "(fb_count_next < CNT_W'(FB_DEPTH))",
-   "new": "(fb_count_next <= CNT_W'(FB_DEPTH))"
+   "old": "(fb_count_next < CNT_W'(FB_DEPTH - (FETCH16 ? 1 : 0)))",
+   "new": "(fb_count_next <= CNT_W'(FB_DEPTH - (FETCH16 ? 1 : 0)))"
   },
   {
    "name": "a stale answer is not dropped when streaming",
@@ -66,8 +66,8 @@
   },
   {
    "name": "a held fetch streams",
-   "old": "&& (fb_count_next < CNT_W'(FB_DEPTH)) && !i_hold",
-   "new": "&& (fb_count_next < CNT_W'(FB_DEPTH)) && (!i_hold || bus_resp)"
+   "old": "&& (fb_count_next < CNT_W'(FB_DEPTH - (FETCH16 ? 1 : 0))) && !i_hold",
+   "new": "&& (fb_count_next < CNT_W'(FB_DEPTH - (FETCH16 ? 1 : 0))) && (!i_hold || bus_resp)"
   }
  ]
 }
