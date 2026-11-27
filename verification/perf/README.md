@@ -1089,6 +1089,91 @@ With the knob off, all eight CSVs are byte-identical to the committed ones. Knob
   - back-to-back stores at every delay, counted by `lockstep_mem` (883,768 / 1,432,238 and 487,041 / 543,734);
   - with the knob off, 60 each in `soc` at delay 0 and `cache` at delay 8 pass, with none.
 
+### W3b: 16-byte fetch (measured)
+
+With `QV_PIPE_FETCH16=1` the SoC builds the core with `FETCH16`. Fetch asks for the 16-byte block of its pc, and the
+I$ answers both of its dwords from one line (`icache.sv`'s `PAIR`, the upper one on `dat_hi_o`). The knob is off until
+the flip (W3h). `FETCH16` is a core parameter that the harness sets, not a define: a harness whose memory does not
+answer the upper dword keeps 8-byte fetch. Today that is every testbench but `soc.sv` and lockstep's cache
+configurations.
+
+- **The fetch buffer still holds dwords.** An answer pushes the block's dwords from the start pc's on, so the
+  aligners see what they see today, up to two entries a cycle. A request needs room for two entries. A fault or error
+  answer is two fault entries alike, so the buffer always holds what fetch followed.
+- **The BTB is not the one W3.0 priced.** It stays dword-indexed, with a second read port for the block's upper dword
+  (`qv_btb`'s `i_lk2_pc`), so a block's two branches are two neighbouring entries.
+  - A taken branch in the lower dword ends the block there; otherwise the upper dword's hint, or the next block,
+    follows.
+  - `ilp.py --fit w0 --set w3` prices it (`W3b built`, `W3g built`, against the reference, M / S and their mean). At
+    W3b it gives -4.4 / -0.7 (-2.5), against W3.0's -4.6 / -1.0 (-2.8) for the two-way block BTB holding two branches.
+    For the whole track (W3g) it gives -17.0 / -13.5 (-15.3), against -17.3 / -13.8 (-15.6). That is 0.3 points, for
+    no new structure.
+  - Its own step over W3a is -3.9 / -0.2, against W3.0's -4.1 / -0.5.
+- **The buffer grows from 4 to 5 entries under `FETCH16`.**
+  - At 4, the room a request needs for two entries means sieve M's inner loop is never whole in the buffer. The loop
+    is three dwords, and its first instruction crosses into the second. Fetch stalls a cycle each turn, and the
+    aligner's stash of that crossing instruction is never hidden, so the loop stays at three cycles (sieve M -0.04 %).
+  - At 5 it runs at two (-30.7 %); 6 entries gain 0.2 % more.
+  - A 6-entry buffer without `FETCH16` gains nothing: it takes the two together. W3.0's 32-byte buffer is two blocks;
+    in dword entries the same reach takes 5.
+
+With the knob off, all eight CSVs are byte-identical to the committed ones, and so are the `_w3.csv` pair's columns.
+That pair gains two: `fb_resp` (fetch's answers into the buffer in the window) and `fb_pairs` (those that filled two
+entries). Knob on, against the committed CSVs (SoC unless named; W3.0's W3b step is the prediction):
+
+| kernel | M SoC | S SoC | W3.0, M / S | M flat SRAM | S flat SRAM | M `fb_pairs` / `fb_resp` |
+|---|---|---|---|---|---|---|
+| memcpy | 484 -> 481 (-0.6 %) | 486 -> 483 (-0.6 %) | -2.1 / -2.1 | +0.0 % | +0.0 % | 143 / 287 (410) |
+| crc32 | 5334 -> 5325 (-0.2 %) | 5348 -> 5335 (-0.2 %) | +0.0 / -0.1 | +0.0 % | +0.0 % | 1170 / 2459 (3623) |
+| qsort | 4895 -> 4794 (-2.1 %) | 5083 -> 4928 (-3.0 %) | -2.7 / -2.1 | +0.0 % | +0.0 % | 1406 / 2467 (3472) |
+| matmul | +0.0 % | +0.0 % | -0.3 / -0.3 | +0.0 % | +0.0 % | 619 / 1855 (2398) |
+| sieve | 4547 -> 3149 (-30.7 %) | 3173 -> 3171 (-0.1 %) | -30.6 / -0.6 | +0.0 % | +0.0 % | 1535 / 2989 (4454) |
+| listchase | +0.0 % | +0.0 % | +0.0 / +0.0 | +0.0 % | +0.0 % | 520 / 521 (1034) |
+| mixedint | 2746 -> 2748 (+0.1 %) | 2747 -> 2751 (+0.1 %) | +0.0 / +0.0 | +0.0 % | +0.0 % | 910 / 1753 (2594) |
+| trap | +0.0 % | +0.0 % | +0.0 / +0.0 | +0.0 % | +0.0 % | 2210 / 3012 (5013) |
+| fmatmul | +0.0 % | 2462 -> 2468 (+0.2 %) | -0.3 / -0.2 | +0.0 % | +0.0 % | 628 / 1346 (1953) |
+| fpmix | +0.0 % | +0.0 % | +0.0 / +0.0 | +0.0 % | +0.0 % | 113 / 122 (229) |
+| geomean | -3.88 % | -0.36 % | -4.1 / -0.5 | +0.00 % | +0.00 % | |
+
+(`fb_resp` in brackets: with the knob off.)
+
+- **D8 holds.** W3.0 said -4.1 / -0.5, and the build gives -3.88 / -0.36. The model of what was built says -3.9 / -0.2.
+- **sieve M is the prediction** (-30.7 against -30.6), and qsort is near it (-2.1 / -3.0 against -2.7 / -2.1). sieve S
+  gains nothing, as predicted: its loop does not cross a dword in the S build, and only 53 of its answers fill two
+  entries.
+- **memcpy gets a third of its prediction** (-0.6 against -2.1). Its front end was rarely what it waited for
+  (`iq_empty` 40 -> 37).
+- **Fetch answers fall by a quarter to a half on every kernel.** In S, translations fall by about a third, one a block
+  instead of one a dword (`xl_req`).
+- **Three losses of a few cycles, each under 0.3 %** (the tolerance, perf README above): mixedint +2 (M) and +4 (S),
+  fmatmul S +6. These are scheduling, not fetch. fmatmul's window is full more often with fetch further ahead
+  (`is_rob` 18 -> 23), and mixedint S has 8 more empty-front-end cycles after redirects. The knob is off until W3h
+  either way.
+- **The flat SRAM does not change**: its harness keeps 8-byte fetch.
+
+**The gate:**
+- Regress: 244 / 244, knob off and on.
+- Lint clean, off and on (and with `QV_PIPE_SB_PIPE=1` too).
+- `fetch_props` with FETCH16 (`-D F16`):
+  - prove at the core's 5 entries and at the formal small 3, a 12-deep bmc, and cover (a block answer with two
+    entries, the upper one hinted, a start in the upper dword, an error answer);
+  - every earlier fetch task still passes on the changed fetch.
+- Unit tests:
+  - `qv_fetch_tb` and `qv_fetch_stream_tb` at FETCH16 (the stream with and without page reuse);
+  - `icache_random_tb` at `PAIR`;
+  - `qv_btb_tb`, whose every lookup now also checks the second port.
+- Mutants:
+  - `run.sh`'s 12 FETCH16 mutants are all caught, and the two it re-anchored as well;
+  - `w3b_unit_fetch` kills 14 / 14 (the upper entry's fault fields too, which no core-level check sees, since the
+    lower entry always traps first), `w3b_unit_btb` 7 / 7 and `w3b_unit_icache` 4 / 4;
+  - the re-anchored `p9a_unit_fetch` (10 / 10) and `p10a_unit_fetch_stream` (4 / 4), and the other fetch and BTB specs,
+    are unchanged.
+- Lockstep, knob on, with the new `qvgen --win16` (checked REF against REF first, 20 / 20):
+  - 200 programs each in `soc` at delay 0, and at delay 8 with `QV_PIPE_SB_PIPE=1` as well;
+  - 100 each in `cache` at delays 0 and 8; all pass;
+  - two-entry answers in every run, counted by `lockstep_side` (`LOCKSTEP_FB2`: 6.9 M, 7.6 M, 3.3 M and 3.5 M);
+  - with the knob off, 60 each in `soc` at delay 0 and `cache` at delay 8 pass.
+
 ## CPI stack
 
 `perf_stack.sv` (instantiated by `perf_tb.sv`, not part of the reference build) splits every cycle of a
