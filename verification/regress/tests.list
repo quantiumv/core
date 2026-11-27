@@ -191,6 +191,8 @@ pipe_lsu_sb_tb|design/pipe/qv_lsu_sb_tb.sv||design|pipe|pass|
 pipe_lsu_sb_rob4_tb|design/pipe/qv_lsu_sb_tb.sv||design|pipe|pass||-Pqv_lsu_sb_tb.ROB=4
 pipe_sb_tb|design/pipe/qv_sb_tb.sv||design|pipe|pass|
 pipe_sb_tb_yr1|design/pipe/qv_sb_tb.sv||design|pipe|pass||-Pqv_sb_tb.YIELD_READY=1
+pipe_sb_tb_pipe|design/pipe/qv_sb_tb.sv||design|pipe|pass||-Pqv_sb_tb.PIPE=1
+pipe_sb_tb_yr1_pipe|design/pipe/qv_sb_tb.sv||design|pipe|pass||-Pqv_sb_tb.YIELD_READY=1 -Pqv_sb_tb.PIPE=1
 pipe_dc_tb|design/pipe/qv_dc_tb.sv||design|pipe|pass|
 pipe_dc_small_tb|design/pipe/qv_dc_tb.sv||design|pipe|pass||-Pqv_dc_tb.LINES=2 -Pqv_dc_tb.WORDS=2 -Pqv_dc_tb.WAIT_MAX=0
 pipe_commit_sb_tb|design/pipe/qv_commit_sb_tb.sv||design|pipe|pass|

@@ -14,8 +14,13 @@
  * is exactly "an unwritten entry for that dword"; a response that is not the buffer's own (nobody's beat is
  * in flight) is ignored; an error response drops the entry and the drain goes on. Memory ends up equal to the
  * golden image.
+ *
+ * (W3a) PIPE: the next beat goes out in the previous one's response cycle (cyc stays high, the bus carries the next
+ * entry), so the gap between back-to-back beats is none and cyc is high in a response cycle exactly when a beat
+ * is decided in it; o_resp_* name the entry the response answers.
  */
-module qv_sb_tb #(parameter bit YIELD_READY = 1'b0);   // 1: P9d's drain rule (QV_PIPE_SB_YIELD_READY)
+module qv_sb_tb #(parameter bit YIELD_READY = 1'b0,    // 1: P9d's drain rule (QV_PIPE_SB_YIELD_READY)
+                  parameter bit PIPE = 1'b0);          // 1: a beat a cycle (QV_PIPE_SB_PIPE)
     int   pass_count = 0;
     int   fail_count = 0;
     logic quiet_on_pass = 1'b1;
@@ -42,15 +47,19 @@ module qv_sb_tb #(parameter bit YIELD_READY = 1'b0);   // 1: P9d's drain rule (Q
     logic [7:0]  sel;
     logic        ack = 1'b0, err = 1'b0;
     logic        foreign_ack = 1'b0;
+    logic [31:3] resp_addr;
+    logic [7:0]  resp_sel;
+    logic [63:0] resp_dat;
 
-    qv_sb #(.DEPTH(DEPTH), .YIELD_MAX(YIELD_MAX), .YIELD_READY(YIELD_READY)) dut (
+    qv_sb #(.DEPTH(DEPTH), .YIELD_MAX(YIELD_MAX), .YIELD_READY(YIELD_READY), .PIPE(PIPE)) dut (
         .clk(clk), .rst(rst),
         .i_push(push), .i_push_addr(push_addr), .i_push_sel(push_sel), .i_push_data(push_data),
         .o_ready(ready), .o_empty(empty),
         .i_match_addr(match_addr), .o_match(match),
         .i_lsu_busy(lsu_busy), .i_lsu_inflight(lsu_inflight), .i_ptw_beat(ptw_beat), .i_load_near(load_near),
         .o_start_now(start_now), .o_start_idle(start_idle), .o_beat(beat), .o_cyc(cyc), .o_addr(addr), .o_dat(dat), .o_sel(sel),
-        .i_ack(ack | foreign_ack), .i_err(err)
+        .i_ack(ack | foreign_ack), .i_err(err),
+        .o_resp_addr(resp_addr), .o_resp_sel(resp_sel), .o_resp_dat(resp_dat)
     );
 
     // ---------------- slave model ----------------
@@ -100,9 +109,9 @@ module qv_sb_tb #(parameter bit YIELD_READY = 1'b0);   // 1: P9d's drain rule (Q
             end
         end
     end
-    // cyc must be low in every response cycle
+    // cyc must be low in every response cycle -- with PIPE, unless that cycle decides the next beat (it is on the bus)
     always @(negedge clk)
-        if (!rst && (ack || err) && cyc) begin
+        if (!rst && (ack || err) && cyc && !(PIPE && beat && start_now)) begin
             if (proto_ok) $display("PROTO: cyc still high in the response cycle");
             proto_ok = 1'b0;
         end
@@ -132,7 +141,8 @@ module qv_sb_tb #(parameter bit YIELD_READY = 1'b0);   // 1: P9d's drain rule (Q
         end
     end
 
-    // beat monitor: the first cycle of a beat is checked against the head of the list; a response pops it
+    // beat monitor: the first cycle of a beat is checked against the head of the list (with PIPE a beat may start in
+    // the previous one's response cycle: it is then the entry behind the one answered); a response pops it
     logic in_beat = 1'b0;
     int   cyc_rises = 0;
     int   last_rise = -100, cycle_n = 0;
@@ -142,28 +152,37 @@ module qv_sb_tb #(parameter bit YIELD_READY = 1'b0);   // 1: P9d's drain rule (Q
     always @(posedge clk) begin
         cycle_n <= cycle_n + 1;
         if (!rst) begin
-            if (cyc) begin
-                if (!in_beat) begin
-                    in_beat = 1'b1;
-                    cyc_rises = cyc_rises + 1;
-                    check("beat: something to write", {63'b0, e_head != e_tail}, 64'd1);
-                    if (e_head != e_tail) begin
-                        check("beat: address", {32'b0, addr}, {32'b0, e_addr[e_head % 4096], 3'b000});
-                        check("beat: select", {56'b0, sel}, {56'b0, e_sel[e_head % 4096]});
-                        check("beat: data", dat, e_dat[e_head % 4096]);
-                    end
-                    if (gap_check && resp_cycle >= 0) begin
-                        // the response cycle is the one cycle in between: the next beat's first cyc is the cycle after
-                        if (cycle_n - resp_cycle < gap_min) gap_min = cycle_n - resp_cycle;
-                    end
+            logic r, starts;
+            int   idx;
+            r = beat && (ack || err);
+            starts = cyc && (!in_beat || r);
+            idx = r ? e_head + 1 : e_head;
+            if (starts) begin
+                cyc_rises = cyc_rises + 1;
+                check("beat: something to write", {63'b0, idx < e_tail}, 64'd1);
+                if (idx < e_tail) begin
+                    check("beat: address", {32'b0, addr}, {32'b0, e_addr[idx % 4096], 3'b000});
+                    check("beat: select", {56'b0, sel}, {56'b0, e_sel[idx % 4096]});
+                    check("beat: data", dat, e_dat[idx % 4096]);
+                end
+                if (gap_check && resp_cycle >= 0) begin
+                    // cycles from the last response to this beat's first cyc: 1 (the cycle after), with PIPE none
+                    if ((r ? 0 : cycle_n - resp_cycle) < gap_min) gap_min = r ? 0 : cycle_n - resp_cycle;
                 end
             end
-            if (beat && (ack || err)) begin
+            if (r) begin
+                // the response answers the oldest entry: what the D$ takes
+                if (e_head != e_tail) begin
+                    check("response: o_resp_addr", {35'b0, resp_addr}, {35'b0, e_addr[e_head % 4096]});
+                    check("response: o_resp_sel", {56'b0, resp_sel}, {56'b0, e_sel[e_head % 4096]});
+                    check("response: o_resp_dat", resp_dat, e_dat[e_head % 4096]);
+                end
                 in_beat = 1'b0;
                 resp_cycle = cycle_n;
                 answered = answered + 1;
                 if (e_head != e_tail) e_head = e_head + 1;
             end
+            if (starts) in_beat = 1'b1;
         end
     end
 
@@ -256,8 +275,10 @@ module qv_sb_tb #(parameter bit YIELD_READY = 1'b0);   // 1: P9d's drain rule (Q
         gap_check = 1'b1; gap_min = 1000;
         for (int i = 0; i < 4; i++) do_push(29'h20 + i, 8'hFF, 64'h1000 + i);
         wait_empty(60);
-        // the cycle after the response is the next beat's first cycle: cycle_n - resp_cycle == 1
-        check("back-to-back beats: the next one starts the cycle after the response", 64'(gap_min), 64'd1);
+        // the cycle after the response is the next beat's first cycle: cycle_n - resp_cycle == 1; with PIPE the
+        // response cycle itself (a beat a cycle)
+        check(PIPE ? "back-to-back beats: the next one starts in the response cycle (PIPE)"
+                   : "back-to-back beats: the next one starts the cycle after the response", 64'(gap_min), PIPE ? 64'd0 : 64'd1);
         gap_check = 1'b0;
 
         // ---- full: o_ready low, a push while full is ignored ----

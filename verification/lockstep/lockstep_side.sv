@@ -32,12 +32,16 @@
 `ifndef QV_FPU_EN
 `define QV_FPU_EN 1
 `endif
+`ifndef QV_PIPE_SB_PIPE
+`define QV_PIPE_SB_PIPE 0                 // the core's default (design/pipe/core.sv)
+`endif
 
 module lockstep_side #(
     parameter int QV_MUTANT        = 0,    // structural: selects a generate-gated RTL mutant (ref_core)
     parameter bit CORE_PIPE        = 1'b0, // structural: the pipelined core instead of ref_core
     parameter bit MEMCFG_CACHE     = 1'b0, // structural: selects the memory topology
-    parameter int DELAY_MAX        = 0     // structural: 0 disables both delay-shim FSMs
+    parameter int DELAY_MAX        = 0,    // structural: 0 disables both delay-shim FSMs
+    parameter bit BUS_DC           = 1'b1  // (W3a) MEMCFG_CACHE: 0 leaves the bus D$ out, as soc.sv (memcfg soc)
 ) (
     input  logic clk,
     input  logic rst,
@@ -452,9 +456,16 @@ module lockstep_side #(
     logic        magic_set_we, magic_clr_we;
     logic [31:0] magic_set_wdata, magic_clr_wdata;
 
+    // (W3a) the pipelined core's store buffer may drain a beat a cycle: the memory forwards and latches a request
+    // presented in a response cycle, and counts those stores (printed at the end: a gate of the feature needs some)
+    localparam bit SB_PIPE = CORE_PIPE && (`QV_PIPE_SB_PIPE != 0);
+    logic [31:0] b2b_n;
+    final if (SB_PIPE) $display("LOCKSTEP_B2B %0d", b2b_n);
     lockstep_mem #(
         .MEMCFG_CACHE(MEMCFG_CACHE),
-        .DELAY_MAX(DELAY_MAX)
+        .DELAY_MAX(DELAY_MAX),
+        .BUS_DC(BUS_DC),
+        .SB_PIPE(SB_PIPE)
     ) mem0 (
         .clk(clk), .rst(rst),
         .delay_seed_fetch_i(delay_seed_fetch_i), .delay_seed_mem_i(delay_seed_mem_i),
@@ -468,7 +479,8 @@ module lockstep_side #(
         .o_magic_set_we(magic_set_we), .o_magic_set_wdata(magic_set_wdata),
         .o_magic_clr_we(magic_clr_we), .o_magic_clr_wdata(magic_clr_wdata),
         .o_wr_valid(o_wr_valid), .o_wr_addr(o_wr_addr), .o_wr_sel(o_wr_sel), .o_wr_data(o_wr_data),
-        .o_rd_valid(o_mmio_rd_valid), .o_rd_addr(o_mmio_rd_addr), .o_rd_data(o_mmio_rd_data)
+        .o_rd_valid(o_mmio_rd_valid), .o_rd_addr(o_mmio_rd_addr), .o_rd_data(o_mmio_rd_data),
+        .o_b2b(b2b_n)
     );
 
     // The levels drop on this side's own RETIRED store to MAGIC_CLR, seen through RVFI, never on the

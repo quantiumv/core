@@ -59,7 +59,8 @@ module lockstep_tb #(
     parameter int QV_MUTANT_B     = 0,
     parameter bit MEMCFG_B_CACHE  = 1'b0,
     parameter int DELAY_MAX       = 0,
-    parameter bit B_PIPE          = 1'b0
+    parameter bit B_PIPE          = 1'b0,
+    parameter bit MEMCFG_B_BUSDC  = 1'b1     // (W3a) with MEMCFG_B_CACHE: 0 is soc.sv's (no bus D$; memcfg soc)
 );
     // ---------------- plusargs ----------------
     string       hex_path;
@@ -250,7 +251,7 @@ module lockstep_tb #(
 
     lockstep_side #(
         .QV_MUTANT(QV_MUTANT_B), .CORE_PIPE(B_PIPE), .MEMCFG_CACHE(MEMCFG_B_CACHE),
-        .DELAY_MAX(DELAY_MAX)
+        .DELAY_MAX(DELAY_MAX), .BUS_DC(MEMCFG_B_BUSDC)
     ) side_b (
         .clk(clk_b), .rst(rst),
         .delay_seed_fetch_i(dly_seed_b[31:0]), .delay_seed_mem_i(dly_seed_b[31:0] + 32'h1000),

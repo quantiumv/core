@@ -11,6 +11,15 @@
  * goes straight to the dcache side of cache_complex, and the single
  * delay shim sits on cache_complex's own downstream mem_* port instead
  * (modeling backing-RAM latency; a cache hit stays fast on both sides).
+ * BUS_DC=0 (W3a, with MEMCFG_CACHE) leaves cache_complex's D$ out, as
+ * design/soc.sv does while the pipelined core has its own D$.
+ *
+ * SB_PIPE (W3a): the core's store buffer drains a beat a cycle
+ * (QV_PIPE_SB_PIPE), presenting its next beat in the previous one's
+ * response cycle: the flat configuration's arbiter forwards the mem
+ * master's request then (PIPE_M1) and the mem-side delay shims latch it
+ * then (ACCEPT_IN_ACK). o_b2b counts such requests (a store presented in a
+ * response cycle), which a lockstep gate of the feature must see.
  */
 `include "lockstep_defs.svh"
 
@@ -19,7 +28,9 @@ module lockstep_mem #(
     parameter int NUM_WORDS         = `QV_LOCKSTEP_RAM_WORDS,
     parameter int NUM_LINES         = 64,
     parameter int LINE_WORDS        = 4,
-    parameter int DELAY_MAX         = 0     // structural: 0 disables both delay-shim FSMs
+    parameter int DELAY_MAX         = 0,    // structural: 0 disables both delay-shim FSMs
+    parameter bit BUS_DC            = 1'b1, // (W3a) MEMCFG_CACHE: cache_complex keeps its D$ (0: as soc.sv with the core's)
+    parameter bit SB_PIPE           = 1'b0  // (W3a) the mem master may present a new request in a response cycle
 ) (
     input  logic clk,
     input  logic rst,
@@ -61,7 +72,9 @@ module lockstep_mem #(
 
     output logic        o_rd_valid,
     output logic [31:0] o_rd_addr,
-    output logic [63:0] o_rd_data
+    output logic [63:0] o_rd_data,
+
+    output logic [31:0] o_b2b           // (W3a) stores presented in the previous request's response cycle
 );
     // Downstream single-master port (post arbitration / post cache).
     logic [31:0] dn_addr;
@@ -175,19 +188,27 @@ module lockstep_mem #(
      * cyc&&we&&ack, as this used to be, logs nothing: every master here
      * drops cyc in its ack cycle, and so do the delay shim and the D$
      * downstream of it, so the log stayed empty. Every core here holds a
-     * request until its ack and never starts the next one in that cycle,
-     * so "outstanding" is just "cyc was high last cycle".
+     * request until its ack, so "outstanding" is just "cyc was high last
+     * cycle"; a request is new in its first cycle, or (W3a) when the
+     * master presents it in the previous one's response cycle (the store
+     * buffer draining a beat a cycle; no other master here holds cyc
+     * through an ack).
      */
     logic        wr_out_q, wr_we_q;
     logic [31:0] wr_addr_q;
     logic [7:0]  wr_sel_q;
     logic [63:0] wr_data_q;
+    logic [31:0] b2b_q;
+    wire         req_new = mem_cyc_i && mem_stb_i && (!wr_out_q || mem_ack_o || mem_err_o);
+    assign o_b2b = b2b_q;
     always_ff @(posedge clk) begin
         if (rst) begin
             wr_out_q <= 1'b0;
+            b2b_q    <= '0;
         end else begin
             wr_out_q <= mem_cyc_i && mem_stb_i;
-            if (mem_cyc_i && mem_stb_i && !wr_out_q) begin
+            if (wr_out_q && (mem_ack_o || mem_err_o) && mem_cyc_i && mem_stb_i && mem_we_i) b2b_q <= b2b_q + 1;
+            if (req_new) begin
                 wr_we_q   <= mem_we_i;
                 wr_addr_q <= mem_addr_i;
                 wr_sel_q  <= mem_sel_i;
@@ -223,7 +244,7 @@ module lockstep_mem #(
                 .dn_ack_i(df_ack), .dn_err_i(df_err), .dn_lock_o()
             );
 
-            lockstep_wb_delay #(.DELAY_MAX(DELAY_MAX)) delay_mem (
+            lockstep_wb_delay #(.DELAY_MAX(DELAY_MAX), .ACCEPT_IN_ACK(SB_PIPE)) delay_mem (
                 .clk(clk), .rst(rst), .seed_i(delay_seed_mem_i),
                 .up_addr_i(mem_addr_i), .up_dat_i(mem_dat_i), .up_dat_o(mem_dat_o),
                 .up_sel_i(mem_sel_i), .up_we_i(mem_we_i),
@@ -236,7 +257,7 @@ module lockstep_mem #(
 
             // fetch=m0 (lower priority), mem=m1 (higher priority, wins
             // ties) -- same convention as core_wb4_sram_harness.sv.
-            wb_arbiter2 #(.DROP_REQ_ON_RESP(1'b1)) arb0 (
+            wb_arbiter2 #(.DROP_REQ_ON_RESP(1'b1), .PIPE_M1(SB_PIPE)) arb0 (
                 .clk(clk), .rst(rst),
                 .m0_addr_i(df_addr), .m0_dat_i(64'b0), .m0_dat_o(df_dn_dat_i),
                 .m0_sel_i(8'hFF), .m0_we_i(1'b0),
@@ -267,7 +288,7 @@ module lockstep_mem #(
             // read+write phases can't be split by an interleaved fetch
             // refill. Revisit if cache-config AMO lockstep ever surfaces
             // a real interleaving.
-            cache_complex #(.num_lines(NUM_LINES), .line_words(LINE_WORDS)) cache0 (
+            cache_complex #(.num_lines(NUM_LINES), .line_words(LINE_WORDS), .DC_EN(BUS_DC)) cache0 (
                 .clk(clk), .rst(rst),
                 .fetch_addr_i(fetch_addr_i), .fetch_cyc_i(fetch_cyc_i), .fetch_stb_i(fetch_stb_i),
                 .fetch_dat_o(fetch_dat_o), .fetch_ack_o(fetch_ack_o), .fetch_err_o(fetch_err_o),
@@ -280,7 +301,7 @@ module lockstep_mem #(
                 .mem_ack_i(cm_ack), .mem_err_i(cm_err)
             );
 
-            lockstep_wb_delay #(.DELAY_MAX(DELAY_MAX)) delay_post_cache (
+            lockstep_wb_delay #(.DELAY_MAX(DELAY_MAX), .ACCEPT_IN_ACK(SB_PIPE)) delay_post_cache (
                 .clk(clk), .rst(rst), .seed_i(delay_seed_mem_i),
                 .up_addr_i(cm_addr), .up_dat_i(cm_dat_m2s), .up_dat_o(cm_dat_s2m),
                 .up_sel_i(cm_sel), .up_we_i(cm_we),

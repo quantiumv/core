@@ -17,10 +17,16 @@
  * exact stop the faster side could run on past its tohost write (on
  * ACT tests through an EBREAK to mtvec=0 and round the whole program
  * again) while it waited for the other side.
+ *
+ * ACCEPT_IN_ACK (W3a, default 0): a request the master presents in its previous one's response cycle is latched in
+ * that cycle, as from idle, so a master that issues back to back (the pipelined core's store buffer draining a beat a
+ * cycle, QV_PIPE_SB_PIPE) can get one on a zero-wait draw. Only for a master whose request held through its ack is
+ * always a new one; without it such a request is latched a cycle later, from idle.
  */
 
 module lockstep_wb_delay #(
-    parameter int DELAY_MAX = 0    // structural: 0 permanently disables the FSM below
+    parameter int DELAY_MAX = 0,   // structural: 0 permanently disables the FSM below
+    parameter bit ACCEPT_IN_ACK = 1'b0
 ) (
     input  logic        clk,
     input  logic        rst,
@@ -132,7 +138,21 @@ module lockstep_wb_delay #(
                             end
                         end
                         S_REQ: begin
-                            if (dn_ack_i || dn_err_i) begin
+                            if ((dn_ack_i || dn_err_i) && ACCEPT_IN_ACK && up_cyc_i && up_stb_i) begin
+                                // (W3a) the master's next request, presented in this response cycle
+                                addr_q <= up_addr_i;
+                                dat_q  <= up_dat_i;
+                                sel_q  <= up_sel_i;
+                                we_q   <= up_we_i;
+                                lock_q <= up_lock_i;
+                                lfsr_q <= lfsr_next;
+                                if (lfsr_next[CW-1:0] == '0) begin
+                                    state_q <= S_REQ;
+                                end else begin
+                                    wait_cnt_q <= lfsr_next[CW-1:0];
+                                    state_q    <= S_WAIT;
+                                end
+                            end else if (dn_ack_i || dn_err_i) begin
                                 state_q <= S_IDLE;
                             end
                         end

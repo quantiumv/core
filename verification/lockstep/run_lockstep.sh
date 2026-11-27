@@ -114,8 +114,9 @@ Usage: run_lockstep.sh --mode selfproof|mutant|corrupt [options]
   --defines "A=1 B=0"  preprocessor defines for the build, both sides (the QV_PIPE_* feature knobs, QV_FPU_EN);
                         part of the cache key
   --mutant N           QV_MUTANT_B value, 1-18 (--mode mutant only)
-  --memcfg-b sram|cache  side B's memory config (default sram -- also applies
-                        under --mode mutant, e.g. --mutant 9 needs cache)
+  --memcfg-b sram|cache|soc  side B's memory config (default sram -- also applies
+                        under --mode mutant, e.g. --mutant 9 needs cache); soc (W3a) is cache
+                        as design/soc.sv builds it for the pipelined core: no D$ on the bus
   --delay-max N        max bus-delay wait states (default 0 = disabled)
   --irq-mode N          0=disabled (default), 1=MTIP only, 2=MTIP+MEIP+SEIP
                         (see lockstep_irq.sv) -- only matters against a
@@ -223,7 +224,9 @@ if [ "$DUT" == "pipe" ]; then
 fi
 
 MEMCFG_B_CACHE=0
+MEMCFG_B_BUSDC=1
 [ "$MEMCFG_B" == "cache" ] && MEMCFG_B_CACHE=1
+[ "$MEMCFG_B" == "soc" ] && { MEMCFG_B_CACHE=1; MEMCFG_B_BUSDC=0; }
 DEFINE_FLAGS=""
 for d in $DEFINES; do DEFINE_FLAGS="$DEFINE_FLAGS -D$d"; done
 # (O5a) with the D$ inside the pipelined core (the default since O5/6 closed), the end of a test also audits it against
@@ -257,6 +260,7 @@ case "$SIM" in
                 -Plockstep_tb.MEMCFG_B_CACHE=$MEMCFG_B_CACHE \
                 -Plockstep_tb.DELAY_MAX=$RUN_DELAY_MAX \
                 -Plockstep_tb.B_PIPE=$B_PIPE \
+                -Plockstep_tb.MEMCFG_B_BUSDC=$MEMCFG_B_BUSDC \
                 -o "$VVP_BIN" \
                 $PIPE_FILES $REF_FILES $SUPPORT_FILES $LOCKSTEP_FILES > "$BUILD_LOG" 2>&1
             if [ $? -ne 0 ] || ! [ -e "$VVP_BIN" ]; then
@@ -279,6 +283,7 @@ case "$SIM" in
                 -Wno-CASEINCOMPLETE -Wno-UNOPTFLAT -Wno-BLKANDNBLK -Wno-INITIALDLY -Wno-MULTIDRIVEN -Wno-REDEFMACRO \
                 -DRISCV_FORMAL $DEFINE_FLAGS $([ "$B_PIPE" == "1" ] && echo -DLS_HAVE_PIPE) -Idesign -Idesign/defaults -Iverification/reference -Iverification/lockstep \
                 -GQV_MUTANT_B=$QV_MUTANT_B -GMEMCFG_B_CACHE=$MEMCFG_B_CACHE -GDELAY_MAX=$RUN_DELAY_MAX -GB_PIPE=$B_PIPE \
+                -GMEMCFG_B_BUSDC=$MEMCFG_B_BUSDC \
                 --top-module lockstep_tb --Mdir "$VL_DIR" -o lockstep_vl \
                 $PIPE_FILES $REF_FILES $SUPPORT_FILES $LOCKSTEP_FILES > "$BUILD_LOG" 2>&1
             if [ $? -ne 0 ] || ! [ -e "$VL_BIN" ]; then
@@ -349,7 +354,7 @@ RANDOM_PROFILE="${QV_RANDOM_PROFILE:-$RANDOM_PROFILE}"   # experiments: override
 [ "$DBG_MODE" != "0" ] && RANDOM_PROFILE="$RANDOM_PROFILE --dbg"   # x22/x23 are the debug script's
 # the cache configuration takes side B's data accesses, devices included, through cache_complex's D$: a device read
 # refills the device's whole line, so the two sides' MMIO-read logs can never match; its programs read no device
-[ "$MEMCFG_B" == "cache" ] && RANDOM_PROFILE="$RANDOM_PROFILE --no-dev-read"
+[ "$MEMCFG_B" == "cache" ] || [ "$MEMCFG_B" == "soc" ] && RANDOM_PROFILE="$RANDOM_PROFILE --no-dev-read"
 
 build_random_entries() {
     # programs are regenerated whenever the generator or the profile changes
