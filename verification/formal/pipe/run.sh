@@ -71,6 +71,12 @@ for task in prove_w bmc_w cover_w prove_w2; do
     printf '%-12s %s\n' "fetch $task" "$r"
     [ "$r" == "PASS" ] || fail=1
 done
+# (W3a) the store buffer draining a beat a cycle (PIPE)
+for task in prove_p bmc_p cover_p; do
+    r=$(sby -f sb.sby $task 2>&1 | status)
+    printf '%-12s %s\n' "sb $task" "$r"
+    [ "$r" == "PASS" ] || fail=1
+done
 # (O5a) the D$ at 4 lines x 4 dwords: bounded
 r=$(sby -f dc.sby bmc4 2>&1 | status)
 printf '%-12s %s\n' "dc bmc4" "$r"
@@ -182,15 +188,20 @@ EOF
     mutant ptw_cyc_in_response ptw 's/assign o_bus_cyc  = beat_q \&\& !(i_bus_ack || i_bus_err);/assign o_bus_cyc  = beat_q;/'
     mutant ptw_abandons_on_cancel ptw 's/assign o_bus_cyc  = beat_q \&\& !(i_bus_ack || i_bus_err);/assign o_bus_cyc  = beat_q \&\& !(i_bus_ack || i_bus_err) \&\& !cancel_srv;/'
     mutant ptw_stale_decoded   ptw 's/if (st_q == W_DEC \&\& !stale_eff) begin/if (st_q == W_DEC) begin/'
-    mutant sb_out_of_order     sb 's/assign o_addr      = {addr_q\[rd_q\], 3'"'"'b000};/assign o_addr      = {addr_q[wr_q], 3'"'"'b000};/'
-    mutant sb_loses_select     sb 's/assign o_sel       = sel_q\[rd_q\];/assign o_sel       = 8'"'"'hFF;/'
+    mutant sb_out_of_order     sb 's/assign o_addr      = {addr_q\[cur\], 3'"'"'b000};/assign o_addr      = {addr_q[wr_q], 3'"'"'b000};/'
+    mutant sb_loses_select     sb 's/assign o_sel       = sel_q\[cur\];/assign o_sel       = 8'"'"'hFF;/'
     mutant sb_ignores_lsu_bus  sb 's/ \&\& !i_lsu_inflight \&\& !i_ptw_beat$/ \&\& !i_ptw_beat/'
     mutant sb_ignores_walker   sb 's/ \&\& !i_lsu_inflight \&\& !i_ptw_beat$/ \&\& !i_lsu_inflight/'
     mutant sb_always_urgent    sb 's/wire urgent   = full || (held_q >= 8'"'"'(YIELD_MAX));/wire urgent   = 1'"'"'b1;/'
-    mutant sb_cyc_in_response  sb 's/assign o_cyc       = beat_q \&\& !(i_ack || i_err);/assign o_cyc       = beat_q;/'
+    mutant sb_cyc_in_response  sb 's/assign o_cyc       = beat_q \&\& (!(i_ack || i_err) || nxt);/assign o_cyc       = beat_q;/'
     mutant sb_takes_foreign_ack sb 's/wire resp     = beat_q \&\& (i_ack || i_err);/wire resp     = (i_ack || i_err);/'
     mutant sb_match_dead_entry sb 's/if (v_q\[i\] \&\& addr_q\[i\] == i_match_addr) o_match = 1'"'"'b1;/if (addr_q[i] == i_match_addr) o_match = 1'"'"'b1;/'
     mutant sb_beat_with_nothing sb 's/wire has_next = (cnt_q > (resp ? CNT_W'"'"'(1) : CNT_W'"'"'(0)));/wire has_next = 1'"'"'b1;/'
+    # (W3a) a beat a cycle: the response cycle's request is the next entry, and only then held. (A next beat that ignores
+    # the drain's holds is equivalent at DEPTH 2 -- a response with a next entry means a full buffer, which never
+    # yields -- and is left to qv_sb_tb at DEPTH 4: verification/pipe/mutants/w3a_unit_sb.json.)
+    mutant sb_pipe_same_entry  sb 's/wire \[PTR_W-1:0\] cur = nxt ? ptr_inc(rd_q) : rd_q;/wire [PTR_W-1:0] cur = rd_q;/' "-D QV_SB_PIPE"
+    mutant sb_pipe_cyc_held    sb 's/assign o_cyc       = beat_q \&\& (!(i_ack || i_err) || nxt);/assign o_cyc       = beat_q \&\& (!(i_ack || i_err) || PIPE);/' "-D QV_SB_PIPE"
     mutant sb_push_when_full   sb 's/wire push = i_push \&\& o_ready;/wire push = i_push;/'
     mutant sb_idle_in_response sb 's/assign o_start_idle = !beat_q \&\& (cnt_q != .0)/assign o_start_idle = (!beat_q || resp) \&\& (cnt_q != 0)/'
     mutant sb_yields_to_ready  sb 's/!(YIELD_READY \&\& i_lsu_busy)/!i_lsu_busy/g'

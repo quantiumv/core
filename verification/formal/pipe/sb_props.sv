@@ -22,6 +22,11 @@
  *   - an answer that is not a beat's own (none in flight) changes nothing;
  *   - o_empty / o_ready follow the count, which never passes DEPTH; a push into a full buffer is refused;
  *   - o_match is exactly "an unanswered entry holds that dword".
+ *
+ * (W3a) With QV_SB_PIPE defined the buffer is built with PIPE (a beat a cycle): a beat may start in the previous
+ * one's response cycle, so cyc is high in a response cycle exactly when the next beat is decided in it, that beat is
+ * the next entry (the K-th check above), and the slave may answer a request it saw in an ack cycle. Every property
+ * is the one above with that start added; without the define it is the same model.
  */
 module sb_props (
     input logic         clk,
@@ -39,13 +44,18 @@ module sb_props (
     localparam int DEPTH = 2;
     localparam int YIELD_MAX = 3;
     localparam bit YIELD_READY = 1'b0;
+`ifdef QV_SB_PIPE
+    localparam bit PIPE = 1'b1;
+`else
+    localparam bit PIPE = 1'b0;
+`endif
 
     logic        ready, empty, match, start_now, start_idle, beat, cyc;
     logic [31:0] addr;
     logic [63:0] dat;
     logic [7:0]  sel;
 
-    qv_sb #(.DEPTH(DEPTH), .YIELD_MAX(YIELD_MAX), .YIELD_READY(YIELD_READY)) dut (
+    qv_sb #(.DEPTH(DEPTH), .YIELD_MAX(YIELD_MAX), .YIELD_READY(YIELD_READY), .PIPE(PIPE)) dut (
         .clk(clk), .rst(rst),
         .i_push(push), .i_push_addr(push_addr), .i_push_sel(push_sel), .i_push_data(push_data),
         .o_ready(ready), .o_empty(empty),
@@ -68,12 +78,16 @@ module sb_props (
 
     wire accepted = !rst && push && ready;
     wire resp     = beat && (ack || err);
+    // a beat's first cycle: cyc rising, or (PIPE) cyc held through the previous beat's response
+    wire bstart   = cyc && (!in_beat || resp);
+    // the buffer's request on the bus is a live one: an unanswered beat, or (PIPE) the next beat in a response cycle
+    wire live     = cyc && (PIPE || !(ack || err));
 
     always @(posedge clk) begin
         init    <= 1'b0;
         p_valid <= !rst;
-        p_out   <= !rst && cyc && !ack && !err;
-        p_any   <= !rst && (cyc || foreign) && !ack && !err;
+        p_out   <= !rst && live;
+        p_any   <= !rst && (live || (foreign && !ack && !err));
         p_foreign <= !rst && foreign && !ack && !err;
         p_addr  <= addr; p_dat <= dat; p_sel <= sel;
         p_start <= !rst && start_now;
@@ -84,8 +98,9 @@ module sb_props (
                 if (npush == K) begin have_k <= 1'b1; k_addr <= push_addr; k_sel <= push_sel; k_dat <= push_data; end
                 npush <= npush + 4'd1;
             end
-            if (cyc && !in_beat) begin nbeat <= nbeat + 4'd1; in_beat <= 1'b1; end
-            if (resp) begin nresp <= nresp + 4'd1; in_beat <= 1'b0; end
+            if (bstart) nbeat <= nbeat + 4'd1;
+            if (resp) nresp <= nresp + 4'd1;
+            in_beat <= bstart ? 1'b1 : (resp ? 1'b0 : in_beat);
         end
     end
 
@@ -133,17 +148,18 @@ module sb_props (
                 assert (dut.dat_q[K[0]] == k_dat);
             end
             // the K-th beat is the K-th push (its first cycle: nbeat has not counted it yet)
-            if (cyc && have_k && (in_beat ? (nbeat == K + 4'd1) : (nbeat == K))) begin
+            if (cyc && have_k && (bstart ? (nbeat == K) : (nbeat == K + 4'd1))) begin
                 assert (addr == {k_addr, 3'b000});
                 assert (sel == k_sel);
                 assert (dat == k_dat);
             end
-            // a beat is stable until answered, and cyc is low in its response cycle
+            // a beat is stable until answered, and cyc is low in its response cycle -- with PIPE high there only for
+            // the next beat, decided in that cycle
             if (p_valid && p_out) begin
                 assert (cyc || ack || err);
-                if (cyc) begin assert (addr == p_addr); assert (sel == p_sel); assert (dat == p_dat); end
+                if (cyc && !(ack || err)) begin assert (addr == p_addr); assert (sel == p_sel); assert (dat == p_dat); end
             end
-            if (ack || err) assert (!cyc);
+            if ((ack || err) && cyc) assert (PIPE && resp && start_now);
             // when a beat starts and why
             if (start_now) begin
                 assert (!lsu_inflight);
@@ -159,8 +175,9 @@ module sb_props (
             // the decision the LSU takes: an idle drain's, which does not look at the response
             assert (start_idle == (start_now && !beat));
             if (beat && !p_start && !(p_valid && p_out) && !p_out) begin end
-            // the first cycle of a beat is preceded by its start
-            if (cyc && !in_beat) assert (p_start);
+            // the first cycle of a beat is preceded by its start (with PIPE, one in a response cycle is its start)
+            if (bstart && !resp) assert (p_start);
+            if (bstart && resp) assert (start_now);
             // o_match
             begin : m
                 logic mm;
@@ -184,6 +201,7 @@ module sb_props (
             cover (!(cnt_model == DEPTH) && dut.held_q >= YIELD_MAX && start_now && load_near);   // yielded out
             cover (push && !ready);
             cover ((ack || err) && !beat);              // a foreign answer
+            if (PIPE) cover (resp && cyc && cnt_model == 4'd2);   // (W3a) the next beat on the bus in a response cycle
         end
     end
 endmodule

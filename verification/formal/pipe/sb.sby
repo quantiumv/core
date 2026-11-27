@@ -1,9 +1,12 @@
-# qv_sb properties (sb_props.sv): k-induction proof, deep BMC, covers.
+# qv_sb properties (sb_props.sv): k-induction proof, deep BMC, covers; the *_p tasks with PIPE (W3a: a beat a cycle).
 # Run with run.sh, or: sby -f sb.sby
 [tasks]
 prove
 bmc
 cover
+prove_p prove pipe
+bmc_p bmc pipe
+cover_p cover pipe
 
 [options]
 prove: mode prove
@@ -18,7 +21,8 @@ smtbmc boolector
 
 [script]
 plugin -i /home/potato/yosys-slang-src/build/slang.so
-read_slang --single-unit qv_sb.sv sb_props.sv --top sb_props
+~pipe: read_slang --single-unit qv_sb.sv sb_props.sv --top sb_props
+pipe: read_slang --single-unit -D QV_SB_PIPE qv_sb.sv sb_props.sv --top sb_props
 prep -top sb_props
 
 [files]

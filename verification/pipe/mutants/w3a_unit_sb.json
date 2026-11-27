@@ -1,0 +1,46 @@
+{
+ "dut": "design/pipe/qv_sb.sv",
+ "tb": "design/pipe/qv_sb_tb.sv",
+ "files": [
+  "design/pipe/qv_sb.sv"
+ ],
+ "flags": [
+  "-g2012",
+  "-I",
+  ".",
+  "-I",
+  "defaults",
+  "-I",
+  "../testbench",
+  "-Pqv_sb_tb.PIPE=1"
+ ],
+ "cwd": "design",
+ "timeout": 600,
+ "mutants": [
+  {
+   "name": "(W3a) the next beat in a response cycle ignores the drain's holds",
+   "old": "wire nxt = PIPE && resp && go;",
+   "new": "wire nxt = PIPE && resp && has_next;"
+  },
+  {
+   "name": "(W3a) the response cycle presents the answered entry again",
+   "old": "wire [PTR_W-1:0] cur = nxt ? ptr_inc(rd_q) : rd_q;",
+   "new": "wire [PTR_W-1:0] cur = rd_q;"
+  },
+  {
+   "name": "(W3a) cyc held through every response cycle",
+   "old": "assign o_cyc       = beat_q && (!(i_ack || i_err) || nxt);",
+   "new": "assign o_cyc       = beat_q && (!(i_ack || i_err) || PIPE);"
+  },
+  {
+   "name": "(W3a) the answered beat's fields are the bus's (the next entry's)",
+   "old": "assign o_resp_addr = addr_q[rd_q];",
+   "new": "assign o_resp_addr = addr_q[cur];"
+  },
+  {
+   "name": "(W3a) no beat in a response cycle: back to a beat every two cycles",
+   "old": "wire nxt = PIPE && resp && go;",
+   "new": "wire nxt = 1'b0;"
+  }
+ ]
+}
