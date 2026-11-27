@@ -186,10 +186,15 @@ OX_CSV="${STACK_CSV%_stack.csv}_ox.csv"
 OX_KEYS="s1_retire s1_idle s1_none s1_wait_lsu s1_wait_div s1_wait_fpu s1_wait_alu s1_rule_head s1_rule_pair"
 OX_KEYS="$OX_KEYS dc_miss dc_cyc ic_miss ic_cyc xr_n xr_killed xr_head xr_save mp_commit ear_mp_x"
 OX_KEYS="$OX_KEYS rob_occ rob_max rs_occ rs_max rob_one is_lsq"
+# the three-wide track's counters (W3), a file of their own again: the store buffer's beats, and those presented in
+# the previous beat's response cycle (W3a)
+W3_CSV="${STACK_CSV%_stack.csv}_w3.csv"
+W3_KEYS="sb_beats sb_b2b"
 if [ "$CORE" == "pipe" ] && [ "$ORACLE" != "store" ]; then
     echo "kernel,config,$(echo $STACK_KEYS $SIDE_KEYS | tr ' ' ',')" > "$STACK_CSV"
     echo "kernel,config,$(echo $LSQ_KEYS | tr ' ' ',')" > "$LSQ_CSV"
     echo "kernel,config,$(echo $OX_KEYS | tr ' ' ',')" > "$OX_CSV"
+    echo "kernel,config,$(echo $W3_KEYS | tr ' ' ',')" > "$W3_CSV"
 fi
 
 # kv "<line>" key: the number after key= in a PERF_ line
@@ -251,6 +256,11 @@ run_one() {
         row="${kernel},${cfg_name}"
         for k in $OX_KEYS; do row="$row,$(kv "$xline" $k)"; done
         echo "$row" >> "$OX_CSV"
+        local wline
+        wline=$(echo "$out" | grep "^PERF_W3:" | head -1)
+        row="${kernel},${cfg_name}"
+        for k in $W3_KEYS; do row="$row,$(kv "$wline" $k)"; done
+        echo "$row" >> "$W3_CSV"
     fi
 }
 

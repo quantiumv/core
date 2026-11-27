@@ -77,7 +77,9 @@
         .req_div(CORE.div_req.valid), .req_div_tag(CORE.div_req.tag), .req_fpu(CORE.fpu_req.valid), \
         .req_fpu_tag(CORE.fpu_req.tag), .fb_push(CORE.fetch0.fb_push), .fb_pop(CORE.fetch0.fb_pop), \
         .fb_pop2(CORE.fetch0.fb_pop2), \
-        .fb_flush(CORE.fetch_redirect), .lsu_in_bus(CORE.lsu0.in_bus), .dc_refill(DCREF), .ic_refill(ICREF) \
+        .fb_flush(CORE.fetch_redirect), .lsu_in_bus(CORE.lsu0.in_bus), .dc_refill(DCREF), .ic_refill(ICREF), \
+        .sb_resp(CORE.sb_beat && (CORE.wb_mem_ack_i || CORE.wb_mem_err_i)), \
+        .sb_b2b(CORE.sb_beat && CORE.sb_cyc && (CORE.wb_mem_ack_i || CORE.wb_mem_err_i)) \
     );
 `define PERF_STACK_REPORT(STACK, MEM_ARRAY, ADDR) \
     begin \

@@ -183,7 +183,11 @@ module perf_stack #(
     input logic             fb_flush = 1'b0,        // a redirect empties it
     input logic             lsu_in_bus = 1'b0,      // the LSU's op is on the bus
     input logic             dc_refill = 1'b0,       // the D$ refills a line
-    input logic             ic_refill = 1'b0        // the I$ refills a line
+    input logic             ic_refill = 1'b0,       // the I$ refills a line
+    // (W3a) the store buffer's beats: one answered, and one presented in the previous beat's response cycle (a beat a
+    // cycle, QV_PIPE_SB_PIPE); printed on their own line (PERF_W3), so the other CSVs keep their columns
+    input logic             sb_resp = 1'b0,
+    input logic             sb_b2b = 1'b0
 );
     localparam logic [2:0] FU_DIV = 3'd2;
     localparam logic [2:0] FU_LSU = 3'd3;
@@ -228,6 +232,7 @@ module perf_stack #(
     // for one entry but not two, and a memory op held by a full queue whatever its operands (is_lsu counts it only
     // when its operands are ready); side counters, in no class
     longint unsigned c_rob_occ, c_rob_max, c_rs_occ, c_rs_max, c_rob_one, c_is_lsq;
+    longint unsigned c_sb_beats, c_sb_b2b;      // (W3a) side counters, in no class
     longint unsigned xr_cycle [0:(1<<TAG_W)-1];
     logic            dc_refill_q, ic_refill_q;
     src_e   shadow_q;                // the source of the redirect whose refill shadow is running
@@ -395,6 +400,7 @@ module perf_stack #(
             c_dc_miss <= 0; c_dc_cyc <= 0; c_ic_miss <= 0; c_ic_cyc <= 0;
             c_xr_n <= 0; c_xr_killed <= 0; c_xr_head <= 0; c_xr_save <= 0; c_mp_commit <= 0; c_ear_mp_x <= 0;
             c_rob_occ <= 0; c_rob_max <= 0; c_rs_occ <= 0; c_rs_max <= 0; c_rob_one <= 0; c_is_lsq <= 0;
+            c_sb_beats <= 0; c_sb_b2b <= 0;
             dc_refill_q <= 1'b0; ic_refill_q <= 1'b0;
             shadow_q <= SRC_NONE;
             shadow_kind_q <= 0;
@@ -502,6 +508,8 @@ module perf_stack #(
                 else                                               c_s1_rule_pair <= c_s1_rule_pair + 1;
                 if (dc_refill) begin c_dc_cyc <= c_dc_cyc + 1; if (!dc_refill_q) c_dc_miss <= c_dc_miss + 1; end
                 if (ic_refill) begin c_ic_cyc <= c_ic_cyc + 1; if (!ic_refill_q) c_ic_miss <= c_ic_miss + 1; end
+                if (sb_resp) c_sb_beats <= c_sb_beats + 1;
+                if (sb_b2b)  c_sb_b2b   <= c_sb_b2b + 1;
 
                 if (flush) begin
                     if ((commit && head_mispredict) || (commit2 && head1_mispredict))
@@ -615,6 +623,7 @@ module perf_stack #(
                  c_s1_rule_head, c_s1_rule_pair, c_dc_miss, c_dc_cyc, c_ic_miss, c_ic_cyc,
                  c_xr_n, c_xr_killed, c_xr_head, c_xr_save, c_mp_commit, c_ear_mp_x,
                  c_rob_occ, c_rob_max, c_rs_occ, c_rs_max, c_rob_one, c_is_lsq);
+        $display("PERF_W3: sb_beats=%0d sb_b2b=%0d", c_sb_beats, c_sb_b2b);
         if (c_s1_retire + c_s1_idle + c_s1_none + c_s1_wait_lsu + c_s1_wait_div + c_s1_wait_fpu + c_s1_wait_alu
                 + c_s1_rule_head + c_s1_rule_pair != c_window)
             $display("PERF_STACK_WARN: the second slot's classes do not add up to the window");
