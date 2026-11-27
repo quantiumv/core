@@ -1249,6 +1249,9 @@ STEPS_W3 = [
 ]
 CONFIGS_W3 = ([('base', cfg()), ('ref', REF_W)] + STEPS_W3
               + [('L20 ref', cfg(REF_W, miss_add=20))] + [('L20 ' + n, cfg(kn, miss_add=20)) for n, kn in STEPS_W3])
+# (W3b) as built: today's dword BTB, read for both dwords of the block, in place of the two-way two-slot block BTB
+CONFIGS_W3 += [('W3b built', wrow(2, ['db1', 'fe16'], bp='gshare')),
+               ('W3g built', wrow(3, [r for r in W3_RUNGS if r != 'bslots2'], bp='gshare'))]
 
 CONFIGS_O4 = [  # name, knobs: two-wide with the pair rules (O4.0)
     ('ooo rs4', dict(rs=4)),
