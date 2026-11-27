@@ -35,8 +35,14 @@
  * Seeding: no explicit $srandom call, same as divider_random_tb.sv/
  * csr_file_random_tb.sv -- this iverilog build's bare $urandom/
  * $urandom_range are confirmed run-to-run deterministic unseeded.
+ *
+ * PAIR (W3b; tests.list runs both): every read also checks dat_hi_o, the
+ * word with the lowest offset bit set (the next one for an even word, the
+ * same one for an odd word), on hits and at the end of a refill alike.
  */
-module icache_random_tb;
+module icache_random_tb #(
+    parameter bit PAIR = 1'b0
+);
 
     localparam int NUM_ITER = 2000;
 
@@ -49,7 +55,7 @@ module icache_random_tb;
     logic rst = 1;
 
     logic [31:0] ic_addr;
-    logic [63:0] ic_dat_o;
+    logic [63:0] ic_dat_o, ic_dat_hi_o;
     logic        ic_cyc, ic_stb, ic_ack, ic_err;
 
     logic [31:0] mem_addr;
@@ -57,9 +63,9 @@ module icache_random_tb;
     logic [7:0]  mem_sel;
     logic        mem_we, mem_cyc, mem_stb, mem_ack, mem_err;
 
-    icache #(.num_lines(NUM_LINES), .line_words(LINE_WORDS)) dut (
+    icache #(.num_lines(NUM_LINES), .line_words(LINE_WORDS), .PAIR(PAIR)) dut (
         .clk(clk), .rst(rst),
-        .addr_i(ic_addr), .dat_o(ic_dat_o), .cyc_i(ic_cyc), .stb_i(ic_stb),
+        .addr_i(ic_addr), .dat_o(ic_dat_o), .dat_hi_o(ic_dat_hi_o), .cyc_i(ic_cyc), .stb_i(ic_stb),
         .ack_o(ic_ack), .err_o(ic_err),
         .mem_addr_o(mem_addr), .mem_dat_i(mem_dat_o), .mem_sel_o(mem_sel),
         .mem_we_o(mem_we), .mem_cyc_o(mem_cyc), .mem_stb_o(mem_stb),
@@ -113,6 +119,10 @@ module icache_random_tb;
 
             check($sformatf("iter %0d: addr=%h data", i, addr), ic_dat_o, expected);
             check($sformatf("iter %0d: addr=%h err_o clear", i, addr), {63'b0, ic_err}, 64'd0);
+            if (PAIR) begin
+                w = (addr >> 3) | 1;
+                check($sformatf("iter %0d: addr=%h upper dword", i, addr), ic_dat_hi_o, {32'(w), ~32'(w)});
+            end
         end
 
         $display("");

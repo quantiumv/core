@@ -35,6 +35,9 @@
 `ifndef QV_PIPE_SB_PIPE
 `define QV_PIPE_SB_PIPE 0                 // the core's default (design/pipe/core.sv)
 `endif
+`ifndef QV_PIPE_FETCH16
+`define QV_PIPE_FETCH16 0                 // (W3b) 16-byte fetch: the cache configuration only, as design/soc.sv
+`endif
 
 module lockstep_side #(
     parameter int QV_MUTANT        = 0,    // structural: selects a generate-gated RTL mutant (ref_core)
@@ -159,6 +162,9 @@ module lockstep_side #(
     logic [31:0] wb_fetch_addr, wb_mem_addr;
     logic        wb_fetch_cyc, wb_fetch_stb, wb_fetch_ack, wb_fetch_err;
     logic [63:0] wb_fetch_dat;
+    // (W3b) 16-byte fetch: the pipelined core in the cache configuration, whose I$ returns the block's upper dword
+    localparam bit LS_FETCH16 = CORE_PIPE && MEMCFG_CACHE && (`QV_PIPE_FETCH16 != 0);
+    logic [63:0] wb_fetch_dat_hi;
     logic [63:0] wb_mem_dat_o, wb_mem_dat_i;
     logic [7:0]  wb_mem_sel;
     logic        wb_mem_we, wb_mem_cyc, wb_mem_stb, wb_mem_ack, wb_mem_err, wb_mem_lock;
@@ -276,11 +282,16 @@ module lockstep_side #(
             // RAM is the 1 MiB flat image: its stores are posted by the store buffer. On the flat SRAM fetch and the
             // memory port share one slave through an arbiter, so the fetch stream gives way to the memory port; with the
             // caches fetch has the instruction cache to itself.
-            core #(.PMA_RAM_SIZE(64'(`QV_LOCKSTEP_RAM_WORDS) * 64'd8), .FETCH_YIELD(!MEMCFG_CACHE)) core0 (`LS_CORE_PORTS);
+            core #(.PMA_RAM_SIZE(64'(`QV_LOCKSTEP_RAM_WORDS) * 64'd8), .FETCH_YIELD(!MEMCFG_CACHE), .FETCH16(LS_FETCH16))
+                core0 (`LS_CORE_PORTS, .wb_fetch_dat_hi_i(wb_fetch_dat_hi));
 `ifdef LS_HAVE_PIPE
             // (O4) a pair writes FP state at most once: when channel 0 did, FS and fflags as csr_file0 is about to
             // update them, else as they are
             wire ch0_fp = core0.commit0.h_fpw;
+            // (W3b) responses that filled two fetch-buffer entries (printed at the end: a gate of the feature needs some)
+            logic [31:0] fb2_n;
+            always_ff @(posedge clk) if (rst) fb2_n <= '0; else if (core0.fetch0.fb_push2) fb2_n <= fb2_n + 1;
+            final if (LS_FETCH16) $display("LOCKSTEP_FB2 %0d", fb2_n);
             assign fs1     = (ch0_fp && core0.csr_file0.fs_dirty) ? 2'b11 : core0.mstatus_fs_w;
             assign fflags1 = ch0_fp ? (core0.fflags_w | core0.c_fp_accrue) : core0.fflags_w;
 `else
@@ -465,12 +476,14 @@ module lockstep_side #(
         .MEMCFG_CACHE(MEMCFG_CACHE),
         .DELAY_MAX(DELAY_MAX),
         .BUS_DC(BUS_DC),
-        .SB_PIPE(SB_PIPE)
+        .SB_PIPE(SB_PIPE),
+        .FETCH16(LS_FETCH16)
     ) mem0 (
         .clk(clk), .rst(rst),
         .delay_seed_fetch_i(delay_seed_fetch_i), .delay_seed_mem_i(delay_seed_mem_i),
         .fetch_addr_i(wb_fetch_addr), .fetch_cyc_i(wb_fetch_cyc), .fetch_stb_i(wb_fetch_stb),
         .fetch_dat_o(wb_fetch_dat), .fetch_ack_o(wb_fetch_ack), .fetch_err_o(wb_fetch_err),
+        .fetch_dat_hi_o(wb_fetch_dat_hi),
         .mem_addr_i(wb_mem_addr), .mem_dat_i(wb_mem_dat_o), .mem_dat_o(wb_mem_dat_i),
         .mem_sel_i(wb_mem_sel), .mem_we_i(wb_mem_we),
         .mem_cyc_i(wb_mem_cyc), .mem_stb_i(wb_mem_stb),

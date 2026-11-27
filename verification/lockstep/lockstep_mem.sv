@@ -20,6 +20,9 @@
  * master's request then (PIPE_M1) and the mem-side delay shims latch it
  * then (ACCEPT_IN_ACK). o_b2b counts such requests (a store presented in a
  * response cycle), which a lockstep gate of the feature must see.
+ *
+ * FETCH16 (W3b, with MEMCFG_CACHE): the core asks for 16-byte blocks and the
+ * I$ returns the upper dword on fetch_dat_hi_o beside the lower one.
  */
 `include "lockstep_defs.svh"
 
@@ -30,7 +33,8 @@ module lockstep_mem #(
     parameter int LINE_WORDS        = 4,
     parameter int DELAY_MAX         = 0,    // structural: 0 disables both delay-shim FSMs
     parameter bit BUS_DC            = 1'b1, // (W3a) MEMCFG_CACHE: cache_complex keeps its D$ (0: as soc.sv with the core's)
-    parameter bit SB_PIPE           = 1'b0  // (W3a) the mem master may present a new request in a response cycle
+    parameter bit SB_PIPE           = 1'b0, // (W3a) the mem master may present a new request in a response cycle
+    parameter bit FETCH16           = 1'b0  // (W3b) MEMCFG_CACHE: the I$ also returns the 16-byte block's upper dword
 ) (
     input  logic clk,
     input  logic rst,
@@ -43,6 +47,7 @@ module lockstep_mem #(
     input  logic        fetch_cyc_i,
     input  logic        fetch_stb_i,
     output logic [63:0] fetch_dat_o,
+    output logic [63:0] fetch_dat_hi_o,     // (W3b) FETCH16: the block's upper dword; 0 otherwise
     output logic        fetch_ack_o,
     output logic        fetch_err_o,
 
@@ -225,6 +230,7 @@ module lockstep_mem #(
 
     generate
         if (!MEMCFG_CACHE) begin : g_sram_cfg
+            assign fetch_dat_hi_o = 64'b0;
             logic [31:0] df_addr, dm_addr;
             logic [7:0]  df_sel, dm_sel;
             logic        df_we, dm_we, df_cyc, dm_cyc, df_stb, dm_stb;
@@ -288,10 +294,11 @@ module lockstep_mem #(
             // read+write phases can't be split by an interleaved fetch
             // refill. Revisit if cache-config AMO lockstep ever surfaces
             // a real interleaving.
-            cache_complex #(.num_lines(NUM_LINES), .line_words(LINE_WORDS), .DC_EN(BUS_DC)) cache0 (
+            cache_complex #(.num_lines(NUM_LINES), .line_words(LINE_WORDS), .DC_EN(BUS_DC), .FETCH_PAIR(FETCH16)) cache0 (
                 .clk(clk), .rst(rst),
                 .fetch_addr_i(fetch_addr_i), .fetch_cyc_i(fetch_cyc_i), .fetch_stb_i(fetch_stb_i),
                 .fetch_dat_o(fetch_dat_o), .fetch_ack_o(fetch_ack_o), .fetch_err_o(fetch_err_o),
+                .fetch_dat_hi_o(fetch_dat_hi_o),
                 .data_addr_i(mem_addr_i), .data_dat_i(mem_dat_i), .data_dat_o(mem_dat_o),
                 .data_sel_i(mem_sel_i), .data_we_i(mem_we_i),
                 .data_cyc_i(mem_cyc_i), .data_stb_i(mem_stb_i),

@@ -34,9 +34,19 @@
  * REUSE (PAGE_REUSE, P10a; tests.list runs both): a translated request in the page of the last translation needs
  * none and may be streamed, so the rule above becomes "never streamed while translation is on, unless fetch keeps
  * its page", and translated fetch inside one page streams at the untranslated rate.
+ *
+ * FETCH16 (W3b; tests.list runs it with and without REUSE): the slave answers the 16-byte block with both dwords and
+ * the BTB model answers the second lookup (the upper dword, from its halfword 0) too. Every request is 16-byte
+ * aligned; an answer pushes the upper dword as well exactly when the request starts in the lower one and the BTB
+ * found no taken branch there, and that entry carries the second lookup's hint; the
+ * scoreboard is unchanged (each entry is the next dword or the hinted target: a fault or error answer is two fault
+ * entries alike). The rates are per block: one a cycle
+ * fills the buffer faster than the consumer pops, so the slave that ignores the streamed request and the yield still
+ * give a dword a cycle, and translation without page reuse two in three cycles.
  */
 module qv_fetch_stream_tb #(
-    parameter bit REUSE = 1'b0
+    parameter bit REUSE = 1'b0,
+    parameter bit FETCH16 = 1'b0
 );
     int   pass_count = 0;
     int   fail_count = 0;
@@ -73,14 +83,20 @@ module qv_fetch_stream_tb #(
     logic        btb_hit, btb_x, buf_hint, buf_hx;
     logic [1:0]  btb_off, buf_hoff;
     logic [63:0] btb_tgt, buf_htgt;
+    logic [63:0] dat_hi;
+    logic [63:0] btb2_pc;
+    logic        btb2_hit, btb2_x;
+    logic [1:0]  btb2_off;
+    logic [63:0] btb2_tgt;
 
-    qv_fetch #(.FB_DEPTH(FBD), .STREAM(1'b1), .BTB_EN(1'b1), .PAGE_REUSE(REUSE)) dut (
+    qv_fetch #(.FB_DEPTH(FBD), .STREAM(1'b1), .BTB_EN(1'b1), .PAGE_REUSE(REUSE), .FETCH16(FETCH16)) dut (
         .clk(clk), .rst(rst),
         .wb_fetch_addr_o(addr), .wb_fetch_cyc_o(cyc), .wb_fetch_stb_o(stb),
-        .wb_fetch_dat_i(dat), .wb_fetch_ack_i(ack), .wb_fetch_err_i(err),
+        .wb_fetch_dat_i(dat), .wb_fetch_dat_hi_i(dat_hi), .wb_fetch_ack_i(ack), .wb_fetch_err_i(err),
         .i_redirect_valid(redirect_valid), .i_redirect_pc(redirect_pc),
         .i_hold(hold), .o_idle(idle), .i_yield(yield),
         .o_btb_pc(btb_pc), .i_btb_hit(btb_hit), .i_btb_off(btb_off), .i_btb_x(btb_x), .i_btb_tgt(btb_tgt),
+        .o_btb2_pc(btb2_pc), .i_btb2_hit(btb2_hit), .i_btb2_off(btb2_off), .i_btb2_x(btb2_x), .i_btb2_tgt(btb2_tgt),
         .i_xl_on(xl_on), .o_xl_req(xl_req), .o_xl_va(xl_va), .o_xl_cancel(xl_cancel),
         .i_xl_done(xl_done), .i_xl_pf(xl_pf), .i_xl_af(xl_af), .i_xl_ppn(xl_ppn),
         .o_buf_valid(buf_valid), .o_buf_pc(buf_pc), .o_buf_data(buf_data),
@@ -91,29 +107,41 @@ module qv_fetch_stream_tb #(
     // ---------------- BTB model ----------------
     // an answer for whatever pc is being issued: a hit with probability p_btb, at a halfword at or after the first
     int          p_btb = 0;
-    logic        r_hit, r_x;
-    logic [1:0]  r_off;
-    logic [63:0] r_tgt;
+    logic        r_hit, r_x, r_hit2, r_x2;
+    logic [1:0]  r_off, r_off2;
+    logic [63:0] r_tgt, r_tgt2;
     always @(negedge clk) begin
         r_hit = ($urandom % 100) < p_btb;
         r_off = 2'($urandom);
         r_x   = ($urandom % 4) == 0;
         r_tgt = 64'(($urandom % (MEM_WORDS * 4 + 32)) * 2);                  // inside the memory, or a little beyond
+        r_hit2 = ($urandom % 100) < p_btb;
+        r_off2 = 2'($urandom);
+        r_x2   = ($urandom % 4) == 0;
+        r_tgt2 = 64'(($urandom % (MEM_WORDS * 4 + 32)) * 2);
     end
     assign btb_hit = r_hit;
     assign btb_off = (r_off < btb_pc[2:1]) ? btb_pc[2:1] : r_off;
     assign btb_x   = r_x;
     assign btb_tgt = r_tgt;
+    // (FETCH16) the second lookup starts at the upper dword's halfword 0: any halfword
+    assign btb2_hit = r_hit2;
+    assign btb2_off = r_off2;
+    assign btb2_x   = r_x2;
+    assign btb2_tgt = r_tgt2;
 
     // What the BTB answered when each request issued, followed to the entry that request becomes: the request
     // register must latch it, the buffer must hand it out unchanged. (issq: requests not yet answered or dropped,
     // pushq: answers sitting in the buffer. Both a few deep at most.)
     logic        iq_h [0:7];  logic [1:0] iq_o [0:7];  logic iq_x [0:7];  logic [63:0] iq_t [0:7];
+    // (FETCH16) the request pushes the upper dword too, and the second lookup's answer for it
+    logic        iq_2 [0:7];  logic iq_h2 [0:7]; logic [1:0] iq_o2 [0:7]; logic iq_x2 [0:7]; logic [63:0] iq_t2 [0:7];
     int          iq_n = 0;
     logic        pq_h [0:15]; logic [1:0] pq_o [0:15]; logic pq_x [0:15]; logic [63:0] pq_t [0:15];
     int          pq_n = 0;
     int          hint_errs = 0;
     logic        c_h, c_x;  logic [1:0] c_o;  logic [63:0] c_t;
+    logic        c_2, c_h2, c_x2;  logic [1:0] c_o2;  logic [63:0] c_t2;
     always @(posedge clk) begin
         if (rst) begin
             iq_n = 0; pq_n = 0;
@@ -123,16 +151,30 @@ module qv_fetch_stream_tb #(
                 if (iq_n == 0) begin hint_errs++; $display("HINT: a response with no request issued"); end
                 else begin
                     c_h = iq_h[0]; c_o = iq_o[0]; c_x = iq_x[0]; c_t = iq_t[0];
+                    c_2 = iq_2[0]; c_h2 = iq_h2[0]; c_o2 = iq_o2[0]; c_x2 = iq_x2[0]; c_t2 = iq_t2[0];
                     for (int i = 0; i < 7; i++) begin iq_h[i] = iq_h[i+1]; iq_o[i] = iq_o[i+1]; iq_x[i] = iq_x[i+1]; iq_t[i] = iq_t[i+1]; end
+                    for (int i = 0; i < 7; i++) begin iq_2[i] = iq_2[i+1]; iq_h2[i] = iq_h2[i+1]; iq_o2[i] = iq_o2[i+1]; iq_x2[i] = iq_x2[i+1]; iq_t2[i] = iq_t2[i+1]; end
                     iq_n--;
                     if (dut.fb_push) begin
                         pq_h[pq_n] = c_h; pq_o[pq_n] = c_o; pq_x[pq_n] = c_x; pq_t[pq_n] = c_t; pq_n++;
+                    end
+                    if (FETCH16 && dut.fb_push && (dut.fb_push2 !== c_2)) begin
+                        hint_errs++; $display("HINT: the upper dword pushed %b, expected %b", dut.fb_push2, c_2);
+                    end
+                    if (dut.fb_push2) begin
+                        pq_h[pq_n] = c_h2; pq_o[pq_n] = c_o2; pq_x[pq_n] = c_x2; pq_t[pq_n] = c_t2; pq_n++;
                     end
                 end
             end
             // a request issues
             if (dut.can_issue) begin
-                iq_h[iq_n] = btb_hit; iq_o[iq_n] = btb_off; iq_x[iq_n] = btb_x; iq_t[iq_n] = btb_tgt; iq_n++;
+                iq_h[iq_n] = btb_hit; iq_o[iq_n] = btb_off; iq_x[iq_n] = btb_x; iq_t[iq_n] = btb_tgt;
+                iq_2[iq_n] = FETCH16 && !dut.issue_pc[3] && !btb_hit;
+                iq_h2[iq_n] = btb2_hit; iq_o2[iq_n] = btb2_off; iq_x2[iq_n] = btb2_x; iq_t2[iq_n] = btb2_tgt;
+                if (FETCH16 && btb2_pc !== {dut.issue_pc[63:4], 4'b1000}) begin
+                    hint_errs++; $display("HINT: second lookup at %h for a request at %h", btb2_pc, dut.issue_pc);
+                end
+                iq_n++;
                 if (dut.req_valid_q && !dut.resp && !dut.drop) begin hint_errs++; $display("HINT: two requests outstanding"); end
             end
             // the buffer: a redirect empties it; a pop hands out the oldest
@@ -176,7 +218,9 @@ module qv_fetch_stream_tb #(
     endfunction
 
     task automatic respond(input logic [31:0] a);
-        if (a < MEM_WORDS * 8 || (a >= 32'h1000_0000 && a < 32'h1000_0000 + MEM_WORDS * 8)) begin ack <= 1'b1; dat <= mem_word(a); end
+        if (a < MEM_WORDS * 8 || (a >= 32'h1000_0000 && a < 32'h1000_0000 + MEM_WORDS * 8)) begin
+            ack <= 1'b1; dat <= mem_word(a); dat_hi <= mem_word(a | 32'h8);
+        end
         else                   begin err <= 1'b1; end
     endtask
 
@@ -214,6 +258,9 @@ module qv_fetch_stream_tb #(
                 proto_errs++; $display("PROTO: request shown in an answer's cycle with translation on at t=%0t", $time);
             end
             if (idle && cyc) begin proto_errs++; $display("PROTO: idle with cyc at t=%0t", $time); end
+            if (FETCH16 && cyc && addr[3:0] != 4'h0) begin
+                proto_errs++; $display("PROTO: request not 16-byte aligned (%h) at t=%0t", addr, $time);
+            end
             if (p_hold_idle && cyc) begin proto_errs++; $display("PROTO: a request started under hold at t=%0t", $time); end
         end
         p_cyc       = cyc && !rst;
@@ -243,8 +290,11 @@ module qv_fetch_stream_tb #(
             if (buf_xl && !buf_err && buf_pg !== buf_pc[55:12] + 44'h10000) begin
                 sb_errs++; $display("SCOREBOARD: pc %h translated to page %h at t=%0t", buf_pc, buf_pg, $time);
             end
-            if (buf_err && buf_cause !== 4'd1 && buf_cause !== 4'd12) begin
-                sb_errs++; $display("SCOREBOARD: pc %h fault cause %0d at t=%0t", buf_pc, buf_cause, $time);
+            // a fault is cause 1 or 12; without REUSE, exactly a translated request's page fault (12: every translated
+            // request is translated, and translated fetch never errs on the bus here) or an untranslated one's bus
+            // error (1). (REUSE: a request in the kept page asks no translation, so beyond the memory it errs on the bus.)
+            if (buf_err && (REUSE ? (buf_cause !== 4'd1 && buf_cause !== 4'd12) : (buf_cause !== (buf_xl ? 4'd12 : 4'd1)))) begin
+                sb_errs++; $display("SCOREBOARD: pc %h fault cause %0d (xl %b) at t=%0t", buf_pc, buf_cause, buf_xl, $time);
             end
             if (buf_hint) exp_pc <= buf_htgt;
             else          exp_pc <= {exp_pc[63:3], 3'b000} + 64'd8;
@@ -317,9 +367,11 @@ module qv_fetch_stream_tb #(
         rate_run(0, 1'b0, 1'b0, r0);
         check("zero-wait slave: streaming rate is well over one dword per two cycles", 64'(r0 > 75), 64'd1);
         rate_run(0, 1'b1, 1'b0, r1);
-        check("slave ignoring the streamed request: about one dword per two cycles", 64'(r1 > 25 && r1 < 55), 64'd1);
+        if (FETCH16) check("FETCH16, slave ignoring the streamed request: a block per two cycles keeps up", 64'(r1 > 75), 64'd1);
+        else check("slave ignoring the streamed request: about one dword per two cycles", 64'(r1 > 25 && r1 < 55), 64'd1);
         rate_run(0, 1'b0, 1'b1, r2);
-        check("yield held high: about one dword per two cycles", 64'(r2 > 25 && r2 < 55), 64'd1);
+        if (FETCH16) check("FETCH16, yield held high: a block per two cycles keeps up", 64'(r2 > 75), 64'd1);
+        else check("yield held high: about one dword per two cycles", 64'(r2 > 25 && r2 < 55), 64'd1);
         $display("qv_fetch_stream_tb: dwords per 100 cycles: stream %0d, swallowing slave %0d, yielding %0d", r0, r1, r2);
         if (REUSE) begin
             rate_run(0, 1'b0, 1'b0, r2, 1'b1);
@@ -327,7 +379,8 @@ module qv_fetch_stream_tb #(
             $display("qv_fetch_stream_tb: translated, one page: %0d dwords per 100 cycles", r2);
         end else begin
             rate_run(0, 1'b0, 1'b0, r2, 1'b1);
-            check("translated (no page reuse): at most one dword per three cycles", 64'(r2 < 40), 64'd1);
+            if (FETCH16) check("FETCH16, translated (no page reuse): at most two dwords per three cycles", 64'(r2 < 70), 64'd1);
+            else check("translated (no page reuse): at most one dword per three cycles", 64'(r2 < 40), 64'd1);
         end
         check("rate runs: protocol", 64'(proto_errs), 64'd0);
         check("rate runs: scoreboard", 64'(sb_errs), 64'd0);

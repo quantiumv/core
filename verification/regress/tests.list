@@ -51,6 +51,7 @@ design_divider_tb|design/divider_tb.sv||design|pipe|pass|
 design_divider_kill_tb|design/divider_kill_tb.sv||design|pipe|pass|
 design_icache_random_tb|design/icache_random_tb.sv||design|ref,pipe|pass|
 design_icache_tb|design/icache_tb.sv||design|ref,pipe|pass|
+design_icache_random_pair_tb|design/icache_random_tb.sv||design|ref,pipe|pass||-Picache_random_tb.PAIR=1
 design_plic_tb|design/plic_tb.sv||design|ref,pipe|pass|
 design_register_file_tb|design/register_file_tb.sv||design|pipe|pass|
 design_uart16550_tb|design/uart16550_tb.sv||design|ref,pipe|pass|
@@ -143,10 +144,13 @@ tb_core_trigger_tb|testbench/core_trigger_tb.sv|testbench/dm_core_harness.sv|des
 # === design/pipe/*_tb.sv (modules of the pipelined core) ===
 # Module-level tests; the pipe file list compiles every module they use.
 pipe_fetch_tb|design/pipe/qv_fetch_tb.sv||design|pipe|pass|
+pipe_fetch16_tb|design/pipe/qv_fetch_tb.sv||design|pipe|pass||-Pqv_fetch_tb.FETCH16=1
 pipe_fetch_xl_tb|design/pipe/qv_fetch_xl_tb.sv||design|pipe|pass|
 pipe_fetch_stream_tb|design/pipe/qv_fetch_stream_tb.sv||design|pipe|pass|
 pipe_fetch_xl_reuse_tb|design/pipe/qv_fetch_xl_tb.sv||design|pipe|pass||-Pqv_fetch_xl_tb.REUSE=1
 pipe_fetch_stream_reuse_tb|design/pipe/qv_fetch_stream_tb.sv||design|pipe|pass||-Pqv_fetch_stream_tb.REUSE=1
+pipe_fetch16_stream_tb|design/pipe/qv_fetch_stream_tb.sv||design|pipe|pass||-Pqv_fetch_stream_tb.FETCH16=1
+pipe_fetch16_stream_reuse_tb|design/pipe/qv_fetch_stream_tb.sv||design|pipe|pass||-Pqv_fetch_stream_tb.REUSE=1 -Pqv_fetch_stream_tb.FETCH16=1
 pipe_align_fifo_tb|design/pipe/qv_align_fifo_tb.sv||design|pipe|pass|600
 pipe_align_fifo_one_tb|design/pipe/qv_align_fifo_tb.sv||design|pipe|pass|600|-Pqv_align_fifo_tb.ONE_OK=1
 pipe_align_fifo_win_tb|design/pipe/qv_align_fifo_tb.sv||design|pipe|pass|600|-Pqv_align_fifo_tb.WIN=1

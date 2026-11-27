@@ -948,6 +948,101 @@ def emit_win(p: Program, recent: list[int]):
     del recent[:-8]
 
 
+def emit_win16(p: Program, recent: list[int]):
+    """--win16: what 16-byte fetch (W3b) has to get right. Code placed at a chosen halfword of a 16-byte block
+    (`.balign 16`, then 0-7 c.nops): a mix of 16- and 32-bit instructions from each start, so a 32-bit one crosses the
+    block's middle from halfword 3 and the next block from halfword 7; a jump or branch to each halfword of a block (a
+    target in the upper dword is a request that answers one entry); a taken 32-bit branch or jump crossing the middle
+    (filed under the upper dword, where the second BTB lookup finds it) or into the next block; two branches in one
+    block, one in each dword; a short loop whose top and backward branch land at each offset, so it sits in one block
+    or spans a boundary (sieve's shape: the top in an upper dword, the branch crossing into the next dword)."""
+    if "c" not in p.args.isa:
+        emit_alu(p, recent)
+        return
+
+    def pad(k=None):
+        p.e("    .balign 16")
+        for _ in range(p.rng.randint(0, 7) if k is None else k):
+            p.e("    .half   0x0001")                             # c.nop
+
+    def nops(k):
+        for _ in range(k):
+            p.e("    .half   0x0001")
+
+    def w32(line):
+        p.e("    .option push")
+        p.e("    .option norvc")
+        p.e(line)
+        p.e("    .option pop")
+
+    def op():
+        rd = p.reg()
+        if p.rng.random() < 0.5:
+            w32(f"    {p.rng.choice(['add', 'sub', 'xor', 'or', 'and', 'addw']):<7} x{rd}, x{p.reg_biased(recent)}, "
+                f"x{p.reg_biased(recent)}")
+        else:
+            p.e(f"    addi    x{rd}, x{rd}, {p.rng.choice([i for i in range(-32, 32) if i])}")   # c.addi
+        recent.append(rd)
+
+    def mix(lo, hi):
+        for _ in range(p.rng.randint(lo, hi)):
+            op()
+
+    k = p.rng.random()
+    if k < 0.25:                                                   # a mix from each start halfword of a block
+        pad()
+        mix(3, 9)
+    elif k < 0.45:                                                 # a jump or a branch to each halfword of a block
+        lbl = Label("w16")
+        r = p.reg_biased(recent)
+        br = p.rng.choice([f"    j       {lbl}", f"    beqz    x{r}, {lbl}", f"    bnez    x{r}, {lbl}"])
+        pad()
+        if p.rng.random() < 0.4:
+            w32(br)
+        else:
+            p.e(br)
+        mix(0, 3)
+        pad()
+        p.e(f"{lbl}:")
+        mix(1, 3)
+    elif k < 0.60:                                                 # a taken 32-bit branch or jump crossing a dword
+        lbl = Label("w16")
+        pad(p.rng.choice([3, 7]))                                  # the block's middle, or into the next block
+        w32(p.rng.choice([f"    beq     x0, x0, {lbl}", f"    bgeu    x0, x0, {lbl}", f"    jal     x0, {lbl}"]))
+        mix(0, 3)
+        pad()
+        p.e(f"{lbl}:")
+        mix(1, 2)
+    elif k < 0.75:                                                 # two branches in one block, one in each dword
+        l1, l2 = Label("w16"), Label("w16")
+        k1 = p.rng.randint(0, 2)
+        pad(k1)
+        p.e(f"    beqz    x{p.rng.choice([13, 14, 15])}, {l1}")   # c.beqz / c.bnez: x8-x15 only
+        nops(3 - k1 + p.rng.randint(0, 3))                          # to a halfword of the upper dword
+        p.e(f"    bnez    x{p.rng.choice([13, 14, 15])}, {l2}")
+        mix(0, 2)
+        p.e(f"{l1}:")
+        mix(0, 2)
+        p.e(f"{l2}:")
+        mix(1, 2)
+    else:                                                          # a short loop, its top and its branch at each offset
+        if p.loop_nesting >= p.args.max_loop_nesting:
+            pad()
+            mix(2, 5)
+        else:
+            counter = 28 + p.loop_nesting
+            top = Label("loop")
+            p.li(counter, p.rng.randint(2, 6))
+            pad()
+            p.e(f"{top}:")
+            p.loop_nesting += 1
+            mix(1, 5)
+            p.loop_nesting -= 1
+            p.e(f"    addi    x{counter}, x{counter}, -1")
+            p.e(f"    bnez    x{counter}, {top}")
+    del recent[:-8]
+
+
 def emit_pair(p: Program, recent: list[int]):
     """--pair: what a core that dispatches, executes and retires two a cycle (O4) has to get right. Runs of independent
     ALU ops (both slots, both ALU ports, commit pairs); a pair whose second reads the first's destination (it waits
@@ -2868,6 +2963,9 @@ def emit_main_body(p: Program):
         if getattr(a, "win", False) and p.rng.random() < 0.20:
             emit_win(p, recent)
             return
+        if getattr(a, "win16", False) and p.rng.random() < 0.20:
+            emit_win16(p, recent)
+            return
         if getattr(a, "mem_dense", False) and p.rng.random() < 0.30:
             emit_mem_pair(p, recent)
             return
@@ -3102,6 +3200,10 @@ def main():
                     help="a fifth of the instructions are placed at chosen halfwords: 32-bit ones crossing dwords, "
                          "branch targets at every offset, two branches in a dword (see emit_win): for the window "
                          "aligner (O8b)")
+    ap.add_argument("--win16", action="store_true",
+                    help="a fifth of the instructions are placed at chosen halfwords of 16-byte blocks: crossings of "
+                         "the block's middle and of its end, branch targets at every halfword, two branches in a "
+                         "block, loops across a block boundary (see emit_win16): for 16-byte fetch (W3b)")
     ap.add_argument("--no-div", action="store_true", dest="no_div",
                     help="keep M to the multiplies (for cores without a divider yet)")
     ap.add_argument("--no-dev-read", action="store_true", dest="no_dev_read",

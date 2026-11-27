@@ -12,6 +12,9 @@
  *
  * Random: updates and lookups at random against a model that keeps one record per index.
  *
+ * Port 2 (W3b): every lookup also looks up the other dword of the 16-byte block (pc ^ 8) on the second port, at the
+ * same time, against the same model.
+ *
  * CTR (O8c; tests.list runs both): the entry's direction counter. Directed: a conditional branch allocated by a taken
  * update steers at 2, a fall-through counts it down and keeps the entry (it stops steering below 2), a taken update
  * of the same branch counts it up to 3 and the counter saturates both ways; a jump's entry steers whatever its counter
@@ -36,12 +39,17 @@ module qv_btb_tb #(
     logic        hit, x;
     logic [1:0]  off;
     logic [63:0] tgt;
+    logic [63:0] lk2_pc = '0;
+    logic        hit2, x2;
+    logic [1:0]  off2;
+    logic [63:0] tgt2;
     logic        upd_valid = 1'b0, upd_taken = 1'b0, upd_cross = 1'b0, upd_cond = 1'b1;
     logic [63:0] upd_pc = '0, upd_tgt = '0;
 
     qv_btb #(.ENTRIES(ENTRIES), .CTR(CTR)) dut (
         .clk(clk), .rst(rst),
         .i_lk_pc(lk_pc), .o_hit(hit), .o_off(off), .o_x(x), .o_tgt(tgt),
+        .i_lk2_pc(lk2_pc), .o_hit2(hit2), .o_off2(off2), .o_x2(x2), .o_tgt2(tgt2),
         .i_upd_valid(upd_valid), .i_upd_pc(upd_pc), .i_upd_taken(upd_taken), .i_upd_cross(upd_cross), .i_upd_tgt(upd_tgt),
         .i_upd_cond(upd_cond)
     );
@@ -85,8 +93,10 @@ module qv_btb_tb #(
     endfunction
 
     task automatic check_lookup(input string name, input logic [63:0] pc);
-        int idx;
-        lk_pc = pc;
+        int idx, idx2;
+        logic [63:0] pc2;
+        pc2 = pc ^ 64'h8;
+        lk_pc = pc; lk2_pc = pc2;
         #1;
         idx = int'(pc[3 +: $clog2(ENTRIES)]);
         check({name, ": hit"}, {63'b0, hit}, {63'b0, m_hit(pc)});
@@ -94,6 +104,13 @@ module qv_btb_tb #(
             check({name, ": halfword"}, {62'b0, off}, {62'b0, m_off[idx]});
             check({name, ": crossing flag"}, {63'b0, x}, {63'b0, m_x[idx]});
             check({name, ": target"}, tgt, m_tgt[idx]);
+        end
+        idx2 = int'(pc2[3 +: $clog2(ENTRIES)]);
+        check({name, ": port 2 hit"}, {63'b0, hit2}, {63'b0, m_hit(pc2)});
+        if (m_hit(pc2)) begin
+            check({name, ": port 2 halfword"}, {62'b0, off2}, {62'b0, m_off[idx2]});
+            check({name, ": port 2 crossing flag"}, {63'b0, x2}, {63'b0, m_x[idx2]});
+            check({name, ": port 2 target"}, tgt2, m_tgt[idx2]);
         end
     endtask
 

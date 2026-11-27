@@ -15,8 +15,18 @@
  *     cyc&&stb stay high -- wb4_sram does -- never produces a ghost ack);
  *   - once cyc is high, it stays high with the same address until the
  *     response arrives (a request is never abandoned or moved).
+ *
+ * FETCH16 (W3b; tests.list runs both): the slave answers a 16-byte block
+ * with both dwords, the fetch buffer is 4 deep and the BTB is on, driven
+ * by a one-branch model. The same tests hold, plus: requests are 16-byte
+ * aligned; a block answer fills two entries; a start in the upper dword
+ * pushes that one alone; a taken branch in the lower dword ends the block
+ * there, one in the upper dword (the second lookup) after it; an error
+ * answer is two fault entries.
  */
-module qv_fetch_tb;
+module qv_fetch_tb #(
+    parameter bit FETCH16 = 1'b0
+);
     int   pass_count = 0;
     int   fail_count = 0;
     logic quiet_on_pass = 1'b1;
@@ -38,15 +48,30 @@ module qv_fetch_tb;
     wire         buf_pop = pop_en && buf_valid;
     logic        hold = 1'b0;
     logic        idle;
+    logic [63:0] dat_hi;
+    logic        buf_hint;
+    logic [1:0]  buf_hoff;
+    logic [63:0] buf_htgt;
 
-    qv_fetch dut (
+    // (FETCH16) the BTB: one taken branch at br_pc going to br_tgt, found by either lookup as qv_btb finds it
+    logic        br_on = 1'b0;
+    logic [63:0] br_pc = '0, br_tgt = '0;
+    logic [63:0] btb_pc, btb2_pc;
+    wire btb_hit  = br_on && btb_pc[63:3] == br_pc[63:3] && br_pc[2:1] >= btb_pc[2:1];
+    wire btb2_hit = br_on && btb2_pc[63:3] == br_pc[63:3];
+
+    localparam int FBD = FETCH16 ? 4 : 2;
+    qv_fetch #(.FB_DEPTH(FBD), .BTB_EN(FETCH16), .FETCH16(FETCH16)) dut (
         .clk(clk), .rst(rst),
         .wb_fetch_addr_o(addr), .wb_fetch_cyc_o(cyc), .wb_fetch_stb_o(stb),
-        .wb_fetch_dat_i(dat), .wb_fetch_ack_i(ack), .wb_fetch_err_i(err),
+        .wb_fetch_dat_i(dat), .wb_fetch_dat_hi_i(dat_hi), .wb_fetch_ack_i(ack), .wb_fetch_err_i(err),
         .i_redirect_valid(redirect_valid), .i_redirect_pc(redirect_pc),
         .i_hold(hold), .o_idle(idle),
+        .o_btb_pc(btb_pc), .i_btb_hit(btb_hit), .i_btb_off(br_pc[2:1]), .i_btb_x(1'b0), .i_btb_tgt(br_tgt),
+        .o_btb2_pc(btb2_pc), .i_btb2_hit(btb2_hit), .i_btb2_off(br_pc[2:1]), .i_btb2_x(1'b0), .i_btb2_tgt(br_tgt),
         .o_buf_valid(buf_valid), .o_buf_pc(buf_pc), .o_buf_data(buf_data),
-        .o_buf_err(buf_err), .i_buf_pop(buf_pop)
+        .o_buf_err(buf_err), .i_buf_pop(buf_pop),
+        .o_buf_hint(buf_hint), .o_buf_hoff(buf_hoff), .o_buf_htgt(buf_htgt)
     );
 
     // ---------------- behavioral slave ----------------
@@ -66,6 +91,7 @@ module qv_fetch_tb;
                 if (addr < MEM_WORDS * 8) begin
                     ack <= 1'b1;
                     dat <= mem[addr[31:3]];
+                    dat_hi <= mem[addr[31:3] | 29'd1];
                 end else begin
                     err <= 1'b1;
                 end
@@ -79,6 +105,9 @@ module qv_fetch_tb;
     logic        prev_cyc = 1'b0;
     logic [31:0] prev_addr;
     int          proto_errs = 0;
+    localparam int CNT_W = $clog2(FBD + 1);
+    int          pairs = 0;     // (FETCH16) answers that filled two entries
+    always @(posedge clk) if (!rst && dut.fb_push2) pairs++;
     always @(negedge clk) begin
         if (!rst) begin
             if ((ack || err) && cyc) begin
@@ -90,6 +119,14 @@ module qv_fetch_tb;
                 $display("PROTO: request abandoned or moved before its response at t=%0t (cyc=%b addr=%h prev=%h)",
                          $time, cyc, addr, prev_addr);
             end
+            if (FETCH16 && cyc && addr[3:0] != 4'h0) begin
+                proto_errs++;
+                $display("PROTO: FETCH16 request not 16-byte aligned at t=%0t (addr=%h)", $time, addr);
+            end
+            if (dut.fb_count_q > CNT_W'(FBD)) begin
+                proto_errs++;
+                $display("PROTO: fetch buffer over-full at t=%0t", $time);
+            end
         end
         prev_cyc  = cyc && !rst;
         prev_addr = addr;
@@ -100,12 +137,18 @@ module qv_fetch_tb;
     logic [63:0] log_pc   [0:LOG_MAX-1];
     logic [63:0] log_data [0:LOG_MAX-1];
     logic        log_err  [0:LOG_MAX-1];
+    logic        log_hint [0:LOG_MAX-1];
+    logic [1:0]  log_hoff [0:LOG_MAX-1];
+    logic [63:0] log_htgt [0:LOG_MAX-1];
     int          log_n = 0;
     always @(posedge clk) begin
         if (!rst && buf_pop && !redirect_valid && log_n < LOG_MAX) begin
             log_pc[log_n]   <= buf_pc;
             log_data[log_n] <= buf_data;
             log_err[log_n]  <= buf_err;
+            log_hint[log_n] <= buf_hint;
+            log_hoff[log_n] <= buf_hoff;
+            log_htgt[log_n] <= buf_htgt;
             log_n           <= log_n + 1;
         end
     end
@@ -335,6 +378,60 @@ module qv_fetch_tb;
         check("T7: out-of-range pc", log_pc[1], 64'h200);
         check("T7: out-of-range marked err", {63'b0, log_err[1]}, 64'd1);
         check("T7: fetch continues after an error", log_pc[2], 64'h208);
+        // (FETCH16: an error answer is two fault entries)
+        check("T7: the next dword is beyond the memory too", {63'b0, log_err[2]}, 64'd1);
+
+        if (FETCH16) begin
+            // ---- T10: a start in the upper dword pushes that one alone ----
+            do_reset();
+            repeat (30) @(posedge clk);
+            pulse_redirect(64'h4A);
+            @(negedge clk);
+            check("T10: the block's address", {32'b0, addr}, 64'h40);
+            pop_en = 1'b1;
+            wait_log(3, 200);
+            check("T10: first pc keeps the low bits", log_pc[0], 64'h4A);
+            check("T10: first data is the upper dword", log_data[0], mem[9]);
+            check_seq("T10 (the blocks after it)", 1, 2, 64'h50);
+
+            // ---- T11: a block answer fills two entries ----
+            do_reset();
+            pairs = 0;
+            pop_en = 1'b1;
+            wait_log(8, 200);
+            check_seq("T11", 0, 8, 64'h0);
+            check("T11: answers filled two entries", 64'(pairs >= 3), 64'd1);
+
+            // ---- T12: a taken branch in the lower dword ends the block there ----
+            do_reset();
+            br_on = 1'b1; br_pc = 64'h64; br_tgt = 64'h100;
+            repeat (30) @(posedge clk);
+            pulse_redirect(64'h60);
+            pop_en = 1'b1;
+            wait_log(3, 200);
+            check("T12: the branch's dword", log_pc[0], 64'h60);
+            check("T12: ... with the hint", {63'b0, log_hint[0]}, 64'd1);
+            check("T12: ... at halfword 2", {62'b0, log_hoff[0]}, 64'd2);
+            check("T12: ... to the target", log_htgt[0], 64'h100);
+            check_seq("T12 (the target, not the upper dword)", 1, 2, 64'h100);
+
+            // ---- T13: a taken branch in the upper dword: both pushed, the hint on the upper one ----
+            do_reset();
+            br_on = 1'b1; br_pc = 64'h6A; br_tgt = 64'h140;
+            repeat (30) @(posedge clk);
+            pulse_redirect(64'h60);
+            pop_en = 1'b1;
+            wait_log(4, 200);
+            check("T13: the lower dword", log_pc[0], 64'h60);
+            check("T13: ... no hint", {63'b0, log_hint[0]}, 64'd0);
+            check("T13: the upper dword", log_pc[1], 64'h68);
+            check("T13: ... its data", log_data[1], mem[13]);
+            check("T13: ... with the hint", {63'b0, log_hint[1]}, 64'd1);
+            check("T13: ... at halfword 1", {62'b0, log_hoff[1]}, 64'd1);
+            check("T13: ... to the target", log_htgt[1], 64'h140);
+            check_seq("T13 (the target)", 2, 2, 64'h140);
+            br_on = 1'b0;
+        end
 
         check("protocol monitor: no violations across all tests", 64'(proto_errs), 64'd0);
 
