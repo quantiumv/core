@@ -187,9 +187,9 @@ OX_KEYS="s1_retire s1_idle s1_none s1_wait_lsu s1_wait_div s1_wait_fpu s1_wait_a
 OX_KEYS="$OX_KEYS dc_miss dc_cyc ic_miss ic_cyc xr_n xr_killed xr_head xr_save mp_commit ear_mp_x"
 OX_KEYS="$OX_KEYS rob_occ rob_max rs_occ rs_max rob_one is_lsq"
 # the three-wide track's counters (W3), a file of their own again: the store buffer's beats, and those presented in
-# the previous beat's response cycle (W3a)
+# the previous beat's response cycle (W3a); fetch's answers into the buffer, and those that filled two entries (W3b)
 W3_CSV="${STACK_CSV%_stack.csv}_w3.csv"
-W3_KEYS="sb_beats sb_b2b"
+W3_KEYS="sb_beats sb_b2b fb_resp fb_pairs"
 if [ "$CORE" == "pipe" ] && [ "$ORACLE" != "store" ]; then
     echo "kernel,config,$(echo $STACK_KEYS $SIDE_KEYS | tr ' ' ',')" > "$STACK_CSV"
     echo "kernel,config,$(echo $LSQ_KEYS | tr ' ' ',')" > "$LSQ_CSV"
