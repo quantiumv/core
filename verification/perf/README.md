@@ -1039,8 +1039,55 @@ slower.
 - **W3f** is the width.
 - **W3e** alone is worth 0.3 (trap), but three dispatches need three commits.
 - **The third ALU port (W3g) is worth 0.25 points** (qsort 1.9 / 1.4), under the 1 point a rung needs (W3). It costs
-  the station an eighth bus and the ROB a seventh write port, so whether it is built is a question for the user before
-  W3f.
+  the station an eighth bus and the ROB a seventh write port. The user chose on 2026-11-26 to keep it in the plan.
+
+### W3a: a drain beat a cycle (measured)
+
+With `QV_PIPE_SB_PIPE=1` the store buffer presents its next beat in the previous one's response cycle
+(`qv_sb.sv`). The SoC's arbiter forwards it then (`wb_arbiter2`'s `PIPE_M0`), and drops a request in a response cycle
+only for the Debug Module's SBA, which holds its request. The knob is off until the flip (W3h).
+
+With the knob off, all eight CSVs are byte-identical to the committed ones. Knob on, against them (`_w3.csv`:
+`sb_beats` are the buffer's beats in the window, `sb_b2b` those presented in a response cycle, SoC, M mode):
+
+| kernel | M SoC | S SoC | M flat SRAM | S flat SRAM | sb_b2b / sb_beats |
+|---|---|---|---|---|---|
+| memcpy | 484 -> 478 (-1.2 %) | 486 -> 480 (-1.2 %) | -0.8 % | -1.1 % | 19 / 128 |
+| crc32 | +0.0 % | +0.0 % | +0.0 % | +0.1 % | 0 / 0 |
+| qsort | -0.0 % | -0.1 % | -3.2 % | -3.3 % | 192 / 330 |
+| matmul | +0.0 % | +0.0 % | +0.0 % | +0.0 % | 0 / 64 |
+| sieve | +0.0 % | -0.0 % | -5.6 % | +4.6 % | 0 / 1409 |
+| listchase | +0.0 % | +0.0 % | +0.0 % | -0.1 % | 0 / 0 |
+| mixedint | +0.0 % | +0.0 % | +1.3 % | -2.4 % | 60 / 720 |
+| trap | 8036 -> 7833 (-2.5 %) | 8644 -> 8441 (-2.3 %) | -2.5 % | -2.4 % | 1000 / 1200 |
+| fmatmul | +0.0 % | +0.0 % | +0.0 % | +0.0 % | 0 / 64 |
+| fpmix | +0.0 % | +0.0 % | +0.0 % | +0.0 % | 1 / 2 |
+| geomean | -0.38 % | -0.38 % | -1.11 % | -0.48 % | |
+
+- **D8 holds.** The model said -0.5 / -0.5 (W3.0), and no SoC kernel is slower.
+- **trap is the prediction exactly** (-2.5 / -2.3): its handler's saves leave in back-to-back beats.
+- **memcpy gets half** (-1.2 against -2.5): only 19 of its 128 beats find the next store already in the buffer in
+  the response cycle.
+- **On the flat SRAM, fetch shares the one memory, and back-to-back beats hold it longer:** sieve S +4.6 %, mixedint
+  M +1.3 %. That harness is not gated; the SoC decides, as for the station and O4.
+
+**The gate:**
+- Regress: 240 / 240, knob off and on.
+- Lint clean.
+- `sb_props`: prove, bmc and cover, also at `PIPE` (a beat in a response cycle is the next entry, and is decided in
+  it).
+- `qv_sb_tb` at `PIPE` (no gap between back-to-back beats; `o_resp_*` name the answered entry).
+- Mutants:
+  - `run.sh`'s store-buffer mutants re-anchored, and two new ones at `PIPE`, all caught. A third, a next beat that
+    ignores the drain's holds, is equivalent at the proof's depth of 2, so it is in `w3a_unit_sb.json` instead,
+    which kills 5 of 5.
+  - `p9d_unit_sb` 24 / 24 and `o4f_unit_sb` 3 / 3.
+- Lockstep, knob on:
+  - 200 programs each at delay 0 and 8 in the new `--memcfg-b soc` configuration (the cache topology with the bus D$
+    off, as `soc.sv`);
+  - 100 each in the flat configuration (its arbiter's `PIPE_M1`), all passing;
+  - back-to-back stores at every delay, counted by `lockstep_mem` (883,768 / 1,432,238 and 487,041 / 543,734);
+  - with the knob off, 60 each in `soc` at delay 0 and `cache` at delay 8 pass, with none.
 
 ## CPI stack
 
