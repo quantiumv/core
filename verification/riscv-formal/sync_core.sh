@@ -1,5 +1,5 @@
 #!/bin/bash
-# sync_core.sh ref|pipe|pipe-rs0|pipe-full|pipe-amo|pipe-sv39|pipe-sb -- copy a core's RTL, the shared
+# sync_core.sh ref|pipe|pipe-rs0|pipe-full|pipe-amo|pipe-sv39|pipe-sb|pipe-dc|pipe-fpu|pipe-w2 -- copy a core's RTL, the shared
 # wrapper and its checks.cfg into the riscv-formal checkout and regenerate its
 # checks. Run under WSL. The checkout defaults to ~/riscv-formal (override
 # with RVFORMAL=...); it carries this repo's local patches, see
@@ -35,6 +35,10 @@
 #   pipe-amo  -> $RVFORMAL/cores/quantiumv_pipe_amo: isa rv64ia, for the 18
 #                AMO checks (needs the patch and isa_rv64ia.txt from
 #                quantiumv/README.md in the riscv-formal checkout)
+#   pipe-w2   -> $RVFORMAL/cores/quantiumv_pipe_w2: two retirement channels (O4), with its own checks.cfg
+#
+# A model's folder is quantiumv_ and its name with - as _ (quantiumv for ref); run_sweep.sh and sweep_status.sh
+# name it the same way. Its checks.cfg comes from quantiumv_pipe/ but for pipe-amo and pipe-w2 (their own folders).
 #
 # QV_FORMAL_DEFS="A=1 ..." adds defines to a pipe model's build (e.g. a knob that is off by default).
 #
@@ -44,7 +48,6 @@ cd "$(dirname "$0")/../.."
 REPO=$(pwd)
 RVFORMAL=${RVFORMAL:-$HOME/riscv-formal}
 
-SUFFIX=""
 REF=""
 case "${1:-}" in
     ref)
@@ -53,21 +56,15 @@ case "${1:-}" in
         # the reference's own files (ref_design_files.list) and its macros header, flat in design/ (the cfg lists them)
         FILES="$(grep -E '^verification/reference/' verification/regress/ref_design_files.list) verification/reference/ref_macros.svh" ;;
     pipe|pipe-rs0|pipe-full|pipe-amo|pipe-sv39|pipe-sb|pipe-dc|pipe-fpu|pipe-w2)
-        NAME=quantiumv_pipe
-        [ "$1" == "pipe-rs0" ] && SUFFIX=_rs0
-        [ "$1" == "pipe-full" ] && SUFFIX=_full
-        [ "$1" == "pipe-sb" ] && SUFFIX=_sb
-        [ "$1" == "pipe-dc" ] && SUFFIX=_dc
-        [ "$1" == "pipe-sv39" ] && SUFFIX=_sv39
-        [ "$1" == "pipe-fpu" ] && SUFFIX=_fpu
-        [ "$1" == "pipe-amo" ] && NAME=quantiumv_pipe_amo
-        [ "$1" == "pipe-w2" ] && NAME=quantiumv_pipe_w2        # two retirement channels (O4), its own checks.cfg
+        NAME=quantiumv_pipe                                   # where checks.cfg comes from
+        case "$1" in pipe-amo|pipe-w2) NAME=quantiumv_${1//-/_} ;; esac
         FILES=$(grep -E '^design/(pipe/|decoder\.sv|alu\.sv|c_expand\.sv|csr_file\.sv|register_file\.sv|divider\.sv)' \
                     verification/regress/design_files.list) ;;
     *) echo "usage: sync_core.sh ref|pipe|pipe-rs0|pipe-full|pipe-amo|pipe-sv39|pipe-sb|pipe-dc|pipe-fpu|pipe-w2" >&2; exit 2 ;;
 esac
+if [ -n "$REF" ]; then MODEL=quantiumv; else MODEL=quantiumv_${1//-/_}; fi
 
-DST="$RVFORMAL/cores/$NAME$SUFFIX"
+DST="$RVFORMAL/cores/$MODEL"
 rm -rf "$DST/design" "$DST/checks"
 mkdir -p "$DST/design/pipe"
 for f in $FILES; do
@@ -103,4 +100,4 @@ if [ -z "$REF" ]; then
     sed -i "s#@PIPE_RTL@#${RTL# }#" "$DST/checks.cfg"
 fi
 (cd "$DST" && python3 ../../checks/genchecks.py > /dev/null)
-echo "synced $NAME$SUFFIX: $(ls "$DST/checks"/*.sby | wc -l) checks in $DST/checks"
+echo "synced $MODEL:$(ls "$DST/checks"/*.sby | wc -l) checks in $DST/checks"

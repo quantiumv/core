@@ -11,18 +11,11 @@ set -u
 RVFORMAL=${RVFORMAL:-$HOME/riscv-formal}
 ONLY="."; SUMMARY=0; DETAIL=0
 case "${1:-}" in
-    ref)  NAME=quantiumv ;;
-    pipe) NAME=quantiumv_pipe ;;
-    pipe-rs0) NAME=quantiumv_pipe_rs0 ;;
-    pipe-full) NAME=quantiumv_pipe_full ;;
-    pipe-amo) NAME=quantiumv_pipe_amo ;;
-    pipe-sv39) NAME=quantiumv_pipe_sv39 ;;
-    pipe-sb) NAME=quantiumv_pipe_sb ;;
-    pipe-dc) NAME=quantiumv_pipe_dc ;;
-    pipe-fpu) NAME=quantiumv_pipe_fpu ;;
-    pipe-w2) NAME=quantiumv_pipe_w2 ;;
+    ref|pipe|pipe-rs0|pipe-full|pipe-amo|pipe-sv39|pipe-sb|pipe-dc|pipe-fpu|pipe-w2) ;;
     *) echo "usage: sweep_status.sh ref|pipe|pipe-rs0|pipe-full|pipe-amo|pipe-sv39|pipe-sb|pipe-dc|pipe-fpu|pipe-w2 [--only REGEX] [--summary] [--detail]" >&2; exit 2 ;;
 esac
+# the model's folder under cores/, as sync_core.sh names it: quantiumv for ref, else quantiumv_ and the model
+if [ "$1" == "ref" ]; then NAME=quantiumv; else NAME=quantiumv_${1//-/_}; fi
 shift
 while [ $# -gt 0 ]; do
     case "$1" in

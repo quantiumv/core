@@ -61,46 +61,38 @@ export PYTHONPATH="$HOME/yosys-py-patch${PYTHONPATH:+:$PYTHONPATH}"   # smtio.py
 fail=0
 
 status() { grep -o 'DONE ([A-Z]*' | head -1 | sed 's/DONE (//'; }
+# run_task UNIT TASK: one task of UNIT.sby, which has to PASS
+run_task() {
+    local r
+    r=$(sby -f $1.sby $2 2>&1 | status)
+    printf '%-12s %s\n' "$1 $2" "$r"
+    [ "$r" == "PASS" ] || fail=1
+}
 
 for unit in fetch lsu dbg ptw sb fpu rs rs2 kill ras align2 gh dc; do
-    for task in prove bmc cover; do
-        r=$(sby -f $unit.sby $task 2>&1 | status)
-        printf '%-12s %s\n' "$unit $task" "$r"
-        [ "$r" == "PASS" ] || fail=1
-    done
+    for task in prove bmc cover; do run_task $unit $task; done
 done
 # (O8b) the window aligner's fetch
-for task in prove_w bmc_w cover_w prove_w2; do
-    r=$(sby -f fetch.sby $task 2>&1 | status)
-    printf '%-12s %s\n' "fetch $task" "$r"
-    [ "$r" == "PASS" ] || fail=1
-done
+for task in prove_w bmc_w cover_w prove_w2; do run_task fetch $task; done
 # (W3a) the store buffer draining a beat a cycle (PIPE)
-for task in prove_p bmc_p cover_p; do
-    r=$(sby -f sb.sby $task 2>&1 | status)
-    printf '%-12s %s\n' "sb $task" "$r"
-    [ "$r" == "PASS" ] || fail=1
-done
+for task in prove_p bmc_p cover_p; do run_task sb $task; done
 # (W3b) 16-byte fetch: the core's FB_DEPTH 5, and the formal small 3
-for task in prove_16 bmc_16 cover_16 prove_16s; do
-    r=$(sby -f fetch.sby $task 2>&1 | status)
-    printf '%-12s %s
-' "fetch $task" "$r"
-    [ "$r" == "PASS" ] || fail=1
-done
+for task in prove_16 bmc_16 cover_16 prove_16s; do run_task fetch $task; done
 # (O5a) the D$ at 4 lines x 4 dwords: bounded
-r=$(sby -f dc.sby bmc4 2>&1 | status)
-printf '%-12s %s\n' "dc bmc4" "$r"
-[ "$r" == "PASS" ] || fail=1
+run_task dc bmc4
 # the load/store queue with the engine (lsq.sby): bounded only, no k-induction (see lsq_props.sv)
-for task in bmc cover opw opw_cover; do
-    r=$(sby -f lsq.sby $task 2>&1 | status)
-    printf '%-12s %s\n' "lsq $task" "$r"
-    [ "$r" == "PASS" ] || fail=1
-done
+for task in bmc cover opw opw_cover; do run_task lsq $task; done
 
 if [ "${1:-}" == "--mutants" ]; then
     T=$(mktemp -d)
+    # report NAME STATUS: a mutant is caught when its proof fails
+    report() {
+        if [ "$2" == "FAIL" ]; then
+            printf '%-30s %s\n' "mutant $1" "caught"
+        else
+            printf '%-30s %s\n' "mutant $1" "NOT CAUGHT ($2)"; fail=1
+        fi
+    }
     # mutant NAME UNIT (SED-EXPR | FILE) [PROPS-DEFINES]
     mutant() {
         local name=$1 unit=$2 src=$3 defs=${4:-}
@@ -132,13 +124,22 @@ qv_pte.sv
 qv_$unit.sv
 ${unit}_props.sv
 EOF
-        local r
-        r=$(cd "$d" && sby -f m.sby 2>&1 | status)
-        if [ "$r" == "FAIL" ]; then
-            printf '%-30s %s\n' "mutant $name" "caught"
-        else
-            printf '%-30s %s\n' "mutant $name" "NOT CAUGHT ($r)"; fail=1
+        report "$name" "$(cd "$d" && sby -f m.sby 2>&1 | status)"
+    }
+    # multi_mutant NAME SBY FILE SED-EXPR: a proof over several design files (fpu, lsq, rs, rs2, kill, ...): copy what
+    # its .sby lists, mutate FILE (qv_pkg for the waiting-operand rules, qv_opnd_*), run the .sby's own bmc task (at its
+    # own depth: the generic 24 is far too deep for the station)
+    multi_mutant() {
+        local name=$1 sbyf=$2 f=$3 expr=$4
+        local d=$T/$name
+        mkdir -p "$d"
+        for src in $(sed -n '/^\[files\]/,$p' "$HERE/$sbyf" | grep -v '^\['); do cp "$HERE/$src" "$d/"; done
+        sed "$expr" "$REPO/design/pipe/$f.sv" > "$d/$f.sv"
+        if cmp -s "$d/$f.sv" "$REPO/design/pipe/$f.sv"; then
+            printf '%-30s %s\n' "mutant $name" "sed changed nothing"; fail=1; return
         fi
+        sed -e 's#^\.\./\.\./\.\./design/pipe/##' "$HERE/$sbyf" > "$d/$sbyf"
+        report "$name" "$(cd "$d" && sby -f $sbyf bmc 2>&1 | status)"
     }
     # (O5a) the D$
     mutant dc_hit_invalid      dc 's/assign o_hit = valid_q\[l_idx\] \&\& (tag_q\[l_idx\] == l_tag);/assign o_hit = (tag_q[l_idx] == l_tag);/'
@@ -229,140 +230,42 @@ EOF
     mutant sb_push_when_full   sb 's/wire push = i_push \&\& o_ready;/wire push = i_push;/'
     mutant sb_idle_in_response sb 's/assign o_start_idle = !beat_q \&\& (cnt_q != .0)/assign o_start_idle = (!beat_q || resp) \&\& (cnt_q != 0)/'
     mutant sb_yields_to_ready  sb 's/!(YIELD_READY \&\& i_lsu_busy)/!i_lsu_busy/g'
-    # fpu_mutant NAME FILE SED-EXPR: the FP unit is five files (the datapath abstracted); one of them is mutated
-    fpu_mutant() {
-        local name=$1 file=$2 expr=$3
-        local d=$T/$name
-        mkdir -p "$d"
-        for f in qv_pkg qv_fpu_round qv_fpu_pipe qv_fpu_divsqrt qv_exu_fpu; do cp "$REPO/design/pipe/$f.sv" "$d/"; done
-        cp "$HERE/fpu_props.sv" "$d/"
-        sed "$expr" "$REPO/design/pipe/$file.sv" > "$d/$file.sv"
-        if cmp -s "$d/$file.sv" "$REPO/design/pipe/$file.sv"; then
-            printf '%-30s %s\n' "mutant $name" "sed changed nothing"; fail=1; return
-        fi
-        sed -e 's#^\.\./\.\./\.\./design/pipe/##' "$HERE/fpu.sby" > "$d/fpu.sby"
-        local r
-        r=$(cd "$d" && sby -f fpu.sby bmc 2>&1 | status)
-        if [ "$r" == "FAIL" ]; then
-            printf '%-30s %s\n' "mutant $name" "caught"
-        else
-            printf '%-30s %s\n' "mutant $name" "NOT CAUGHT ($r)"; fail=1
-        fi
-    }
-    fpu_mutant fpu_wb_in_flush     qv_exu_fpu 's/o_wb.valid = (pwb.valid || ds_live) \&\& !i_flush;/o_wb.valid = (pwb.valid || ds_live);/'
-    fpu_mutant fpu_ack_over_pipe   qv_exu_fpu 's/assign ds_ack    = ds_live \&\& !pwb.valid \&\& !i_flush;/assign ds_ack    = ds_live \&\& !i_flush;/'
-    fpu_mutant fpu_ds_always_free  qv_exu_fpu 's/assign o_ds_free = !ds_busy;/assign o_ds_free = 1'"'"'b1;/'
-    fpu_mutant fpu_flush_keeps_r1  qv_fpu_pipe 's/if (rst || i_flush) r1_valid <= 1'"'"'b0;/if (rst) r1_valid <= 1'"'"'b0;/'
-    fpu_mutant fpu_ds_not_killed   qv_fpu_divsqrt 's/if (rst || i_flush) begin/if (rst) begin/'
-    fpu_mutant fpu_ds_no_hold      qv_fpu_divsqrt 's/S_DONE: if (i_ack) st_q <= S_IDLE;/S_DONE: st_q <= S_IDLE;/'
-    fpu_mutant fpu_ds_busy_short   qv_fpu_divsqrt 's/assign o_busy = st_q != S_IDLE;/assign o_busy = st_q == S_ITER;/'
-    fpu_mutant fpu_tag_skips_stage qv_fpu_pipe 's/r2_tag <= r1_tag;/r2_tag <= r0.tag;/'
-    fpu_mutant fpu_stage_skipped   qv_fpu_pipe 's/r3_valid <= r2_valid;/r3_valid <= r1_valid;/'
-    # lsq_mutant NAME FILE SED-EXPR: the queue proof is two units (qv_lsq, qv_lsu); one of them is mutated
-    lsq_mutant() {
-        local name=$1 file=$2 expr=$3
-        local d=$T/$name
-        mkdir -p "$d"
-        for f in qv_pkg qv_pmp qv_lsq qv_lsu; do cp "$REPO/design/pipe/$f.sv" "$d/"; done
-        cp "$HERE/lsq_props.sv" "$d/"
-        sed "$expr" "$REPO/design/pipe/$file.sv" > "$d/$file.sv"
-        if cmp -s "$d/$file.sv" "$REPO/design/pipe/$file.sv"; then
-            printf '%-30s %s\n' "mutant $name" "sed changed nothing"; fail=1; return
-        fi
-        sed -e 's#^\.\./\.\./\.\./design/pipe/##' "$HERE/lsq.sby" > "$d/lsq.sby"
-        local r
-        r=$(cd "$d" && sby -f lsq.sby bmc 2>&1 | status)
-        if [ "$r" == "FAIL" ]; then
-            printf '%-30s %s\n' "mutant $name" "caught"
-        else
-            printf '%-30s %s\n' "mutant $name" "NOT CAUGHT ($r)"; fail=1
-        fi
-    }
-    lsq_mutant lsq_early_ignores_bar  qv_lsu 's/wire early     = EARLY \&\& i_early \&\& /wire early     = EARLY \&\& /'
-    lsq_mutant lsq_early_outside_ram  qv_lsu 's/wire ram_ld    = pa_in_window \&\& /wire ram_ld    = /'
-    lsq_mutant lsq_early_atomic       qv_lsu 's/wire ram_ld    = pa_in_window \&\& !store_q \&\& !atomic_q/wire ram_ld    = pa_in_window \&\& !store_q/'
-    lsq_mutant lsq_no_match           qv_lsq 's/assign o_match = |posted_hit;/assign o_match = 1'"'"'b0;/'
-    lsq_mutant lsq_match_no_copy      qv_lsq 's/r    = (copy_q \&\& copy_idx_q == IW.(i)) ? i_eng_res : res_q\[i\];/r    = res_q[i];/'
-    lsq_mutant lsq_head_no_bypass     qv_lsq 's/assign o_head_res = (copy_q \&\& copy_idx_q == head_i) ? i_eng_res : res_q\[head_i\];/assign o_head_res = res_q[head_i];/'
-    lsq_mutant lsq_pop_any_tag        qv_lsq 's/ \&\& (i_pop_tag == tag_q\[head_i\])//'
-    lsq_mutant lsq_bar_ignored        qv_lsq 's/assign o_early  = (cmpl_q != send_q) \&\& !bar_q\[cmpl_i\] \&\& /assign o_early  = (cmpl_q != send_q) \&\& /'
-    lsq_mutant lsq_newest_first       qv_lsq 's/o_eng_req       = has_q ? send_e : i_req;/o_eng_req       = i_req.valid ? i_req : send_e;/'
-    # rs_mutant NAME SED-EXPR [FILE]: the reservation station, at rs.sby's own BMC depth (the generic 24 is far too deep
-    # for it); FILE (default qv_rs) is the one mutated: qv_pkg for the waiting-operand rules (qv_opnd_*, O4d)
-    rs_mutant() {
-        local name=$1 expr=$2 f=${3:-qv_rs}
-        local d=$T/$name
-        mkdir -p "$d"
-        cp "$REPO/design/pipe/qv_pkg.sv" "$REPO/design/pipe/qv_rs.sv" "$HERE/rs_props.sv" "$d/"
-        sed "$expr" "$REPO/design/pipe/$f.sv" > "$d/$f.sv"
-        if cmp -s "$d/$f.sv" "$REPO/design/pipe/$f.sv"; then
-            printf '%-30s %s\n' "mutant $name" "sed changed nothing"; fail=1; return
-        fi
-        sed -e 's#^\.\./\.\./\.\./design/pipe/##' "$HERE/rs.sby" > "$d/rs.sby"
-        local r
-        r=$(cd "$d" && sby -f rs.sby bmc 2>&1 | status)
-        if [ "$r" == "FAIL" ]; then
-            printf '%-30s %s\n' "mutant $name" "caught"
-        else
-            printf '%-30s %s\n' "mutant $name" "NOT CAUGHT ($r)"; fail=1
-        fi
-    }
-    rs_mutant rs_late_wakes_on_unit  's/end else if (!o.late) begin/end else begin/' qv_pkg
-    rs_mutant rs_no_capture          's/^            x.a    = qv_opnd_wake(x.a, i_wb, i_wbp, i_wbl, i_wbd, i_wbf, i_wbc);$/            x.a    = x.a;/'
-    rs_mutant rs_youngest_first      's/for (int i = DEPTH - 1; i >= 0; i--) begin             \/\/ the last hit is the oldest/for (int i = 0; i < DEPTH; i++) begin/'
-    rs_mutant rs_div_passes_older    's/if (v_q\[i\] \&\& kind\[i\] == QV_RS_DIV)/if (ready[i] \&\& kind[i] == QV_RS_DIV)/'
-    rs_mutant rs_div_when_busy       's/o_sel_div = !i_flush \&\& div_f \&\& ready\[div_i\] \&\& i_div_free;/o_sel_div = !i_flush \&\& div_f \&\& ready[div_i];/'
-    rs_mutant rs_sel_in_flush        's/o_sel_ab  = !i_flush \&\& ab_f;/o_sel_ab  = ab_f;/'
-    rs_mutant rs_issued_stays        's/issued\[i\] = (o_sel_ab \&\& i == ab_i) || /issued[i] = /'
-    rs_mutant rs_div_bus_lost        's/else if (wbd.valid \&\& wbd.tag == o.tag) begin n.rdy = 1.b1; n.value = wbd.value; end//' qv_pkg
-    rs_mutant rs_c_ignored           's/ \&\& (x.c.rdy || qv_opnd_byp(x.c, i_wb, i_wbp, i_wbl, i_wbf, BYPASS_EN, LSU_BYPASS));/;/'
-    rs_mutant rs_room_when_full      's/assign o_room = !v_q\[DEPTH-1\];/assign o_room = 1;/'
-    rs_mutant rs_flush_keeps         's/v_q\[i\] <= (rst || i_flush) ? 1.b0 : n_v\[i\];/v_q[i] <= rst ? 0 : n_v[i];/'
-    # rs2_mutant NAME SED-EXPR [FILE]: the station in a two-wide core (rs2_props.sv: two pushes, two ALU ports)
-    rs2_mutant() {
-        local name=$1 expr=$2 f=${3:-qv_rs}
-        local d=$T/$name
-        mkdir -p "$d"
-        cp "$REPO/design/pipe/qv_pkg.sv" "$REPO/design/pipe/qv_rs.sv" "$HERE/rs2_props.sv" "$d/"
-        sed "$expr" "$REPO/design/pipe/$f.sv" > "$d/$f.sv"
-        if cmp -s "$d/$f.sv" "$REPO/design/pipe/$f.sv"; then
-            printf '%-30s %s\n' "mutant $name" "sed changed nothing"; fail=1; return
-        fi
-        sed -e 's#^\.\./\.\./\.\./design/pipe/##' "$HERE/rs2.sby" > "$d/rs2.sby"
-        local r
-        r=$(cd "$d" && sby -f rs2.sby bmc 2>&1 | status)
-        if [ "$r" == "FAIL" ]; then
-            printf '%-30s %s\n' "mutant $name" "caught"
-        else
-            printf '%-30s %s\n' "mutant $name" "NOT CAUGHT ($r)"; fail=1
-        fi
-    }
-    rs2_mutant rs2_p1_multiply        's/ \&\& !qv_is_mul(eop\[i\])//'
-    rs2_mutant rs2_p1_port0s_entry    's/ \&\& !(ab_f \&\& i == ab_i)//'
-    rs2_mutant rs2_p1_in_flush        's/o_sel_p1  = !i_flush \&\& p1_f;/o_sel_p1  = p1_f;/'
-    rs2_mutant rs2_p1_stays           's/|| (o_sel_p1 \&\& i == p1_i);/;/'
-    rs2_mutant rs2_push2_no_capture   's/y.a = qv_opnd_wake(y.a, i_wb, i_wbp, i_wbl, i_wbd, i_wbf, i_wbc);/y.a = y.a;/'
-    rs2_mutant rs2_push2_ahead        's/k   = j + (i_push ? 1 : 0);/k   = j;/'
-    rs2_mutant rs2_p1_bus_lost        's/else if (wbp.valid \&\& wbp.tag == o.tag) begin n.rdy = 1.b1; n.value = wbp.value; end//' qv_pkg
-    # (O3) a proof over several design files: copy what its .sby lists, mutate one of them, run its bmc task
-    multi_mutant() {
-        local name=$1 sbyf=$2 f=$3 expr=$4
-        local d=$T/$name
-        mkdir -p "$d"
-        for src in $(sed -n '/^\[files\]/,$p' "$HERE/$sbyf" | grep -v '^\['); do cp "$HERE/$src" "$d/"; done
-        sed "$expr" "$REPO/design/pipe/$f.sv" > "$d/$f.sv"
-        if cmp -s "$d/$f.sv" "$REPO/design/pipe/$f.sv"; then
-            printf '%-30s %s\n' "mutant $name" "sed changed nothing"; fail=1; return
-        fi
-        sed -e 's#^\.\./\.\./\.\./design/pipe/##' "$HERE/$sbyf" > "$d/$sbyf"
-        local r
-        r=$(cd "$d" && sby -f $sbyf bmc 2>&1 | status)
-        if [ "$r" == "FAIL" ]; then
-            printf '%-30s %s\n' "mutant $name" "caught"
-        else
-            printf '%-30s %s\n' "mutant $name" "NOT CAUGHT ($r)"; fail=1
-        fi
-    }
+    multi_mutant fpu_wb_in_flush      fpu.sby qv_exu_fpu 's/o_wb.valid = (pwb.valid || ds_live) \&\& !i_flush;/o_wb.valid = (pwb.valid || ds_live);/'
+    multi_mutant fpu_ack_over_pipe    fpu.sby qv_exu_fpu 's/assign ds_ack    = ds_live \&\& !pwb.valid \&\& !i_flush;/assign ds_ack    = ds_live \&\& !i_flush;/'
+    multi_mutant fpu_ds_always_free   fpu.sby qv_exu_fpu 's/assign o_ds_free = !ds_busy;/assign o_ds_free = 1'"'"'b1;/'
+    multi_mutant fpu_flush_keeps_r1   fpu.sby qv_fpu_pipe 's/if (rst || i_flush) r1_valid <= 1'"'"'b0;/if (rst) r1_valid <= 1'"'"'b0;/'
+    multi_mutant fpu_ds_not_killed    fpu.sby qv_fpu_divsqrt 's/if (rst || i_flush) begin/if (rst) begin/'
+    multi_mutant fpu_ds_no_hold       fpu.sby qv_fpu_divsqrt 's/S_DONE: if (i_ack) st_q <= S_IDLE;/S_DONE: st_q <= S_IDLE;/'
+    multi_mutant fpu_ds_busy_short    fpu.sby qv_fpu_divsqrt 's/assign o_busy = st_q != S_IDLE;/assign o_busy = st_q == S_ITER;/'
+    multi_mutant fpu_tag_skips_stage  fpu.sby qv_fpu_pipe 's/r2_tag <= r1_tag;/r2_tag <= r0.tag;/'
+    multi_mutant fpu_stage_skipped    fpu.sby qv_fpu_pipe 's/r3_valid <= r2_valid;/r3_valid <= r1_valid;/'
+    multi_mutant lsq_early_ignores_bar   lsq.sby qv_lsu 's/wire early     = EARLY \&\& i_early \&\& /wire early     = EARLY \&\& /'
+    multi_mutant lsq_early_outside_ram   lsq.sby qv_lsu 's/wire ram_ld    = pa_in_window \&\& /wire ram_ld    = /'
+    multi_mutant lsq_early_atomic        lsq.sby qv_lsu 's/wire ram_ld    = pa_in_window \&\& !store_q \&\& !atomic_q/wire ram_ld    = pa_in_window \&\& !store_q/'
+    multi_mutant lsq_no_match            lsq.sby qv_lsq 's/assign o_match = |posted_hit;/assign o_match = 1'"'"'b0;/'
+    multi_mutant lsq_match_no_copy       lsq.sby qv_lsq 's/r    = (copy_q \&\& copy_idx_q == IW.(i)) ? i_eng_res : res_q\[i\];/r    = res_q[i];/'
+    multi_mutant lsq_head_no_bypass      lsq.sby qv_lsq 's/assign o_head_res = (copy_q \&\& copy_idx_q == head_i) ? i_eng_res : res_q\[head_i\];/assign o_head_res = res_q[head_i];/'
+    multi_mutant lsq_pop_any_tag         lsq.sby qv_lsq 's/ \&\& (i_pop_tag == tag_q\[head_i\])//'
+    multi_mutant lsq_bar_ignored         lsq.sby qv_lsq 's/assign o_early  = (cmpl_q != send_q) \&\& !bar_q\[cmpl_i\] \&\& /assign o_early  = (cmpl_q != send_q) \&\& /'
+    multi_mutant lsq_newest_first        lsq.sby qv_lsq 's/o_eng_req       = has_q ? send_e : i_req;/o_eng_req       = i_req.valid ? i_req : send_e;/'
+    multi_mutant rs_late_wakes_on_unit   rs.sby qv_pkg 's/end else if (!o.late) begin/end else begin/'
+    multi_mutant rs_no_capture           rs.sby qv_rs 's/^            x.a    = qv_opnd_wake(x.a, i_wb, i_wbp, i_wbl, i_wbd, i_wbf, i_wbc);$/            x.a    = x.a;/'
+    multi_mutant rs_youngest_first       rs.sby qv_rs 's/for (int i = DEPTH - 1; i >= 0; i--) begin             \/\/ the last hit is the oldest/for (int i = 0; i < DEPTH; i++) begin/'
+    multi_mutant rs_div_passes_older     rs.sby qv_rs 's/if (v_q\[i\] \&\& kind\[i\] == QV_RS_DIV)/if (ready[i] \&\& kind[i] == QV_RS_DIV)/'
+    multi_mutant rs_div_when_busy        rs.sby qv_rs 's/o_sel_div = !i_flush \&\& div_f \&\& ready\[div_i\] \&\& i_div_free;/o_sel_div = !i_flush \&\& div_f \&\& ready[div_i];/'
+    multi_mutant rs_sel_in_flush         rs.sby qv_rs 's/o_sel_ab  = !i_flush \&\& ab_f;/o_sel_ab  = ab_f;/'
+    multi_mutant rs_issued_stays         rs.sby qv_rs 's/issued\[i\] = (o_sel_ab \&\& i == ab_i) || /issued[i] = /'
+    multi_mutant rs_div_bus_lost         rs.sby qv_pkg 's/else if (wbd.valid \&\& wbd.tag == o.tag) begin n.rdy = 1.b1; n.value = wbd.value; end//'
+    multi_mutant rs_c_ignored            rs.sby qv_rs 's/ \&\& (x.c.rdy || qv_opnd_byp(x.c, i_wb, i_wbp, i_wbl, i_wbf, BYPASS_EN, LSU_BYPASS));/;/'
+    multi_mutant rs_room_when_full       rs.sby qv_rs 's/assign o_room = !v_q\[DEPTH-1\];/assign o_room = 1;/'
+    multi_mutant rs_flush_keeps          rs.sby qv_rs 's/v_q\[i\] <= (rst || i_flush) ? 1.b0 : n_v\[i\];/v_q[i] <= rst ? 0 : n_v[i];/'
+    multi_mutant rs2_p1_multiply         rs2.sby qv_rs 's/ \&\& !qv_is_mul(eop\[i\])//'
+    multi_mutant rs2_p1_port0s_entry     rs2.sby qv_rs 's/ \&\& !(ab_f \&\& i == ab_i)//'
+    multi_mutant rs2_p1_in_flush         rs2.sby qv_rs 's/o_sel_p1  = !i_flush \&\& p1_f;/o_sel_p1  = p1_f;/'
+    multi_mutant rs2_p1_stays            rs2.sby qv_rs 's/|| (o_sel_p1 \&\& i == p1_i);/;/'
+    multi_mutant rs2_push2_no_capture    rs2.sby qv_rs 's/y.a = qv_opnd_wake(y.a, i_wb, i_wbp, i_wbl, i_wbd, i_wbf, i_wbc);/y.a = y.a;/'
+    multi_mutant rs2_push2_ahead         rs2.sby qv_rs 's/k   = j + (i_push ? 1 : 0);/k   = j;/'
+    multi_mutant rs2_p1_bus_lost         rs2.sby qv_pkg 's/else if (wbp.valid \&\& wbp.tag == o.tag) begin n.rdy = 1.b1; n.value = wbp.value; end//'
     multi_mutant kill_no_rebuild        kill.sby qv_issue 's/        end else if (i_kill) begin/        end else if (1'"'"'b0) begin/'
     multi_mutant kill_oldest_wins       kill.sby qv_issue 's/            for (int j = 0; j < QV_ROB_DEPTH; j++) begin/            for (int j = QV_ROB_DEPTH - 1; j >= 0; j--) begin/'
     multi_mutant kill_late_lost         kill.sby qv_issue 's/prod_late_q\[i_surv_rd\[j\]\] <= CSR_LATE \&\& i_surv_csr\[j\];/prod_late_q[i_surv_rd[j]] <= 1'"'"'b0;/'
