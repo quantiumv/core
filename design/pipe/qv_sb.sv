@@ -33,11 +33,19 @@
  *
  * A bus error cannot happen inside the PMA window the stores are posted for: the entry is dropped (the
  * drain must not hang) and an assertion fires in simulation.
+ *
+ * (W3a) PIPE: a beat decided in the previous one's response cycle goes out in that very cycle -- cyc stays high,
+ * now carrying the next entry -- so back-to-back beats come one a cycle instead of one every two. That is the one
+ * exception to "cyc drops in the response cycle": the request held through the ack is a new one, never the answered
+ * one again, and the bus between the core and memory must take a request in an ack cycle (soc.sv's arbiter forwards
+ * it: wb_arbiter2's PIPE_M0). The beat answered in a cycle is the oldest entry: o_resp_* are its fields (the D$ takes
+ * a store's data from there), o_addr/o_dat/o_sel the request on the bus.
  */
 module qv_sb #(
     parameter int DEPTH     = 4,      // entries, >= 1
     parameter int YIELD_MAX = 16,     // cycles the drain may yield to a load before it goes anyway
-    parameter bit YIELD_READY = 1'b1  // also yield to any LSU access ready to start (P9d's rule; the core passes 0)
+    parameter bit YIELD_READY = 1'b1, // also yield to any LSU access ready to start (P9d's rule; the core passes 0)
+    parameter bit PIPE      = 1'b0    // (W3a) the next beat in the current one's response cycle: a beat a cycle
 ) (
     input  logic        clk,
     input  logic        rst,
@@ -67,7 +75,10 @@ module qv_sb #(
     output logic [63:0] o_dat,
     output logic [7:0]  o_sel,
     input  logic        i_ack,
-    input  logic        i_err
+    input  logic        i_err,
+    output logic [31:3] o_resp_addr,   // the beat an i_ack/i_err answers: the oldest entry (with PIPE the bus may
+    output logic [7:0]  o_resp_sel,    // already carry the next one)
+    output logic [63:0] o_resp_dat
 );
     localparam int PTR_W = (DEPTH > 1) ? $clog2(DEPTH) : 1;
     localparam int CNT_W = $clog2(DEPTH + 1);
@@ -112,11 +123,17 @@ module qv_sb #(
     // when the grant is open.
     assign o_start_idle = !beat_q && (cnt_q != '0) && !i_lsu_inflight && !i_ptw_beat
                           && (urgent || (!(YIELD_READY && i_lsu_busy) && !i_load_near));
+    // (W3a) with PIPE, a beat decided in a response cycle is on the bus in it: the next entry, behind the answered one
+    wire nxt = PIPE && resp && go;
+    wire [PTR_W-1:0] cur = nxt ? ptr_inc(rd_q) : rd_q;
     assign o_beat      = beat_q;
-    assign o_cyc       = beat_q && !(i_ack || i_err);
-    assign o_addr      = {addr_q[rd_q], 3'b000};
-    assign o_dat       = dat_q[rd_q];
-    assign o_sel       = sel_q[rd_q];
+    assign o_cyc       = beat_q && (!(i_ack || i_err) || nxt);
+    assign o_addr      = {addr_q[cur], 3'b000};
+    assign o_dat       = dat_q[cur];
+    assign o_sel       = sel_q[cur];
+    assign o_resp_addr = addr_q[rd_q];
+    assign o_resp_sel  = sel_q[rd_q];
+    assign o_resp_dat  = dat_q[rd_q];
 
     wire push = i_push && o_ready;
 

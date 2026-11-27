@@ -170,7 +170,16 @@
  * out even under fixed priority.
  */
 module wb_arbiter2 #(
-    parameter bit DROP_REQ_ON_RESP = 1'b0
+    parameter bit DROP_REQ_ON_RESP = 1'b0,
+    /*
+     * PIPE_M0 (W3a, default 0): with DROP_REQ_ON_RESP, still forward m0's request in m0's own response cycle. For
+     * a master 0 whose request held through its ack is always a NEW one -- core.sv's memory port: every one of its
+     * masters drops cyc in its response cycle, except the store buffer draining a beat a cycle (QV_PIPE_SB_PIPE),
+     * whose next beat is on the bus in that cycle. The drop stays for m1 (dm.sv's SBA, which holds its request).
+     * PIPE_M1: the same for m1, where a harness puts core.sv's memory port there (lockstep_mem.sv's flat config).
+     */
+    parameter bit PIPE_M0 = 1'b0,
+    parameter bit PIPE_M1 = 1'b0
 ) (
     input logic clk,
     input logic rst,
@@ -264,7 +273,8 @@ module wb_arbiter2 #(
     // registered, or (dcache.sv's for a write it passes through) follows a
     // registered ack further down without looking at cyc, and in_flight_q
     // is a register.
-    wire drop_req = DROP_REQ_ON_RESP && in_flight_q && (ack_i || err_i);
+    wire drop_req = DROP_REQ_ON_RESP && in_flight_q && (ack_i || err_i)
+                    && !(PIPE_M0 && !grant_q) && !(PIPE_M1 && grant_q);
 
     assign cyc_o  = (grant ? m1_cyc_i : m0_cyc_i) && !drop_req;
     assign stb_o  = (grant ? m1_stb_i : m0_stb_i) && !drop_req;

@@ -243,6 +243,17 @@ module soc (
 `else
     localparam bit SOC_BUS_DC = (`QV_PIPE_DCACHE == 0);
 `endif
+    // (W3a) the pipelined core's store buffer drains a beat a cycle (QV_PIPE_SB_PIPE, the same default as
+    // design/pipe/core.sv): its next beat is on the bus in the previous one's response cycle, which arb0 then forwards
+    // for the core (PIPE_M0) while still dropping the Debug Module's held request
+`ifndef QV_PIPE_SB_PIPE
+`define QV_PIPE_SB_PIPE 0
+`endif
+`ifdef QV_REF_AS_CORE
+    localparam bit SOC_SB_PIPE = 1'b0;
+`else
+    localparam bit SOC_SB_PIPE = (`QV_PIPE_SB_PIPE != 0);
+`endif
     core `QV_SOC_CORE_PARAMS core0 (
         .clk(clk), .rst(rst),
         .wb_fetch_addr_o(core_wb_fetch_addr), .wb_fetch_cyc_o(core_wb_fetch_cyc),
@@ -294,7 +305,7 @@ module soc (
      * which every slave behind decoder0 would otherwise re-fire on -- see
      * design/wb_arbiter2.sv's own header.
      */
-    wb_arbiter2 #(.DROP_REQ_ON_RESP(1'b1)) arb0 (
+    wb_arbiter2 #(.DROP_REQ_ON_RESP(1'b1), .PIPE_M0(SOC_SB_PIPE)) arb0 (
         .clk(clk), .rst(rst),
         .m0_addr_i(core_wb_mem_addr), .m0_dat_i(core_wb_mem_dat_m2s), .m0_dat_o(core_wb_mem_dat_s2m),
         .m0_sel_i(core_wb_mem_sel), .m0_we_i(core_wb_mem_we), .m0_cyc_i(core_wb_mem_cyc), .m0_stb_i(core_wb_mem_stb),

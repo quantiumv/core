@@ -244,6 +244,12 @@
 `endif
 // O4f: QV_PIPE_SB_YIELD_READY 1 is P9d's drain rule, the store buffer yields to any LSU access that is ready to start;
 // 0 (the default since O4f) yields only to a load near the ROB head (qv_sb.sv).
+// W3a: QV_PIPE_SB_PIPE 1 drains the store buffer a beat a cycle: the next beat goes out in the current one's response
+// cycle (qv_sb.sv), which the bus to memory must take (soc.sv's arbiter: wb_arbiter2's PIPE_M0). 0: a beat every two
+// cycles, cyc low in every response cycle. A harness sets the core's SB_PIPE parameter directly where its bus differs.
+`ifndef QV_PIPE_SB_PIPE
+`define QV_PIPE_SB_PIPE 0
+`endif
 `ifndef QV_PIPE_SB_YIELD_READY
 `define QV_PIPE_SB_YIELD_READY 0
 `endif
@@ -351,6 +357,7 @@ module core
     parameter int DISPATCH_W = `QV_PIPE_DISPATCH_W,  // instructions dispatched a cycle (1 or 2)
     parameter int ALU_PORTS  = `QV_PIPE_ALU_PORTS,   // ALU issue ports (1 or 2)
     parameter bit SB_YIELD_READY = `QV_PIPE_SB_YIELD_READY,   // the store buffer yields to any ready LSU access (P9d)
+    parameter bit SB_PIPE   = `QV_PIPE_SB_PIPE,      // (W3a) the store buffer drains a beat a cycle
     parameter logic [63:0] PMA_RAM_BASE = `QV_PIPE_PMA_RAM_BASE,   // physical window of RAM: stores into it are posted
     parameter logic [63:0] PMA_RAM_SIZE = `QV_PIPE_PMA_RAM_SIZE
 ) (
@@ -1103,6 +1110,9 @@ module core
     logic [31:0] sb_addr;
     logic [63:0] sb_dat;
     logic [7:0]  sb_sel;
+    logic [31:3] sb_raddr;                // (W3a) the beat answered this cycle (with SB_PIPE the bus may carry the next)
+    logic [63:0] sb_rdat;
+    logic [7:0]  sb_rsel;
     logic        sb_cyc, sb_beat, sb_go, sb_go_idle, sb_ready, sb_empty, sb_match, lsu_load_near, lsu_in_bus, c_sb_push;
     logic [31:3] sb_match_addr;
     logic        ptw_wants;                  // a translation request is waiting for the walker (and so for the memory port)
@@ -1246,7 +1256,7 @@ module core
     assign sb_push_res = c_sb_push1 ? lsu_res1 : lsu_res;
     generate
         if (SB_DEPTH > 0) begin : g_sb
-            qv_sb #(.DEPTH(SB_DEPTH), .YIELD_READY(SB_YIELD_READY)) sb0 (
+            qv_sb #(.DEPTH(SB_DEPTH), .YIELD_READY(SB_YIELD_READY), .PIPE(SB_PIPE)) sb0 (
                 .clk(clk), .rst(rst),
                 .i_push(c_sb_push), .i_push_addr(sb_push_res.mem_addr[31:3]), .i_push_sel(sb_push_res.mem_wmask),
                 .i_push_data(sb_push_res.mem_wdata), .o_ready(sb_ready), .o_empty(sb_empty),
@@ -1255,7 +1265,8 @@ module core
                 .i_load_near(lsu_load_near),
                 .o_start_now(sb_go), .o_start_idle(sb_go_idle), .o_beat(sb_beat), .o_cyc(sb_cyc),
                 .o_addr(sb_addr), .o_dat(sb_dat), .o_sel(sb_sel),
-                .i_ack(wb_mem_ack_i), .i_err(wb_mem_err_i)
+                .i_ack(wb_mem_ack_i), .i_err(wb_mem_err_i),
+                .o_resp_addr(sb_raddr), .o_resp_sel(sb_rsel), .o_resp_dat(sb_rdat)
             );
         end else begin : g_nosb
             assign sb_ready = 1'b1;
@@ -1268,6 +1279,9 @@ module core
             assign sb_addr  = 32'b0;
             assign sb_dat   = 64'b0;
             assign sb_sel   = 8'b0;
+            assign sb_raddr = '0;
+            assign sb_rdat  = 64'b0;
+            assign sb_rsel  = 8'b0;
         end
     endgenerate
 
@@ -1280,8 +1294,8 @@ module core
                 .clk(clk), .rst(rst),
                 .i_addr(sb_match_addr), .o_hit(dc_hit), .o_dat(dc_dat), .o_busy(dc_busy),
                 .i_fill_req(dc_fill_req), .o_fill(dc_fill), .o_fill_dat(dc_fill_dat), .o_fill_err(dc_fill_err),
-                .i_wr(sb_beat && wb_mem_ack_i && !wb_mem_err_i), .i_wr_addr(sb_addr[31:3]), .i_wr_sel(sb_sel),
-                .i_wr_dat(sb_dat),
+                .i_wr(sb_beat && wb_mem_ack_i && !wb_mem_err_i), .i_wr_addr(sb_raddr), .i_wr_sel(sb_rsel),
+                .i_wr_dat(sb_rdat),
                 .i_inv(dc_inv), .i_inv_addr(sb_match_addr), .i_snoop(i_snoop_valid), .i_snoop_addr(i_snoop_addr),
                 .o_beat(dc_cyc), .o_addr(dc_addr), .i_ack(wb_mem_ack_i), .i_err(wb_mem_err_i), .i_dat(wb_mem_dat_i)
             );
