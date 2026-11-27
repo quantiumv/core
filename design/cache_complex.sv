@@ -125,7 +125,10 @@ module cache_complex #(
     parameter line_words = 4,
     // DC_EN 0 (O5a, the pipelined core with its own D$ inside): data_* passes straight to the downstream arbiter, as
     // the D$ would forward a miss, and dcache0 is held idle (kept, so its hierarchical name stays); 1: as always
-    parameter bit DC_EN  = 1'b1
+    parameter bit DC_EN  = 1'b1,
+    // FETCH_PAIR (W3b, the pipelined core's FETCH16): icache0 also answers the dword after the requested one, on
+    // fetch_dat_hi_o (a 16-byte-aligned block, always within one line)
+    parameter bit FETCH_PAIR = 1'b0
 ) (
     input logic clk,
     input logic rst,
@@ -142,6 +145,7 @@ module cache_complex #(
     input  logic        fetch_cyc_i,
     input  logic        fetch_stb_i,
     output logic [63:0] fetch_dat_o,
+    output logic [63:0] fetch_dat_hi_o,     // (FETCH_PAIR) the block's upper dword
     output logic        fetch_ack_o,
     output logic        fetch_err_o,
 
@@ -182,7 +186,7 @@ module cache_complex #(
     input  logic        mem_err_i
 );
     // icache0's own ports.
-    logic [63:0] ic_dat_o;
+    logic [63:0] ic_dat_o, ic_dat_hi_o;
     logic        ic_ack, ic_err;
     logic [31:0] ic_mem_addr;
     logic [63:0] ic_mem_dat_i;
@@ -199,9 +203,9 @@ module cache_complex #(
     /* verilator lint_on UNUSEDSIGNAL */
     logic        ic_mem_cyc, ic_mem_ack, ic_mem_err;
 
-    icache #(.num_lines(num_lines), .line_words(line_words)) icache0 (
+    icache #(.num_lines(num_lines), .line_words(line_words), .PAIR(FETCH_PAIR)) icache0 (
         .clk(clk), .rst(rst),
-        .addr_i(fetch_addr_i), .dat_o(ic_dat_o), .cyc_i(fetch_cyc_i), .stb_i(fetch_stb_i),
+        .addr_i(fetch_addr_i), .dat_o(ic_dat_o), .dat_hi_o(ic_dat_hi_o), .cyc_i(fetch_cyc_i), .stb_i(fetch_stb_i),
         .ack_o(ic_ack), .err_o(ic_err), .flush_i(flush_i),
         .mem_addr_o(ic_mem_addr), .mem_dat_i(ic_mem_dat_i), .mem_sel_o(ic_mem_sel),
         .mem_we_o(ic_mem_we), .mem_cyc_o(ic_mem_cyc), .mem_stb_o(ic_mem_stb),
@@ -239,6 +243,7 @@ module cache_complex #(
     assign fetch_ack_o = ic_ack;
     assign fetch_err_o = ic_err;
     assign fetch_dat_o = ic_dat_o;
+    assign fetch_dat_hi_o = ic_dat_hi_o;
 
     // (DC_EN 0) the data port's request goes downstream itself, and its response comes straight back
     assign data_ack_o = DC_EN ? dc_ack   : dc_mem_ack;

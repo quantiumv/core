@@ -230,8 +230,19 @@ module soc (
 `ifdef QV_REF_AS_CORE
 `define QV_SOC_CORE_PARAMS
 `else
-`define QV_SOC_CORE_PARAMS #(.PMA_RAM_SIZE(64'h0400_0000))
+`define QV_SOC_CORE_PARAMS #(.PMA_RAM_SIZE(64'h0400_0000), .FETCH16(SOC_FETCH16))
 `endif
+    // (W3b) the pipelined core fetches 16-byte blocks (QV_PIPE_FETCH16, default 0): the I$ answers both dwords of a
+    // block (cache_complex's FETCH_PAIR) and the core takes the upper one on wb_fetch_dat_hi_i
+`ifndef QV_PIPE_FETCH16
+`define QV_PIPE_FETCH16 0
+`endif
+`ifdef QV_REF_AS_CORE
+    localparam bit SOC_FETCH16 = 1'b0;
+`else
+    localparam bit SOC_FETCH16 = (`QV_PIPE_FETCH16 != 0);
+`endif
+    logic [63:0] core_wb_fetch_dat_hi;
     // (O5a) the pipelined core with its own D$ (QV_PIPE_DCACHE, the same default as design/pipe/core.sv): the D$ on
     // the bus is then left out (cache0's data port goes straight to memory, as the D$ would forward a miss), and the
     // Debug Module's writes to RAM empty their line from the core's D$
@@ -267,6 +278,7 @@ module soc (
         .i_meip(plic_meip), .i_seip(plic_seip),
 `ifndef QV_REF_AS_CORE
         .i_snoop_valid(sba_we && sba_ack && !sba_err && !sba_addr[26]), .i_snoop_addr(sba_addr[31:3]),
+        .wb_fetch_dat_hi_i(core_wb_fetch_dat_hi),
 `endif
 
         /*
@@ -435,10 +447,11 @@ module soc (
     // traffic AND any System Bus Access targeting a RAM address, both
     // already correctly arbitrated/decoded upstream by arb0/decoder0
     // before either ever reaches here).
-    cache_complex #(.DC_EN(SOC_BUS_DC)) cache0 (
+    cache_complex #(.DC_EN(SOC_BUS_DC), .FETCH_PAIR(SOC_FETCH16)) cache0 (
         .clk(clk), .rst(rst),
         .fetch_addr_i(core_wb_fetch_addr), .fetch_cyc_i(core_wb_fetch_cyc), .fetch_stb_i(core_wb_fetch_stb),
         .fetch_dat_o(core_wb_fetch_dat), .fetch_ack_o(core_wb_fetch_ack), .fetch_err_o(core_wb_fetch_err),
+        .fetch_dat_hi_o(core_wb_fetch_dat_hi),
         .data_addr_i(ram_addr), .data_dat_i(ram_dat_o), .data_dat_o(ram_dat_i), .data_sel_i(ram_sel),
         .data_we_i(ram_we), .data_cyc_i(ram_cyc), .data_stb_i(ram_stb),
         .data_ack_o(ram_ack), .data_err_o(ram_err), .flush_i(icache_flush),

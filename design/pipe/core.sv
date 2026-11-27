@@ -358,6 +358,10 @@ module core
     parameter int ALU_PORTS  = `QV_PIPE_ALU_PORTS,   // ALU issue ports (1 or 2)
     parameter bit SB_YIELD_READY = `QV_PIPE_SB_YIELD_READY,   // the store buffer yields to any ready LSU access (P9d)
     parameter bit SB_PIPE   = `QV_PIPE_SB_PIPE,      // (W3a) the store buffer drains a beat a cycle
+    // (W3b) fetch asks for 16-byte blocks and takes their upper dword on wb_fetch_dat_hi_i (qv_fetch.sv). Default 0
+    // whatever the defines: only a harness that connects wb_fetch_dat_hi_i to a memory that answers it (soc.sv, with
+    // QV_PIPE_FETCH16) may set it, or the upper dwords would be read as zeros
+    parameter bit FETCH16   = 1'b0,
     parameter logic [63:0] PMA_RAM_BASE = `QV_PIPE_PMA_RAM_BASE,   // physical window of RAM: stores into it are posted
     parameter logic [63:0] PMA_RAM_SIZE = `QV_PIPE_PMA_RAM_SIZE
 ) (
@@ -368,6 +372,7 @@ module core
     output logic        wb_fetch_cyc_o,
     output logic        wb_fetch_stb_o,
     input  logic [63:0] wb_fetch_dat_i,
+    input  logic [63:0] wb_fetch_dat_hi_i = 64'b0,   // (W3b, FETCH16) the fetch block's upper dword
     input  logic        wb_fetch_ack_i,
     input  logic        wb_fetch_err_i,
 
@@ -565,15 +570,24 @@ module core
     logic        btb_hit, btb_x;
     logic [1:0]  btb_off;
     logic [63:0] btb_tgt;
+    logic [63:0] btb_lk2_pc;                 // (W3b) the fetch block's upper dword
+    logic        btb_hit2, btb_x2;
+    logic [1:0]  btb_off2;
+    logic [63:0] btb_tgt2;
 
-    qv_fetch #(.RESET_PC(RESET_PC), .FB_DEPTH(FB_DEPTH), .STREAM(FETCH_STREAM), .BTB_EN(BTB_ENTRIES > 0),
-               .PAGE_REUSE(SV39_EN && FETCH_PAGE_REUSE), .IDLE_GO(ALIGN_WIN)) fetch0 (
+    // (W3b) FETCH16: one entry more. A request needs room for a block's two dwords, so at 4 the buffer never holds a
+    // loop of three dwords whole, and the aligner's stash of a dword-crossing instruction costs a cycle a turn (sieve)
+    qv_fetch #(.RESET_PC(RESET_PC), .FB_DEPTH(FB_DEPTH + (FETCH16 ? 1 : 0)), .STREAM(FETCH_STREAM),
+               .BTB_EN(BTB_ENTRIES > 0), .PAGE_REUSE(SV39_EN && FETCH_PAGE_REUSE), .IDLE_GO(ALIGN_WIN),
+               .FETCH16(FETCH16)) fetch0 (
         .clk(clk), .rst(rst),
         .wb_fetch_addr_o(wb_fetch_addr_o), .wb_fetch_cyc_o(wb_fetch_cyc_o), .wb_fetch_stb_o(wb_fetch_stb_o),
         .wb_fetch_dat_i(wb_fetch_dat_i), .wb_fetch_ack_i(wb_fetch_ack_i), .wb_fetch_err_i(wb_fetch_err_i),
+        .wb_fetch_dat_hi_i(wb_fetch_dat_hi_i),
         .i_redirect_valid(fetch_redirect), .i_redirect_pc(fetch_redirect_pc), .i_redirect_ctx(fetch_redirect_ctx),
         .i_hold(fetch_hold), .o_idle(fetch_idle), .i_yield(fetch_yield),
         .o_btb_pc(btb_lk_pc), .i_btb_hit(btb_hit), .i_btb_off(btb_off), .i_btb_x(btb_x), .i_btb_tgt(btb_tgt),
+        .o_btb2_pc(btb_lk2_pc), .i_btb2_hit(btb_hit2), .i_btb2_off(btb_off2), .i_btb2_x(btb_x2), .i_btb2_tgt(btb_tgt2),
         .i_xl_on(fetch_xl_on),
         .o_xl_req(f_xl_req), .o_xl_va(f_xl_va), .o_xl_cancel(f_xl_cancel),
         .i_xl_done(f_xl_done), .i_xl_pf(f_xl_pf), .i_xl_af(f_xl_af), .i_xl_ppn(f_xl_ppn),
@@ -596,6 +610,7 @@ module core
             qv_btb #(.ENTRIES(BTB_ENTRIES), .CTR(BTB_CTR)) btb0 (
                 .clk(clk), .rst(rst),
                 .i_lk_pc(btb_lk_pc), .o_hit(btb_hit), .o_off(btb_off), .o_x(btb_x), .o_tgt(btb_tgt),
+                .i_lk2_pc(btb_lk2_pc), .o_hit2(btb_hit2), .o_off2(btb_off2), .o_x2(btb_x2), .o_tgt2(btb_tgt2),
                 .i_upd_valid(btb_upd_valid), .i_upd_pc(btb_upd_pc), .i_upd_taken(btb_upd_taken), .i_upd_cross(btb_upd_cross),
                 .i_upd_tgt(btb_upd_tgt),
                 .i_upd_cond(bht_upd_valid)       // commit's history-table strobe: the same retirement, a conditional
@@ -605,6 +620,10 @@ module core
             assign btb_off = 2'b0;
             assign btb_x   = 1'b0;
             assign btb_tgt = 64'b0;
+            assign btb_hit2 = 1'b0;
+            assign btb_off2 = 2'b0;
+            assign btb_x2   = 1'b0;
+            assign btb_tgt2 = 64'b0;
         end
     endgenerate
 

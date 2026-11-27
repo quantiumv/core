@@ -76,6 +76,15 @@
  * contents (no SUM or MXR for an execute), and every change of those comes with a redirect marked i_redirect_ctx,
  * an SFENCE.VMA or a debugger's write while halted, which clear the page (the last two through i_xl_flush). A fault
  * is never kept. Like any TLB entry, the page may be used until SFENCE.VMA.
+ *
+ * FETCH16 (W3b): a request is for the 16-byte-aligned block of its pc, and its answer carries both dwords (the
+ * upper one on wb_fetch_dat_hi_i). The fetch buffer still holds dwords: the answer pushes the dwords of the block from
+ * the start pc's on, so the aligners see what they see today, up to two entries a cycle instead of one. The BTB is
+ * looked up for both (o_btb_pc for the start dword, o_btb2_pc for the upper one from its halfword 0): a taken branch
+ * in the start dword ends the block there (the upper dword is not pushed, the next request is the target); else the
+ * upper dword may hold one, with its own hint. A request needs room for two entries. A fault or error answer is two
+ * fault entries alike, the upper one with its hint, so the buffer always holds what fetch followed. A 16-byte block
+ * never crosses a page.
  */
 module qv_fetch #(
     parameter logic [63:0] RESET_PC   = 64'h0,
@@ -83,7 +92,8 @@ module qv_fetch #(
     parameter bit          STREAM     = 1'b0,
     parameter bit          BTB_EN     = 1'b0,
     parameter bit          PAGE_REUSE = 1'b0,
-    parameter bit          IDLE_GO    = 1'b0    // (O8b) a request from an idle bus goes out in its issue cycle too
+    parameter bit          IDLE_GO    = 1'b0,   // (O8b) a request from an idle bus goes out in its issue cycle too
+    parameter bit          FETCH16    = 1'b0    // (W3b) 16-byte blocks: two dwords an answer
 ) (
     input  logic        clk,
     input  logic        rst,
@@ -92,6 +102,7 @@ module qv_fetch #(
     output logic        wb_fetch_cyc_o,
     output logic        wb_fetch_stb_o,
     input  logic [63:0] wb_fetch_dat_i,
+    input  logic [63:0] wb_fetch_dat_hi_i = 64'b0,   // (FETCH16) the block's upper dword
     input  logic        wb_fetch_ack_i,
     input  logic        wb_fetch_err_i,
 
@@ -114,6 +125,12 @@ module qv_fetch #(
     input  logic [1:0]  i_btb_off = 2'b0,
     input  logic        i_btb_x   = 1'b0,
     input  logic [63:0] i_btb_tgt = 64'b0,
+    // (FETCH16) the second lookup: the block's upper dword, from its halfword 0
+    output logic [63:0] o_btb2_pc,
+    input  logic        i_btb2_hit = 1'b0,
+    input  logic [1:0]  i_btb2_off = 2'b0,
+    input  logic        i_btb2_x   = 1'b0,
+    input  logic [63:0] i_btb2_tgt = 64'b0,
 
     // translation (qv_xlate): the request is held until i_xl_done or o_xl_cancel
     input  logic        i_xl_on    = 1'b0,
@@ -168,6 +185,11 @@ module qv_fetch #(
     logic [1:0]  req_hoff_q;
     logic        req_hx_q;
     logic [63:0] req_htgt_q;
+    logic        req_two_q;      // (FETCH16) the answer pushes the upper dword too, with its own hint (req_h2*)
+    logic        req_h2_q;
+    logic [1:0]  req_h2off_q;
+    logic        req_h2x_q;
+    logic [63:0] req_h2tgt_q;
 
     logic [63:0] fpc_q;          // next sequential fetch pc
 
@@ -200,18 +222,23 @@ module qv_fetch #(
     wire fb_push = resp_ok;
     wire fb_pop  = i_buf_pop && (fb_count_q != '0) && !i_redirect_valid;
     wire fb_pop2 = i_buf_pop2 && fb_pop && (fb_count_q >= CNT_W'(2));   // (O8b) the entry behind the head too
+    // (FETCH16) the answer's second entry: the block's upper dword (a fault or an error too, so the buffer holds what
+    // fetch followed: the request after it went to the upper dword's hint)
+    wire fb_push2 = FETCH16 && fb_push && req_two_q;
 
     logic [CNT_W-1:0] fb_count_next;
     always_comb begin
         if (i_redirect_valid) fb_count_next = '0;
-        else                  fb_count_next = fb_count_q + CNT_W'(fb_push) - CNT_W'(fb_pop) - CNT_W'(fb_pop2);
+        else                  fb_count_next = fb_count_q + CNT_W'(fb_push) - CNT_W'(fb_pop) - CNT_W'(fb_pop2)
+                                              + CNT_W'(fb_push2);
     end
 
     // Room for exactly one more response after this cycle settles, and no
     // request left outstanding past this edge. A redirect while held (or one
     // that changes the translation context) is recorded below and fetched
     // once the hold drops, or in the next cycle.
-    wire can_issue = (!req_valid_q || resp || drop) && (fb_count_next < CNT_W'(FB_DEPTH)) && !i_hold
+    // (FETCH16: room for two)
+    wire can_issue = (!req_valid_q || resp || drop) && (fb_count_next < CNT_W'(FB_DEPTH - (FETCH16 ? 1 : 0))) && !i_hold
                      && !(i_redirect_valid && i_redirect_ctx);
 
     assign o_idle = !bus;
@@ -239,10 +266,11 @@ module qv_fetch #(
 
     assign wb_fetch_cyc_o  = (bus && (!(wb_fetch_ack_i || wb_fetch_err_i) || stream_go)) || idle_go;
     assign wb_fetch_stb_o  = wb_fetch_cyc_o;
-    // the bus carries PA[31:0]: the physical page's low 20 bits, then the offset within the page
-    assign wb_fetch_addr_o = fpc_go     ? (stream_reuse ? {lp_ppn_q[19:0], fpc_q[11:3], 3'b000} : {fpc_q[31:3], 3'b000})
+    // the bus carries PA[31:0]: the physical page's low 20 bits, then the offset within the page (FETCH16: the block's)
+    wire [31:0] addr_dw    = fpc_go     ? (stream_reuse ? {lp_ppn_q[19:0], fpc_q[11:3], 3'b000} : {fpc_q[31:3], 3'b000})
                            : req_isxl_q ? {req_pa_q[19:0], req_pc_q[11:3], 3'b000}
                                         : {req_pc_q[31:3], 3'b000};
+    assign wb_fetch_addr_o = FETCH16 ? {addr_dw[31:4], 4'b0000} : addr_dw;
 
     wire [63:0] issue_pc    = i_redirect_valid ? i_redirect_pc : fpc_q;
     // a translated request whose page is kept: no translation phase
@@ -251,10 +279,18 @@ module qv_fetch #(
     // the BTB's word on the request being issued: the next one is the branch's target
     assign o_btb_pc = issue_pc;
     wire        hint     = BTB_EN && i_btb_hit;
+    // (FETCH16) a block that starts in its lower dword with no taken branch there pushes the upper one too, which may
+    // hold the block's taken branch
+    assign o_btb2_pc = {issue_pc[63:4], 4'b1000};
+    wire        two      = FETCH16 && !issue_pc[3] && !hint;
+    wire        hint2    = two && BTB_EN && i_btb2_hit;
 
     function automatic logic [PTR_W-1:0] ptr_inc(input logic [PTR_W-1:0] p);
         ptr_inc = (p == PTR_W'(FB_DEPTH - 1)) ? '0 : p + 1'b1;
     endfunction
+    wire [PTR_W-1:0] fb_wr1 = ptr_inc(fb_wr_q);   // (FETCH16) where the answer's second entry goes
+
+    initial if (FETCH16 && FB_DEPTH < 2) $fatal(1, "qv_fetch: FETCH16 needs FB_DEPTH >= 2 (room for a block's two dwords)");
 
     always_ff @(posedge clk) begin
         if (rst) begin
@@ -270,6 +306,11 @@ module qv_fetch #(
             req_hoff_q  <= 2'b0;
             req_hx_q    <= 1'b0;
             req_htgt_q  <= '0;
+            req_two_q   <= 1'b0;
+            req_h2_q    <= 1'b0;
+            req_h2off_q <= 2'b0;
+            req_h2x_q   <= 1'b0;
+            req_h2tgt_q <= '0;
             lp_valid_q  <= 1'b0;
             lp_vpn_q    <= '0;
             lp_ppn_q    <= '0;
@@ -291,6 +332,13 @@ module qv_fetch #(
                 req_hx_q    <= i_btb_x;
                 req_htgt_q  <= i_btb_tgt;
                 fpc_q       <= hint ? i_btb_tgt : {issue_pc[63:3], 3'b000} + 64'd8;
+                req_two_q   <= two;
+                req_h2_q    <= hint2;
+                req_h2off_q <= i_btb2_off;
+                req_h2x_q   <= i_btb2_x;
+                req_h2tgt_q <= i_btb2_tgt;
+                // (FETCH16) past a whole block: the upper dword's branch target, else the next block
+                if (two) fpc_q <= hint2 ? i_btb2_tgt : {issue_pc[63:4], 4'b0000} + 64'd16;
             end else begin
                 if (resp || drop) req_valid_q <= 1'b0;
                 if (i_redirect_valid) begin
@@ -333,6 +381,21 @@ module qv_fetch #(
                     fb_hx[fb_wr_q]    <= req_hx_q;
                     fb_htgt[fb_wr_q]  <= req_htgt_q;
                     fb_wr_q           <= ptr_inc(fb_wr_q);
+                    // (FETCH16) a request that starts in the upper dword pushes that one alone
+                    if (FETCH16 && req_pc_q[3] && !flt_resp) fb_data[fb_wr_q] <= wb_fetch_dat_hi_i;
+                end
+                if (fb_push2) begin
+                    fb_pc[fb_wr1]    <= {req_pc_q[63:4], 4'b1000};
+                    fb_data[fb_wr1]  <= flt_resp ? 64'b0 : wb_fetch_dat_hi_i;
+                    fb_err[fb_wr1]   <= flt_resp || wb_fetch_err_i;
+                    fb_cause[fb_wr1] <= (flt_resp && req_pf_q) ? 4'd12 : 4'd1;
+                    fb_xl[fb_wr1]    <= req_isxl_q;
+                    fb_pg[fb_wr1]    <= req_isxl_q ? req_pa_q : 44'b0;
+                    fb_hint[fb_wr1]  <= req_h2_q;
+                    fb_hoff[fb_wr1]  <= req_h2off_q;
+                    fb_hx[fb_wr1]    <= req_h2x_q;
+                    fb_htgt[fb_wr1]  <= req_h2tgt_q;
+                    fb_wr_q          <= ptr_inc(fb_wr1);
                 end
                 if (fb_pop) fb_rd_q <= fb_pop2 ? ptr_inc(ptr_inc(fb_rd_q)) : ptr_inc(fb_rd_q);
             end

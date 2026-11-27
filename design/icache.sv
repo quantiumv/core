@@ -44,10 +44,14 @@
  * Parameters:
  *  num_lines:  Number of cache lines (default 64).
  *  line_words: 64-bit words per line (default 4, i.e. 32-byte lines).
+ *  PAIR:       (W3b) a read also answers the dword after the requested one, on dat_hi_o: a 16-byte-aligned fetch
+ *              block (the core's FETCH16) asks for its lower dword, and the pair is always in one line. At the end
+ *              of a refill the upper dword is the beat that just arrived when it is the line's last.
  */
 module icache #(
     parameter num_lines  = 64,
-    parameter line_words = 4
+    parameter line_words = 4,
+    parameter bit PAIR   = 1'b0
 ) (
     input logic clk,
     input logic rst,
@@ -62,6 +66,7 @@ module icache #(
     input  logic [31:0] addr_i,
     /* verilator lint_on UNUSEDSIGNAL */
     output logic [63:0] dat_o,
+    output logic [63:0] dat_hi_o,     // (PAIR) the dword after dat_o's (its word with the lowest offset bit set)
     input  logic         cyc_i,
     input  logic         stb_i,
     output logic         ack_o,
@@ -139,6 +144,10 @@ module icache #(
     reg [OFFSET_WIDTH-1:0] refill_beat_q;
 
     wire [31:0] refill_addr = {refill_tag_q, refill_index_q, refill_beat_q, 3'b0};
+    // (PAIR) the pair's upper word: the requested one with its lowest offset bit set (the next, for an aligned pair)
+    wire [OFFSET_WIDTH-1:0] req_offset_hi    = req_offset | OFFSET_WIDTH'(1);
+    wire [OFFSET_WIDTH-1:0] refill_word_hi   = refill_word_q | OFFSET_WIDTH'(1);
+    initial if (PAIR && line_words < 2) $fatal(1, "icache: PAIR needs lines of at least two dwords");
 
     /*
      * Memory-facing bus drive: same !mem_ack_i-gated discipline core.sv's
@@ -170,6 +179,7 @@ module icache #(
             ack_o   <= 1'b0;
             err_o   <= 1'b0;
             dat_o   <= 64'b0;
+            dat_hi_o <= 64'b0;
             state_q <= CACHE_IDLE;
             /*
              * Correctness-critical, unlike data_q/tag_q's simulation-only
@@ -200,6 +210,7 @@ module icache #(
                     if (cyc_i && stb_i) begin
                         if (valid_q[req_index] && (tag_q[req_index] == req_tag)) begin
                             dat_o <= data_q[req_index][req_offset];
+                            if (PAIR) dat_hi_o <= data_q[req_index][req_offset_hi];
                             ack_o <= 1'b1;
                         end else begin
                             refill_index_q <= req_index;
@@ -255,6 +266,9 @@ module icache #(
                                 dat_o <= (refill_beat_q == refill_word_q)
                                          ? mem_dat_i
                                          : data_q[refill_index_q][refill_word_q];
+                                if (PAIR) dat_hi_o <= (refill_beat_q == refill_word_hi)
+                                                      ? mem_dat_i
+                                                      : data_q[refill_index_q][refill_word_hi];
                                 ack_o   <= 1'b1;
                                 state_q <= CACHE_IDLE;
                             end else begin

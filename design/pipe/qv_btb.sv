@@ -20,6 +20,10 @@
  * counts up (to 3), a conditional one that falls through counts down (to 0) and keeps the entry; a conditional
  * entry steers fetch only while its counter says taken (2 or 3). A loop branch that falls through once then keeps
  * its entry for the next time the loop runs; one that mostly falls through stops steering fetch past code it runs.
+ *
+ * (W3b) A second lookup (i_lk2_pc, o_*2) for the other dword of a 16-byte fetch block: the same rule, the same table.
+ * The two dwords of an aligned block are adjacent dwords, so they never share an entry, and a block holds a branch
+ * per dword: two per 16-byte block.
  */
 module qv_btb #(
     parameter int ENTRIES = 32,         // power of two
@@ -36,6 +40,14 @@ module qv_btb #(
     output logic [1:0]  o_off,          // the branch's halfword within the dword
     output logic        o_x,            // ... it is the second half of a crossing 32-bit branch (then o_off is 0)
     output logic [63:0] o_tgt,
+    // (W3b) the second lookup: the upper dword of a 16-byte block, from its halfword 0
+    /* verilator lint_off UNUSEDSIGNAL */
+    input  logic [63:0] i_lk2_pc = 64'b0,
+    /* verilator lint_on UNUSEDSIGNAL */
+    output logic        o_hit2,
+    output logic [1:0]  o_off2,
+    output logic        o_x2,
+    output logic [63:0] o_tgt2,
 
     // training, at commit
     input  logic        i_upd_valid,
@@ -69,6 +81,13 @@ module qv_btb #(
     assign o_off = off_q[lk_idx];
     assign o_x   = x_q[lk_idx];
     assign o_tgt = tgt_q[lk_idx];
+
+    wire [IDX_W-1:0] lk2_idx = i_lk2_pc[3 +: IDX_W];
+    assign o_hit2 = v_q[lk2_idx] && (tag_q[lk2_idx] == {i_lk2_pc[63:3], 3'b000}) && (off_q[lk2_idx] >= i_lk2_pc[2:1])
+                    && (!CTR || !c_q[lk2_idx] || ctr_q[lk2_idx][1]);
+    assign o_off2 = off_q[lk2_idx];
+    assign o_x2   = x_q[lk2_idx];
+    assign o_tgt2 = tgt_q[lk2_idx];
 
     wire own = v_q[up_idx] && (tag_q[up_idx] == {up_key[63:3], 3'b000}) && (off_q[up_idx] == up_key[2:1])
                && (x_q[up_idx] == i_upd_cross);
